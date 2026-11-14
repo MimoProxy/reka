@@ -21,9 +21,8 @@ import (
 // upstream route.ConnectionManager.NewConnection flow (dial, report handshake
 // success to the inbound, kick lazy outbound handshakes, copy), minus
 // sniffing, TLS fragmenting and URL-test bookkeeping.
-func (b *Backend) relayTCP(ctx context.Context, out *Outbound, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+func (b *Backend) relayTCP(ctx context.Context, out *Outbound, release func(), conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = adapter.WithContext(ctx, &metadata)
-	release := out.acquire()
 	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
 	if err != nil {
 		release()
@@ -162,9 +161,8 @@ func kickHandshake(source, destination net.Conn, finish func(error)) bool {
 
 // relayUDP opens a packet session through out and copies both directions
 // until either side closes.
-func (b *Backend) relayUDP(ctx context.Context, out *Outbound, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+func (b *Backend) relayUDP(ctx context.Context, out *Outbound, release func(), conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = adapter.WithContext(ctx, &metadata)
-	release := out.acquire()
 	remote, err := out.out.ListenPacket(ctx, metadata.Destination)
 	if err != nil {
 		release()

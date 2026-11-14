@@ -196,7 +196,7 @@ func runReplaceAndClose(t *testing.T, c closeCase) closeResult {
 	a := c.newOutbound(t, b, "A")
 	var current atomic.Pointer[Outbound]
 	current.Store(a)
-	b.SetRoute(func(Metadata) *Outbound { return current.Load() })
+	b.SetRoute(func(md Metadata) (*Outbound, func()) { return Fixed(current.Load())(md) })
 	socks := loopback(freePort(t))
 	in, err := b.NewMixedInbound("mixed-in", socks)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -34,9 +35,21 @@ type Metadata struct {
 	Destination Destination
 }
 
-// RouteFunc picks the outbound for a new connection. Returning nil rejects it.
-// It must be safe for concurrent use; it is called once per connection.
-type RouteFunc func(Metadata) *Outbound
+// RouteFunc picks the outbound for a new connection and returns it with a
+// lease already taken (see Outbound.Lease); release is called when the
+// connection ends. Returning a nil outbound rejects the connection. It must
+// be safe for concurrent use; it is called once per connection.
+type RouteFunc func(Metadata) (out *Outbound, release func())
+
+// Fixed routes every connection to out while out accepts leases.
+func Fixed(out *Outbound) RouteFunc {
+	return func(Metadata) (*Outbound, func()) {
+		if out == nil || !out.lease.Acquire() {
+			return nil, nil
+		}
+		return out, out.lease.Release
+	}
+}
 
 var errRejected = errors.New("reka: connection rejected by route")
 
@@ -55,12 +68,20 @@ func (r *router) setRoute(fn RouteFunc) {
 	r.route.Store(&fn)
 }
 
-func (r *router) pick(metadata adapter.InboundContext) *Outbound {
+func (r *router) pick(metadata adapter.InboundContext) (*Outbound, func()) {
 	fn := r.route.Load()
 	if fn == nil || *fn == nil {
-		return nil
+		return nil, nil
 	}
-	return (*fn)(toMetadata(metadata))
+	out, release := (*fn)(toMetadata(metadata))
+	if out == nil {
+		return nil, nil
+	}
+	if release == nil {
+		release = func() {}
+	}
+	var once sync.Once
+	return out, func() { once.Do(release) }
 }
 
 func toMetadata(m adapter.InboundContext) Metadata {
@@ -80,24 +101,24 @@ func toMetadata(m adapter.InboundContext) Metadata {
 
 func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Network = N.NetworkTCP
-	out := r.pick(metadata)
+	out, release := r.pick(metadata)
 	if out == nil {
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
 		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
 		return
 	}
-	r.backend.relayTCP(ctx, out, conn, metadata, onClose)
+	r.backend.relayTCP(ctx, out, release, conn, metadata, onClose)
 }
 
 func (r *router) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Network = N.NetworkUDP
-	out := r.pick(metadata)
+	out, release := r.pick(metadata)
 	if out == nil {
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
 		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
 		return
 	}
-	r.backend.relayUDP(ctx, out, conn, metadata, onClose)
+	r.backend.relayUDP(ctx, out, release, conn, metadata, onClose)
 }
 
 // The non-Ex variants are only used by legacy inbounds Reka does not enable.

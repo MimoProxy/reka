@@ -133,7 +133,7 @@ func startClient(t *testing.T, spec any) (socks netip.AddrPort, out *Outbound) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { out.Close() })
-	b.SetRoute(func(Metadata) *Outbound { return out })
+	b.SetRoute(Fixed(out))
 	socks = loopback(freePort(t))
 	in, err := b.NewMixedInbound("mixed-in", socks)
 	if err != nil {
@@ -154,7 +154,7 @@ func startServer(t *testing.T, typ string, newInbound func(b *Backend, listen ne
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { direct.Close() })
-	b.SetRoute(func(Metadata) *Outbound { return direct })
+	b.SetRoute(Fixed(direct))
 	listen := loopback(freePort(t))
 	if err := newInbound(b, listen); err != nil {
 		t.Fatalf("start %s server: %v", typ, err)
@@ -409,7 +409,7 @@ func TestLoopbackHTTPConnect(t *testing.T) {
 func TestRouteReject(t *testing.T) {
 	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: testHalfClose})
 	t.Cleanup(func() { b.Close() })
-	b.SetRoute(func(Metadata) *Outbound { return nil })
+	b.SetRoute(Fixed(nil))
 	listen := loopback(freePort(t))
 	in, err := b.NewMixedInbound("mixed-in", listen)
 	if err != nil {

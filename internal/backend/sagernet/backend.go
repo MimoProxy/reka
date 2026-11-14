@@ -8,8 +8,9 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/lease"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
@@ -108,33 +109,36 @@ func (b *Backend) start(name string, component any, logger log.ContextLogger) (*
 	return scope, nil
 }
 
-// Outbound is one upstream outbound instance.
+// Outbound is one upstream outbound instance. Every relay through it holds
+// one lease on it; see Lease.
 type Outbound struct {
-	tag    string
-	typ    string
-	out    adapter.Outbound
-	scope  *adapter.Scope
-	active atomic.Int64
-	once   sync.Once
+	tag   string
+	typ   string
+	out   adapter.Outbound
+	scope *adapter.Scope
+	lease *lease.Lease
+	once  sync.Once
 }
 
 func (o *Outbound) Tag() string  { return o.tag }
 func (o *Outbound) Type() string { return o.typ }
 
+// Lease is the instance's lease counter. A RouteFunc takes a lease when it
+// picks the instance; the relay releases it when the connection ends.
+// Retiring the lease stops new connections from using the instance.
+func (o *Outbound) Lease() *lease.Lease { return o.lease }
+
 // Active reports how many relayed connections currently use this instance.
-func (o *Outbound) Active() int64 { return o.active.Load() }
+func (o *Outbound) Active() int64 { return o.lease.Active() }
 
-func (o *Outbound) acquire() func() {
-	o.active.Add(1)
-	var once sync.Once
-	return func() { once.Do(func() { o.active.Add(-1) }) }
-}
-
-// Close closes this instance and whatever its scope opened. It does not wait
-// for connections still relaying through it.
+// Close retires and closes this instance and whatever its scope opened. It
+// does not wait for connections still relaying through it: without
+// multiplexing they keep running, with multiplexing they are cut. Retire
+// and drain first (internal/runtime does) to avoid cutting them.
 func (o *Outbound) Close() error {
 	var err error
 	o.once.Do(func() {
+		o.lease.Retire()
 		err = errors.Join(common.Close(o.out), o.scope.Close())
 	})
 	return err
@@ -227,7 +231,7 @@ func (b *Backend) adoptOutbound(tag, typ string, out adapter.Outbound) (*Outboun
 		common.Close(out)
 		return nil, err
 	}
-	return &Outbound{tag: tag, typ: typ, out: out, scope: scope}, nil
+	return &Outbound{tag: tag, typ: typ, out: out, scope: scope, lease: lease.New()}, nil
 }
 
 func (t *TLSSpec) build() *option.OutboundTLSOptions {
