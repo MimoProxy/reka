@@ -9,6 +9,7 @@ require (
 	github.com/sagernet/sing-box v1.14.4
 	github.com/sagernet/sing-tun v0.9.7-0.20261023115432-040db71fcd33
 	github.com/sagernet/sing-vmess v0.2.9-0.20261019223527-a0c58542bd9d
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
 )
