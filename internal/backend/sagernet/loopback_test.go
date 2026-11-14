@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,12 +36,22 @@ func testLogger(t *testing.T) *slog.Logger {
 	if os.Getenv("REKA_TEST_LOG") == "debug" {
 		level = levelTrace
 	}
-	return slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: level}))
+	w := &testWriter{t: t}
+	t.Cleanup(func() { w.done.Store(true) })
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
-type testWriter struct{ t *testing.T }
+// testWriter drops output once the test has finished: relay goroutines may
+// still log while connections wind down, and t.Log panics after completion.
+type testWriter struct {
+	t    *testing.T
+	done atomic.Bool
+}
 
-func (w testWriter) Write(p []byte) (int, error) {
+func (w *testWriter) Write(p []byte) (int, error) {
+	if w.done.Load() {
+		return len(p), nil
+	}
 	w.t.Helper()
 	w.t.Log(string(bytes.TrimRight(p, "\n")))
 	return len(p), nil
@@ -115,7 +126,7 @@ func tlsEchoServer(t *testing.T) netip.AddrPort {
 // sends everything to the outbound built from spec.
 func startClient(t *testing.T, spec any) (socks netip.AddrPort, out *Outbound) {
 	t.Helper()
-	b := New(Options{Logger: testLogger(t)})
+	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: testHalfClose})
 	t.Cleanup(func() { b.Close() })
 	out, err := b.NewOutbound("proxy", spec)
 	if err != nil {
@@ -136,7 +147,7 @@ func startClient(t *testing.T, spec any) (socks netip.AddrPort, out *Outbound) {
 // built by newInbound, routed to a direct outbound.
 func startServer(t *testing.T, typ string, newInbound func(b *Backend, listen netip.AddrPort) error) netip.AddrPort {
 	t.Helper()
-	b := New(Options{Logger: testLogger(t)})
+	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: testHalfClose})
 	t.Cleanup(func() { b.Close() })
 	direct, err := b.NewOutbound("direct", DirectSpec{})
 	if err != nil {
@@ -396,7 +407,7 @@ func TestLoopbackHTTPConnect(t *testing.T) {
 
 // TestRouteReject checks that a nil route closes the client connection.
 func TestRouteReject(t *testing.T) {
-	b := New(Options{Logger: testLogger(t)})
+	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: testHalfClose})
 	t.Cleanup(func() { b.Close() })
 	b.SetRoute(func(Metadata) *Outbound { return nil })
 	listen := loopback(freePort(t))
@@ -411,3 +422,6 @@ func TestRouteReject(t *testing.T) {
 		t.Fatal("rejected route still connected")
 	}
 }
+
+// testHalfClose keeps the half-close grace period short in tests.
+const testHalfClose = 300 * time.Millisecond

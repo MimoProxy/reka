@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
@@ -30,7 +31,12 @@ type Options struct {
 	// Protect, when set, is applied to every outbound socket before it
 	// connects. On Android it calls VpnService.protect().
 	Protect control.Func
+	// HalfCloseTimeout bounds how long a relay keeps receiving after the
+	// client half-closed and the outbound connection cannot. Default 2s.
+	HalfCloseTimeout time.Duration
 }
+
+const defaultHalfCloseTimeout = 2 * time.Second
 
 // Backend owns the upstream service context. Inbounds and outbounds created
 // from it are independent instances: each has its own lifecycle scope and can
@@ -41,6 +47,8 @@ type Backend struct {
 	slog   *slog.Logger
 	logger *slogLogger
 	router *router
+
+	halfCloseTimeout time.Duration
 }
 
 // New builds the upstream context with only the services the enabled
@@ -54,6 +62,11 @@ func New(opts Options) *Backend {
 		cancel: cancel,
 		slog:   opts.Logger,
 		logger: newLogger(opts.Logger, "backend"),
+
+		halfCloseTimeout: opts.HalfCloseTimeout,
+	}
+	if b.halfCloseTimeout <= 0 {
+		b.halfCloseTimeout = defaultHalfCloseTimeout
 	}
 	b.router = &router{backend: b}
 	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: opts.Protect})
@@ -203,6 +216,12 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create outbound/%s[%s]: %w", typ, tag, err)
 	}
+	return b.adoptOutbound(tag, typ, out)
+}
+
+// adoptOutbound starts an already constructed upstream outbound in its own
+// scope and wraps it.
+func (b *Backend) adoptOutbound(tag, typ string, out adapter.Outbound) (*Outbound, error) {
 	scope, err := b.start("outbound/"+typ+"["+tag+"]", out, b.componentLogger("outbound", typ, tag))
 	if err != nil {
 		common.Close(out)

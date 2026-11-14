@@ -38,15 +38,21 @@ func (b *Backend) relayTCP(ctx context.Context, out *Outbound, conn net.Conn, me
 		N.CloseOnHandshakeFailure(conn, onClose, E.Cause(err, "report handshake success"))
 		return
 	}
-	var done atomic.Bool
+	var (
+		done      atomic.Bool
+		finished  = make(chan struct{})
+		up, down  atomic.Int64
+		closeBoth = func() { common.Close(conn, remote) }
+	)
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {
 		if done.Swap(true) {
+			close(finished)
 			release()
 			if onClose != nil {
 				onClose(err)
 			}
-			common.Close(conn, remote)
+			closeBoth()
 		}
 	}
 	// abort tears the pair down before any copy goroutine has started.
@@ -57,34 +63,62 @@ func (b *Backend) relayTCP(ctx context.Context, out *Outbound, conn net.Conn, me
 				onClose(err)
 			}
 		}
-		common.Close(conn, remote)
+		closeBoth()
 		b.logger.ErrorContext(ctx, E.Cause(err, "outbound handshake"))
 	}
 	// No sniffing yet, so treat every protocol as client-first.
 	if kickHandshake(conn, remote, abort) || kickHandshake(remote, conn, abort) {
 		return
 	}
-	go copyHalf(conn, remote, finish)
-	go copyHalf(remote, conn, finish)
+	grace := b.halfCloseTimeout
+	go copyHalf(conn, remote, &up, finish, func() { watchIdle(&down, grace, finished, closeBoth) })
+	go copyHalf(remote, conn, &down, finish, func() { watchIdle(&up, grace, finished, closeBoth) })
 }
 
-// copyHalf copies source to destination, then half-closes destination so
-// the peer sees EOF while the other direction keeps flowing.
-func copyHalf(source, destination net.Conn, finish func(error)) {
-	_, err := bufio.CopyWithIncreateBuffer(destination, source, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
-	if err != nil {
+// copyHalf copies source to destination, counting bytes into moved. At EOF
+// it half-closes destination so the peer sees EOF while the other direction
+// keeps flowing. Many proxy connections cannot half-close (Shadowsocks has no
+// CloseWrite, REALITY servers mishandle TLS close_notify); closing them
+// outright would drop the reply still in flight. For those, drain is called
+// instead: the other direction keeps relaying until it goes idle.
+func copyHalf(source, destination net.Conn, moved *atomic.Int64, finish func(error), drain func()) {
+	count := []N.CountFunc{func(n int64) { moved.Add(n) }}
+	_, err := bufio.CopyWithCounters(destination, source, source, count, nil, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+	switch {
+	case err != nil:
 		common.Close(source, destination)
-	} else {
+	default:
 		writer, _ := N.UnwrapCountWriter(destination, nil)
 		if duplex, ok := N.UnwrapWriter(writer).(N.WriteCloser); ok {
 			if err = duplex.CloseWrite(); err != nil {
 				common.Close(source, destination)
 			}
 		} else {
-			destination.Close()
+			drain()
 		}
 	}
 	finish(err)
+}
+
+// watchIdle closes the pair once moved has not changed for grace, unless
+// the relay finishes first.
+func watchIdle(moved *atomic.Int64, grace time.Duration, finished <-chan struct{}, closeBoth func()) {
+	tick := time.NewTicker(grace / 4)
+	defer tick.Stop()
+	last, idleSince := moved.Load(), time.Now()
+	for {
+		select {
+		case <-finished:
+			return
+		case now := <-tick.C:
+			if cur := moved.Load(); cur != last {
+				last, idleSince = cur, now
+			} else if now.Sub(idleSince) >= grace {
+				closeBoth()
+				return
+			}
+		}
+	}
 }
 
 // kickHandshake flushes a lazy outbound handshake (VLESS, Shadowsocks and

@@ -177,7 +177,7 @@ func (c *realityClient) Handshake(ctx context.Context, conn net.Conn) (net.Conn,
 		go realityFallback(uConn, c.serverName, c.fingerprint)
 		return nil, errRealityVerification
 	}
-	return &realityConn{uConn}, nil
+	return &realityConn{uConn: uConn}, nil
 }
 
 var errRealityVerification = errors.New("reality verification failed")
@@ -269,16 +269,27 @@ func realityFallback(uConn *utls.UConn, serverName string, fp utls.ClientHelloID
 	resp.Body.Close()
 }
 
-// realityConn exposes the uTLS connection to Vision via Upstream.
+// realityConn exposes the uTLS connection to Vision via Upstream. It wraps
+// rather than embeds *utls.UConn so that uTLS's CloseWrite (a TLS
+// close_notify) is not promoted: REALITY servers mishandle it and leak the
+// connection. sing-box closes the whole connection instead, which drops the
+// reply still in flight; without CloseWrite Reka's relay keeps reading until
+// the download goes idle, then closes.
 type realityConn struct {
-	*utls.UConn
+	uConn *utls.UConn
 }
 
-func (c *realityConn) Upstream() any { return c.UConn }
+var _ net.Conn = (*realityConn)(nil)
 
-// CloseWrite closes the whole connection. REALITY servers mishandle TLS
-// half-close (sing-box works around the same leak this way).
-func (c *realityConn) CloseWrite() error { return c.Close() }
+func (c *realityConn) Read(b []byte) (int, error)         { return c.uConn.Read(b) }
+func (c *realityConn) Write(b []byte) (int, error)        { return c.uConn.Write(b) }
+func (c *realityConn) Close() error                       { return c.uConn.Close() }
+func (c *realityConn) LocalAddr() net.Addr                { return c.uConn.LocalAddr() }
+func (c *realityConn) RemoteAddr() net.Addr               { return c.uConn.RemoteAddr() }
+func (c *realityConn) SetDeadline(t time.Time) error      { return c.uConn.SetDeadline(t) }
+func (c *realityConn) SetReadDeadline(t time.Time) error  { return c.uConn.SetReadDeadline(t) }
+func (c *realityConn) SetWriteDeadline(t time.Time) error { return c.uConn.SetWriteDeadline(t) }
 
+func (c *realityConn) Upstream() any           { return c.uConn }
 func (c *realityConn) ReaderReplaceable() bool { return true }
 func (c *realityConn) WriterReplaceable() bool { return false }
