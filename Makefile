@@ -10,13 +10,18 @@ LDFLAGS ?= -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
 
 GOFLAGS_BUILD = -trimpath -tags "$(TAGS)" -ldflags "$(LDFLAGS) -s -w -buildid="
 
-.PHONY: build test vet
+.PHONY: build test race vet
 
 build:
 	go build $(GOFLAGS_BUILD) -o bin/reka ./cmd/reka
 
 test:
 	go test -tags "$(TAGS)" -ldflags "$(LDFLAGS)" ./...
+
+# The race detector needs cgo. checkptr is off because sing-vmess's Vision
+# reads TLS connection internals through unsafe offsets.
+race:
+	CGO_ENABLED=1 go test -race -gcflags=all=-d=checkptr=0 -tags "$(TAGS)" -ldflags "$(LDFLAGS)" ./...
 
 vet:
 	go vet -tags "$(TAGS)" ./...
