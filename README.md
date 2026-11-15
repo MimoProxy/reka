@@ -1,0 +1,100 @@
+<div align="center">
+
+<h1>Reka</h1>
+
+<p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+
+<p>A proxy core in Go that owns its configuration and changes it without restarting or dropping connections</p>
+
+<p>
+  Reka takes its name from the Russian word “Река,” meaning “river.”<br />
+  Change the course, and the water keeps flowing.
+</p>
+
+</div>
+
+Reka (the Reka proxy core) is a headless proxy kernel for macOS, Windows and Android. It is being built as the core of the [Mimo](https://github.com/MimoProxy/Mimo) clients, and any GUI can drive it through its control API.
+
+> **Status: early development.** Reka runs as a local proxy configured by hand. Clash subscription import, DNS policy and fake IP, rule sets and GeoIP, automatic groups, TUN and system proxy are not implemented yet. There are no releases.
+
+## Why
+
+Clash-style cores read one flat configuration file. GUIs regenerate it, API changes live only in memory, and subscription refreshes overwrite edits; many changes need a reload that drops connections. Reka is designed around two rules:
+
+- **One source of truth.** The kernel owns the configuration. Files, the CLI, the API and GUIs all commit through the same versioned transaction, which is only reported successful once it is running and on disk.
+- **Changes without restarts.** Rules, group selections, nodes and listeners change by diffing resources. Connections that are already open keep the outbound they started with until they end.
+
+## What works today
+
+- **Configuration**: a native YAML profile plus per-machine local settings, composed with a recorded origin for every field. Strict parsing with line, column and field-path diagnostics. Edits made by the kernel keep your comments.
+- **Transactions**: revision history and restore, conflict detection between clients, idempotent retries by operation ID, crash recovery at every step, and hand-edited files committed through the same path.
+- **Hot updates**: outbounds are reused or replaced by fingerprint and drained before closing; listeners bind the new port before the old one stops; a port that is already in use is caught before anything changes.
+- **Routing**: ordered first-match rules (`domain`, `domain-suffix`, `domain-keyword`, `domain-regex`, `ip-cidr`, `src-ip-cidr`, `dst-port`, `src-port`, `network`, `process-name`, match-all), with indexed domain rules, select groups, and route explanations that make no network requests.
+- **Protocols**: mixed, SOCKS5 and HTTP listeners, including per-destination UDP; DIRECT, REJECT, HTTP, SOCKS5, Shadowsocks and VLESS + REALITY + Vision + XUDP outbounds. The REALITY client is Reka's own and supports X25519MLKEM768.
+- **Secrets**: `secret://` references stored in the macOS Keychain, Windows DPAPI, an Android Keystore callback, or a 0600 file.
+- **Control API**: length-prefixed JSON over a Unix socket or a Windows named pipe, restricted to the current user, with an event stream; `rekactl` on the command line.
+- **Android**: a JNI library with a Kotlin wrapper that takes the same API messages.
+
+## Build
+
+Go 1.27 or later.
+
+```sh
+make build        # bin/reka and bin/rekactl
+make test         # unit and end-to-end tests
+make android      # bin/android/libreka.so (needs ANDROID_HOME and the NDK)
+```
+
+## Quick start
+
+`profile.yaml`:
+
+```yaml
+schema-version: 1
+outbounds:
+  - id: my-ss
+    type: shadowsocks
+    server: ss.example
+    port: 8388
+    method: 2022-blake3-aes-128-gcm
+    password: secret://outbounds/my-ss/password
+groups:
+  - id: proxy
+    type: select
+    members: [my-ss, direct]
+rules:
+  - match: {domain-suffix: [lan, local]}
+    outbound: direct
+  - match: {ip-cidr: [10.0.0.0/8, 192.168.0.0/16], no-resolve: true}
+    outbound: direct
+  - match: {all: true}
+    outbound: proxy
+```
+
+`local.yaml`:
+
+```yaml
+listeners:
+  - {id: mixed, type: mixed, listen: "127.0.0.1:7890"}
+```
+
+```sh
+./bin/reka -profile profile.yaml -local local.yaml   # imported as revision 1; waits for its secret
+printf '%s' '<base64 key>' | ./bin/rekactl secret set outbounds/my-ss/password   # now it runs
+./bin/rekactl status
+./bin/rekactl select proxy direct                     # applied without dropping connections
+./bin/rekactl explain www.example.com:443 -resolve
+./bin/rekactl revisions
+./bin/rekactl restore 1
+```
+
+The state lives in `~/Library/Application Support/Reka` (macOS), `%LOCALAPPDATA%\Reka` (Windows) or `~/.local/state/reka` (Linux); pass `-state-root` to use another directory. The active configuration is also exported to `<state-root>/edit/`: saving a change there commits it.
+
+## Documentation
+
+- [Configuration reference](docs/configuration.md)
+- [Control API](docs/control-api.md)
+
+## License
+
+[GPL-3.0](LICENSE). Reka builds on protocol components from the [sing-box](https://github.com/SagerNet/sing-box) family (sing, sing-tun, sing-vmess, sing-shadowsocks and others); it is an independent project and is not affiliated with or endorsed by sing-box.
