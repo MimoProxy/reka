@@ -27,6 +27,10 @@ type Resource interface {
 type Snapshot[R Resource] struct {
 	Generation uint64
 	Resources  map[string]R
+	// Value is published together with Resources, for state that has no
+	// lifecycle of its own (a compiled router, for example). It is shared,
+	// never copied, so it must be immutable too.
+	Value any
 }
 
 // Options tunes retirement.
@@ -77,11 +81,16 @@ type Runtime[R Resource] struct {
 
 // New publishes generation 1 with the given resources.
 func New[R Resource](initial map[string]R, opts Options) *Runtime[R] {
+	return NewValue(initial, nil, opts)
+}
+
+// NewValue is New with a snapshot Value.
+func NewValue[R Resource](initial map[string]R, value any, opts Options) *Runtime[R] {
 	if opts.DrainTimeout <= 0 {
 		opts.DrainTimeout = defaultDrainTimeout
 	}
 	r := &Runtime[R]{opts: opts}
-	r.current.Store(&Snapshot[R]{Generation: 1, Resources: maps.Clone(initial)})
+	r.current.Store(&Snapshot[R]{Generation: 1, Resources: maps.Clone(initial), Value: value})
 	return r
 }
 
@@ -122,35 +131,65 @@ func (r *Runtime[R]) Acquire(pick func(*Snapshot[R]) (R, bool)) (generation uint
 // they stop accepting leases, drain, and are closed in the background.
 // Resources kept in next are shared with the old generation.
 func (r *Runtime[R]) Commit(next map[string]R) (uint64, error) {
+	return r.commit(next, nil, false)
+}
+
+// CommitValue is Commit that also replaces the snapshot Value.
+func (r *Runtime[R]) CommitValue(next map[string]R, value any) (uint64, error) {
+	return r.commit(next, value, true)
+}
+
+// WouldRetire reports how many resources committing next would retire, and
+// whether that stays within MaxRetiring. It lets a caller refuse a commit
+// before doing expensive preparation; Commit checks again.
+func (r *Runtime[R]) WouldRetire(next map[string]R) (int, bool) {
+	r.commitMu.Lock()
+	defer r.commitMu.Unlock()
+	n := len(r.dropped(r.current.Load(), next))
+	max := r.opts.MaxRetiring
+	return n, max <= 0 || int(r.retiring.Load())+n <= max
+}
+
+type dropped[R Resource] struct {
+	id  string
+	res R
+}
+
+func (r *Runtime[R]) dropped(old *Snapshot[R], next map[string]R) []dropped[R] {
+	kept := make(map[any]struct{}, len(next))
+	for _, res := range next {
+		kept[any(res)] = struct{}{}
+	}
+	var drop []dropped[R]
+	for id, res := range old.Resources {
+		if _, ok := kept[any(res)]; !ok {
+			drop = append(drop, dropped[R]{id, res})
+		}
+	}
+	return drop
+}
+
+func (r *Runtime[R]) commit(next map[string]R, value any, setValue bool) (uint64, error) {
 	r.commitMu.Lock()
 	defer r.commitMu.Unlock()
 	if r.closed {
 		return 0, errClosed
 	}
 	old := r.current.Load()
-
-	kept := make(map[any]struct{}, len(next))
 	for id, res := range next {
 		if res.Lease().Retired() {
 			return old.Generation, fmt.Errorf("runtime: resource %q is already retired", id)
 		}
-		kept[any(res)] = struct{}{}
 	}
-	type dropped struct {
-		id  string
-		res R
-	}
-	var drop []dropped
-	for id, res := range old.Resources {
-		if _, ok := kept[any(res)]; !ok {
-			drop = append(drop, dropped{id, res})
-		}
+	drop := r.dropped(old, next)
+	if !setValue {
+		value = old.Value
 	}
 	if max := r.opts.MaxRetiring; max > 0 && int(r.retiring.Load())+len(drop) > max {
 		return old.Generation, ErrTooManyRetiring
 	}
 
-	snap := &Snapshot[R]{Generation: old.Generation + 1, Resources: maps.Clone(next)}
+	snap := &Snapshot[R]{Generation: old.Generation + 1, Resources: maps.Clone(next), Value: value}
 	r.current.Store(snap) // publish before retiring; see Acquire
 	for _, d := range drop {
 		r.retire(d.id, old.Generation, d.res)
@@ -213,7 +252,7 @@ func (r *Runtime[R]) Close() {
 	if !r.closed {
 		r.closed = true
 		old := r.current.Load()
-		r.current.Store(&Snapshot[R]{Generation: old.Generation + 1})
+		r.current.Store(&Snapshot[R]{Generation: old.Generation + 1, Value: old.Value})
 		for id, res := range old.Resources {
 			r.retire(id, old.Generation, res)
 		}

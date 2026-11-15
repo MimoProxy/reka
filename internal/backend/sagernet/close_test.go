@@ -7,6 +7,7 @@ package sagernet
 // whether closing A disturbs B.
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -196,7 +197,7 @@ func runReplaceAndClose(t *testing.T, c closeCase) closeResult {
 	a := c.newOutbound(t, b, "A")
 	var current atomic.Pointer[Outbound]
 	current.Store(a)
-	b.SetRoute(func(md Metadata) (*Outbound, func()) { return Fixed(current.Load())(md) })
+	b.SetRoute(func(ctx context.Context, md Metadata) Route { return Fixed(current.Load())(ctx, md) })
 	socks := loopback(freePort(t))
 	in, err := b.NewMixedInbound("mixed-in", socks)
 	if err != nil {

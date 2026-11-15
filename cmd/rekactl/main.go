@@ -1,0 +1,733 @@
+// Command rekactl controls a running Reka kernel through its control API.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/service"
+	"github.com/MimoProxy/reka/internal/config/store"
+	"github.com/MimoProxy/reka/internal/control"
+	"github.com/MimoProxy/reka/internal/platform"
+	"github.com/MimoProxy/reka/internal/runtime/generation"
+)
+
+const usage = `usage: rekactl [-c address | -state-root dir] [-json] command [args]
+
+configuration
+  get [profile|local|effective] [-reveal]   print the active configuration
+  origin PATH                               where an effective field comes from
+  validate [-local] FILE                    check a document, no side effects
+  plan [-local] FILE                        show what committing FILE changes
+  commit [-local] FILE [-base N] [-op ID] [-m MSG] [-yes]
+  set [-local] PATH JSON [-base N]          change one field, e.g. set /log/level '"debug"'
+  remove [-local] PATH [-base N]            remove a field or list element
+  select GROUP MEMBER                       change a select group's choice
+  revisions                                 list revisions
+  restore REVISION [-yes]                   commit an old revision again
+  op ID                                     result of an operation
+
+runtime
+  status
+  explain DESTINATION [-network tcp|udp] [-source ADDR] [-addr IP]... [-resolve] [-process NAME]
+  connections
+  close ID...|all
+  watch                                     stream events
+
+secrets
+  secret set NAME      (value from stdin)
+  secret rm NAME
+  secret ls
+`
+
+var (
+	addrFlag  = flag.String("c", "", "control API address")
+	rootFlag  = flag.String("state-root", "", "state root of the kernel (to find its default address)")
+	jsonFlag  = flag.Bool("json", false, "print raw JSON results")
+	client    *control.Client
+	exitError = errors.New("")
+)
+
+func main() {
+	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	flag.Parse()
+	if flag.NArg() == 0 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	if err := run(flag.Args()); err != nil {
+		if err != exitError {
+			fmt.Fprintln(os.Stderr, "rekactl:", err)
+		}
+		os.Exit(1)
+	}
+}
+
+func address() (string, error) {
+	if *addrFlag != "" {
+		return *addrFlag, nil
+	}
+	if v := os.Getenv("REKA_CONTROL"); v != "" {
+		return v, nil
+	}
+	root := *rootFlag
+	if root == "" {
+		var err error
+		if root, err = platform.DefaultStateRoot(); err != nil {
+			return "", err
+		}
+	}
+	return control.DefaultAddress(root), nil
+}
+
+func connect() error {
+	addr, err := address()
+	if err != nil {
+		return err
+	}
+	c, err := control.Connect(addr, "rekactl")
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w (is reka running?)", addr, err)
+	}
+	client = c
+	return nil
+}
+
+func call(method string, params, out any) error {
+	var raw json.RawMessage
+	if err := client.Call(method, params, &raw); err != nil {
+		return err
+	}
+	if *jsonFlag {
+		var v any
+		json.Unmarshal(raw, &v)
+		b, _ := json.MarshalIndent(v, "", "  ")
+		fmt.Println(string(b))
+	}
+	if out != nil {
+		return json.Unmarshal(raw, out)
+	}
+	return nil
+}
+
+func run(args []string) error {
+	if err := connect(); err != nil {
+		return err
+	}
+	defer client.Close()
+	cmd, rest := args[0], args[1:]
+	switch cmd {
+	case "get":
+		return cmdGet(rest)
+	case "origin":
+		return cmdOrigin(rest)
+	case "validate":
+		return cmdValidate(rest)
+	case "plan":
+		return cmdPlan(rest)
+	case "commit":
+		return cmdCommit(rest)
+	case "set", "remove":
+		return cmdPatch(cmd, rest)
+	case "select":
+		if len(rest) != 2 {
+			return errors.New("usage: select GROUP MEMBER")
+		}
+		v, _ := json.Marshal(rest[1])
+		return cmdPatch("set", []string{model.JoinPath("/groups", rest[0], "selected"), string(v)})
+	case "revisions":
+		return cmdRevisions()
+	case "restore":
+		return cmdRestore(rest)
+	case "op":
+		if len(rest) != 1 {
+			return errors.New("usage: op ID")
+		}
+		var res service.Result
+		if err := call("GetOperation", map[string]string{"operation_id": rest[0]}, &res); err != nil {
+			return err
+		}
+		return printResult(res)
+	case "status":
+		return cmdStatus()
+	case "explain":
+		return cmdExplain(rest)
+	case "connections":
+		return cmdConnections()
+	case "close":
+		return cmdClose(rest)
+	case "watch":
+		return cmdWatch()
+	case "secret":
+		return cmdSecret(rest)
+	}
+	flag.Usage()
+	return exitError
+}
+
+func cmdGet(args []string) error {
+	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	reveal := fs.Bool("reveal", false, "show inline credentials")
+	what := "profile"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		what, args = args[0], args[1:]
+	}
+	parse(fs, args)
+	var cfg service.Configuration
+	if err := call("GetConfiguration", map[string]bool{"reveal": *reveal}, &cfg); err != nil {
+		return err
+	}
+	if *jsonFlag {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "# revision %d\n", cfg.Revision)
+	switch what {
+	case "profile":
+		fmt.Print(cfg.Profile)
+	case "local":
+		fmt.Print(cfg.Local)
+	case "effective":
+		b, _ := json.MarshalIndent(cfg.Effective, "", "  ")
+		fmt.Println(string(b))
+	default:
+		return fmt.Errorf("get: unknown document %q", what)
+	}
+	for _, d := range cfg.Diagnostics {
+		fmt.Fprintln(os.Stderr, d)
+	}
+	if cfg.StartError != "" {
+		fmt.Fprintln(os.Stderr, "not running:", cfg.StartError)
+	}
+	return nil
+}
+
+func cmdOrigin(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: origin PATH")
+	}
+	var cfg service.Configuration
+	if err := call("GetConfiguration", nil, &cfg); err != nil {
+		return err
+	}
+	if cfg.Effective == nil {
+		return errors.New("no effective configuration")
+	}
+	o, ok := cfg.Effective.OriginOf(args[0])
+	if !ok {
+		return fmt.Errorf("%s is not set", args[0])
+	}
+	fmt.Printf("%s: %s", args[0], o.Layer)
+	if o.Line > 0 {
+		fmt.Printf(" (line %d, column %d)", o.Line, o.Column)
+	}
+	if o.Overrides != nil {
+		fmt.Printf(", overriding %s", o.Overrides.Layer)
+		if o.Overrides.Line > 0 {
+			fmt.Printf(" line %d", o.Overrides.Line)
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// docFlags parses [-local] FILE plus extra flags.
+func docFlags(name string, args []string, extra func(*flag.FlagSet)) (local bool, text string, fs *flag.FlagSet, err error) {
+	fs = flag.NewFlagSet(name, flag.ExitOnError)
+	l := fs.Bool("local", false, "the file is local settings, not the profile")
+	if extra != nil {
+		extra(fs)
+	}
+	parse(fs, args)
+	if fs.NArg() != 1 {
+		return false, "", fs, fmt.Errorf("usage: %s [-local] FILE", name)
+	}
+	var b []byte
+	if fs.Arg(0) == "-" {
+		b, err = io.ReadAll(os.Stdin)
+	} else {
+		b, err = os.ReadFile(fs.Arg(0))
+	}
+	return *l, string(b), fs, err
+}
+
+func change(local bool, text string, base uint64) service.ChangeRequest {
+	req := service.ChangeRequest{BaseRevision: base}
+	if local {
+		req.Local = &text
+	} else {
+		req.Profile = &text
+	}
+	return req
+}
+
+func activeRevision() (uint64, error) {
+	var cfg service.Configuration
+	err := client.Call("GetConfiguration", nil, &cfg)
+	return cfg.Revision, err
+}
+
+func printDiagnostics(ds model.Diagnostics) {
+	for _, d := range ds {
+		fmt.Fprintln(os.Stderr, d)
+	}
+}
+
+func cmdValidate(args []string) error {
+	local, text, _, err := docFlags("validate", args, nil)
+	if err != nil {
+		return err
+	}
+	var res service.ValidateResult
+	if err := call("ValidateConfiguration", change(local, text, 0), &res); err != nil {
+		return err
+	}
+	if *jsonFlag {
+		return nil
+	}
+	printDiagnostics(res.Diagnostics)
+	if !res.Valid {
+		return exitError
+	}
+	fmt.Println("valid")
+	return nil
+}
+
+func printPlan(p *generation.Plan) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	for _, o := range p.Outbounds {
+		if o.Action == generation.ActionKeep {
+			continue
+		}
+		fmt.Fprintf(w, "outbound %s\t%s", o.ID, o.Action)
+		if o.Connections > 0 {
+			fmt.Fprintf(w, "\t%d connections keep the old instance until they end", o.Connections)
+		}
+		fmt.Fprintln(w)
+	}
+	for _, l := range p.Listeners {
+		if l.Action == generation.ActionKeep {
+			continue
+		}
+		fmt.Fprintf(w, "listener %s\t%s\t%s\t%s\n", l.ID, l.Action, l.Listen, l.Note)
+	}
+	for _, g := range p.Groups {
+		fmt.Fprintf(w, "group %s\tselect\t%s -> %s\n", g.ID, g.From, g.To)
+	}
+	if p.RulesChanged {
+		fmt.Fprintf(w, "rules\treplace\t%d rules\n", p.Rules)
+	}
+	if p.LogLevel != "" {
+		fmt.Fprintf(w, "log level\t%s\n", p.LogLevel)
+	}
+	for _, r := range p.RestartRequired {
+		fmt.Fprintf(w, "%s\tneeds a restart\n", r)
+	}
+	if p.Blocked != "" {
+		fmt.Fprintf(w, "blocked\t%s\n", p.Blocked)
+	}
+	w.Flush()
+}
+
+func cmdPlan(args []string) error {
+	var base uint64
+	local, text, _, err := docFlags("plan", args, func(fs *flag.FlagSet) { fs.Uint64Var(&base, "base", 0, "base revision (default: active)") })
+	if err != nil {
+		return err
+	}
+	if base == 0 {
+		if base, err = activeRevision(); err != nil {
+			return err
+		}
+	}
+	var res service.PlanResult
+	if err := call("PlanConfiguration", change(local, text, base), &res); err != nil {
+		return err
+	}
+	if *jsonFlag {
+		return nil
+	}
+	printDiagnostics(res.Diagnostics)
+	if res.Conflict != nil {
+		printConflict(res.Conflict)
+		return exitError
+	}
+	if !res.Valid {
+		return exitError
+	}
+	fmt.Printf("plan against revision %d (hash %s):\n", res.Base, res.PlanHash)
+	printPlan(res.Plan)
+	return nil
+}
+
+func printConflict(c *service.Conflict) {
+	fmt.Fprintf(os.Stderr, "conflict: revision %d is active, the change was based on %d. Changed since:\n", c.Active, c.Base)
+	for _, ch := range c.Changes {
+		fmt.Fprintf(os.Stderr, "  %s: %v -> %v\n", ch.Path, ch.From, ch.To)
+	}
+}
+
+func confirm(prompt string) bool {
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return strings.TrimSpace(strings.ToLower(line)) == "y"
+}
+
+func printResult(res service.Result) error {
+	if *jsonFlag {
+		if res.State != store.OpCommitted {
+			return exitError
+		}
+		return nil
+	}
+	printDiagnostics(res.Diagnostics)
+	if res.Conflict != nil {
+		printConflict(res.Conflict)
+	}
+	switch res.State {
+	case store.OpCommitted:
+		if res.NoChange {
+			fmt.Printf("no change; revision %d stays active (operation %s)\n", res.Revision, res.OperationID)
+		} else {
+			fmt.Printf("revision %d active, generation %d (operation %s)\n", res.Revision, res.Generation, res.OperationID)
+		}
+		return nil
+	case store.OpPending:
+		fmt.Printf("operation %s is still pending\n", res.OperationID)
+		return nil
+	}
+	msg := res.State
+	if res.Error != nil {
+		msg += ": " + res.Error.Message
+	}
+	if res.Degraded {
+		msg += " (degraded: some listeners could not be restored)"
+	}
+	fmt.Fprintln(os.Stderr, msg)
+	return exitError
+}
+
+func commitWithPlan(req service.ChangeRequest, op, msg, source string, yes bool) error {
+	var plan service.PlanResult
+	if err := client.Call("PlanConfiguration", req, &plan); err != nil {
+		return err
+	}
+	if plan.Conflict != nil {
+		printConflict(plan.Conflict)
+		return exitError
+	}
+	if !plan.Valid {
+		printDiagnostics(plan.Diagnostics)
+		return exitError
+	}
+	if !*jsonFlag {
+		printPlan(plan.Plan)
+		if plan.Plan.Interrupts && !yes && !confirm("This change briefly interrupts a listener. Commit?") {
+			return exitError
+		}
+	}
+	var res service.Result
+	if err := call("CommitConfiguration", service.CommitRequest{ChangeRequest: req, OperationID: op, PlanHash: plan.PlanHash, Message: msg, Source: source}, &res); err != nil {
+		return err
+	}
+	return printResult(res)
+}
+
+func cmdCommit(args []string) error {
+	var (
+		base    uint64
+		op, msg string
+		yes     bool
+	)
+	local, text, _, err := docFlags("commit", args, func(fs *flag.FlagSet) {
+		fs.Uint64Var(&base, "base", 0, "revision the file was edited from (default: active, without conflict check)")
+		fs.StringVar(&op, "op", "", "operation ID, for safe retries")
+		fs.StringVar(&msg, "m", "", "message recorded with the revision")
+		fs.BoolVar(&yes, "yes", false, "do not ask before interrupting a listener")
+	})
+	if err != nil {
+		return err
+	}
+	if base == 0 {
+		if base, err = activeRevision(); err != nil {
+			return err
+		}
+	}
+	return commitWithPlan(change(local, text, base), op, msg, "cli", yes)
+}
+
+func cmdPatch(op string, args []string) error {
+	fs := flag.NewFlagSet(op, flag.ExitOnError)
+	local := fs.Bool("local", false, "edit local settings")
+	base := fs.Uint64("base", 0, "base revision (default: active)")
+	yes := fs.Bool("yes", false, "do not ask before interrupting a listener")
+	parse(fs, args)
+	want := 2
+	if op == "remove" {
+		want = 1
+	}
+	if fs.NArg() != want {
+		return fmt.Errorf("usage: %s [-local] PATH%s", op, map[bool]string{true: " JSON"}[op == "set"])
+	}
+	o := model.Op{Op: op, Path: fs.Arg(0)}
+	if op == "set" {
+		v := fs.Arg(1)
+		if !json.Valid([]byte(v)) {
+			// Bare words are strings.
+			b, _ := json.Marshal(v)
+			v = string(b)
+		}
+		o.Value = json.RawMessage(v)
+	}
+	b := *base
+	if b == 0 {
+		var err error
+		if b, err = activeRevision(); err != nil {
+			return err
+		}
+	}
+	req := service.ChangeRequest{BaseRevision: b}
+	if *local {
+		req.LocalPatch = []model.Op{o}
+	} else {
+		req.Patch = []model.Op{o}
+	}
+	return commitWithPlan(req, "", "", "cli", *yes)
+}
+
+func cmdRevisions() error {
+	var out struct {
+		Active    uint64           `json:"active"`
+		Revisions []store.Revision `json:"revisions"`
+	}
+	if err := call("ListRevisions", nil, &out); err != nil || *jsonFlag {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "REVISION\tCREATED\tSOURCE\tBASE\tMESSAGE")
+	for _, r := range out.Revisions {
+		mark := " "
+		if r.Number == out.Active {
+			mark = "*"
+		}
+		fmt.Fprintf(w, "%s%d\t%s\t%s\t%d\t%s\n", mark, r.Number, r.Created.Local().Format(time.DateTime), r.Source, r.Base, r.Message)
+	}
+	return w.Flush()
+}
+
+func cmdRestore(args []string) error {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	yes := fs.Bool("yes", false, "do not ask")
+	parse(fs, args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: restore REVISION")
+	}
+	n, err := strconv.ParseUint(fs.Arg(0), 10, 64)
+	if err != nil {
+		return err
+	}
+	base, err := activeRevision()
+	if err != nil {
+		return err
+	}
+	if !*yes && !*jsonFlag && !confirm(fmt.Sprintf("Commit revision %d again as a new revision (active is %d)?", n, base)) {
+		return exitError
+	}
+	var res service.Result
+	if err := call("RestoreRevision", service.RestoreRequest{Revision: n, BaseRevision: base}, &res); err != nil {
+		return err
+	}
+	return printResult(res)
+}
+
+func cmdStatus() error {
+	var st control.Status
+	if err := call("GetStatus", nil, &st); err != nil || *jsonFlag {
+		return err
+	}
+	fmt.Printf("revision %d, generation %d, %d connections, %d instances draining\n",
+		st.Revision, st.Runtime.Generation, st.Runtime.Connections, st.Runtime.Draining)
+	for _, l := range st.Runtime.Listeners {
+		fmt.Printf("listener %s  %s  %s\n", l.ID, l.Action, l.Listen)
+	}
+	fmt.Printf("outbounds: %s\n", strings.Join(st.Runtime.Outbounds, ", "))
+	if st.StartError != "" {
+		fmt.Println("not running:", st.StartError)
+	}
+	return nil
+}
+
+// parse parses flags anywhere among the arguments ("commit FILE -m x").
+func parse(fs *flag.FlagSet, args []string) {
+	var pos []string
+	for {
+		fs.Parse(args)
+		args = fs.Args()
+		if len(args) == 0 {
+			break
+		}
+		pos = append(pos, args[0])
+		args = args[1:]
+	}
+	fs.Parse(pos)
+}
+
+type multi []string
+
+func (m *multi) String() string     { return strings.Join(*m, ",") }
+func (m *multi) Set(v string) error { *m = append(*m, v); return nil }
+
+func cmdExplain(args []string) error {
+	fs := flag.NewFlagSet("explain", flag.ExitOnError)
+	network := fs.String("network", "tcp", "tcp or udp")
+	source := fs.String("source", "", "source address:port")
+	resolve := fs.Bool("resolve", false, "allow a DNS lookup for ip rules")
+	process := fs.String("process", "", "process name to assume")
+	var addrs multi
+	fs.Var(&addrs, "addr", "destination address to assume for ip rules (repeatable)")
+	parse(fs, args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: explain HOST:PORT [flags]")
+	}
+	req := generation.ExplainRequest{Destination: fs.Arg(0), Network: *network, Source: *source, Resolve: *resolve, Addresses: addrs, Process: *process}
+	var x generation.Explanation
+	if err := call("ExplainRoute", req, &x); err != nil || *jsonFlag {
+		return err
+	}
+	if x.Undetermined != "" {
+		fmt.Println("undetermined:", x.Undetermined)
+		return nil
+	}
+	if x.Matched {
+		id := ""
+		if x.RuleID != "" {
+			id = " (" + x.RuleID + ")"
+		}
+		fmt.Printf("rule %d%s: %s\n", x.RuleIndex, id, x.Rule)
+	} else {
+		fmt.Println("no rule matched; using the final target")
+	}
+	if len(x.Resolved) > 0 {
+		fmt.Printf("resolved: %s\n", strings.Join(x.Resolved, ", "))
+	}
+	if x.ResolveError != "" {
+		fmt.Printf("resolve failed: %s (ip rules did not match)\n", x.ResolveError)
+	}
+	path := append(append([]string{}, x.Chain...), x.Outbound)
+	fmt.Printf("outbound: %s (%s, instance %s)\n", strings.Join(path, " -> "), x.OutboundType, x.Fingerprint)
+	return nil
+}
+
+func cmdConnections() error {
+	var out struct {
+		Total       int                     `json:"total"`
+		Connections []generation.Connection `json:"connections"`
+	}
+	if err := call("ListConnections", map[string]int{"limit": 1000}, &out); err != nil || *jsonFlag {
+		return err
+	}
+	sort.Slice(out.Connections, func(i, j int) bool { return out.Connections[i].ID < out.Connections[j].ID })
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNET\tDESTINATION\tOUTBOUND\tRULE\tGEN\tUP\tDOWN\tAGE")
+	for _, c := range out.Connections {
+		rule := c.RuleID
+		if rule == "" {
+			rule = c.Rule
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n", c.ID, c.Network, c.Destination, c.Outbound, rule,
+			c.Generation, c.Upload, c.Download, time.Since(c.Start).Round(time.Second))
+	}
+	return w.Flush()
+}
+
+func cmdClose(args []string) error {
+	params := map[string]any{}
+	if len(args) == 1 && args[0] == "all" {
+		params["all"] = true
+	} else {
+		var ids []uint64
+		for _, a := range args {
+			n, err := strconv.ParseUint(a, 10, 64)
+			if err != nil {
+				return fmt.Errorf("close: %q is not a connection ID", a)
+			}
+			ids = append(ids, n)
+		}
+		params["ids"] = ids
+	}
+	var out struct{ Closed int }
+	if err := call("CloseConnections", params, &out); err != nil || *jsonFlag {
+		return err
+	}
+	fmt.Printf("closed %d connections\n", out.Closed)
+	return nil
+}
+
+func cmdWatch() error {
+	if err := client.Call("Subscribe", map[string]any{}, nil); err != nil {
+		return err
+	}
+	for ev := range client.Events {
+		b, _ := json.Marshal(ev.Data)
+		drop := ""
+		if ev.Dropped > 0 {
+			drop = fmt.Sprintf(" (missed %d)", ev.Dropped)
+		}
+		fmt.Printf("%s #%d %s%s %s\n", ev.Time.Local().Format(time.TimeOnly), ev.Seq, ev.Type, drop, b)
+	}
+	return errors.New("connection closed")
+}
+
+func cmdSecret(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: secret set|rm|ls")
+	}
+	switch args[0] {
+	case "ls":
+		var out struct{ Names []string }
+		if err := call("ListSecrets", nil, &out); err != nil || *jsonFlag {
+			return err
+		}
+		for _, n := range out.Names {
+			fmt.Println(n)
+		}
+		return nil
+	case "rm":
+		if len(args) != 2 {
+			return errors.New("usage: secret rm NAME")
+		}
+		return call("DeleteSecret", map[string]string{"name": args[1]}, nil)
+	case "set":
+		if len(args) != 2 {
+			return errors.New("usage: secret set NAME < value")
+		}
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		value := strings.TrimRight(string(b), "\r\n")
+		var out struct {
+			Ref   string          `json:"ref"`
+			Apply *service.Result `json:"apply"`
+		}
+		if err := call("SetSecret", map[string]string{"name": args[1], "value": value}, &out); err != nil || *jsonFlag {
+			return err
+		}
+		fmt.Printf("stored; reference it as %s\n", out.Ref)
+		if out.Apply != nil {
+			return printResult(*out.Apply)
+		}
+		return nil
+	}
+	return fmt.Errorf("secret: unknown command %q", args[0])
+}

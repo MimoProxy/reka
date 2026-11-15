@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -30,24 +31,39 @@ func (d Destination) String() string {
 // Metadata is the part of a connection Reka's router decides on.
 type Metadata struct {
 	Inbound     string
+	InboundType string
 	Network     string // "tcp" or "udp"
 	Source      netip.AddrPort
 	Destination Destination
+	// Local is the listener address the client connected to, used to find
+	// the owning process. It may be invalid.
+	Local netip.AddrPort
 }
 
-// RouteFunc picks the outbound for a new connection and returns it with a
-// lease already taken (see Outbound.Lease); release is called when the
-// connection ends. Returning a nil outbound rejects the connection. It must
-// be safe for concurrent use; it is called once per connection.
-type RouteFunc func(Metadata) (out *Outbound, release func())
+// Route is the routing decision for one connection.
+type Route struct {
+	// Outbound carries the connection, with a lease already taken (see
+	// Outbound.Lease). Nil rejects the connection.
+	Outbound *Outbound
+	// Release gives the lease back; the relay calls it once when the
+	// connection ends.
+	Release func()
+	// Info is opaque to the backend and shown in connection listings.
+	Info any
+}
+
+// RouteFunc picks the outbound for a new connection. It must be safe for
+// concurrent use; it is called once per TCP connection and once per UDP
+// destination.
+type RouteFunc func(ctx context.Context, md Metadata) Route
 
 // Fixed routes every connection to out while out accepts leases.
 func Fixed(out *Outbound) RouteFunc {
-	return func(Metadata) (*Outbound, func()) {
+	return func(context.Context, Metadata) Route {
 		if out == nil || !out.lease.Acquire() {
-			return nil, nil
+			return Route{}
 		}
-		return out, out.lease.Release
+		return Route{Outbound: out, Release: out.lease.Release}
 	}
 }
 
@@ -68,57 +84,65 @@ func (r *router) setRoute(fn RouteFunc) {
 	r.route.Store(&fn)
 }
 
-func (r *router) pick(metadata adapter.InboundContext) (*Outbound, func()) {
+func (r *router) pick(ctx context.Context, md Metadata) Route {
 	fn := r.route.Load()
 	if fn == nil || *fn == nil {
-		return nil, nil
+		return Route{}
 	}
-	out, release := (*fn)(toMetadata(metadata))
-	if out == nil {
-		return nil, nil
+	rt := (*fn)(ctx, md)
+	if rt.Outbound == nil {
+		if rt.Release != nil {
+			rt.Release()
+		}
+		return Route{Info: rt.Info}
 	}
+	release := rt.Release
 	if release == nil {
 		release = func() {}
 	}
 	var once sync.Once
-	return out, func() { once.Do(release) }
+	rt.Release = func() { once.Do(release) }
+	return rt
 }
 
 func toMetadata(m adapter.InboundContext) Metadata {
 	md := Metadata{
-		Inbound: m.Inbound,
-		Network: m.Network,
-		Source:  m.Source.AddrPort(),
+		Inbound:     m.Inbound,
+		InboundType: m.InboundType,
+		Network:     m.Network,
+		Source:      m.Source.AddrPort(),
 	}
-	md.Destination.Port = m.Destination.Port
-	if m.Destination.IsDomain() {
-		md.Destination.Domain = m.Destination.Fqdn
-	} else {
-		md.Destination.Addr = m.Destination.Addr.Unmap()
+	if m.OriginDestination.IsIP() {
+		md.Local = m.OriginDestination.AddrPort()
 	}
+	md.Destination = toDestination(m.Destination)
 	return md
+}
+
+func toDestination(d M.Socksaddr) Destination {
+	out := Destination{Port: d.Port}
+	if d.IsDomain() {
+		out.Domain = d.Fqdn
+	} else {
+		out.Addr = d.Addr.Unmap()
+	}
+	return out
 }
 
 func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Network = N.NetworkTCP
-	out, release := r.pick(metadata)
-	if out == nil {
+	rt := r.pick(ctx, toMetadata(metadata))
+	if rt.Outbound == nil {
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
 		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
 		return
 	}
-	r.backend.relayTCP(ctx, out, release, conn, metadata, onClose)
+	r.backend.relayTCP(ctx, rt, conn, metadata, onClose)
 }
 
 func (r *router) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Network = N.NetworkUDP
-	out, release := r.pick(metadata)
-	if out == nil {
-		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
-		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
-		return
-	}
-	r.backend.relayUDP(ctx, out, release, conn, metadata, onClose)
+	r.backend.relayUDP(ctx, r, conn, metadata, onClose)
 }
 
 // The non-Ex variants are only used by legacy inbounds Reka does not enable.

@@ -21,7 +21,8 @@ import (
 // upstream route.ConnectionManager.NewConnection flow (dial, report handshake
 // success to the inbound, kick lazy outbound handshakes, copy), minus
 // sniffing, TLS fragmenting and URL-test bookkeeping.
-func (b *Backend) relayTCP(ctx context.Context, out *Outbound, release func(), conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	out, release := rt.Outbound, rt.Release
 	ctx = adapter.WithContext(ctx, &metadata)
 	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
 	if err != nil {
@@ -43,10 +44,12 @@ func (b *Backend) relayTCP(ctx context.Context, out *Outbound, release func(), c
 		up, down  atomic.Int64
 		closeBoth = func() { common.Close(conn, remote) }
 	)
+	untrack := b.conns.add(&tracked{md: toMetadata(metadata), out: out, info: rt.Info, up: &up, down: &down, close: closeBoth})
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {
 		if done.Swap(true) {
 			close(finished)
+			untrack()
 			release()
 			if onClose != nil {
 				onClose(err)
@@ -57,6 +60,7 @@ func (b *Backend) relayTCP(ctx context.Context, out *Outbound, release func(), c
 	// abort tears the pair down before any copy goroutine has started.
 	abort := func(err error) {
 		if !done.Swap(true) {
+			untrack()
 			release()
 			if onClose != nil {
 				onClose(err)
@@ -157,31 +161,4 @@ func kickHandshake(source, destination net.Conn, finish func(error)) bool {
 	}
 	finish(err)
 	return true
-}
-
-// relayUDP opens a packet session through out and copies both directions
-// until either side closes.
-func (b *Backend) relayUDP(ctx context.Context, out *Outbound, release func(), conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = adapter.WithContext(ctx, &metadata)
-	remote, err := out.out.ListenPacket(ctx, metadata.Destination)
-	if err != nil {
-		release()
-		err = E.Cause(err, "open packet connection to ", metadata.Destination, " using outbound/", out.Type(), "[", out.Tag(), "]")
-		N.CloseOnHandshakeFailure(conn, onClose, err)
-		b.logger.ErrorContext(ctx, err)
-		return
-	}
-	if err = N.ReportPacketConnHandshakeSuccess(conn, remote); err != nil {
-		release()
-		remote.Close()
-		N.CloseOnHandshakeFailure(conn, onClose, E.Cause(err, "report handshake success"))
-		return
-	}
-	go func() {
-		err := bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(remote))
-		release()
-		if onClose != nil {
-			onClose(err)
-		}
-	}()
 }

@@ -10,18 +10,25 @@ LDFLAGS ?= -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
 
 GOFLAGS_BUILD = -trimpath -tags "$(TAGS)" -ldflags "$(LDFLAGS) -s -w -buildid="
 
-.PHONY: build test race vet
+# The Android probe and JNI binding need the NDK (mobile/android/build.sh).
+PKGS = $(shell go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
+
+.PHONY: build test race vet android
 
 build:
 	go build $(GOFLAGS_BUILD) -o bin/reka ./cmd/reka
+	go build $(GOFLAGS_BUILD) -o bin/rekactl ./cmd/rekactl
 
 test:
-	go test -tags "$(TAGS)" -ldflags "$(LDFLAGS)" ./...
+	go test -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
 
 # The race detector needs cgo. checkptr is off because sing-vmess's Vision
 # reads TLS connection internals through unsafe offsets.
 race:
-	CGO_ENABLED=1 go test -race -gcflags=all=-d=checkptr=0 -tags "$(TAGS)" -ldflags "$(LDFLAGS)" ./...
+	CGO_ENABLED=1 go test -race -gcflags=all=-d=checkptr=0 -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
 
 vet:
-	go vet -tags "$(TAGS)" ./...
+	go vet -tags "$(TAGS)" $(PKGS)
+
+android:
+	mobile/android/build.sh

@@ -1,0 +1,127 @@
+package control
+
+import (
+	"encoding/json"
+	"errors"
+	"net"
+	"sync"
+
+	"github.com/MimoProxy/reka/internal/config/service"
+)
+
+// Client is a control API client. Calls may be made concurrently; events
+// arrive on Events once subscribed.
+type Client struct {
+	conn    net.Conn
+	wmu     sync.Mutex
+	mu      sync.Mutex
+	nextID  uint64
+	pending map[uint64]chan Message
+	err     error
+	Events  chan service.Event
+	Hello   HelloResult
+	done    chan struct{}
+}
+
+// Connect dials addr and says Hello.
+func Connect(addr, name string) (*Client, error) {
+	conn, err := Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+	return NewClient(conn, name)
+}
+
+// NewClient starts a client on an established connection.
+func NewClient(conn net.Conn, name string) (*Client, error) {
+	c := &Client{conn: conn, pending: map[uint64]chan Message{}, Events: make(chan service.Event, 256), done: make(chan struct{})}
+	go c.read()
+	if err := c.Call("Hello", HelloParams{Versions: []int{APIVersion}, Client: name}, &c.Hello); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Client) read() {
+	defer close(c.done)
+	defer close(c.Events)
+	for {
+		frame, err := ReadFrame(c.conn)
+		if err != nil {
+			c.mu.Lock()
+			c.err = err
+			for id, ch := range c.pending {
+				close(ch)
+				delete(c.pending, id)
+			}
+			c.mu.Unlock()
+			return
+		}
+		var m Message
+		if json.Unmarshal(frame, &m) != nil {
+			continue
+		}
+		if m.Event != nil {
+			select {
+			case c.Events <- *m.Event:
+			default: // the caller is not reading events
+			}
+			continue
+		}
+		c.mu.Lock()
+		ch := c.pending[m.ID]
+		delete(c.pending, m.ID)
+		c.mu.Unlock()
+		if ch != nil {
+			ch <- m
+		}
+	}
+}
+
+// ErrClosed is returned for calls on a closed connection.
+var ErrClosed = errors.New("control: connection closed")
+
+// Call sends a request and decodes the result into out (may be nil). A
+// server-side error is returned as *service.Error.
+func (c *Client) Call(method string, params, out any) error {
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.err != nil {
+		c.mu.Unlock()
+		return ErrClosed
+	}
+	c.nextID++
+	id := c.nextID
+	ch := make(chan Message, 1)
+	c.pending[id] = ch
+	c.mu.Unlock()
+	b, _ := json.Marshal(Request{ID: id, Method: method, Params: raw})
+	c.wmu.Lock()
+	err = WriteFrame(c.conn, b)
+	c.wmu.Unlock()
+	if err != nil {
+		return err
+	}
+	m, ok := <-ch
+	if !ok {
+		return ErrClosed
+	}
+	if m.Error != nil {
+		return m.Error
+	}
+	if out != nil && len(m.Result) > 0 {
+		return json.Unmarshal(m.Result, out)
+	}
+	return nil
+}
+
+// Close closes the connection.
+func (c *Client) Close() error {
+	err := c.conn.Close()
+	<-c.done
+	return err
+}

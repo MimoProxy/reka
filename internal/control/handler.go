@@ -1,0 +1,374 @@
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	goruntime "runtime"
+	"slices"
+	"sync"
+
+	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/service"
+	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/runtime/generation"
+	"github.com/MimoProxy/reka/internal/secret"
+)
+
+// Version is reported in Hello; the build may override it.
+var Version = "dev"
+
+// Handler serves control API sessions for one ConfigService.
+type Handler struct {
+	svc *service.Service
+}
+
+// NewHandler binds a handler to svc.
+func NewHandler(svc *service.Service) *Handler { return &Handler{svc: svc} }
+
+// Session is one client connection's state. send writes one message
+// frame; it must be safe for concurrent use.
+type Session struct {
+	h     *Handler
+	send  func([]byte) error
+	ctx   context.Context
+	stop  context.CancelFunc
+	mu    sync.Mutex
+	hello bool
+	sub   *service.Subscription
+}
+
+// NewSession starts a session that replies through send.
+func (h *Handler) NewSession(send func([]byte) error) *Session {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Session{h: h, send: send, ctx: ctx, stop: cancel}
+}
+
+// Close ends the session and its subscription.
+func (s *Session) Close() {
+	s.stop()
+	s.mu.Lock()
+	if s.sub != nil {
+		s.sub.Close()
+		s.sub = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) reply(id uint64, result any, err error) {
+	resp := Response{ID: id, Result: result}
+	if err != nil {
+		var se *service.Error
+		if !errors.As(err, &se) {
+			se = &service.Error{Code: CodeInternal, Message: err.Error()}
+		}
+		resp.Result, resp.Error = nil, se
+	}
+	b, merr := json.Marshal(resp)
+	if merr != nil {
+		b, _ = json.Marshal(Response{ID: id, Error: &service.Error{Code: CodeInternal, Message: merr.Error()}})
+	}
+	if len(b) > MaxFrame {
+		b, _ = json.Marshal(Response{ID: id, Error: &service.Error{Code: CodeInternal, Message: "response too large; page the request"}})
+	}
+	_ = s.send(b)
+}
+
+// Handle processes one request frame. Requests are answered in order.
+func (s *Session) Handle(frame []byte) {
+	var req Request
+	if err := json.Unmarshal(frame, &req); err != nil {
+		s.reply(0, nil, &service.Error{Code: service.CodeBadRequest, Message: "malformed request: " + err.Error()})
+		return
+	}
+	s.mu.Lock()
+	hello := s.hello
+	s.mu.Unlock()
+	if !hello && req.Method != "Hello" {
+		s.reply(req.ID, nil, &service.Error{Code: CodeHelloRequired, Message: "send Hello first"})
+		return
+	}
+	result, err := s.dispatch(req)
+	s.reply(req.ID, result, err)
+}
+
+func decode[T any](raw json.RawMessage) (T, error) {
+	var v T
+	if len(raw) == 0 {
+		return v, nil
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return v, &service.Error{Code: service.CodeBadRequest, Message: "params: " + err.Error()}
+	}
+	return v, nil
+}
+
+// Methods lists the API methods of this version.
+var Methods = []string{
+	"Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
+	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
+	"ListConnections", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
+	"SetSecret", "DeleteSecret", "ListSecrets",
+}
+
+func (s *Session) dispatch(req Request) (any, error) {
+	svc := s.h.svc
+	switch req.Method {
+	case "Hello":
+		p, err := decode[HelloParams](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(p.Versions, APIVersion) {
+			return nil, &service.Error{Code: CodeVersion, Message: fmt.Sprintf("server speaks API version %d", APIVersion)}
+		}
+		s.mu.Lock()
+		s.hello = true
+		s.mu.Unlock()
+		return HelloResult{Version: APIVersion, Server: "reka/" + Version, SchemaVersions: []int{model.SchemaVersion}, Epoch: svc.Events().Epoch()}, nil
+	case "GetCapabilities":
+		return capabilities(svc), nil
+	case "GetStatus":
+		return status(svc), nil
+	case "GetConfiguration":
+		p, err := decode[struct {
+			Reveal bool `json:"reveal"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.GetConfiguration(p.Reveal), nil
+	case "ValidateConfiguration":
+		p, err := decode[service.ChangeRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Validate(p)
+	case "PlanConfiguration":
+		p, err := decode[service.ChangeRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Plan(p)
+	case "CommitConfiguration":
+		p, err := decode[service.CommitRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.Source == "" {
+			p.Source = "api"
+		}
+		return svc.Commit(s.ctx, p)
+	case "GetOperation":
+		p, err := decode[struct {
+			ID string `json:"operation_id"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.GetOperation(p.ID)
+	case "ListRevisions":
+		revs, err := svc.ListRevisions()
+		return map[string]any{"active": svc.ActiveRevision(), "revisions": revs}, err
+	case "RestoreRevision":
+		p, err := decode[service.RestoreRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.RestoreRevision(s.ctx, p)
+	case "ListConnections":
+		p, err := decode[struct {
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.Limit <= 0 || p.Limit > 1000 {
+			p.Limit = 100
+		}
+		all := svc.Engine().Connections()
+		total := len(all)
+		if p.Offset > total {
+			p.Offset = total
+		}
+		end := min(p.Offset+p.Limit, total)
+		return map[string]any{"total": total, "offset": p.Offset, "connections": all[p.Offset:end]}, nil
+	case "CloseConnections":
+		p, err := decode[struct {
+			IDs []uint64 `json:"ids"`
+			All bool     `json:"all"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if !p.All && len(p.IDs) == 0 {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "give ids, or all: true"}
+		}
+		ids := p.IDs
+		if p.All {
+			ids = nil
+		}
+		return map[string]any{"closed": svc.Engine().CloseConnections(ids)}, nil
+	case "ExplainRoute":
+		p, err := decode[generation.ExplainRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		x, err := svc.Engine().Explain(s.ctx, p)
+		if err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		return x, nil
+	case "Subscribe":
+		p, err := decode[struct {
+			Types []string `json:"types"`
+			Epoch string   `json:"epoch"`
+			After uint64   `json:"after"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		s.subscribe(p.Types, p.Epoch, p.After)
+		return map[string]any{"subscribed": true, "epoch": svc.Events().Epoch()}, nil
+	case "Unsubscribe":
+		s.mu.Lock()
+		if s.sub != nil {
+			s.sub.Close()
+			s.sub = nil
+		}
+		s.mu.Unlock()
+		return map[string]any{"subscribed": false}, nil
+	case "SetSecret":
+		p, err := decode[struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+			// Apply recompiles the active configuration so outbounds that
+			// reference the secret pick it up. Default true.
+			Apply *bool `json:"apply"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if err := secret.ValidName(p.Name); err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		if svc.Secrets() == nil {
+			return nil, &service.Error{Code: CodeInternal, Message: "no secret store"}
+		}
+		if err := svc.Secrets().Set(p.Name, p.Value); err != nil {
+			return nil, err
+		}
+		out := map[string]any{"name": p.Name, "ref": secret.Ref(p.Name)}
+		if p.Apply == nil || *p.Apply {
+			res, err := svc.Reapply(s.ctx, "secret")
+			if err != nil {
+				return nil, err
+			}
+			out["apply"] = res
+		}
+		return out, nil
+	case "DeleteSecret":
+		p, err := decode[struct {
+			Name string `json:"name"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if svc.Secrets() == nil {
+			return nil, &service.Error{Code: CodeInternal, Message: "no secret store"}
+		}
+		if err := svc.Secrets().Delete(p.Name); errors.Is(err, secret.ErrNotFound) {
+			return nil, &service.Error{Code: service.CodeNotFound, Message: "no secret " + p.Name}
+		} else if err != nil {
+			return nil, err
+		}
+		return map[string]any{"deleted": p.Name}, nil
+	case "ListSecrets":
+		if svc.Secrets() == nil {
+			return map[string]any{"names": []string{}}, nil
+		}
+		names, err := svc.Secrets().List()
+		if names == nil {
+			names = []string{}
+		}
+		return map[string]any{"names": names}, err
+	}
+	return nil, &service.Error{Code: CodeUnknownMethod, Message: "unknown method " + req.Method}
+}
+
+func (s *Session) subscribe(types []string, epoch string, after uint64) {
+	svc := s.h.svc
+	s.mu.Lock()
+	if s.sub != nil {
+		s.sub.Close()
+	}
+	sub := svc.Events().Subscribe(types, epoch, after, func() any {
+		return map[string]any{"status": status(svc), "revision": svc.ActiveRevision()}
+	})
+	s.sub = sub
+	s.mu.Unlock()
+	go func() {
+		for ev := range sub.C {
+			ev := ev
+			b, err := json.Marshal(Message{Event: &ev})
+			if err != nil {
+				continue
+			}
+			if s.send(b) != nil {
+				return
+			}
+		}
+	}()
+}
+
+// Capabilities describes what this build supports.
+type Capabilities struct {
+	APIVersion         int      `json:"api_version"`
+	SchemaVersion      int      `json:"schema_version"`
+	Methods            []string `json:"methods"`
+	OutboundTypes      []string `json:"outbound_types"`
+	ListenerTypes      []string `json:"listener_types"`
+	GroupTypes         []string `json:"group_types"`
+	RuleConditions     []string `json:"rule_conditions"`
+	ShadowsocksMethods []string `json:"shadowsocks_methods"`
+	TLSFingerprints    []string `json:"tls_fingerprints"`
+	Platform           string   `json:"platform"`
+	ProcessLookup      bool     `json:"process_lookup"`
+}
+
+func capabilities(svc *service.Service) Capabilities {
+	conds := make([]string, 0)
+	for _, k := range router.Kinds() {
+		conds = append(conds, k.String())
+	}
+	return Capabilities{
+		APIVersion:         APIVersion,
+		SchemaVersion:      model.SchemaVersion,
+		Methods:            Methods,
+		OutboundTypes:      compile.OutboundTypes(),
+		ListenerTypes:      []string{model.ListenerMixed, model.ListenerSOCKS, model.ListenerHTTP},
+		GroupTypes:         []string{model.GroupSelect},
+		RuleConditions:     conds,
+		ShadowsocksMethods: compile.ShadowsocksMethods,
+		TLSFingerprints:    compile.Fingerprints,
+		Platform:           goruntime.GOOS + "/" + goruntime.GOARCH,
+		ProcessLookup:      svc.Engine().ProcessLookup(),
+	}
+}
+
+// Status is the answer to GetStatus.
+type Status struct {
+	Revision   uint64            `json:"revision"`
+	Runtime    generation.Status `json:"runtime"`
+	StartError string            `json:"start_error,omitempty"`
+	Goroutines int               `json:"goroutines"`
+}
+
+func status(svc *service.Service) Status {
+	st := Status{Revision: svc.ActiveRevision(), Runtime: svc.Engine().Status(), Goroutines: goruntime.NumGoroutine()}
+	st.StartError = svc.StartError()
+	return st
+}

@@ -1,0 +1,734 @@
+// Package compile validates the profile and local settings and composes
+// them into an effective configuration: defaults, then the profile, then
+// local settings, recording where every field came from. Compilation has
+// no side effects beyond reading secrets.
+package compile
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/netip"
+	"regexp"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/secret"
+)
+
+// Options for Compile.
+type Options struct {
+	// Secrets resolves "secret://" references. Nil makes every reference
+	// an error.
+	Secrets secret.Store
+	// ProcessLookup reports whether this platform can find the process
+	// owning a connection; without it process-name rules never match.
+	ProcessLookup bool
+}
+
+// Layers, in composition order.
+const (
+	LayerDefault = "default"
+	LayerProfile = "profile"
+	LayerLocal   = "local"
+)
+
+// Origin says where an effective field came from.
+type Origin struct {
+	Layer  string `json:"layer"`
+	Line   int    `json:"line,omitempty"`
+	Column int    `json:"column,omitempty"`
+	// Overrides is set when a local setting replaced a profile value.
+	Overrides *Origin `json:"overrides,omitempty"`
+}
+
+// Outbound is a validated outbound with secrets resolved. Fingerprint
+// changes whenever anything that affects the instance changes, including
+// a resolved secret; equal fingerprints mean the instance can be reused.
+type Outbound struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Type        string `json:"type"`
+	Server      string `json:"server,omitempty"`
+	Port        uint16 `json:"port,omitempty"`
+	UDP         bool   `json:"udp"`
+	Username    string `json:"username,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Flow        string `json:"flow,omitempty"`
+	TLS         *TLS   `json:"tls,omitempty"`
+	Builtin     bool   `json:"builtin,omitempty"`
+	Fingerprint string `json:"fingerprint"`
+
+	// Resolved credentials; never serialized.
+	Password string `json:"-"`
+	UUID     string `json:"-"`
+}
+
+// TLS is validated client TLS.
+type TLS struct {
+	ServerName  string   `json:"server-name,omitempty"`
+	Insecure    bool     `json:"insecure,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	ALPN        []string `json:"alpn,omitempty"`
+	Reality     *Reality `json:"reality,omitempty"`
+}
+
+// Reality is validated REALITY client configuration.
+type Reality struct {
+	PublicKey      string `json:"public-key"`
+	ShortID        string `json:"short-id,omitempty"`
+	X25519MLKEM768 bool   `json:"x25519mlkem768,omitempty"`
+}
+
+// Listener is a validated local listener.
+type Listener struct {
+	ID          string         `json:"id"`
+	Type        string         `json:"type"`
+	Listen      netip.AddrPort `json:"listen"`
+	UDP         bool           `json:"udp"`
+	Fingerprint string         `json:"fingerprint"`
+}
+
+// Effective is the composed configuration a runtime generation is built
+// from. It is immutable once returned.
+type Effective struct {
+	Outbounds []Outbound        `json:"outbounds"`
+	Groups    []router.Group    `json:"groups"`
+	Rules     []router.RuleSpec `json:"-"`
+	RuleIDs   []string          `json:"-"`
+	Listeners []Listener        `json:"listeners"`
+	LogLevel  string            `json:"log-level"`
+	Control   string            `json:"control,omitempty"`
+	// Final is the target when no rule matches.
+	Final string `json:"final"`
+	// RulesFingerprint changes whenever the rule list changes.
+	RulesFingerprint string `json:"rules-fingerprint"`
+
+	Provenance map[string]Origin `json:"provenance"`
+
+	// Router is compiled once here so that validation catches every rule
+	// and group error; the runtime reuses it.
+	Router *router.Router `json:"-"`
+}
+
+// OriginOf returns where path came from, falling back to the closest
+// recorded parent.
+func (e *Effective) OriginOf(path string) (Origin, bool) {
+	for p := path; ; {
+		if o, ok := e.Provenance[p]; ok {
+			return o, true
+		}
+		i := strings.LastIndexByte(p, '/')
+		if i <= 0 {
+			return Origin{}, false
+		}
+		p = p[:i]
+	}
+}
+
+// Outbound returns the outbound with id.
+func (e *Effective) Outbound(id string) (Outbound, bool) {
+	for _, o := range e.Outbounds {
+		if o.ID == id {
+			return o, true
+		}
+	}
+	return Outbound{}, false
+}
+
+type compiler struct {
+	opts    Options
+	diags   model.Diagnostics
+	ppos    model.Positions
+	lpos    model.Positions
+	profile *model.Profile
+	local   *model.LocalSettings
+}
+
+func (c *compiler) add(sev model.Severity, doc, path, code, format string, args ...any) {
+	d := model.Diagnostic{Severity: sev, Code: code, Document: doc, Path: path, Message: fmt.Sprintf(format, args...)}
+	pos := c.ppos
+	if doc == model.DocLocal {
+		pos = c.lpos
+	}
+	if p, ok := pos[path]; ok {
+		d.Line, d.Column = p.Line, p.Column
+	}
+	c.diags = append(c.diags, d)
+}
+
+func (c *compiler) errorf(doc, path, code, format string, args ...any) {
+	c.add(model.SeverityError, doc, path, code, format, args...)
+}
+
+func (c *compiler) warnf(doc, path, code, format string, args ...any) {
+	c.add(model.SeverityWarning, doc, path, code, format, args...)
+}
+
+// Compile parses, validates and composes. The result is nil when there are
+// error diagnostics; warnings come with a result.
+func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics) {
+	c := &compiler{opts: opts}
+	var d1, d2 model.Diagnostics
+	c.profile, c.ppos, d1 = model.ParseProfile(profile)
+	c.local, c.lpos, d2 = model.ParseLocal(local)
+	c.diags = append(append(c.diags, d1...), d2...)
+	if c.diags.HasErrors() {
+		return nil, c.diags
+	}
+	eff := c.compose()
+	if c.diags.HasErrors() {
+		return nil, c.diags
+	}
+	return eff, c.diags
+}
+
+func seg(id string, i int) string {
+	if id != "" && !strings.HasPrefix(id, "#") {
+		return id
+	}
+	return "#" + strconv.Itoa(i)
+}
+
+var idRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func (c *compiler) checkID(doc, path, id string) bool {
+	if id == "" {
+		c.errorf(doc, path, "schema.id", "id is required")
+		return false
+	}
+	if !idRE.MatchString(id) {
+		c.errorf(doc, path+"/id", "schema.id", "id %q must start with a letter or digit and contain only letters, digits, '.', '_' and '-' (at most 64)", id)
+		return false
+	}
+	return true
+}
+
+func (c *compiler) compose() *Effective {
+	eff := &Effective{Provenance: map[string]Origin{}, Final: model.OutboundDirect}
+	for p, pos := range c.ppos {
+		eff.Provenance[p] = Origin{Layer: LayerProfile, Line: pos.Line, Column: pos.Column}
+	}
+
+	c.outbounds(eff)
+	c.groups(eff)
+	c.rules(eff)
+	c.listenersAndLocal(eff)
+	if c.diags.HasErrors() {
+		return eff
+	}
+	rs, err := router.CompileRules(eff.Rules)
+	if err != nil {
+		// Each rule was checked already; this only reports leftovers.
+		c.errorf(model.DocProfile, "/rules", "rule.invalid", "%v", err)
+		return eff
+	}
+	ids := make([]string, len(eff.Outbounds))
+	for i, o := range eff.Outbounds {
+		ids[i] = o.ID
+	}
+	r, err := router.New(rs, router.Options{Outbounds: ids, Groups: eff.Groups, Final: eff.Final})
+	if err != nil {
+		c.errorf(model.DocProfile, "/groups", "group.invalid", "%v", err)
+		return eff
+	}
+	eff.Router = r
+	return eff
+}
+
+// fieldsByType lists, per outbound type, the fields that apply. Anything
+// else written for that type is an error.
+var fieldsByType = map[string][]string{
+	model.OutboundDirect:      {"udp"},
+	model.OutboundReject:      {},
+	model.OutboundHTTP:        {"server", "port", "username", "password", "tls"},
+	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp"},
+	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp"},
+	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "packet-encoding", "tls", "udp"},
+}
+
+var commonFields = []string{"id", "name", "type"}
+
+// ShadowsocksMethods are the ciphers the Shadowsocks outbound accepts.
+var ShadowsocksMethods = []string{
+	"2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
+	"aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+}
+
+// Fingerprints are the uTLS ClientHello presets.
+var Fingerprints = []string{"chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android", "random", "randomized"}
+
+// OutboundTypes lists supported outbound types.
+func OutboundTypes() []string {
+	t := make([]string, 0, len(fieldsByType))
+	for k := range fieldsByType {
+		t = append(t, k)
+	}
+	sort.Strings(t)
+	return t
+}
+
+func (c *compiler) present(base string) []string {
+	var keys []string
+	prefix := base + "/"
+	for p := range c.ppos {
+		if rest, ok := strings.CutPrefix(p, prefix); ok && !strings.Contains(rest, "/") {
+			keys = append(keys, rest)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var shortIDRE = regexp.MustCompile(`^[0-9a-fA-F]{0,16}$`)
+
+func (c *compiler) resolveSecret(path, v string) string {
+	name, ok := secret.ParseRef(v)
+	if !ok {
+		return v
+	}
+	if err := secret.ValidName(name); err != nil {
+		c.errorf(model.DocProfile, path, "secret.name", "%v", err)
+		return ""
+	}
+	if c.opts.Secrets == nil {
+		c.errorf(model.DocProfile, path, "secret.unavailable", "no secret store to resolve %s", v)
+		return ""
+	}
+	val, err := c.opts.Secrets.Get(name)
+	if errors.Is(err, secret.ErrNotFound) {
+		c.errorf(model.DocProfile, path, "secret.missing", "secret %q is not stored", name)
+		return ""
+	}
+	if err != nil {
+		c.errorf(model.DocProfile, path, "secret.unavailable", "read secret %q: %v", name, err)
+		return ""
+	}
+	return val
+}
+
+func (c *compiler) outbounds(eff *Effective) {
+	seen := map[string]bool{}
+	const doc = model.DocProfile
+	for i, ob := range c.profile.Outbounds {
+		base := model.JoinPath("/outbounds", seg(ob.ID, i))
+		if !c.checkID(doc, base, ob.ID) {
+			continue
+		}
+		if seen[ob.ID] {
+			c.errorf(doc, base+"/id", "schema.duplicate-id", "duplicate outbound id %q", ob.ID)
+			continue
+		}
+		seen[ob.ID] = true
+		allowed, ok := fieldsByType[ob.Type]
+		if !ok {
+			c.errorf(doc, base+"/type", "outbound.type", "unsupported outbound type %q (supported: %s)", ob.Type, strings.Join(OutboundTypes(), ", "))
+			continue
+		}
+		for _, k := range c.present(base) {
+			if !slices.Contains(allowed, k) && !slices.Contains(commonFields, k) {
+				c.errorf(doc, base+"/"+k, "outbound.field", "field %q does not apply to %s outbounds", k, ob.Type)
+			}
+		}
+		if (ob.ID == model.OutboundDirect && ob.Type != model.OutboundDirect) || (ob.ID == model.OutboundReject && ob.Type != model.OutboundReject) {
+			c.errorf(doc, base+"/type", "outbound.builtin", "id %q is reserved for the built-in %s outbound", ob.ID, ob.ID)
+		}
+		out := Outbound{ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
+		out.UDP = ob.UDP == nil || *ob.UDP
+		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundReject {
+			out.UDP = false
+		}
+		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject {
+			if ob.Server == "" {
+				c.errorf(doc, base, "outbound.server", "server is required")
+			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
+				c.errorf(doc, base+"/server", "outbound.server", "server must be a host name or an IP address")
+			}
+			if ob.Port < 1 || ob.Port > 65535 {
+				c.errorf(doc, base+"/port", "outbound.port", "port must be between 1 and 65535")
+			}
+			out.Server, out.Port = strings.Trim(ob.Server, "[]"), uint16(ob.Port)
+		}
+		out.Username = c.resolveSecret(base+"/username", ob.Username)
+		out.Password = c.resolveSecret(base+"/password", ob.Password)
+		out.UUID = c.resolveSecret(base+"/uuid", ob.UUID)
+		switch ob.Type {
+		case model.OutboundShadowsocks:
+			if !slices.Contains(ShadowsocksMethods, ob.Method) {
+				c.errorf(doc, base+"/method", "outbound.method", "unsupported method %q (supported: %s)", ob.Method, strings.Join(ShadowsocksMethods, ", "))
+			}
+			if out.Password == "" && !c.hasErrorAt(base+"/password") {
+				c.errorf(doc, base, "outbound.password", "password is required")
+			}
+			if strings.HasPrefix(ob.Method, "2022-") && out.Password != "" {
+				if _, err := base64.StdEncoding.DecodeString(strings.Split(out.Password, ":")[0]); err != nil {
+					c.errorf(doc, base+"/password", "outbound.password", "a 2022 method needs a base64 key as password")
+				}
+			}
+		case model.OutboundSOCKS, model.OutboundHTTP:
+			if (out.Username == "") != (out.Password == "") {
+				c.errorf(doc, base, "outbound.auth", "set both username and password, or neither")
+			}
+		case model.OutboundVLESS:
+			if !uuidRE.MatchString(out.UUID) && !c.hasErrorAt(base+"/uuid") {
+				c.errorf(doc, base+"/uuid", "outbound.uuid", "uuid is required and must be a UUID")
+			}
+			if ob.Flow != "" && ob.Flow != "xtls-rprx-vision" {
+				c.errorf(doc, base+"/flow", "outbound.flow", "flow must be empty or xtls-rprx-vision")
+			}
+			if ob.PacketEncoding != "" && ob.PacketEncoding != "xudp" {
+				c.errorf(doc, base+"/packet-encoding", "outbound.packet-encoding", "packet-encoding must be xudp")
+			}
+			if ob.Flow != "" && ob.TLS == nil {
+				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs tls")
+			}
+		}
+		if ob.TLS != nil {
+			out.TLS = c.tls(base+"/tls", ob)
+		}
+		eff.Outbounds = append(eff.Outbounds, out)
+	}
+	for _, b := range []string{model.OutboundDirect, model.OutboundReject} {
+		if !seen[b] {
+			eff.Outbounds = append(eff.Outbounds, Outbound{ID: b, Type: b, UDP: b == model.OutboundDirect, Builtin: true})
+			eff.Provenance["/outbounds/"+b] = Origin{Layer: LayerDefault}
+		}
+	}
+	for i := range eff.Outbounds {
+		eff.Outbounds[i].Fingerprint = fingerprint(eff.Outbounds[i], eff.Outbounds[i].Password, eff.Outbounds[i].UUID)
+	}
+}
+
+func (c *compiler) hasErrorAt(path string) bool {
+	for _, d := range c.diags {
+		if d.Path == path && d.Severity == model.SeverityError {
+			return true
+		}
+	}
+	return false
+}
+
+func isIP(s string) bool {
+	_, err := netip.ParseAddr(strings.Trim(s, "[]"))
+	return err == nil
+}
+
+func (c *compiler) tls(path string, ob model.Outbound) *TLS {
+	const doc = model.DocProfile
+	t := ob.TLS
+	out := &TLS{ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
+	if t.Fingerprint != "" && !slices.Contains(Fingerprints, t.Fingerprint) {
+		c.errorf(doc, path+"/fingerprint", "tls.fingerprint", "unknown fingerprint %q (supported: %s)", t.Fingerprint, strings.Join(Fingerprints, ", "))
+	}
+	if t.Reality == nil {
+		if out.ServerName == "" && !isIP(ob.Server) {
+			out.ServerName = ob.Server
+		}
+		return out
+	}
+	if ob.Type != model.OutboundVLESS {
+		c.errorf(doc, path+"/reality", "tls.reality", "reality is only supported on vless outbounds")
+		return out
+	}
+	r := t.Reality
+	if key, err := base64.RawURLEncoding.DecodeString(r.PublicKey); err != nil || len(key) != 32 {
+		c.errorf(doc, path+"/reality/public-key", "tls.reality", "public-key must be a 32-byte key in base64url without padding")
+	}
+	if !shortIDRE.MatchString(r.ShortID) || len(r.ShortID)%2 != 0 {
+		c.errorf(doc, path+"/reality/short-id", "tls.reality", "short-id must be an even number of hex digits, at most 16")
+	}
+	if t.ServerName == "" {
+		c.errorf(doc, path+"/server-name", "tls.reality", "reality needs server-name (the site the handshake imitates)")
+	}
+	if t.Insecure {
+		c.errorf(doc, path+"/insecure", "tls.reality", "insecure does not apply to reality")
+	}
+	if out.Fingerprint == "" {
+		out.Fingerprint = "chrome"
+		c.warnf(doc, path+"/fingerprint", "tls.fingerprint", "reality needs a ClientHello fingerprint; using chrome")
+	}
+	out.Reality = &Reality{PublicKey: r.PublicKey, ShortID: r.ShortID, X25519MLKEM768: r.X25519MLKEM768}
+	return out
+}
+
+func fingerprint(v any, extra ...string) string {
+	b, _ := json.Marshal(v)
+	h := sha256.New()
+	h.Write(b)
+	for _, e := range extra {
+		h.Write([]byte{0})
+		h.Write([]byte(e))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func (c *compiler) groups(eff *Effective) {
+	const doc = model.DocProfile
+	targets := map[string]bool{}
+	for _, o := range eff.Outbounds {
+		targets[o.ID] = true
+	}
+	seen := map[string]bool{}
+	for i, g := range c.profile.Groups {
+		base := model.JoinPath("/groups", seg(g.ID, i))
+		if !c.checkID(doc, base, g.ID) {
+			continue
+		}
+		if targets[g.ID] || seen[g.ID] {
+			c.errorf(doc, base+"/id", "schema.duplicate-id", "id %q is already used by an outbound or group", g.ID)
+			continue
+		}
+		seen[g.ID] = true
+	}
+	for i, g := range c.profile.Groups {
+		base := model.JoinPath("/groups", seg(g.ID, i))
+		if g.Type != model.GroupSelect {
+			c.errorf(doc, base+"/type", "group.type", "unsupported group type %q (supported: select)", g.Type)
+			continue
+		}
+		if len(g.Members) == 0 {
+			c.errorf(doc, base+"/members", "group.members", "a group needs at least one member")
+			continue
+		}
+		ok := true
+		dup := map[string]bool{}
+		for _, m := range g.Members {
+			if !targets[m] && !seen[m] {
+				c.errorf(doc, base+"/members", "group.member", "unknown member %q", m)
+				ok = false
+			}
+			if dup[m] {
+				c.errorf(doc, base+"/members", "group.member", "member %q is listed twice", m)
+				ok = false
+			}
+			dup[m] = true
+		}
+		if g.Selected != "" && !slices.Contains(g.Members, g.Selected) {
+			c.errorf(doc, base+"/selected", "group.selected", "selected %q is not a member", g.Selected)
+			ok = false
+		}
+		if ok {
+			eff.Groups = append(eff.Groups, router.Group{ID: g.ID, Members: g.Members, Selected: g.Selected})
+		}
+	}
+	// Cycles.
+	byID := map[string]router.Group{}
+	for _, g := range eff.Groups {
+		byID[g.ID] = g
+	}
+	for i, g := range c.profile.Groups {
+		if _, ok := byID[g.ID]; !ok {
+			continue
+		}
+		if cycle := findCycle(g.ID, byID); cycle != "" {
+			c.errorf(doc, model.JoinPath("/groups", seg(g.ID, i), "members"), "group.cycle", "groups form a cycle: %s", cycle)
+			break
+		}
+	}
+}
+
+// findCycle walks every member path from start (not only the selected one:
+// a later selection change must not be able to create a loop).
+func findCycle(start string, groups map[string]router.Group) string {
+	var stack []string
+	var visit func(id string) string
+	visit = func(id string) string {
+		if i := slices.Index(stack, id); i >= 0 {
+			return strings.Join(append(stack[i:], id), " -> ")
+		}
+		g, ok := groups[id]
+		if !ok {
+			return ""
+		}
+		stack = append(stack, id)
+		for _, m := range g.Members {
+			if c := visit(m); c != "" {
+				return c
+			}
+		}
+		stack = stack[:len(stack)-1]
+		return ""
+	}
+	return visit(start)
+}
+
+func (c *compiler) rules(eff *Effective) {
+	const doc = model.DocProfile
+	targets := map[string]bool{}
+	for _, o := range eff.Outbounds {
+		targets[o.ID] = true
+	}
+	for _, g := range c.profile.Groups {
+		targets[g.ID] = true
+	}
+	ids := map[string]bool{}
+	catchAll := -1
+	h := sha256.New()
+	for i, r := range c.profile.Rules {
+		base := model.JoinPath("/rules", seg(r.ID, i))
+		if r.ID != "" {
+			if !idRE.MatchString(r.ID) {
+				c.errorf(doc, base+"/id", "schema.id", "invalid rule id %q", r.ID)
+				continue
+			}
+			if ids[r.ID] {
+				c.errorf(doc, base+"/id", "schema.duplicate-id", "duplicate rule id %q", r.ID)
+				continue
+			}
+			ids[r.ID] = true
+		}
+		if r.Outbound == "" {
+			c.errorf(doc, base, "rule.outbound", "outbound is required")
+			continue
+		}
+		if !targets[r.Outbound] {
+			c.errorf(doc, base+"/outbound", "rule.outbound", "unknown outbound or group %q", r.Outbound)
+			continue
+		}
+		kind, ok := router.ParseKind(r.Match.Kind)
+		if !ok {
+			c.errorf(doc, base+"/match", "rule.match", "unsupported condition %q", r.Match.Kind)
+			continue
+		}
+		spec := router.RuleSpec{ID: r.ID, Kind: kind, Values: r.Match.Values, NoResolve: r.Match.NoResolve, Target: r.Outbound}
+		if _, err := router.CompileRules([]router.RuleSpec{spec}); err != nil {
+			var re *router.RuleError
+			msg := err.Error()
+			if errors.As(err, &re) {
+				msg = re.Err.Error()
+				if re.Value != "" {
+					msg = fmt.Sprintf("%q: %s", re.Value, msg)
+				}
+			}
+			c.errorf(doc, base+"/match/"+r.Match.Kind, "rule.match", "%s", msg)
+			continue
+		}
+		if catchAll >= 0 {
+			c.warnf(doc, base, "rule.unreachable", "unreachable: the match-all rule at position %d always matches first", catchAll)
+		}
+		if kind == router.KindMatch && catchAll < 0 {
+			catchAll = i
+		}
+		if kind == router.KindProcessName && !c.opts.ProcessLookup {
+			c.warnf(doc, base, "rule.process", "this platform cannot identify processes; the rule never matches")
+		}
+		eff.Rules = append(eff.Rules, spec)
+		eff.RuleIDs = append(eff.RuleIDs, r.ID)
+		b, _ := json.Marshal(spec)
+		h.Write(b)
+	}
+	if catchAll < 0 && len(c.profile.Rules) > 0 && !c.diags.HasErrors() {
+		c.warnf(doc, "/rules", "rule.no-final", "no match-all rule; connections no rule matches go direct")
+	}
+	if len(c.profile.Rules) == 0 {
+		eff.Provenance["/final"] = Origin{Layer: LayerDefault}
+	}
+	eff.RulesFingerprint = hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+var logLevels = []string{"debug", "info", "warn", "error"}
+
+func (c *compiler) listenersAndLocal(eff *Effective) {
+	// Listeners: the local list replaces the profile's as a whole.
+	listeners, doc, prefix := c.profile.Listeners, model.DocProfile, "/listeners"
+	if c.local.Listeners != nil || hasKey(c.lpos, "/listeners") {
+		c.override(eff, "/listeners")
+		listeners, doc = c.local.Listeners, model.DocLocal
+	}
+	seen, addrs := map[string]bool{}, map[netip.AddrPort]string{}
+	for i, l := range listeners {
+		base := model.JoinPath(prefix, seg(l.ID, i))
+		if !c.checkID(doc, base, l.ID) {
+			continue
+		}
+		if seen[l.ID] {
+			c.errorf(doc, base+"/id", "schema.duplicate-id", "duplicate listener id %q", l.ID)
+			continue
+		}
+		seen[l.ID] = true
+		if l.Type != model.ListenerMixed && l.Type != model.ListenerSOCKS && l.Type != model.ListenerHTTP {
+			c.errorf(doc, base+"/type", "listener.type", "unsupported listener type %q (supported: mixed, socks, http)", l.Type)
+			continue
+		}
+		ap, err := netip.ParseAddrPort(l.Listen)
+		if err != nil || ap.Port() == 0 {
+			c.errorf(doc, base+"/listen", "listener.listen", "listen must be an IP address and a non-zero port, for example 127.0.0.1:7890")
+			continue
+		}
+		ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+		if other, dup := addrs[ap]; dup {
+			c.errorf(doc, base+"/listen", "listener.listen", "%s is already used by listener %q", ap, other)
+			continue
+		}
+		addrs[ap] = l.ID
+		if l.UDP != nil && *l.UDP && l.Type == model.ListenerHTTP {
+			c.errorf(doc, base+"/udp", "listener.udp", "http listeners do not carry UDP")
+		}
+		udp := (l.UDP == nil || *l.UDP) && l.Type != model.ListenerHTTP
+		lst := Listener{ID: l.ID, Type: l.Type, Listen: ap, UDP: udp}
+		lst.Fingerprint = fingerprint(struct {
+			Type string
+			UDP  bool
+		}{l.Type, udp})
+		eff.Listeners = append(eff.Listeners, lst)
+	}
+	if listeners == nil {
+		eff.Provenance["/listeners"] = Origin{Layer: LayerDefault}
+	}
+
+	eff.LogLevel = "info"
+	eff.Provenance["/log/level"] = Origin{Layer: LayerDefault}
+	if c.profile.Log != nil && c.profile.Log.Level != "" {
+		eff.LogLevel = c.profile.Log.Level
+		p := c.ppos["/log/level"]
+		eff.Provenance["/log/level"] = Origin{Layer: LayerProfile, Line: p.Line, Column: p.Column}
+	}
+	levelDoc := model.DocProfile
+	if c.local.Log != nil && c.local.Log.Level != "" {
+		c.override(eff, "/log/level")
+		eff.LogLevel, levelDoc = c.local.Log.Level, model.DocLocal
+	}
+	if !slices.Contains(logLevels, eff.LogLevel) {
+		c.errorf(levelDoc, "/log/level", "log.level", "log level must be one of %s", strings.Join(logLevels, ", "))
+	}
+	if c.local.Control != nil {
+		c.override(eff, "/control")
+		eff.Control = c.local.Control.Listen
+	}
+}
+
+func hasKey(pos model.Positions, path string) bool {
+	_, ok := pos[path]
+	return ok
+}
+
+// override records that the local layer replaced everything under prefix.
+func (c *compiler) override(eff *Effective, prefix string) {
+	var replaced *Origin
+	for p, o := range eff.Provenance {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			if p == prefix {
+				o := o
+				replaced = &o
+			}
+			delete(eff.Provenance, p)
+		}
+	}
+	for p, pos := range c.lpos {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			o := Origin{Layer: LayerLocal, Line: pos.Line, Column: pos.Column}
+			if p == prefix {
+				o.Overrides = replaced
+			}
+			eff.Provenance[p] = o
+		}
+	}
+}

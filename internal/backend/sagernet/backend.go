@@ -8,16 +8,20 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/lease"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/process"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
+	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
+	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/control"
@@ -32,9 +36,18 @@ type Options struct {
 	// Protect, when set, is applied to every outbound socket before it
 	// connects. On Android it calls VpnService.protect().
 	Protect control.Func
+	// ProtectFD is Protect for hosts that work with raw descriptors, such
+	// as Android's VpnService.protect(int). Ignored when Protect is set.
+	ProtectFD func(fd int) error
 	// HalfCloseTimeout bounds how long a relay keeps receiving after the
 	// client half-closed and the outbound connection cannot. Default 2s.
 	HalfCloseTimeout time.Duration
+	// UDPTimeout closes a UDP destination flow after this much idle time.
+	// Default 60s.
+	UDPTimeout time.Duration
+	// FindProcess enables looking up the process that owns a connection,
+	// where the platform supports it.
+	FindProcess bool
 }
 
 const defaultHalfCloseTimeout = 2 * time.Second
@@ -48,8 +61,11 @@ type Backend struct {
 	slog   *slog.Logger
 	logger *slogLogger
 	router *router
+	conns  connTable
 
 	halfCloseTimeout time.Duration
+	udpTimeout       time.Duration
+	searcher         process.Searcher
 }
 
 // New builds the upstream context with only the services the enabled
@@ -69,8 +85,28 @@ func New(opts Options) *Backend {
 	if b.halfCloseTimeout <= 0 {
 		b.halfCloseTimeout = defaultHalfCloseTimeout
 	}
+	b.udpTimeout = opts.UDPTimeout
+	if b.udpTimeout <= 0 {
+		b.udpTimeout = defaultUDPTimeout
+	}
+	if opts.FindProcess && processSupported {
+		if s, err := process.NewSearcher(process.Config{Logger: newLogger(opts.Logger, "process")}); err == nil {
+			b.searcher = s
+		}
+	}
 	b.router = &router{backend: b}
-	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: opts.Protect})
+	protect := opts.Protect
+	if protect == nil && opts.ProtectFD != nil {
+		fn := opts.ProtectFD
+		protect = func(_, _ string, conn syscall.RawConn) error {
+			var perr error
+			if err := conn.Control(func(fd uintptr) { perr = fn(int(fd)) }); err != nil {
+				return err
+			}
+			return perr
+		}
+	}
+	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: protect})
 	service.MustRegister[adapter.DNSRouter](ctx, &dnsRouter{resolver: net.DefaultResolver})
 	service.MustRegister[adapter.DNSTransportManager](ctx, &dnsTransportManager{})
 	service.MustRegister[adapter.Router](ctx, b.router)
@@ -87,7 +123,30 @@ func (b *Backend) SetRoute(fn RouteFunc) {
 // outbounds first.
 func (b *Backend) Close() error {
 	b.cancel()
+	if b.searcher != nil {
+		b.searcher.Close()
+	}
 	return nil
+}
+
+// CanFindProcess reports whether FindProcess can return results.
+func (b *Backend) CanFindProcess() bool { return b.searcher != nil }
+
+// FindProcess returns the path of the process that opened the connection
+// described by md, if the platform can tell.
+func (b *Backend) FindProcess(ctx context.Context, md Metadata) (string, bool) {
+	if b.searcher == nil || !md.Source.IsValid() {
+		return "", false
+	}
+	dst := md.Local
+	if !dst.IsValid() {
+		return "", false
+	}
+	info, err := b.searcher.FindProcessInfo(ctx, md.Network, md.Source, dst)
+	if err != nil || info == nil || info.ProcessPath == "" {
+		return "", false
+	}
+	return info.ProcessPath, true
 }
 
 func (b *Backend) componentLogger(kind, typ, tag string) log.ContextLogger {
@@ -155,6 +214,23 @@ type ShadowsocksSpec struct {
 	Password string
 }
 
+// HTTPSpec is an HTTP CONNECT proxy client, over TLS when TLS is set.
+type HTTPSpec struct {
+	Server   string
+	Port     uint16
+	Username string
+	Password string
+	TLS      *TLSSpec
+}
+
+// SOCKSSpec is a SOCKS5 client.
+type SOCKSSpec struct {
+	Server   string
+	Port     uint16
+	Username string
+	Password string
+}
+
 // VLESSSpec is a VLESS client. Flow is "" or "xtls-rprx-vision".
 type VLESSSpec struct {
 	Server string
@@ -169,6 +245,7 @@ type TLSSpec struct {
 	ServerName  string
 	Insecure    bool
 	Fingerprint string
+	ALPN        []string
 	Reality     *RealitySpec
 }
 
@@ -183,7 +260,7 @@ type RealitySpec struct {
 }
 
 // NewOutbound creates and starts one outbound instance. spec is one of
-// DirectSpec, ShadowsocksSpec or VLESSSpec.
+// DirectSpec, HTTPSpec, SOCKSSpec, ShadowsocksSpec or VLESSSpec.
 func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	var (
 		typ string
@@ -194,6 +271,22 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	case DirectSpec:
 		typ = "direct"
 		out, err = direct.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.DirectOutboundOptions{})
+	case HTTPSpec:
+		typ = "http"
+		out, err = http.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.HTTPOutboundOptions{
+			ServerOptions:               option.ServerOptions{Server: s.Server, ServerPort: s.Port},
+			Username:                    s.Username,
+			Password:                    s.Password,
+			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: s.TLS.build()},
+		})
+	case SOCKSSpec:
+		typ = "socks"
+		out, err = socks.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.SOCKSOutboundOptions{
+			ServerOptions: option.ServerOptions{Server: s.Server, ServerPort: s.Port},
+			Version:       "5",
+			Username:      s.Username,
+			Password:      s.Password,
+		})
 	case ShadowsocksSpec:
 		typ = "shadowsocks"
 		out, err = shadowsocks.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.ShadowsocksOutboundOptions{
@@ -242,6 +335,7 @@ func (t *TLSSpec) build() *option.OutboundTLSOptions {
 		Enabled:    true,
 		ServerName: t.ServerName,
 		Insecure:   t.Insecure,
+		ALPN:       t.ALPN,
 	}
 	if t.Fingerprint != "" {
 		o.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: t.Fingerprint}
@@ -272,16 +366,33 @@ func (i *Inbound) Close() error {
 
 // NewMixedInbound starts a SOCKS4/4a/5 and HTTP proxy listener on listen.
 func (b *Backend) NewMixedInbound(tag string, listen netip.AddrPort) (*Inbound, error) {
+	return b.NewInbound(tag, "mixed", listen)
+}
+
+// NewInbound starts a listener of type typ ("mixed", "socks" or "http")
+// on listen. Binding errors, such as a port in use, are returned here.
+func (b *Backend) NewInbound(tag, typ string, listen netip.AddrPort) (*Inbound, error) {
 	addr := badoption.Addr(listen.Addr())
-	options := option.HTTPMixedInboundOptions{
-		ListenOptions: option.ListenOptions{Listen: &addr, ListenPort: listen.Port()},
+	lo := option.ListenOptions{Listen: &addr, ListenPort: listen.Port()}
+	logger := b.componentLogger("inbound", typ, tag)
+	var (
+		in  adapter.Inbound
+		err error
+	)
+	switch typ {
+	case "mixed":
+		in, err = mixed.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo})
+	case "socks":
+		in, err = socks.NewInbound(b.ctx, b.router, logger, tag, option.SocksInboundOptions{ListenOptions: lo})
+	case "http":
+		in, err = http.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo})
+	default:
+		return nil, fmt.Errorf("reka: unsupported inbound type %q", typ)
 	}
-	logger := b.componentLogger("inbound", "mixed", tag)
-	in, err := mixed.NewInbound(b.ctx, b.router, logger, tag, options)
 	if err != nil {
-		return nil, fmt.Errorf("create inbound/mixed[%s]: %w", tag, err)
+		return nil, fmt.Errorf("create inbound/%s[%s]: %w", typ, tag, err)
 	}
-	return b.adoptInbound(tag, "mixed", in, logger)
+	return b.adoptInbound(tag, typ, in, logger)
 }
 
 func (b *Backend) adoptInbound(tag, typ string, in adapter.Inbound, logger log.ContextLogger) (*Inbound, error) {

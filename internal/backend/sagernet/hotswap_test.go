@@ -6,6 +6,7 @@ package sagernet
 // other way round, runtime on backend; only this test imports runtime.)
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,15 +24,15 @@ func runtimeRoute(t *testing.T, r *rt.Runtime[*Outbound]) RouteFunc {
 		out, ok := s.Resources["proxy"]
 		return out, ok
 	}
-	return func(Metadata) (*Outbound, func()) {
+	return func(context.Context, Metadata) Route {
 		_, out, release, ok, err := r.Acquire(pick)
 		if err != nil {
 			t.Error(err)
 		}
 		if !ok {
-			return nil, nil
+			return Route{}
 		}
-		return out, release
+		return Route{Outbound: out, Release: release}
 	}
 }
 

@@ -1,0 +1,103 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  TAGS: with_gvisor,with_utls,badlinkname,tfogo_checklinkname0
+  LDFLAGS: -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
+
+jobs:
+  # Jobs named "test" run the tests on that platform; jobs named "build"
+  # only compile.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))" || { gofmt -l $(git ls-files '*.go'); exit 1; }
+      - name: packages
+        # The Android probe and JNI binding need the NDK; they are built
+        # in the android job.
+        run: echo "PKGS=$(go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni | tr '\n' ' ')" >> "$GITHUB_ENV"
+      - name: vet
+        run: go vet -tags "$TAGS" $PKGS
+      - name: test
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
+
+  race:
+    name: test (race, ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: race
+        # sing-vmess's Vision races between its read and write goroutines
+        # (upstream); Vision tests skip themselves under -race. checkptr is
+        # off because Vision reads TLS internals through unsafe offsets.
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          PKGS=$(go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
+          go test -race -gcflags=all=-d=checkptr=0 -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
+
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: darwin, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: windows, goarch: amd64}
+          - {goos: windows, goarch: arm64}
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS -s -w" -o out/ ./cmd/reka ./cmd/rekactl
+          go vet -tags "$TAGS" $(go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
+          ls -l out
+
+  android:
+    name: build (android/arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: libreka.so
+        run: |
+          CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -trimpath -buildmode=c-shared \
+            -tags "$TAGS" -ldflags "$LDFLAGS -s -w" -o out/libreka.so ./mobile/jni
+          ls -l out/libreka.so
