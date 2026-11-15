@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -196,7 +197,16 @@ func Open(opts Options) (*Service, error) {
 			return nil, err
 		}
 		if res.State != store.OpCommitted {
-			return nil, fmt.Errorf("initial configuration: %s", describe(res))
+			if !onlySecretErrors(res) {
+				return nil, fmt.Errorf("initial configuration: %s", describe(res))
+			}
+			// The documents are valid but reference secrets that cannot be
+			// stored before the kernel runs. Keep them as revision 1 without
+			// starting them; storing the secrets re-applies them.
+			if err := s.storeUnstarted(profile, local, res.Diagnostics); err != nil {
+				return nil, err
+			}
+			s.log.Warn("the initial configuration needs secrets before it can start", "missing", res.Diagnostics.Errors().Error())
 		}
 		return s, nil
 	}
@@ -216,6 +226,46 @@ func describe(r Result) string {
 		return msg
 	}
 	return r.State
+}
+
+// onlySecretErrors reports whether a rejection is only about secrets that
+// are not stored (or a store that cannot be read).
+func onlySecretErrors(res Result) bool {
+	if res.Error == nil || res.Error.Code != CodeInvalid {
+		return false
+	}
+	errs := res.Diagnostics.Errors()
+	for _, d := range errs {
+		if !strings.HasPrefix(d.Code, "secret.") {
+			return false
+		}
+	}
+	return len(errs) > 0
+}
+
+// storeUnstarted records the initial documents as revision 1 without
+// running them, for an empty state root whose import needs secrets.
+func (s *Service) storeUnstarted(profile, local []byte, diags model.Diagnostics) error {
+	now := time.Now().UTC()
+	if _, err := s.store.WriteRevision(store.Revision{Number: 1, Operation: "initial", Source: "initial", Created: now,
+		Message: "imported; waiting for secrets"}, profile, local); err != nil {
+		return err
+	}
+	res := Result{OperationID: "initial", State: store.OpCommitted, Revision: 1, Diagnostics: diags}
+	b, _ := json.Marshal(res)
+	if err := s.store.WriteOperation(store.Operation{ID: "initial", State: store.OpCommitted, Revision: 1,
+		RequestHash: "initial", Created: now, Updated: now, Result: b}); err != nil {
+		return err
+	}
+	if err := s.store.WriteActive(store.Active{Revision: 1, Profile: store.Hash(profile), Local: store.Hash(local),
+		Operation: "initial", Updated: now}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.active, s.profile, s.local, s.warnings = 1, profile, local, diags
+	s.startErr = diags.Errors()
+	s.mu.Unlock()
+	return nil
 }
 
 // recover settles operations left pending by a crash.

@@ -452,3 +452,34 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// An initial import that only lacks secrets is stored but not started;
+// storing the secret and re-applying starts it.
+func TestInitialWaitsForSecrets(t *testing.T) {
+	e := newEnv(t)
+	prof := strings.Replace(profileWith("alt"), "outbounds:\n", "outbounds:\n  - {id: ss, type: shadowsocks, server: 192.0.2.1, port: 8388, method: aes-128-gcm, password: secret://outbounds/ss/password}\n", 1)
+	s := e.open(prof, localWith(freePort(t)))
+	defer s.Close()
+	if s.ActiveRevision() != 1 || s.StartError() == "" {
+		t.Fatalf("revision %d, start error %q", s.ActiveRevision(), s.StartError())
+	}
+	if eff, _ := s.Engine().Effective(); eff != nil {
+		t.Fatal("started without its secret")
+	}
+	e.sec.Set("outbounds/ss/password", "pw")
+	res, err := s.Reapply(context.Background(), "secret")
+	if err != nil || res.State != store.OpCommitted || res.Revision != 2 {
+		t.Fatalf("reapply %+v %v", res, err)
+	}
+	if s.StartError() != "" || selected(t, s) != "alt" {
+		t.Fatalf("not running: %q", s.StartError())
+	}
+	// Other errors in the import are still fatal.
+	e2 := newEnv(t)
+	eng := generation.NewEngine(generation.EngineOptions{Backend: backendOptions()})
+	defer eng.Close()
+	if _, err := Open(Options{StateRoot: e2.root, Secrets: e2.sec, Engine: eng, Logger: quiet(),
+		InitialProfile: []byte("schema-version: 1\nrules:\n  - {match: {all: true}, outbound: ghost}\n")}); err == nil {
+		t.Fatal("invalid import accepted")
+	}
+}

@@ -97,7 +97,7 @@ Domain and domain-suffix rules are indexed, so thousands of them cost about as m
 
 ### Secrets
 
-Any `password`, `uuid` or `username` may be `secret://<name>`. Secrets live in the platform store (macOS Keychain, Windows DPAPI, the host's cipher on Android, a 0600 file on Linux) and are set with `rekactl secret set NAME` (value on stdin). Credentials written inline are masked as `********` when the configuration is read through the API; sending `********` back keeps the stored value.
+Any `password`, `uuid` or `username` may be `secret://<name>`. Secrets live in the platform store (macOS Keychain, Windows DPAPI, the host's cipher on Android, a 0600 file on Linux) and are set with `rekactl secret set NAME` (value on stdin), which also re-applies the configuration. A first import (`reka -profile`) whose only problem is a secret that is not stored yet is kept as revision 1 and starts once the secret is set. Credentials written inline are masked as `********` when the configuration is read through the API; sending `********` back keeps the stored value.
 
 ## Local settings
 
