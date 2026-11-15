@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reka 控制台</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #667085; --line: #e4e7ec;
+  --accent: #2563eb; --accent-soft: #e8efff; --ok: #12a150; --warn: #c27c0e; --bad: #d92d20;
+  --chip: #f1f3f6; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --panel: #171b21; --text: #e6e8eb; --muted: #8b95a5; --line: #262c35;
+    --accent: #6ea0ff; --accent-soft: #1c2a45; --ok: #3ccf7f; --warn: #e8a33d; --bad: #ff6b5e; --chip: #20262f;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; }
+header h1 { font-size: 16px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+.stat { display: flex; flex-direction: column; min-width: 64px; }
+.stat b { font-size: 15px; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 11px; color: var(--muted); }
+main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 40px; display: grid; gap: 16px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+section h2 { font-size: 14px; margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; white-space: nowrap; }
+section h2 input[type=text] { flex: 1 1 140px; max-width: 280px; }
+button { white-space: nowrap; }
+section h2 .grow { flex: 1; }
+.wide { grid-column: 1 / -1; }
+.muted { color: var(--muted); }
+.error-banner { grid-column: 1 / -1; background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent); border-radius: 10px; padding: 10px 14px; display: none; }
+.group { padding: 8px 0; border-top: 1px solid var(--line); }
+.group:first-of-type { border-top: 0; }
+.group-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+.group-head b { font-family: var(--mono); }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--chip); color: var(--text); border-radius: 6px; padding: 4px 10px; font: inherit; font-family: var(--mono); font-size: 12px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.chip:hover:not(:disabled) { border-color: var(--accent); }
+.chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.chip:disabled { cursor: default; }
+.delay { font-size: 11px; color: var(--muted); }
+.delay.good { color: var(--ok); } .delay.mid { color: var(--warn); } .delay.dead { color: var(--bad); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.mono { font-family: var(--mono); }
+td.dest { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.table-wrap { overflow: auto; max-height: 420px; }
+button.small, button.act { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--chip); color: var(--text); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+button.small:hover, button.act:hover { border-color: var(--accent); }
+button.danger:hover { border-color: var(--bad); color: var(--bad); }
+input[type=text], select { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.result { margin-top: 10px; padding: 10px; border-radius: 8px; background: var(--chip); font-size: 13px; }
+.result .path { font-family: var(--mono); font-weight: 600; }
+.log { font-family: var(--mono); font-size: 11.5px; max-height: 300px; overflow: auto; }
+.log div { padding: 3px 0; border-bottom: 1px dashed var(--line); word-break: break-all; }
+.log .t { color: var(--muted); margin-right: 6px; }
+.rev { display: flex; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.rev .n { font-family: var(--mono); width: 44px; }
+.rev .msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rev.active .n { color: var(--accent); font-weight: 700; }
+.toast { position: fixed; right: 18px; bottom: 18px; background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 70vw; }
+.toast.show { opacity: .92; }
+.rate-up { color: var(--accent); } .rate-down { color: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="conn-dot"></span>Reka 控制台</h1>
+  <div class="stat"><b id="s-rev">–</b><span>配置版本</span></div>
+  <div class="stat"><b id="s-gen">–</b><span>运行世代</span></div>
+  <div class="stat"><b id="s-conns">–</b><span>活动连接</span></div>
+  <div class="stat"><b id="s-up" class="rate-up">–</b><span>上行</span></div>
+  <div class="stat"><b id="s-down" class="rate-down">–</b><span>下行</span></div>
+  <div class="stat"><b id="s-drain">–</b><span>排空中实例</span></div>
+  <div class="stat"><b id="s-net">–</b><span>系统接管</span></div>
+  <div class="stat"><b id="s-listen" style="font-family:var(--mono);font-size:13px">–</b><span>监听</span></div>
+</header>
+<main>
+  <div class="error-banner" id="banner"></div>
+
+  <section>
+    <h2>策略组 <span class="muted" style="font-weight:400;font-size:12px">点击成员即提交新版本；已有连接不受影响</span></h2>
+    <div id="groups"><div class="muted">加载中…</div></div>
+  </section>
+
+  <section>
+    <h2>路由解释 <span class="muted" style="font-weight:400;font-size:12px">不发起连接</span></h2>
+    <div class="row">
+      <input type="text" id="x-dest" placeholder="www.example.com:443" style="flex:1">
+      <select id="x-net"><option>tcp</option><option>udp</option></select>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="muted"><input type="checkbox" id="x-resolve"> 允许 DNS 解析</label>
+      <button class="act" id="x-go">解释</button>
+    </div>
+    <div id="x-out"></div>
+  </section>
+
+  <section class="wide">
+    <h2>连接 <span class="muted" id="c-count" style="font-weight:400"></span><span class="grow"></span>
+      <input type="text" id="c-filter" placeholder="过滤目标、规则或出站">
+      <button class="small danger" id="c-close-all">全部关闭</button>
+    </h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>协议</th><th>目标</th><th>规则</th><th>出站</th><th>世代</th><th class="num">上行速率</th><th class="num">下行速率</th><th class="num">已上传</th><th class="num">已下载</th><th class="num">时长</th><th></th></tr></thead>
+        <tbody id="conns"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>事件 <span class="grow"></span><button class="small" id="e-clear">清空</button></h2>
+    <div class="log" id="events"><div class="muted">等待事件…</div></div>
+  </section>
+
+  <section>
+    <h2>历史版本</h2>
+    <div id="revs" style="max-height:300px;overflow:auto"></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+(() => {
+  let token = '';
+  const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
+  try {
+    if (fromHash) sessionStorage.setItem('reka-token', fromHash);
+    token = fromHash || sessionStorage.getItem('reka-token') || '';
+  } catch (e) { token = fromHash || ''; }
+  if (fromHash) history.replaceState(null, '', location.pathname);
+
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmtBytes = n => { if (!n) return '0 B'; const u = ['B','KB','MB','GB','TB']; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + ' ' + u[i]; };
+  const fmtRate = n => fmtBytes(Math.max(0, Math.round(n))) + '/s';
+  const fmtAge = ms => { const s = Math.max(0, Math.floor(ms / 1000)); if (s < 60) return s + 's'; if (s < 3600) return Math.floor(s/60) + 'm' + (s%60) + 's'; return Math.floor(s/3600) + 'h' + Math.floor(s%3600/60) + 'm'; };
+
+  let toastTimer;
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600); }
+  function banner(msg) { const b = $('banner'); b.style.display = msg ? 'block' : 'none'; b.textContent = msg || ''; $('conn-dot').className = 'dot ' + (msg ? 'bad' : 'ok'); }
+
+  async function api(path, body) {
+    const opt = { headers: { 'X-Reka-Token': token } };
+    if (body !== undefined) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    const r = await fetch(path, opt);
+    const text = await r.text();
+    let data; try { data = JSON.parse(text); } catch (e) { data = { error: text.trim() }; }
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    return data;
+  }
+
+  if (!token) { banner('缺少访问令牌：请打开 dashboard 启动时打印的完整地址（带 #token=…）。'); return; }
+
+  // ---- state and groups ----
+  let lastState = null;
+  let names = {};
+  const label = id => names[id] || id;
+  // Replace hashed IDs inside rule text with their names.
+  const nameText = t => Object.keys(names).sort((a, b) => b.length - a.length).reduce((acc, id) => acc.split(id).join(names[id]), String(t ?? ''));
+  const labelHTML = id => names[id] ? `<span title="${esc(id)}">${esc(names[id])}</span>` : esc(id);
+  async function loadState() {
+    try {
+      const s = await api('/api/state');
+      lastState = s;
+      names = s.names || {};
+      banner(s.status.start_error ? '当前配置没有运行：' + s.status.start_error : '');
+      const rt = s.status.runtime;
+      $('s-rev').textContent = s.revision;
+      $('s-gen').textContent = rt.generation;
+      $('s-drain').textContent = rt.draining;
+      const net = rt.network || {};
+      $('s-net').textContent = net.mode === 'off' || !net.mode ? '关闭' : net.mode + (net.state ? ' · ' + net.state : '');
+      $('s-listen').textContent = (rt.listeners || []).map(l => l.listen).join(' ') || '无';
+      renderGroups(s.groups || []);
+    } catch (e) { banner('连不上内核：' + e.message); }
+  }
+
+  function delayClass(r) { if (!r.alive) return 'dead'; if (r.delay_ms < 300) return 'good'; if (r.delay_ms < 800) return 'mid'; return ''; }
+
+  function renderGroups(groups) {
+    if (!groups.length) { $('groups').innerHTML = '<div class="muted">配置里没有策略组。</div>'; return; }
+    $('groups').innerHTML = groups.map(g => {
+      let obs = null; try { obs = g.observed ? (typeof g.observed === 'string' ? JSON.parse(g.observed) : g.observed) : null; } catch (e) {}
+      const results = {}; (obs && obs.results || []).forEach(r => results[r.member] = r);
+      const current = obs ? obs.selected : g.selected;
+      const chips = g.members.map(m => {
+        const r = results[m];
+        const d = r ? `<span class="delay ${delayClass(r)}">${r.alive ? r.delay_ms + 'ms' : '不可用'}</span>` : '';
+        return `<button class="chip ${m === current ? 'on' : ''}" ${g.settable ? '' : 'disabled'} data-g="${esc(g.id)}" data-m="${esc(m)}" title="${esc(m)}">${esc(label(m))}${d}</button>`;
+      }).join('');
+      const note = g.settable ? '' : '<span class="muted" style="font-size:12px">自动选择，测速结果不写入配置</span>';
+      return `<div class="group"><div class="group-head"><b>${labelHTML(g.id)}</b><span class="tag">${esc(g.type)}</span>${note}</div><div class="chips">${chips}</div></div>`;
+    }).join('');
+  }
+
+  $('groups').addEventListener('click', async ev => {
+    const b = ev.target.closest('button.chip');
+    if (!b || b.disabled || b.classList.contains('on')) return;
+    document.querySelectorAll('#groups button.chip').forEach(x => x.disabled = true);
+    try {
+      const res = await api('/api/select', { group: b.dataset.g, member: b.dataset.m });
+      toast(`已切换 ${label(b.dataset.g)} → ${label(b.dataset.m)}：版本 ${res.revision}，世代 ${res.generation}`);
+    } catch (e) { toast('切换失败：' + e.message); }
+    await loadState(); loadRevisions();
+  });
+
+  // ---- connections with rates ----
+  const prev = new Map(); let prevAt = 0; let conns = [];
+  async function loadConns() {
+    try {
+      const data = await api('/api/connections');
+      const now = performance.now(); const dt = prevAt ? (now - prevAt) / 1000 : 0;
+      let up = 0, down = 0;
+      conns = (data.connections || []).map(c => {
+        const p = prev.get(c.id);
+        c.rUp = p && dt ? (c.upload - p.upload) / dt : 0;
+        c.rDown = p && dt ? (c.download - p.download) / dt : 0;
+        up += c.rUp; down += c.rDown; return c;
+      });
+      prev.clear(); conns.forEach(c => prev.set(c.id, { upload: c.upload, download: c.download })); prevAt = now;
+      $('s-conns').textContent = data.total; $('s-up').textContent = fmtRate(up); $('s-down').textContent = fmtRate(down);
+      renderConns();
+    } catch (e) { /* state polling reports the error */ }
+  }
+
+  function renderConns() {
+    const f = $('c-filter').value.trim().toLowerCase();
+    const rows = conns.filter(c => !f || [c.destination, c.rule, c.rule_id, c.outbound, label(c.outbound), (c.chain || []).map(label).join(' ')].join(' ').toLowerCase().includes(f));
+    $('c-count').textContent = rows.length === conns.length ? `${conns.length}` : `${rows.length} / ${conns.length}`;
+    const now = Date.now();
+    $('conns').innerHTML = rows.length ? rows.slice().reverse().map(c => {
+      const chain = (c.chain || []).concat(c.outbound).map(label).join(' → ');
+      const rule = c.rule_index < 0 ? '（兜底）' : (c.rule_id && !c.rule_id.includes('/') ? c.rule_id : nameText(c.rule));
+      return `<tr><td class="mono">${c.id}</td><td>${esc(c.network)}</td><td class="mono dest" title="${esc(c.destination)}">${esc(c.destination)}</td>
+        <td class="mono" title="${esc(c.rule)}">${esc(rule)}</td><td class="mono">${esc(chain)}</td><td class="mono">${c.generation}</td>
+        <td class="num rate-up">${fmtRate(c.rUp)}</td><td class="num rate-down">${fmtRate(c.rDown)}</td>
+        <td class="num">${fmtBytes(c.upload)}</td><td class="num">${fmtBytes(c.download)}</td><td class="num">${fmtAge(now - Date.parse(c.start))}</td>
+        <td><button class="small danger" data-id="${c.id}">关闭</button></td></tr>`;
+    }).join('') : `<tr><td colspan="12" class="muted">没有活动连接。把浏览器或 curl 的代理设成上面的监听地址试试。</td></tr>`;
+  }
+  $('c-filter').addEventListener('input', renderConns);
+  $('conns').addEventListener('click', async ev => {
+    const b = ev.target.closest('button[data-id]'); if (!b) return;
+    try { const r = await api('/api/close', { ids: [Number(b.dataset.id)] }); toast(`已关闭 ${r.closed} 条连接`); } catch (e) { toast(e.message); }
+    loadConns();
+  });
+  $('c-close-all').addEventListener('click', async () => {
+    if (!confirm('关闭全部活动连接？')) return;
+    try { const r = await api('/api/close', { all: true }); toast(`已关闭 ${r.closed} 条连接`); } catch (e) { toast(e.message); }
+    loadConns();
+  });
+
+  // ---- explain ----
+  async function explain() {
+    const dest = $('x-dest').value.trim(); if (!dest) return;
+    try {
+      const x = await api('/api/explain', { destination: dest.includes(':') ? dest : dest + ':443', network: $('x-net').value, resolve: $('x-resolve').checked });
+      if (x.undetermined) { $('x-out').innerHTML = `<div class="result">未定：${esc(x.undetermined)}</div>`; return; }
+      const path = (x.chain || []).concat(x.outbound).map(label).join(' → ');
+      const rule = x.matched ? `第 ${x.rule_index} 条：<span class="mono" title="${esc(x.rule_id || '')}">${esc(nameText(x.rule))}</span>` : '没有规则命中，使用兜底目标';
+      const res = (x.resolved || []).length ? `<div class="muted">解析：${esc(x.resolved.join(', '))}</div>` : '';
+      const rerr = x.resolve_error ? `<div class="muted">解析失败：${esc(x.resolve_error)}（IP 规则不命中）</div>` : '';
+      $('x-out').innerHTML = `<div class="result"><div>${rule}</div><div>出站：<span class="path">${esc(path)}</span> <span class="tag">${esc(x.outbound_type || '')}</span></div>${res}${rerr}</div>`;
+    } catch (e) { $('x-out').innerHTML = `<div class="result" style="color:var(--bad)">${esc(e.message)}</div>`; }
+  }
+  $('x-go').addEventListener('click', explain);
+  $('x-dest').addEventListener('keydown', e => { if (e.key === 'Enter') explain(); });
+
+  // ---- revisions ----
+  async function loadRevisions() {
+    try {
+      const r = await api('/api/revisions');
+      $('revs').innerHTML = (r.revisions || []).map(v => `<div class="rev ${v.revision === r.active ? 'active' : ''}">
+        <span class="n">#${v.revision}</span><span class="tag">${esc(v.source)}</span>
+        <span class="msg" title="${esc(v.message)}">${esc(v.message || '')}</span>
+        <span class="muted">${new Date(v.created).toLocaleTimeString()}</span>
+        ${v.revision === r.active ? '<span class="muted">当前</span>' : `<button class="small" data-rev="${v.revision}">恢复</button>`}</div>`).join('') || '<div class="muted">无</div>';
+    } catch (e) {}
+  }
+  $('revs').addEventListener('click', async ev => {
+    const b = ev.target.closest('button[data-rev]'); if (!b) return;
+    if (!confirm(`把版本 #${b.dataset.rev} 的内容作为新版本提交？`)) return;
+    try { const r = await api('/api/restore', { revision: Number(b.dataset.rev) }); toast(`已恢复为新版本 ${r.revision}`); } catch (e) { toast('恢复失败：' + e.message); }
+    loadState(); loadRevisions();
+  });
+
+  // ---- events ----
+  const evNames = { 'snapshot': '快照', 'config.committed': '已提交', 'config.rejected': '被拒绝', 'runtime.generation': '新世代', 'candidate.invalid': '候选文件无效' };
+  function addEvent(ev) {
+    const box = $('events');
+    if (box.firstChild && box.firstChild.classList && box.firstChild.classList.contains('muted')) box.innerHTML = '';
+    const d = ev.data || {};
+    let detail = '';
+    if (ev.type === 'config.committed') detail = `版本 ${d.revision} · ${d.source || ''} · 世代 ${d.generation}`;
+    else if (ev.type === 'runtime.generation') detail = `世代 ${d.generation} · 版本 ${d.revision}`;
+    else if (ev.type === 'config.rejected') detail = (d.error && d.error.message) || '';
+    else if (ev.type !== 'snapshot') detail = JSON.stringify(d).slice(0, 200);
+    const div = document.createElement('div');
+    div.innerHTML = `<span class="t">${new Date(ev.time || Date.now()).toLocaleTimeString()}</span><b>${esc(evNames[ev.type] || ev.type)}</b> ${esc(detail)}${ev.dropped ? ` <span class="muted">（漏掉 ${ev.dropped} 条）</span>` : ''}`;
+    box.prepend(div);
+    while (box.children.length > 200) box.lastChild.remove();
+  }
+  $('e-clear').addEventListener('click', () => { $('events').innerHTML = ''; });
+
+  async function streamEvents() {
+    for (;;) {
+      try {
+        const r = await fetch('/api/events', { headers: { 'X-Reka-Token': token } });
+        if (!r.ok) throw new Error(r.statusText);
+        const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        for (;;) {
+          const { value, done } = await reader.read(); if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i; while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+            if (!line || line === '{}') continue;
+            try { const ev = JSON.parse(line); addEvent(ev); if (ev.type !== 'snapshot') { loadState(); loadRevisions(); } } catch (e) {}
+          }
+        }
+      } catch (e) {}
+      await new Promise(res => setTimeout(res, 2000));
+    }
+  }
+
+  loadState(); loadConns(); loadRevisions(); streamEvents();
+  setInterval(loadConns, 1000);
+  setInterval(loadState, 3000);
+})();
+</script>
+</body>
+</html>

@@ -18,7 +18,7 @@ GOFLAGS_BUILD = $(GO_OVERLAY) -trimpath -tags "$(TAGS)" -ldflags "$(LDFLAGS) -s 
 # The Android probe and JNI binding need the NDK (mobile/android/build.sh).
 PKGS = $(shell go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
 
-.PHONY: build test race vet android
+.PHONY: build test race vet android dashboard
 
 build:
 	go build $(GOFLAGS_BUILD) -o bin/reka ./cmd/reka
@@ -37,3 +37,7 @@ vet:
 
 android:
 	mobile/android/build.sh
+
+# A local web page for watching and steering a running kernel.
+dashboard:
+	go build $(GOFLAGS_BUILD) -o bin/reka-dashboard ./tools/dashboard
