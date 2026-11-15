@@ -37,6 +37,10 @@ def main():
         ['go', 'list', '-m', '-json', 'github.com/sagernet/sing-box'], cwd=ROOT))
     if info.get('Version') != PINNED_VERSION or info.get('Replace'):
         raise SystemExit('Review the Reka ECH overlay before changing the pinned sing-box version')
+    if 'Dir' not in info:
+        # A fresh checkout (CI) has not downloaded the module yet.
+        info = json.loads(subprocess.check_output(
+            ['go', 'mod', 'download', '-json', 'github.com/sagernet/sing-box@' + PINNED_VERSION], cwd=ROOT))
     original = Path(info['Dir'])
     if sha256(original / ECH_FILE) != PINNED_ECH_SHA256:
         raise SystemExit('Pinned ECH source changed; review the overlay before building')
