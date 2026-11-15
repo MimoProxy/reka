@@ -52,6 +52,8 @@ jobs:
           $source=Join-Path $root '1.0.0-dev\reka-1.0.0-dev-windows-${{ matrix.arch }}'
           & (Join-Path $tools 'ISCC.exe') ('/DSourceRoot='+$source) '/DAppVersion=1.0.0-dev' '/DTargetArch=${{ matrix.inno_arch }}' ('/O'+(Join-Path $root 'installer-${{ matrix.arch }}')) (Join-Path $source 'packaging\windows\reka.iss')
           if($LASTEXITCODE -ne 0){throw 'Installer compilation failed'}
+          $installer=Join-Path $root 'installer-${{ matrix.arch }}\reka-1.0.0-dev-setup.exe'
+          ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+[IO.Path]::GetFileName($installer))|Set-Content -Encoding ASCII (Join-Path $root 'installer-SHA256SUMS')
       - name: Install, upgrade, owner access and uninstall
         run: |
           $ErrorActionPreference='Stop'
@@ -64,3 +66,6 @@ jobs:
             bin/ci-windows/installer-${{ matrix.arch }}/*.exe
             bin/ci-windows/installer-runtime.json
             bin/ci-windows/installer*.log
+            bin/ci-windows/installer-SHA256SUMS
+            bin/ci-windows/1.0.0-dev/reka-1.0.0-dev-source.tar.gz
+            bin/ci-windows/1.0.0-dev/reka-1.0.0-dev-windows-${{ matrix.arch }}/BUILD.json
