@@ -9,9 +9,9 @@ import (
 )
 
 func TestProxyRestoreClearsEmptyEndpointAtomically(t *testing.T) {
-	s, e := proxyPreferenceScript("/NetworkServices/fixture/Proxies", true, map[string]json.RawMessage{"HTTPProxy": nil, "HTTPPort": nil, "ExceptionsList": nil}, "webproxy", proxyValue{})
-	if e != nil {
-		t.Fatal(e)
+	s, err := proxyPreferenceScript("/NetworkServices/fixture/Proxies", true, map[string]json.RawMessage{"HTTPProxy": nil, "HTTPPort": nil, "ExceptionsList": nil}, "webproxy", proxyValue{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, want := range []string{"d.add HTTPEnable # 0", "d.remove HTTPProxy", "d.remove HTTPPort", "commit\napply"} {
 		if !strings.Contains(s, want) {

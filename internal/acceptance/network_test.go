@@ -27,23 +27,23 @@ func TestNetworkTransactionsKeepDeviceForRules(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	eng := generation.NewEngine(generation.EngineOptions{StateRoot: root, NetworkHooks: &h})
 	defer eng.Close()
-	svc, e := service.Open(service.Options{StateRoot: root, Engine: eng, InitialProfile: []byte("schema-version: 1\nrules: [{id: final, match: {all: true}, outbound: direct}]\n")})
-	if e != nil {
-		t.Fatal(e)
+	svc, err := service.Open(service.Options{StateRoot: root, Engine: eng, InitialProfile: []byte("schema-version: 1\nrules: [{id: final, match: {all: true}, outbound: direct}]\n")})
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer svc.Close()
 	if runtime.GOOS == "linux" {
 		t.Skip("Linux takeover intentionally unsupported")
 	}
 	local := "network: {mode: tun, tun: {routes: [198.18.0.0/24]}}\n"
-	res, e := svc.Commit(context.Background(), service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: svc.ActiveRevision(), Local: &local}})
-	if e != nil || res.State != "committed" {
-		t.Fatal(res, e)
+	res, err := svc.Commit(context.Background(), service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: svc.ActiveRevision(), Local: &local}})
+	if err != nil || res.State != "committed" {
+		t.Fatal(res, err)
 	}
 	before := eng.Status()
-	r, e := svc.Commit(context.Background(), service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: svc.ActiveRevision(), Patch: []model.Op{{Op: "set", Path: "/rules/final/outbound", Value: []byte(`"reject"`)}}}})
-	if e != nil || r.State != "committed" {
-		t.Fatal(r, e)
+	r, err := svc.Commit(context.Background(), service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: svc.ActiveRevision(), Patch: []model.Op{{Op: "set", Path: "/rules/final/outbound", Value: []byte(`"reject"`)}}}})
+	if err != nil || r.State != "committed" {
+		t.Fatal(r, err)
 	}
 	if r.Plan.NetworkChanged || r.Plan.Interrupts || starts != 1 || closes != 0 || eng.Status().Network != before.Network {
 		t.Fatal(r.Plan, eng.Status())

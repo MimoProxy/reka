@@ -39,7 +39,6 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
-	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/resource"
@@ -81,78 +80,8 @@ const (
 	CodeNotFound    = "not_found"
 )
 
-// Error is a request error with a stable code.
-type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-func (e *Error) Error() string { return e.Code + ": " + e.Message }
-
 func errf(code, format string, args ...any) *Error {
 	return &Error{Code: code, Message: fmt.Sprintf(format, args...)}
-}
-
-// ChangeRequest describes a candidate configuration relative to a base
-// revision: whole documents, patches, or both (patches apply after the
-// documents).
-type ChangeRequest struct {
-	Import *importer.Request `json:"import,omitempty"`
-	// BaseRevision is the revision the client edited. It must be the
-	// active revision.
-	BaseRevision uint64     `json:"base_revision"`
-	Profile      *string    `json:"profile,omitempty"`
-	Local        *string    `json:"local,omitempty"`
-	Patch        []model.Op `json:"patch,omitempty"`
-	LocalPatch   []model.Op `json:"local_patch,omitempty"`
-	Sources      *string    `json:"sources,omitempty"`
-	Overlay      *string    `json:"overlay,omitempty"`
-	SourcesPatch []model.Op `json:"sources_patch,omitempty"`
-	OverlayPatch []model.Op `json:"overlay_patch,omitempty"`
-}
-
-// CommitRequest is a ChangeRequest to activate.
-type CommitRequest struct {
-	ChangeRequest
-	// OperationID makes the commit idempotent: retrying with the same ID
-	// and content returns the first result. Generated when empty.
-	OperationID string `json:"operation_id,omitempty"`
-	// PlanHash, if set, must match the hash PlanConfiguration returned,
-	// so the client commits exactly what it reviewed.
-	PlanHash string `json:"plan_hash,omitempty"`
-	Source   string `json:"source,omitempty"`
-	Message  string `json:"message,omitempty"`
-
-	restoredFrom uint64
-}
-
-// FieldChange is one differing field between two revisions.
-type FieldChange struct {
-	Path string `json:"path"`
-	From any    `json:"from,omitempty"`
-	To   any    `json:"to,omitempty"`
-}
-
-// Conflict explains a stale base revision.
-type Conflict struct {
-	Base    uint64        `json:"base"`
-	Active  uint64        `json:"active"`
-	Changes []FieldChange `json:"changes"`
-}
-
-// Result is the outcome of a commit; it is also what GetOperation
-// returns.
-type Result struct {
-	OperationID string            `json:"operation_id"`
-	State       string            `json:"state"`
-	Revision    uint64            `json:"revision,omitempty"`
-	Generation  uint64            `json:"generation,omitempty"`
-	NoChange    bool              `json:"no_change,omitempty"`
-	Plan        *generation.Plan  `json:"plan,omitempty"`
-	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
-	Conflict    *Conflict         `json:"conflict,omitempty"`
-	Error       *Error            `json:"error,omitempty"`
-	Degraded    bool              `json:"degraded,omitempty"`
 }
 
 // Service is the ConfigService.
@@ -343,7 +272,13 @@ func (s *Service) recover() error {
 }
 
 func (s *Service) compileOpts(sources, overlay []byte) compile.Options {
-	return compile.Options{ReadResource: resource.At(s.store.Root()).Read, Secrets: s.opts.Secrets, ProcessLookup: s.engine.ProcessLookup(), Sources: sources, Overlay: overlay}
+	return compile.Options{
+		ReadResource:  resource.At(s.store.Root()).Read,
+		Secrets:       s.opts.Secrets,
+		ProcessLookup: s.engine.ProcessLookup(),
+		Sources:       sources,
+		Overlay:       overlay,
+	}
 }
 
 func (s *Service) startActive(a *store.Active) error {
@@ -386,12 +321,12 @@ func (s *Service) ActiveRevision() uint64 {
 	return s.active
 }
 
-func requestHash(req CommitRequest) string {
+func requestHash(req CommitRequest, restoredFrom uint64) string {
 	b, _ := json.Marshal(struct {
 		ChangeRequest
 		Restored uint64
 		Plan     string
-	}{req.ChangeRequest, req.restoredFrom, req.PlanHash})
+	}{req.ChangeRequest, restoredFrom, req.PlanHash})
 	return store.Hash(b)
 }
 
@@ -514,12 +449,6 @@ func PlanHash(base uint64, profile, local []byte, layers ...[]byte) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// ValidateResult is the answer to Validate.
-type ValidateResult struct {
-	Valid       bool              `json:"valid"`
-	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
-}
-
 // Validate compiles a candidate without any side effect.
 func (s *Service) Validate(req ChangeRequest) (ValidateResult, error) {
 	s.mu.Lock()
@@ -534,16 +463,6 @@ func (s *Service) Validate(req ChangeRequest) (ValidateResult, error) {
 	}
 	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	return ValidateResult{Valid: eff != nil, Diagnostics: diags}, nil
-}
-
-// PlanResult is the answer to Plan.
-type PlanResult struct {
-	Base        uint64            `json:"base_revision"`
-	Valid       bool              `json:"valid"`
-	Plan        *generation.Plan  `json:"plan,omitempty"`
-	PlanHash    string            `json:"plan_hash,omitempty"`
-	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
-	Conflict    *Conflict         `json:"conflict,omitempty"`
 }
 
 // Plan compiles a candidate and reports what committing it would change.
@@ -586,6 +505,11 @@ func (s *Service) fail(point string) error {
 // for failures of the service itself (disk errors, an aborted fail point);
 // a rejected change is a Result with State "rejected".
 func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error) {
+	return s.commit(ctx, req, 0)
+}
+
+// commit is Commit; restoredFrom names the revision a restore copies, or 0.
+func (s *Service) commit(ctx context.Context, req CommitRequest, restoredFrom uint64) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if req.OperationID == "" {
@@ -597,7 +521,7 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 	if req.Source == "" {
 		req.Source = "api"
 	}
-	hash := requestHash(req)
+	hash := requestHash(req, restoredFrom)
 	if op, ok, err := s.store.ReadOperation(req.OperationID); err != nil {
 		return Result{}, err
 	} else if ok {
@@ -650,7 +574,9 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 	if eff == nil {
 		return reject(errf(CodeInvalid, "the configuration has %d errors", len(diags.Errors())))
 	}
-	if !initial && s.startErr == nil && string(profile) == string(s.profile) && string(local) == string(s.local) && bytes.Equal(sources, s.sources) && bytes.Equal(overlay, s.overlay) && sameInstances(s.eff, eff) {
+	unchanged := bytes.Equal(profile, s.profile) && bytes.Equal(local, s.local) &&
+		bytes.Equal(sources, s.sources) && bytes.Equal(overlay, s.overlay) && sameInstances(s.eff, eff)
+	if !initial && s.startErr == nil && unchanged {
 		res.State, res.Revision, res.NoChange = store.OpCommitted, s.active, true
 		op.State, op.Revision = store.OpCommitted, s.active
 		op.Result, _ = json.Marshal(res)
@@ -677,7 +603,7 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 		return Result{}, err
 	}
 	rev := store.Revision{Number: number, Base: s.active, Operation: req.OperationID, Source: req.Source,
-		Message: req.Message, Created: now, RestoredFrom: req.restoredFrom}
+		Message: req.Message, Created: now, RestoredFrom: restoredFrom}
 	if _, err := s.store.WriteRevision(rev, profile, local, sources, overlay); err != nil {
 		s.engine.Abort(prepared)
 		return Result{}, err
@@ -690,6 +616,13 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 	res.State, res.Revision = store.OpPending, number
 	op.Result, _ = json.Marshal(res)
 	if err := s.store.WriteOperation(op); err != nil {
+		s.engine.Abort(prepared)
+		s.store.DeleteRevision(number)
+		return Result{}, err
+	}
+	// The revision and the intent must be durable before the switch, so a
+	// crash after it can always be recovered.
+	if err := s.store.Barrier(); err != nil {
 		s.engine.Abort(prepared)
 		s.store.DeleteRevision(number)
 		return Result{}, err
@@ -803,26 +736,21 @@ func (s *Service) GetOperation(id string) (Result, error) {
 	return res, nil
 }
 
-// Configuration is the answer to GetConfiguration.
-type Configuration struct {
-	Revision    uint64             `json:"revision"`
-	Profile     string             `json:"profile"`
-	Local       string             `json:"local"`
-	Sources     string             `json:"sources"`
-	Overlay     string             `json:"overlay"`
-	Masked      int                `json:"masked,omitempty"`
-	Effective   *compile.Effective `json:"effective,omitempty"`
-	Diagnostics model.Diagnostics  `json:"diagnostics,omitempty"`
-	StartError  string             `json:"start_error,omitempty"`
-}
-
 // GetConfiguration returns the active documents (inline credentials
 // masked unless reveal), the effective configuration with field origins,
 // and its warnings.
 func (s *Service) GetConfiguration(reveal bool) Configuration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := Configuration{Revision: s.active, Profile: string(s.profile), Local: string(s.local), Sources: string(s.sources), Overlay: string(s.overlay), Effective: s.eff, Diagnostics: s.warnings}
+	c := Configuration{
+		Revision:    s.active,
+		Profile:     string(s.profile),
+		Local:       string(s.local),
+		Sources:     string(s.sources),
+		Overlay:     string(s.overlay),
+		Effective:   s.eff,
+		Diagnostics: s.warnings,
+	}
 	if s.startErr != nil {
 		c.StartError = s.startErr.Error()
 	}
@@ -863,13 +791,6 @@ func (s *Service) LayerDocuments() (revision uint64, profile, local, sources, ov
 // ListRevisions lists stored revisions, newest first.
 func (s *Service) ListRevisions() ([]store.Revision, error) { return s.store.ListRevisions() }
 
-// RestoreRequest restores an old revision as a new one.
-type RestoreRequest struct {
-	Revision     uint64 `json:"revision"`
-	BaseRevision uint64 `json:"base_revision"`
-	OperationID  string `json:"operation_id,omitempty"`
-}
-
 // RestoreRevision commits the content of an older revision as a new
 // revision.
 func (s *Service) RestoreRevision(ctx context.Context, req RestoreRequest) (Result, error) {
@@ -882,12 +803,11 @@ func (s *Service) RestoreRevision(ctx context.Context, req RestoreRequest) (Resu
 		return Result{}, errf(CodeNotFound, "revision %d: %v", req.Revision, err)
 	}
 	p, l, ss, oo := string(profile), string(local), string(sources), string(overlay)
-	return s.Commit(ctx, CommitRequest{
+	return s.commit(ctx, CommitRequest{
 		ChangeRequest: ChangeRequest{BaseRevision: req.BaseRevision, Profile: &p, Local: &l, Sources: &ss, Overlay: &oo},
 		OperationID:   req.OperationID, Source: "restore",
-		Message:      fmt.Sprintf("restore revision %d", req.Revision),
-		restoredFrom: req.Revision,
-	})
+		Message: fmt.Sprintf("restore revision %d", req.Revision),
+	}, req.Revision)
 }
 
 // Close stops the runtime.

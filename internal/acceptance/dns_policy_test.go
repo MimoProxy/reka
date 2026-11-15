@@ -15,9 +15,9 @@ import (
 )
 
 func TestFakeIPFlowsGenerationsAndRestart(t *testing.T) {
-	socket, e := net.ListenPacket("udp", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
+	socket, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
 	up := &D.Server{PacketConn: socket, Handler: D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		m := new(D.Msg)
@@ -33,9 +33,9 @@ func TestFakeIPFlowsGenerationsAndRestart(t *testing.T) {
 	allocate := func() netip.Addr {
 		q := new(D.Msg)
 		q.SetQuestion("echo.test.", D.TypeA)
-		reply, e := h.engine().ExchangeDNS(context.Background(), q)
-		if e != nil {
-			t.Fatal(e)
+		reply, err := h.engine().ExchangeDNS(context.Background(), q)
+		if err != nil {
+			t.Fatal(err)
 		}
 		a, ok := netip.AddrFromSlice(reply.Answer[0].(*D.A).A)
 		if !ok {
@@ -44,20 +44,20 @@ func TestFakeIPFlowsGenerationsAndRestart(t *testing.T) {
 		return a.Unmap()
 	}
 	first := allocate()
-	conn, e := socks5Connect(h.proxy(), netip.AddrPortFrom(first, target.Port()))
-	if e != nil {
-		t.Fatal("fake TCP connect", e)
+	conn, err := socks5Connect(h.proxy(), netip.AddrPortFrom(first, target.Port()))
+	if err != nil {
+		t.Fatal("fake TCP connect", err)
 	}
 	defer conn.Close()
 	echo := func() {
 		conn.SetDeadline(time.Now().Add(2 * time.Second))
 		payload := []byte("pinned-fake-domain")
-		if _, e := conn.Write(payload); e != nil {
-			t.Fatal(e)
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatal(err)
 		}
 		got := make([]byte, len(payload))
-		if _, e := io.ReadFull(conn, got); e != nil || !bytes.Equal(payload, got) {
-			t.Fatal("fake TCP echo", e)
+		if _, err := io.ReadFull(conn, got); err != nil || !bytes.Equal(payload, got) {
+			t.Fatal("fake TCP echo", err)
 		}
 	}
 	echo()
@@ -73,15 +73,15 @@ func TestFakeIPFlowsGenerationsAndRestart(t *testing.T) {
 	waitFor(t, "old fake flow drained", 3*time.Second, func() bool { return len(h.engine().Connections()) == 0 })
 	h.svc.Close()
 	h.open("")
-	restored, e := socks5Connect(h.proxy(), netip.AddrPortFrom(second, target.Port()))
-	if e != nil {
-		t.Fatal("persisted fake address lost", e)
+	restored, err := socks5Connect(h.proxy(), netip.AddrPortFrom(second, target.Port()))
+	if err != nil {
+		t.Fatal("persisted fake address lost", err)
 	}
 	restored.SetDeadline(time.Now().Add(2 * time.Second))
 	restored.Write([]byte("restored"))
 	got := make([]byte, 8)
-	if _, e = io.ReadFull(restored, got); e != nil || string(got) != "restored" {
-		t.Fatal("restored fake route", e)
+	if _, err = io.ReadFull(restored, got); err != nil || string(got) != "restored" {
+		t.Fatal("restored fake route", err)
 	}
 	restored.Close()
 	if !raceEnabled {

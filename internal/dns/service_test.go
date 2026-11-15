@@ -11,9 +11,9 @@ import (
 
 func service(t *testing.T, c Config, fn ExchangeFunc) *Service {
 	t.Helper()
-	s, e := New(c, Options{Exchange: fn, Match: func(p, d string, _ netip.Addr) bool { return p == d }, Generation: 1})
-	if e != nil {
-		t.Fatal(e)
+	s, err := New(c, Options{Exchange: fn, Match: func(p, d string, _ netip.Addr) bool { return p == d }, Generation: 1})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return s
 }
@@ -32,17 +32,17 @@ func TestPolicyFallbackScopedCacheAndHosts(t *testing.T) {
 		return answer(q, ep.Host), nil
 	})
 	for _, tc := range []struct{ domain, scope, want string }{{"special.test", "normal", "192.0.2.5"}, {"normal.test", "normal", "192.0.2.6"}, {"normal.test", "bootstrap", "192.0.2.2"}, {"normal.test", "proxy", "192.0.2.3"}, {"normal.test", "direct", "192.0.2.4"}, {"local.test", "normal", "127.0.0.1"}} {
-		ips, e := s.Lookup(context.Background(), tc.domain, tc.scope)
-		if e != nil || ips[0].String() != tc.want {
-			t.Fatal(tc, ips, e)
+		ips, err := s.Lookup(context.Background(), tc.domain, tc.scope)
+		if err != nil || ips[0].String() != tc.want {
+			t.Fatal(tc, ips, err)
 		}
 	}
 	before := calls.Load()
 	q := query("normal.test")
 	q.Id = 42
-	m, e := s.Exchange(context.Background(), q, "normal", false)
-	if e != nil || m.Id != 42 || calls.Load() != before {
-		t.Fatal("cache miss", m, e)
+	m, err := s.Exchange(context.Background(), q, "normal", false)
+	if err != nil || m.Id != 42 || calls.Load() != before {
+		t.Fatal("cache miss", m, err)
 	}
 	m.Answer[0].Header().Ttl = 0
 	m2, _ := s.Exchange(context.Background(), q, "normal", false)
@@ -83,9 +83,9 @@ func TestNegativeCacheTTLAndQuestionIsolation(t *testing.T) {
 func TestFakeGenerationsRangesAndLease(t *testing.T) {
 	p := NewFakePool(8)
 	prefix := netip.MustParsePrefix("198.18.0.0/29")
-	a, e := p.Allocate(1, "old.test", prefix, 30*time.Millisecond)
-	if e != nil {
-		t.Fatal(e)
+	a, err := p.Allocate(1, "old.test", prefix, 30*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
 	}
 	name, release, ok := p.Acquire(a)
 	if !ok || name != "old.test" {
@@ -124,8 +124,8 @@ func TestFallbackRetainsBudgetAfterPrimaryTimeout(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}
-		if e := ctx.Err(); e != nil {
-			return nil, e
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		return answer(q, "192.0.2.2"), nil
 	})

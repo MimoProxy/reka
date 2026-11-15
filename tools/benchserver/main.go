@@ -16,13 +16,13 @@ import (
 func main() {
 	address := flag.String("listen", "127.0.0.1:18388", "local test listener")
 	flag.Parse()
-	a, e := netip.ParseAddrPort(*address)
-	if e != nil || !a.Addr().IsLoopback() {
+	a, err := netip.ParseAddrPort(*address)
+	if err != nil || !a.Addr().IsLoopback() {
 		panic("loopback address required")
 	}
-	s, e := sagernet.StartShadowsocksServer(a, "aes-128-gcm", "reka-controlled-benchmark", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if e != nil {
-		panic(e)
+	s, err := sagernet.StartShadowsocksServer(a, "aes-128-gcm", "reka-controlled-benchmark", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		panic(err)
 	}
 	defer s.Close()
 	fmt.Println("ready")

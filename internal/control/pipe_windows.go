@@ -3,18 +3,15 @@
 package control
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
-	"time"
 	"unsafe"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"golang.org/x/sys/windows"
 )
 
@@ -24,23 +21,7 @@ import (
 // Handles are opened for overlapped I/O, so os.NewFile attaches them to
 // the runtime's I/O completion port and deadlines work.
 
-func currentSID() (*windows.SID, error) {
-	u, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		return nil, err
-	}
-	return u.User.Sid.Copy()
-}
-
-func pipeSuffix(stateRoot string) string {
-	abs, _ := filepath.Abs(stateRoot)
-	who := ""
-	if sid, err := currentSID(); err == nil {
-		who = sid.String()
-	}
-	h := sha256.Sum256([]byte(who + "\x00" + abs))
-	return hex.EncodeToString(h[:6])
-}
+func currentSID() (*windows.SID, error) { return api.CurrentSID() }
 
 type pipeListener struct {
 	path    string
@@ -171,7 +152,7 @@ func (l *pipeListener) accept() (net.Conn, error) {
 		windows.CloseHandle(h)
 		return nil, err
 	}
-	return &pipeConn{File: os.NewFile(uintptr(h), l.path), path: l.path}, nil
+	return api.NewPipeConn(os.NewFile(uintptr(h), l.path), l.path), nil
 }
 
 var systemSID, _ = windows.StringToSid("S-1-5-18")
@@ -216,40 +197,6 @@ func (l *pipeListener) Close() error {
 	return nil
 }
 
-func (l *pipeListener) Addr() net.Addr { return pipeAddr(l.path) }
-
-type pipeAddr string
-
-func (a pipeAddr) Network() string { return "pipe" }
-func (a pipeAddr) String() string  { return string(a) }
-
-type pipeConn struct {
-	*os.File
-	path string
-}
-
-func (c *pipeConn) LocalAddr() net.Addr  { return pipeAddr(c.path) }
-func (c *pipeConn) RemoteAddr() net.Addr { return pipeAddr(c.path) }
-
-func dialPipe(path string) (net.Conn, error) {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING,
-			windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
-		if err == nil {
-			return &pipeConn{File: os.NewFile(uintptr(h), path), path: path}, nil
-		}
-		// Busy: every instance is taken; not found: between instances.
-		if (errors.Is(err, windows.ERROR_PIPE_BUSY) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND)) && time.Now().Before(deadline) {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		return nil, err
-	}
-}
+func (l *pipeListener) Addr() net.Addr { return api.PipeAddr(l.path) }
 
 func checkPeer(net.Conn) error { return nil } // pipes check in Accept

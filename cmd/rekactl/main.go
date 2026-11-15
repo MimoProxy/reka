@@ -15,13 +15,11 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
-	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/config/store"
-	"github.com/MimoProxy/reka/internal/control"
 	"github.com/MimoProxy/reka/internal/platform"
-	"github.com/MimoProxy/reka/internal/runtime/generation"
 )
 
 const usage = `usage: rekactl [-c address | -state-root dir] [-json] command [args]
@@ -59,7 +57,7 @@ var (
 	addrFlag  = flag.String("c", "", "control API address")
 	rootFlag  = flag.String("state-root", "", "state root of the kernel (to find its default address)")
 	jsonFlag  = flag.Bool("json", false, "print raw JSON results")
-	client    *control.Client
+	client    *api.Client
 	exitError = errors.New("")
 )
 
@@ -92,7 +90,7 @@ func address() (string, error) {
 			return "", err
 		}
 	}
-	return control.DefaultAddress(root), nil
+	return api.DefaultAddress(root), nil
 }
 
 func connect() error {
@@ -100,7 +98,7 @@ func connect() error {
 	if err != nil {
 		return err
 	}
-	c, err := control.Connect(addr, "rekactl")
+	c, err := api.Connect(addr, "rekactl")
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w (is reka running?)", addr, err)
 	}
@@ -161,7 +159,7 @@ func run(args []string) error {
 		if len(rest) != 1 {
 			return errors.New("usage: op ID")
 		}
-		var res service.Result
+		var res api.Result
 		if err := call("GetOperation", map[string]string{"operation_id": rest[0]}, &res); err != nil {
 			return err
 		}
@@ -202,7 +200,7 @@ func cmdGet(args []string) error {
 		what, args = args[0], args[1:]
 	}
 	parse(fs, args)
-	var cfg service.Configuration
+	var cfg api.Configuration
 	if err := call("GetConfiguration", map[string]bool{"reveal": *reveal}, &cfg); err != nil {
 		return err
 	}
@@ -238,7 +236,7 @@ func cmdOrigin(args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: origin PATH")
 	}
-	var cfg service.Configuration
+	var cfg api.Configuration
 	if err := client.Call("GetConfiguration", nil, &cfg); err != nil {
 		return err
 	}
@@ -308,8 +306,8 @@ func docFlags(name string, args []string, extra func(*flag.FlagSet)) (document s
 	return document, string(b), fs, err
 }
 
-func change(document string, text string, base uint64) service.ChangeRequest {
-	req := service.ChangeRequest{BaseRevision: base}
+func change(document string, text string, base uint64) api.ChangeRequest {
+	req := api.ChangeRequest{BaseRevision: base}
 	switch document {
 	case "local":
 		req.Local = &text
@@ -324,7 +322,7 @@ func change(document string, text string, base uint64) service.ChangeRequest {
 }
 
 func activeRevision() (uint64, error) {
-	var cfg service.Configuration
+	var cfg api.Configuration
 	err := client.Call("GetConfiguration", nil, &cfg)
 	return cfg.Revision, err
 }
@@ -340,7 +338,7 @@ func cmdValidate(args []string) error {
 	if err != nil {
 		return err
 	}
-	var res service.ValidateResult
+	var res api.ValidateResult
 	if err := call("ValidateConfiguration", change(local, text, 0), &res); err != nil {
 		return err
 	}
@@ -355,13 +353,13 @@ func cmdValidate(args []string) error {
 	return nil
 }
 
-func printPlan(p *generation.Plan) {
+func printPlan(p *api.Plan) {
 	if p.NetworkChanged {
 		fmt.Println("Network takeover:", p.NetworkNote)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	for _, o := range p.Outbounds {
-		if o.Action == generation.ActionKeep {
+		if o.Action == api.ActionKeep {
 			continue
 		}
 		fmt.Fprintf(w, "outbound %s\t%s", o.ID, o.Action)
@@ -371,7 +369,7 @@ func printPlan(p *generation.Plan) {
 		fmt.Fprintln(w)
 	}
 	for _, l := range p.Listeners {
-		if l.Action == generation.ActionKeep {
+		if l.Action == api.ActionKeep {
 			continue
 		}
 		fmt.Fprintf(w, "listener %s\t%s\t%s\t%s\n", l.ID, l.Action, l.Listen, l.Note)
@@ -411,7 +409,7 @@ func cmdPlan(args []string) error {
 			return err
 		}
 	}
-	var res service.PlanResult
+	var res api.PlanResult
 	if err := call("PlanConfiguration", change(local, text, base), &res); err != nil {
 		return err
 	}
@@ -431,7 +429,7 @@ func cmdPlan(args []string) error {
 	return nil
 }
 
-func printConflict(c *service.Conflict) {
+func printConflict(c *api.Conflict) {
 	fmt.Fprintf(os.Stderr, "conflict: revision %d is active, the change was based on %d. Changed since:\n", c.Active, c.Base)
 	for _, ch := range c.Changes {
 		fmt.Fprintf(os.Stderr, "  %s: %v -> %v\n", ch.Path, ch.From, ch.To)
@@ -444,7 +442,7 @@ func confirm(prompt string) bool {
 	return strings.TrimSpace(strings.ToLower(line)) == "y"
 }
 
-func printResult(res service.Result) error {
+func printResult(res api.Result) error {
 	if *jsonFlag {
 		if res.State != store.OpCommitted {
 			return exitError
@@ -478,8 +476,8 @@ func printResult(res service.Result) error {
 	return exitError
 }
 
-func commitWithPlan(req service.ChangeRequest, op, msg, source string, yes bool) error {
-	var plan service.PlanResult
+func commitWithPlan(req api.ChangeRequest, op, msg, source string, yes bool) error {
+	var plan api.PlanResult
 	if err := client.Call("PlanConfiguration", req, &plan); err != nil {
 		return err
 	}
@@ -497,8 +495,8 @@ func commitWithPlan(req service.ChangeRequest, op, msg, source string, yes bool)
 			return exitError
 		}
 	}
-	var res service.Result
-	if err := call("CommitConfiguration", service.CommitRequest{ChangeRequest: req, OperationID: op, PlanHash: plan.PlanHash, Message: msg, Source: source}, &res); err != nil {
+	var res api.Result
+	if err := call("CommitConfiguration", api.CommitRequest{ChangeRequest: req, OperationID: op, PlanHash: plan.PlanHash, Message: msg, Source: source}, &res); err != nil {
 		return err
 	}
 	return printResult(res)
@@ -559,7 +557,7 @@ func cmdPatch(op string, args []string) error {
 			return err
 		}
 	}
-	req := service.ChangeRequest{BaseRevision: b}
+	req := api.ChangeRequest{BaseRevision: b}
 	count := 0
 	for _, selected := range []bool{*local, *sources, *overlay} {
 		if selected {
@@ -587,7 +585,7 @@ func cmdSelect(group, member string) error {
 	if !strings.Contains(group, "/") {
 		return cmdPatch("set", []string{path, string(value)})
 	}
-	var cfg service.Configuration
+	var cfg api.Configuration
 	if err := client.Call("GetConfiguration", nil, &cfg); err != nil {
 		return err
 	}
@@ -603,7 +601,7 @@ func cmdSelect(group, member string) error {
 			edit = model.Op{Op: "set", Path: fmt.Sprintf("/patches/#%d/value", i), Value: value}
 		}
 	}
-	return commitWithPlan(service.ChangeRequest{BaseRevision: cfg.Revision, OverlayPatch: []model.Op{edit}}, "", "", "cli", false)
+	return commitWithPlan(api.ChangeRequest{BaseRevision: cfg.Revision, OverlayPatch: []model.Op{edit}}, "", "", "cli", false)
 }
 
 func cmdRevisions() error {
@@ -644,15 +642,15 @@ func cmdRestore(args []string) error {
 	if !*yes && !*jsonFlag && !confirm(fmt.Sprintf("Commit revision %d again as a new revision (active is %d)?", n, base)) {
 		return exitError
 	}
-	var res service.Result
-	if err := call("RestoreRevision", service.RestoreRequest{Revision: n, BaseRevision: base}, &res); err != nil {
+	var res api.Result
+	if err := call("RestoreRevision", api.RestoreRequest{Revision: n, BaseRevision: base}, &res); err != nil {
 		return err
 	}
 	return printResult(res)
 }
 
 func cmdStatus() error {
-	var st control.Status
+	var st api.Status
 	if err := call("GetStatus", nil, &st); err != nil || *jsonFlag {
 		return err
 	}
@@ -685,8 +683,11 @@ func parse(fs *flag.FlagSet, args []string) {
 
 type multi []string
 
-func (m *multi) String() string     { return strings.Join(*m, ",") }
-func (m *multi) Set(v string) error { *m = append(*m, v); return nil }
+func (m *multi) String() string { return strings.Join(*m, ",") }
+func (m *multi) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
 
 func cmdExplain(args []string) error {
 	fs := flag.NewFlagSet("explain", flag.ExitOnError)
@@ -700,8 +701,8 @@ func cmdExplain(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: explain HOST:PORT [flags]")
 	}
-	req := generation.ExplainRequest{Destination: fs.Arg(0), Network: *network, Source: *source, Resolve: *resolve, Addresses: addrs, Process: *process}
-	var x generation.Explanation
+	req := api.ExplainRequest{Destination: fs.Arg(0), Network: *network, Source: *source, Resolve: *resolve, Addresses: addrs, Process: *process}
+	var x api.Explanation
 	if err := call("ExplainRoute", req, &x); err != nil || *jsonFlag {
 		return err
 	}
@@ -731,8 +732,8 @@ func cmdExplain(args []string) error {
 
 func cmdConnections() error {
 	var out struct {
-		Total       int                     `json:"total"`
-		Connections []generation.Connection `json:"connections"`
+		Total       int              `json:"total"`
+		Connections []api.Connection `json:"connections"`
 	}
 	if err := call("ListConnections", map[string]int{"limit": 1000}, &out); err != nil || *jsonFlag {
 		return err
@@ -818,8 +819,8 @@ func cmdSecret(args []string) error {
 		}
 		value := strings.TrimRight(string(b), "\r\n")
 		var out struct {
-			Ref   string          `json:"ref"`
-			Apply *service.Result `json:"apply"`
+			Ref   string      `json:"ref"`
+			Apply *api.Result `json:"apply"`
 		}
 		if err := call("SetSecret", map[string]string{"name": args[1], "value": value}, &out); err != nil || *jsonFlag {
 			return err
@@ -879,7 +880,7 @@ func cmdImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	return commitWithPlan(service.ChangeRequest{BaseRevision: base, Import: &request}, "", "import source "+*id, "import", false)
+	return commitWithPlan(api.ChangeRequest{BaseRevision: base, Import: &request}, "", "import source "+*id, "import", false)
 }
 
 func cmdSubscription(args []string) error {
@@ -888,7 +889,7 @@ func cmdSubscription(args []string) error {
 	}
 	action := args[0]
 	if action == "list" {
-		var statuses []service.SubscriptionStatus
+		var statuses []api.SubscriptionStatus
 		if err := call("ListSubscriptions", nil, &statuses); err != nil {
 			return err
 		}
@@ -903,7 +904,7 @@ func cmdSubscription(args []string) error {
 		if len(args) != 2 {
 			return errors.New("usage: subscription refresh ID")
 		}
-		var status service.SubscriptionStatus
+		var status api.SubscriptionStatus
 		if err := call("RefreshSubscription", map[string]any{"source_id": args[1], "wait": true}, &status); err != nil {
 			return err
 		}
@@ -930,7 +931,7 @@ func cmdSubscription(args []string) error {
 	if fs.NArg() != want {
 		return errors.New("usage: subscription set ID URL [-interval N] [-nodes-only] or pause|resume|remove ID")
 	}
-	var cfg service.Configuration
+	var cfg api.Configuration
 	// Definition edits must round-trip masked URL/header values without
 	// displaying them. ConfigService restores those masks from stored fields.
 	if err := client.Call("GetConfiguration", nil, &cfg); err != nil {
@@ -964,7 +965,7 @@ func cmdSubscription(args []string) error {
 	default:
 		return errors.New("unknown subscription action")
 	}
-	var result service.Result
+	var result api.Result
 	if err := call("ConfigureSubscription", map[string]any{"source_id": fs.Arg(0), "base_revision": cfg.Revision, "subscription": spec}, &result); err != nil {
 		return err
 	}

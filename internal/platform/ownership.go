@@ -10,17 +10,27 @@ import (
 	"sync"
 )
 
-// Setting operations must be idempotent. The journal is written before each
-// mutation, so recovery works even when a process dies inside the OS call.
+// Settings reads and writes operating-system settings (system DNS, proxy
+// endpoints) by key. Both operations must be idempotent: recovery may
+// repeat a write that already happened.
 type Settings interface {
 	Read(key string) (string, error)
 	Write(key, value string) error
 }
+
+// entry records one setting Reka changed: the value it found and the value
+// it installed.
 type entry struct {
 	Key       string `json:"key"`
 	Before    string `json:"before"`
 	Installed string `json:"installed"`
 }
+
+// Journal is a write-ahead log of the OS settings Reka owns. Each entry is
+// written and synced before the setting is changed, so a process that dies
+// inside the OS call still knows what to undo. Restoring writes a setting
+// back only while it still holds the value Reka installed; a newer change by
+// someone else is left alone.
 type Journal struct {
 	mu      sync.Mutex
 	Path    string
@@ -28,6 +38,7 @@ type Journal struct {
 	entries []entry
 }
 
+// save writes the entries atomically and durably.
 func (j *Journal) save() error {
 	if err := os.MkdirAll(filepath.Dir(j.Path), 0700); err != nil {
 		return err
@@ -55,27 +66,34 @@ func (j *Journal) save() error {
 	}
 	return syncDirectory(filepath.Dir(j.Path))
 }
+
+// Recover loads the journal left by a previous run, if any, and restores
+// what it lists. Call it before any new takeover.
 func (j *Journal) Recover() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	b, e := os.ReadFile(j.Path)
-	if errors.Is(e, os.ErrNotExist) {
+	b, err := os.ReadFile(j.Path)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if e != nil {
-		return e
+	if err != nil {
+		return err
 	}
-	if e = json.Unmarshal(b, &j.entries); e != nil {
-		return fmt.Errorf("invalid network journal: %w", e)
+	if err = json.Unmarshal(b, &j.entries); err != nil {
+		return fmt.Errorf("invalid network journal: %w", err)
 	}
 	return j.restore()
 }
+
+// Apply sets key to value and takes ownership of it. A setting that already
+// has the value is not owned (nothing to undo). A setting owned before must
+// still hold Reka's value, or the change is refused as an external edit.
 func (j *Journal) Apply(key, value string) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	current, e := j.OS.Read(key)
-	if e != nil {
-		return e
+	current, err := j.OS.Read(key)
+	if err != nil {
+		return err
 	}
 	for _, v := range j.entries {
 		if v.Key == key {
@@ -92,19 +110,21 @@ func (j *Journal) Apply(key, value string) error {
 		return nil
 	} // No ownership of preexisting settings.
 	j.entries = append(j.entries, entry{key, current, value})
-	if e = j.save(); e != nil {
+	if err = j.save(); err != nil {
 		j.entries = j.entries[:len(j.entries)-1]
-		return e
+		return err
 	}
 	return j.OS.Write(key, value)
 }
+
+// Check reports an owned setting that someone else changed.
 func (j *Journal) Check() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	for _, v := range j.entries {
-		s, e := j.OS.Read(v.Key)
-		if e != nil {
-			return e
+		s, err := j.OS.Read(v.Key)
+		if err != nil {
+			return err
 		}
 		if s != v.Installed {
 			return fmt.Errorf("external setting changed: %s", v.Key)
@@ -112,28 +132,37 @@ func (j *Journal) Check() error {
 	}
 	return nil
 }
-func (j *Journal) Restore() error { j.mu.Lock(); defer j.mu.Unlock(); return j.restore() }
+
+// Restore undoes every owned setting, newest first. Settings changed by
+// someone else since are kept as they are; settings whose restore failed
+// stay in the journal and are reported.
+func (j *Journal) Restore() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.restore()
+}
+
 func (j *Journal) restore() error {
 	old := append([]entry{}, j.entries...)
 	var pending []entry
 	var errs []error
 	for i := len(j.entries) - 1; i >= 0; i-- {
 		v := j.entries[i]
-		s, e := j.OS.Read(v.Key)
-		if e == nil && s == v.Installed {
-			e = j.OS.Write(v.Key, v.Before)
+		s, err := j.OS.Read(v.Key)
+		if err == nil && s == v.Installed {
+			err = j.OS.Write(v.Key, v.Before)
 		}
 		// External changes and already-restored values are deliberately preserved.
-		if e != nil {
+		if err != nil {
 			pending = append([]entry{v}, pending...)
-			errs = append(errs, fmt.Errorf("restore %s: %w", v.Key, e))
+			errs = append(errs, fmt.Errorf("restore %s: %w", v.Key, err))
 		}
 	}
 	j.entries = pending
 	if len(old) > 0 || !reflect.DeepEqual(old, pending) {
-		if e := j.save(); e != nil {
+		if err := j.save(); err != nil {
 			j.entries = old
-			errs = append(errs, e)
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

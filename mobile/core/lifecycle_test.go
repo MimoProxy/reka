@@ -20,9 +20,9 @@ func (h *blockingHost) Seal(p []byte) ([]byte, error) {
 func TestStopWaitsForHostCallAndHoldsStateLock(t *testing.T) {
 	root := t.TempDir()
 	h := &blockingHost{entered: make(chan struct{}), release: make(chan struct{})}
-	in, e := Start(Options{StateRoot: root}, h)
-	if e != nil {
-		t.Fatal(e)
+	in, err := Start(Options{StateRoot: root}, h)
+	if err != nil {
+		t.Fatal(err)
 	}
 	in.Call([]byte(`{"id":1,"method":"Hello","params":{"versions":[1]}}`))
 	called := make(chan struct{})
@@ -44,7 +44,7 @@ func TestStopWaitsForHostCallAndHoldsStateLock(t *testing.T) {
 		t.Fatal("stopped before host callback completed")
 	case <-time.After(30 * time.Millisecond):
 	}
-	if second, e := Start(Options{StateRoot: root}, &fakeHost{}); e == nil {
+	if second, err := Start(Options{StateRoot: root}, &fakeHost{}); err == nil {
 		second.Stop()
 		t.Fatal("second instance acquired root during stop")
 	}
@@ -68,9 +68,9 @@ func TestStopWaitsForHostCallAndHoldsStateLock(t *testing.T) {
 	if response.Error.Code != "blocked" {
 		t.Fatal(response)
 	}
-	next, e := Start(Options{StateRoot: root}, &fakeHost{})
-	if e != nil {
-		t.Fatal(e)
+	next, err := Start(Options{StateRoot: root}, &fakeHost{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	next.Stop()
 }

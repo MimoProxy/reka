@@ -7,19 +7,6 @@ import (
 	"time"
 )
 
-// Event is one entry of the event stream. Seq increases by one per event
-// within an epoch; a new epoch starts with every process start.
-type Event struct {
-	Epoch string    `json:"epoch"`
-	Seq   uint64    `json:"seq"`
-	Type  string    `json:"type"`
-	Time  time.Time `json:"time"`
-	Data  any       `json:"data,omitempty"`
-	// Dropped counts events this subscriber missed because it read too
-	// slowly, since the previous event it received.
-	Dropped uint64 `json:"dropped,omitempty"`
-}
-
 // Event types.
 const (
 	EventSnapshot  = "snapshot"

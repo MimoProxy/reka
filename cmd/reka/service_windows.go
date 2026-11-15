@@ -16,9 +16,9 @@ func ready() {
 	}
 }
 func serve(run func() error) error {
-	yes, e := svc.IsWindowsService()
-	if e != nil {
-		return e
+	yes, err := svc.IsWindowsService()
+	if err != nil {
+		return err
 	}
 	if !yes {
 		return run()
@@ -36,8 +36,8 @@ func (h serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, c
 		select {
 		case <-serviceReady:
 			changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
-		case e := <-done:
-			if e != nil {
+		case err := <-done:
+			if err != nil {
 				return true, 1
 			}
 			return false, 0
@@ -48,8 +48,8 @@ func (h serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, c
 			case svc.Stop, svc.Shutdown:
 				changes <- svc.Status{State: svc.StopPending}
 				close(serviceStop)
-				e := <-done
-				if e != nil {
+				err := <-done
+				if err != nil {
 					return true, 1
 				}
 				return false, 0

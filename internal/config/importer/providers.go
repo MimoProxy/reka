@@ -162,7 +162,16 @@ func Providers(req Request) ([]Provider, error) {
 			if n.Kind != yaml.MappingNode {
 				return nil, errors.New("provider_definition_invalid")
 			}
-			p := Provider{ID: StableID(kind, name), Name: name, Kind: kind, Type: text(get(n, "type")), URL: text(get(n, "url")), Interval: 3600, Format: "yaml", Headers: map[string][]string{}}
+			p := Provider{
+				ID:       StableID(kind, name),
+				Name:     name,
+				Kind:     kind,
+				Type:     text(get(n, "type")),
+				URL:      text(get(n, "url")),
+				Interval: 3600,
+				Format:   "yaml",
+				Headers:  map[string][]string{},
+			}
 			for j := 0; j+1 < len(n.Content); j += 2 {
 				key := n.Content[j].Value
 				allowed := key == "type" || key == "url" || key == "interval" || key == "path" || key == "header" || key == "payload" || kind == "rule" && (key == "behavior" || key == "format")
@@ -182,7 +191,14 @@ func Providers(req Request) ([]Provider, error) {
 						}
 					}
 					if enabled {
-						p.Health = object{"name": "provider-health-" + p.ID, "type": "url-test", "url": r.str("url"), "interval": r.number("interval", 300), "timeout": r.number("timeout", 5000), "lazy": r.boolean("lazy", true)}
+						p.Health = object{
+							"name":     "provider-health-" + p.ID,
+							"type":     "url-test",
+							"url":      r.str("url"),
+							"interval": r.number("interval", 300),
+							"timeout":  r.number("timeout", 5000),
+							"lazy":     r.boolean("lazy", true),
+						}
 					}
 					if r.bad {
 						return nil, errors.New("provider_health_invalid")
@@ -343,7 +359,11 @@ func removeField(n *yaml.Node, key string) {
 	}
 }
 func invalidBundle(req Request, err error) Result {
-	return Result{Report: Report{SourceID: req.SourceID, Format: "clash", Diagnostics: model.Diagnostics{{Severity: model.SeverityError, Code: "import.provider", Document: "clash", Path: "/", Message: err.Error()}}}}
+	return Result{Report: Report{
+		SourceID:    req.SourceID,
+		Format:      "clash",
+		Diagnostics: model.Diagnostics{{Severity: model.SeverityError, Code: "import.provider", Document: "clash", Path: "/", Message: err.Error()}},
+	}}
 }
 
 // ImportProviders is pure: payloads must already be downloaded and locked by
@@ -547,7 +567,7 @@ func Import(req Request) Result {
 		format = detectFormat(req.Data)
 	}
 	if format == "clash" {
-		if ps, e := Providers(req); e == nil && len(ps) > 0 {
+		if ps, err := Providers(req); err == nil && len(ps) > 0 {
 			payloads := map[string][]byte{}
 			all := true
 			for _, p := range ps {
@@ -567,9 +587,9 @@ func Import(req Request) Result {
 						if p.Kind != "rule" {
 							continue
 						}
-						specs, e := rulesdata.Decode(p.Behavior, p.Format, "", p.Inline)
-						if e != nil {
-							return invalidBundle(req, e)
+						specs, err := rulesdata.Decode(p.Behavior, p.Format, "", p.Inline)
+						if err != nil {
+							return invalidBundle(req, err)
 						}
 						entries := []object{}
 						for _, s := range specs {

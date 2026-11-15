@@ -26,17 +26,6 @@ type RefreshOptions struct {
 	JobTimeout   time.Duration
 	Concurrency  int
 }
-type SubscriptionStatus struct {
-	SourceID    string    `json:"source_id"`
-	State       string    `json:"state"`
-	Stale       bool      `json:"stale"`
-	LastAttempt time.Time `json:"last_attempt,omitempty"`
-	LastSuccess time.Time `json:"last_success,omitempty"`
-	NextAttempt time.Time `json:"next_attempt,omitempty"`
-	ErrorCode   string    `json:"error_code,omitempty"`
-	Revision    uint64    `json:"revision,omitempty"`
-	RootHash    string    `json:"root_hash,omitempty"`
-}
 type refreshRecord struct {
 	Status   SubscriptionStatus            `json:"status"`
 	SpecHash string                        `json:"spec_hash"`
@@ -122,7 +111,18 @@ func (s *Service) manager(opts RefreshOptions) (*RefreshManager, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.refresh = &RefreshManager{svc: s, options: opts, client: client, blobs: blobs, dir: dir, ctx: ctx, cancel: cancel, jobs: map[string]*refreshJob{}, records: map[string]refreshRecord{}, slots: make(chan struct{}, opts.Concurrency)}
+	s.refresh = &RefreshManager{
+		svc:     s,
+		options: opts,
+		client:  client,
+		blobs:   blobs,
+		dir:     dir,
+		ctx:     ctx,
+		cancel:  cancel,
+		jobs:    map[string]*refreshJob{},
+		records: map[string]refreshRecord{},
+		slots:   make(chan struct{}, opts.Concurrency),
+	}
 	return s.refresh, nil
 }
 func (s *Service) StartSubscriptions(opts RefreshOptions) error {
@@ -185,7 +185,10 @@ func (m *RefreshManager) runDue() {
 		}
 	}
 }
-func specHash(spec *model.Subscription) string { b, _ := json.Marshal(spec); return resource.Hash(b) }
+func specHash(spec *model.Subscription) string {
+	b, _ := json.Marshal(spec)
+	return resource.Hash(b)
+}
 func (m *RefreshManager) record(id string) refreshRecord {
 	if r, ok := m.records[id]; ok {
 		return r
@@ -527,7 +530,11 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 		if resource.Hash(model.Format(currentDoc.Get(model.JoinPath("/sources", id)))) != original {
 			return fail("refresh_conflict")
 		}
-		committed, e = m.svc.Commit(ctx, CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: base, SourcesPatch: []model.Op{{Op: "set", Path: model.JoinPath("/sources", id), Value: encoded}}}, Source: "subscription", Message: "refresh source " + id})
+		committed, e = m.svc.Commit(ctx, CommitRequest{
+			ChangeRequest: ChangeRequest{BaseRevision: base, SourcesPatch: []model.Op{{Op: "set", Path: model.JoinPath("/sources", id), Value: encoded}}},
+			Source:        "subscription",
+			Message:       "refresh source " + id,
+		})
 		if e != nil {
 			return fail("commit_failed")
 		}
@@ -622,7 +629,16 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 		for _, h := range spec.Headers {
 			headers = append(headers, map[string]string{"name": h.Name, "value": h.Value})
 		}
-		value := map[string]any{"url": spec.URL, "format": spec.Format, "interval": spec.Interval, "nodes-only": spec.NodesOnly, "allow-partial": spec.AllowPartial, "paused": spec.Paused, "headers": headers, "geodata": spec.Geodata}
+		value := map[string]any{
+			"url":           spec.URL,
+			"format":        spec.Format,
+			"interval":      spec.Interval,
+			"nodes-only":    spec.NodesOnly,
+			"allow-partial": spec.AllowPartial,
+			"paused":        spec.Paused,
+			"headers":       headers,
+			"geodata":       spec.Geodata,
+		}
 		if doc.Get(path) == nil {
 			encoded, _ := json.Marshal(map[string]any{"id": id, "subscription": value})
 			ops = append(ops, model.Op{Op: "insert", Path: "/sources", Value: encoded})

@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -56,24 +57,60 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			}
 		}
 	}
-	var dnsSecrets func(*yaml.Node, string)
-	dnsSecrets = func(n *yaml.Node, prefix string) {
+	// urlValue reports one URL-valued scalar: DNS upstreams when dns is
+	// set, health-check URLs otherwise. A value already masked is reported
+	// too, so UnmaskSecrets can restore it.
+	urlValue := func(n *yaml.Node, path string, dns bool) {
+		n = unalias(n)
+		if n != nil && n.Kind == yaml.ScalarNode && (n.Value == Mask || credentialURL(n.Value, dns)) {
+			fn(path, n)
+		}
+	}
+	urlList := func(n *yaml.Node, path string, dns bool) {
 		n = unalias(n)
 		if n == nil {
 			return
 		}
-		if n.Kind == yaml.ScalarNode {
-			if (strings.ContainsAny(n.Value, "?@") || n.Value == Mask) && !strings.HasPrefix(n.Value, SecretPrefix) {
-				fn(prefix, n)
-			}
-		} else if n.Kind == yaml.MappingNode {
-			for i := 0; i+1 < len(n.Content); i += 2 {
-				dnsSecrets(n.Content[i+1], JoinPath(prefix, n.Content[i].Value))
-			}
-		} else if n.Kind == yaml.SequenceNode {
+		if n.Kind == yaml.SequenceNode {
 			for i, v := range n.Content {
-				dnsSecrets(v, JoinPath(prefix, ElementSegment(v, i)))
+				urlValue(v, JoinPath(path, ElementSegment(v, i)), dns)
 			}
+			return
+		}
+		urlValue(n, path, dns)
+	}
+	// dnsSecrets walks only the DNS fields that hold upstream URLs. rel is
+	// n's path relative to the dns mapping, so a patch can target any
+	// level of it.
+	var dnsSecrets func(n *yaml.Node, prefix string, rel []string)
+	dnsSecrets = func(n *yaml.Node, prefix string, rel []string) {
+		n = unalias(n)
+		if n == nil {
+			return
+		}
+		if len(rel) == 0 {
+			if n.Kind == yaml.MappingNode {
+				for i := 0; i+1 < len(n.Content); i += 2 {
+					k := n.Content[i].Value
+					dnsSecrets(n.Content[i+1], JoinPath(prefix, k), []string{k})
+				}
+			}
+			return
+		}
+		switch {
+		case dnsURLFields[rel[0]] && len(rel) <= 2:
+			urlList(n, prefix, true)
+		case rel[0] == "nameserver-policy" && len(rel) == 1 && n.Kind == yaml.SequenceNode:
+			for i, p := range n.Content {
+				seg := ElementSegment(p, i)
+				dnsSecrets(p, JoinPath(prefix, seg), []string{rel[0], seg})
+			}
+		case rel[0] == "nameserver-policy" && len(rel) == 2:
+			if servers, err := child(unalias(n), "servers", false, 0); err == nil {
+				urlList(servers, JoinPath(prefix, "servers"), true)
+			}
+		case rel[0] == "nameserver-policy" && len(rel) >= 3 && rel[2] == "servers":
+			urlList(n, prefix, true)
 		}
 	}
 	var outbound func(*yaml.Node, string)
@@ -83,7 +120,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			return
 		}
 		for _, key := range []string{"protocol", "transport"} {
-			if v, e := child(ob, key, false, 0); e == nil {
+			if v, err := child(ob, key, false, 0); err == nil {
 				nested(v, JoinPath(prefix, key))
 			}
 		}
@@ -103,8 +140,8 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			outbound(ob, JoinPath(prefix, ElementSegment(ob, i)))
 		}
 	}
-	if v, e := child(root, "dns", false, 0); e == nil {
-		dnsSecrets(v, "/dns")
+	if v, err := child(root, "dns", false, 0); err == nil {
+		dnsSecrets(v, "/dns", nil)
 	}
 	var groupSecrets func(*yaml.Node, string)
 	groupSecrets = func(n *yaml.Node, prefix string) {
@@ -116,11 +153,11 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			for i, g := range n.Content {
 				groupSecrets(g, JoinPath(prefix, ElementSegment(g, i)))
 			}
-		} else if u, e := child(n, "url", false, 0); e == nil {
-			dnsSecrets(u, JoinPath(prefix, "url"))
+		} else if u, err := child(n, "url", false, 0); err == nil {
+			urlValue(u, JoinPath(prefix, "url"), false)
 		}
 	}
-	if groups, e := child(root, "groups", false, 0); e == nil {
+	if groups, err := child(root, "groups", false, 0); err == nil {
 		groupSecrets(groups, "/groups")
 	}
 	obs, _ := child(root, "outbounds", false, 0)
@@ -158,7 +195,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				}
 			}
 			if v, e := child(src, "dns", false, 0); e == nil {
-				dnsSecrets(v, JoinPath("/sources", ElementSegment(src, i), "dns"))
+				dnsSecrets(v, JoinPath("/sources", ElementSegment(src, i), "dns"), nil)
 			}
 			if v, e := child(src, "groups", false, 0); e == nil {
 				groupSecrets(v, JoinPath("/sources", ElementSegment(src, i), "groups"))
@@ -190,12 +227,13 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				}
 			}
 			if path.Value == "/dns" || strings.HasPrefix(path.Value, "/dns/") {
-				dnsSecrets(value, JoinPath("/patches", ElementSegment(patch, i), "value"))
+				segs, _ := SplitPath(path.Value)
+				dnsSecrets(value, JoinPath("/patches", ElementSegment(patch, i), "value"), segs[1:])
 			}
 			if strings.HasPrefix(path.Value, "/groups") {
 				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
 				if strings.HasSuffix(path.Value, "/url") {
-					dnsSecrets(value, prefix)
+					urlValue(value, prefix, false)
 				} else {
 					groupSecrets(value, prefix)
 				}
@@ -222,6 +260,40 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			}
 		}
 	}
+}
+
+// dnsURLFields are the DNS fields that list upstream URLs.
+var dnsURLFields = map[string]bool{
+	"nameserver": true, "default-nameserver": true, "proxy-server-nameserver": true,
+	"direct-nameserver": true, "fallback": true,
+}
+
+// credentialURL reports whether a URL-valued setting carries a credential:
+// user info or a query. For DNS upstreams a path other than a standard DoH
+// endpoint counts too, since providers put account tokens there
+// (https://dns.example/abc123). Values without a scheme (addresses,
+// "system") never do. A value that does not parse is treated as secret.
+// A token in a host name (tls://abc123.dns.example) cannot be told apart
+// and is not masked.
+func credentialURL(v string, dns bool) bool {
+	if strings.HasPrefix(v, SecretPrefix) || !strings.Contains(v, "://") {
+		return false
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return true
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return true
+	}
+	if dns {
+		switch strings.TrimSuffix(u.EscapedPath(), "/") {
+		case "", "/dns-query", "/resolve":
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // MaskSecrets replaces inline credentials in a profile with Mask and

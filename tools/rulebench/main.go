@@ -45,12 +45,12 @@ func profile(n int, target string) string {
 	return b.String()
 }
 func commits(n, samples int) metrics {
-	root, e := os.MkdirTemp("", "reka-rulebench-")
-	must(e)
+	root, err := os.MkdirTemp("", "reka-rulebench-")
+	must(err)
 	defer os.RemoveAll(root)
 	eng := generation.NewEngine(generation.EngineOptions{})
-	svc, e := service.Open(service.Options{StateRoot: root, Engine: eng, InitialProfile: []byte(profile(n, "direct"))})
-	must(e)
+	svc, err := service.Open(service.Options{StateRoot: root, Engine: eng, InitialProfile: []byte(profile(n, "direct"))})
+	must(err)
 	defer svc.Close()
 	var values []float64
 	for i := 0; i < samples+3; i++ {
@@ -60,8 +60,8 @@ func commits(n, samples int) metrics {
 		}
 		text := profile(n, target)
 		start := time.Now()
-		result, e := svc.Commit(context.Background(), service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: svc.ActiveRevision(), Profile: &text}, Source: "benchmark"})
-		must(e)
+		result, err := svc.Commit(context.Background(), service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: svc.ActiveRevision(), Profile: &text}, Source: "benchmark"})
+		must(err)
 		if result.State != "committed" {
 			panic(fmt.Sprintf("commit failed: %+v", result))
 		}
@@ -106,9 +106,9 @@ func queries(n, samples int) metrics {
 	runtime.KeepAlive(eff)
 	return metrics{"rule-set-query", n, samples, pct(values, .5), pct(values, .95), after.HeapAlloc - before.HeapAlloc, build, true}
 }
-func must(e error) {
-	if e != nil {
-		panic(e)
+func must(err error) {
+	if err != nil {
+		panic(err)
 	}
 }
 func main() {

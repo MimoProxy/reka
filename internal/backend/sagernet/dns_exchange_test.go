@@ -33,8 +33,8 @@ func TestEncryptedDNS(t *testing.T) {
 		}
 		b, _ := io.ReadAll(r.Body)
 		q := new(D.Msg)
-		if e := q.Unpack(b); e != nil {
-			t.Error(e)
+		if err := q.Unpack(b); err != nil {
+			t.Error(err)
 			return
 		}
 		if invalid.Load() {
@@ -47,28 +47,28 @@ func TestEncryptedDNS(t *testing.T) {
 	}))
 	defer https.Close()
 	cert := https.TLS.Certificates[0]
-	root, e := x509.ParseCertificate(cert.Certificate[0])
-	if e != nil {
-		t.Fatal(e)
+	root, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(root)
-	listener, e := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
-	if e != nil {
-		t.Fatal(e)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
-			conn, e := listener.Accept()
-			if e != nil {
+			conn, err := listener.Accept()
+			if err != nil {
 				return
 			}
 			wg.Go(func() {
 				defer conn.Close()
 				_ = conn.SetDeadline(time.Now().Add(time.Second))
 				dc := &D.Conn{Conn: conn}
-				if q, e := dc.ReadMsg(); e == nil {
+				if q, err := dc.ReadMsg(); err == nil {
 					_ = dc.WriteMsg(dnsTestAnswer(q))
 				}
 			})
@@ -86,11 +86,11 @@ func TestEncryptedDNS(t *testing.T) {
 	for _, endpoint := range []string{"tls://" + listener.Addr().String() + "#proxy", https.URL + "/dns-query#proxy"} {
 		ep, _ := RD.ParseEndpoint(endpoint)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		m, e := exchangeDNS(ctx, ep, q, nil, dial, roots)
-		if e != nil || len(m.Answer) != 1 || m.Id != q.Id {
-			t.Fatal(endpoint, m, e)
+		m, err := exchangeDNS(ctx, ep, q, nil, dial, roots)
+		if err != nil || len(m.Answer) != 1 || m.Id != q.Id {
+			t.Fatal(endpoint, m, err)
 		}
-		if _, e = ExchangeDNS(ctx, ep, q, nil, dial); e == nil {
+		if _, err = ExchangeDNS(ctx, ep, q, nil, dial); err == nil {
 			t.Fatal("untrusted TLS certificate accepted")
 		}
 		cancel()
@@ -98,20 +98,20 @@ func TestEncryptedDNS(t *testing.T) {
 	invalid.Store(true)
 	ep, _ := RD.ParseEndpoint(https.URL)
 	ep.Via = "proxy"
-	if _, e = exchangeDNS(context.Background(), ep, q, nil, dial, roots); e == nil {
+	if _, err = exchangeDNS(context.Background(), ep, q, nil, dial, roots); err == nil {
 		t.Fatal("non-DNS DoH response accepted")
 	}
 }
 
 func TestDNSTruncatedUDPUsesTCP(t *testing.T) {
-	packet, e := net.ListenPacket("udp", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	listener, e := net.Listen("tcp", packet.LocalAddr().String())
-	if e != nil {
+	listener, err := net.Listen("tcp", packet.LocalAddr().String())
+	if err != nil {
 		packet.Close()
-		t.Fatal(e)
+		t.Fatal(err)
 	}
 	handler := D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		m := dnsTestAnswer(q)
@@ -139,8 +139,8 @@ func TestDNSTruncatedUDPUsesTCP(t *testing.T) {
 	q.SetQuestion("example.test.", D.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	m, e := ExchangeDNS(ctx, ep, q, nil, dial)
-	if e != nil || m.Truncated || len(m.Answer) != 1 {
-		t.Fatal(m, e)
+	m, err := ExchangeDNS(ctx, ep, q, nil, dial)
+	if err != nil || m.Truncated || len(m.Answer) != 1 {
+		t.Fatal(m, err)
 	}
 }

@@ -74,14 +74,14 @@ func Normalize(n *Network) (Network, error) {
 		if v == "" {
 			continue
 		}
-		p, e := netip.ParsePrefix(v)
-		if e != nil || p.Addr().Is4() != (i == 0) || p.Addr().IsUnspecified() || p.Bits() == p.Addr().BitLen() {
+		p, err := netip.ParsePrefix(v)
+		if err != nil || p.Addr().Is4() != (i == 0) || p.Addr().IsUnspecified() || p.Bits() == p.Addr().BitLen() {
 			return c, fmt.Errorf("invalid TUN address %q", v)
 		}
 	}
 	for _, v := range append(append([]string{}, t.Routes...), t.ExcludeRoutes...) {
-		p, e := netip.ParsePrefix(v)
-		if e != nil || p != p.Masked() {
+		p, err := netip.ParsePrefix(v)
+		if err != nil || p != p.Masked() {
 			return c, fmt.Errorf("invalid route %q", v)
 		}
 		if p.Addr().Is6() && t.Address6 == "" {

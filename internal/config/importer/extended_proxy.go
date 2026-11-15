@@ -10,8 +10,8 @@ func (r *proxyReader) number(key string, def int) int {
 	if get(r.n, key) == nil {
 		return def
 	}
-	v, e := strconv.Atoi(r.str(key))
-	if e != nil {
+	v, err := strconv.Atoi(r.str(key))
+	if err != nil {
 		r.fail(key, "import.type", "expected an integer")
 	}
 	return v
@@ -111,7 +111,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		}
 		if v := get(n, "alpn"); v != nil {
 			var values []string
-			if e := v.Decode(&values); e != nil {
+			if err := v.Decode(&values); err != nil {
 				r.fail("alpn", "import.type", "alpn must be a string list")
 			} else {
 				tls["alpn"] = values

@@ -151,8 +151,8 @@ func (c *converter) convertDNS(root *yaml.Node) {
 		}
 		return
 	}
-	if e := RD.Validate(decoded.DNS); e != nil {
-		c.unsupported(n, "/dns", "import.dns", e.Error())
+	if err := RD.Validate(decoded.DNS); err != nil {
+		c.unsupported(n, "/dns", "import.dns", err.Error())
 		return
 	}
 	var result any

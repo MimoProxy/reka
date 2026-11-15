@@ -22,9 +22,9 @@ func TestSoak(t *testing.T) {
 	}
 	h := newHarness(t, "schema-version: 1\noutbounds: [{id: alt, type: direct}]\ngroups: [{id: proxy, type: select, members: [direct, alt]}]\nrules: [{id: final, match: {all: true}, outbound: proxy}]\n")
 	echo := echoServer(t)
-	c, e := socks5Connect(h.proxy(), echo)
-	if e != nil {
-		t.Fatal(e)
+	c, err := socks5Connect(h.proxy(), echo)
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer c.Close()
 	base := runtime.NumGoroutine()
@@ -39,12 +39,12 @@ func TestSoak(t *testing.T) {
 		h.mustCommit(patch("/groups/proxy/selected", fmt.Sprintf("%q", selected)))
 		payload := fmt.Sprintf("soak-%08d-%s", updates, string(make([]byte, 4096)))
 		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
-		if _, e = io.WriteString(c, payload); e != nil {
-			t.Fatal(e)
+		if _, err = io.WriteString(c, payload); err != nil {
+			t.Fatal(err)
 		}
 		got := make([]byte, len(payload))
-		if _, e = io.ReadFull(c, got); e != nil || string(got) != payload {
-			t.Fatal("stream changed", e)
+		if _, err = io.ReadFull(c, got); err != nil || string(got) != payload {
+			t.Fatal("stream changed", err)
 		}
 		bytes += len(got)
 		updates++

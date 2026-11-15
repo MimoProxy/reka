@@ -8,44 +8,44 @@ import (
 
 func TestStateRootExclusiveUntilClose(t *testing.T) {
 	root := t.TempDir()
-	first, e := LockStateRoot(root)
-	if e != nil {
-		t.Fatal(e)
+	first, err := LockStateRoot(root)
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer first.Close()
-	if second, e := LockStateRoot(root); e == nil {
+	if second, err := LockStateRoot(root); err == nil {
 		second.Close()
 		t.Fatal("second kernel admitted before recovery")
 	}
-	if e = first.Close(); e != nil {
-		t.Fatal(e)
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
 	}
-	third, e := LockStateRoot(root)
-	if e != nil {
-		t.Fatal(e)
+	third, err := LockStateRoot(root)
+	if err != nil {
+		t.Fatal(err)
 	}
 	third.Close()
 }
 func TestStateRootLockReleasedByProcessExit(t *testing.T) {
 	if root := os.Getenv("REKA_LOCK_CHILD"); root != "" {
-		if _, e := LockStateRoot(root); e != nil {
+		if _, err := LockStateRoot(root); err != nil {
 			os.Exit(2)
 		}
 		os.Exit(0)
 	}
 	root := t.TempDir()
-	exe, e := os.Executable()
-	if e != nil {
-		t.Fatal(e)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
 	cmd := exec.Command(exe, "-test.run=^TestStateRootLockReleasedByProcessExit$")
 	cmd.Env = append(os.Environ(), "REKA_LOCK_CHILD="+root)
-	if b, e := cmd.CombinedOutput(); e != nil {
-		t.Fatal(e, string(b))
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatal(err, string(b))
 	}
-	l, e := LockStateRoot(root)
-	if e != nil {
-		t.Fatal(e)
+	l, err := LockStateRoot(root)
+	if err != nil {
+		t.Fatal(err)
 	}
 	l.Close()
 }

@@ -23,8 +23,8 @@ type ProxySpec struct {
 func (b *Backend) newProtocol(tag string, s ProxySpec) (adapter.Outbound, error) {
 	var values map[string]any
 	if len(s.Options) > 0 {
-		if e := json.Unmarshal(s.Options, &values); e != nil {
-			return nil, e
+		if err := json.Unmarshal(s.Options, &values); err != nil {
+			return nil, err
 		}
 	}
 	if values == nil {
@@ -44,34 +44,34 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (adapter.Outbound, error)
 		}
 		values["tls"] = t
 	}
-	data, e := json.Marshal(values)
-	if e != nil {
-		return nil, e
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
 	}
 	logger := b.componentLogger("outbound", s.Type, tag)
 	switch s.Type {
 	case "vmess":
 		var o option.VMessOutboundOptions
-		if e = json.Unmarshal(data, &o); e != nil {
-			return nil, e
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
 		}
 		return vmess.NewOutbound(b.ctx, b.router, logger, tag, o)
 	case "trojan":
 		var o option.TrojanOutboundOptions
-		if e = json.Unmarshal(data, &o); e != nil {
-			return nil, e
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
 		}
 		return trojan.NewOutbound(b.ctx, b.router, logger, tag, o)
 	case "hysteria2":
 		var o option.Hysteria2OutboundOptions
-		if e = json.Unmarshal(data, &o); e != nil {
-			return nil, e
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
 		}
 		return hysteria2.NewOutbound(b.ctx, b.router, logger, tag, o)
 	case "tuic":
 		var o option.TUICOutboundOptions
-		if e = json.Unmarshal(data, &o); e != nil {
-			return nil, e
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
 		}
 		return tuic.NewOutbound(b.ctx, b.router, logger, tag, o)
 	case "snell":
@@ -79,14 +79,14 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (adapter.Outbound, error)
 		delete(values, "password")
 		data, _ = json.Marshal(values)
 		var o option.SnellOutboundOptions
-		if e = json.Unmarshal(data, &o); e != nil {
-			return nil, e
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
 		}
 		return snell.NewOutbound(b.ctx, b.router, logger, tag, o)
 	case "vless":
 		var o option.VLESSOutboundOptions
-		if e = json.Unmarshal(data, &o); e != nil {
-			return nil, e
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
 		}
 		return vless.NewOutbound(b.ctx, b.router, logger, tag, o)
 	}

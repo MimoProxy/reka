@@ -26,8 +26,8 @@ func TestOwnershipRecovery(t *testing.T) {
 			f := &fakeSettings{m: map[string]string{"dns": "before"}}
 			p := filepath.Join(t.TempDir(), "network.json")
 			j := &Journal{Path: p, OS: f}
-			if e := j.Apply("dns", "ours"); e != nil {
-				t.Fatal(e)
+			if err := j.Apply("dns", "ours"); err != nil {
+				t.Fatal(err)
 			}
 			if external {
 				f.m["dns"] = "other"
@@ -36,8 +36,8 @@ func TestOwnershipRecovery(t *testing.T) {
 				}
 			}
 			recovered := &Journal{Path: p, OS: f}
-			if e := recovered.Recover(); e != nil {
-				t.Fatal(e)
+			if err := recovered.Recover(); err != nil {
+				t.Fatal(err)
 			}
 			want := "before"
 			if external {
@@ -46,8 +46,8 @@ func TestOwnershipRecovery(t *testing.T) {
 			if f.m["dns"] != want {
 				t.Fatal(f.m)
 			}
-			if e := recovered.Recover(); e != nil {
-				t.Fatal(e)
+			if err := recovered.Recover(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -59,16 +59,16 @@ func TestJournalBeforeMutationAndFailedRestore(t *testing.T) {
 	if j.Apply("dns", "new") == nil {
 		t.Fatal("expected failure")
 	}
-	if _, e := os.Stat(p); e != nil {
-		t.Fatal(e)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal(err)
 	}
 	f.m["dns"] = "new" // OS mutation happened, response lost
 	if (&Journal{Path: p, OS: f}).Recover() == nil {
 		t.Fatal("restore must fail")
 	}
 	f.fail = false
-	if e := (&Journal{Path: p, OS: f}).Recover(); e != nil {
-		t.Fatal(e)
+	if err := (&Journal{Path: p, OS: f}).Recover(); err != nil {
+		t.Fatal(err)
 	}
 	if f.m["dns"] != "old" {
 		t.Fatal(f.m)
@@ -77,8 +77,8 @@ func TestJournalBeforeMutationAndFailedRestore(t *testing.T) {
 func TestPreexistingSettingNotOwned(t *testing.T) {
 	f := &fakeSettings{m: map[string]string{"dns": "same"}}
 	j := &Journal{Path: filepath.Join(t.TempDir(), "j"), OS: f}
-	if e := j.Apply("dns", "same"); e != nil {
-		t.Fatal(e)
+	if err := j.Apply("dns", "same"); err != nil {
+		t.Fatal(err)
 	}
 	if len(j.entries) != 0 {
 		t.Fatal("claimed external setting")

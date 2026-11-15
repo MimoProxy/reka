@@ -28,50 +28,50 @@ func internetKey(access uint32) (registry.Key, error) {
 	return registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, access)
 }
 func (NativeSettings) Read(key string) (string, error) {
-	k, e := internetKey(registry.QUERY_VALUE)
-	if e != nil {
-		return "", e
+	k, err := internetKey(registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
 	}
 	defer k.Close()
 	v := regValue{}
 	switch key {
 	case "ProxyEnable", "AutoDetect":
-		v.Number, v.Kind, e = k.GetIntegerValue(key)
+		v.Number, v.Kind, err = k.GetIntegerValue(key)
 	case "ProxyServer", "ProxyOverride", "AutoConfigURL":
-		v.Text, v.Kind, e = k.GetStringValue(key)
+		v.Text, v.Kind, err = k.GetStringValue(key)
 	default:
 		return "", fmt.Errorf("unsupported setting")
 	}
-	if e == registry.ErrNotExist {
-		e = nil
-	} else if e == nil {
+	if err == registry.ErrNotExist {
+		err = nil
+	} else if err == nil {
 		v.Present = true
 	}
 	b, _ := json.Marshal(v)
-	return string(b), e
+	return string(b), err
 }
 func (NativeSettings) Write(key, value string) error {
 	var v regValue
-	if e := json.Unmarshal([]byte(value), &v); e != nil {
-		return e
+	if err := json.Unmarshal([]byte(value), &v); err != nil {
+		return err
 	}
-	k, e := internetKey(registry.SET_VALUE)
-	if e != nil {
-		return e
+	k, err := internetKey(registry.SET_VALUE)
+	if err != nil {
+		return err
 	}
 	defer k.Close()
 	if !v.Present {
-		e = k.DeleteValue(key)
-		if e == registry.ErrNotExist {
-			e = nil
+		err = k.DeleteValue(key)
+		if err == registry.ErrNotExist {
+			err = nil
 		}
 	} else if v.Kind == registry.DWORD {
-		e = k.SetDWordValue(key, uint32(v.Number))
+		err = k.SetDWordValue(key, uint32(v.Number))
 	} else {
-		e = k.SetStringValue(key, v.Text)
+		err = k.SetStringValue(key, v.Text)
 	}
-	if e != nil {
-		return e
+	if err != nil {
+		return err
 	}
 	dll := windows.NewLazySystemDLL("wininet.dll")
 	p := dll.NewProc("InternetSetOptionW")

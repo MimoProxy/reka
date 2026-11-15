@@ -63,22 +63,22 @@ func (c *compiler) dns(eff *Effective) {
 		}
 		spec := router.RuleSpec{Kind: kind, Values: []string{value}, Target: "yes"}
 		if kind == router.KindRuleSet {
-			ref, e := rc.resource(value, 0)
-			if e != nil {
-				c.errorf(model.DocProfile, "/dns", "dns.reference", "%s", e)
+			ref, err := rc.resource(value, 0)
+			if err != nil {
+				c.errorf(model.DocProfile, "/dns", "dns.reference", "%s", err)
 				continue
 			}
 			spec.Set = ref.set
 			spec.ResourceHash = ref.hash
 		}
-		set, e := router.CompileRules([]router.RuleSpec{spec})
-		if e != nil {
-			c.errorf(model.DocProfile, "/dns", "dns.pattern", "%s", e)
+		set, err := router.CompileRules([]router.RuleSpec{spec})
+		if err != nil {
+			c.errorf(model.DocProfile, "/dns", "dns.pattern", "%s", err)
 			continue
 		}
-		r, e := router.New(set, router.Options{Outbounds: []string{"yes", "no"}, Final: "no"})
-		if e != nil {
-			c.errorf(model.DocProfile, "/dns", "dns.pattern", "%s", e)
+		r, err := router.New(set, router.Options{Outbounds: []string{"yes", "no"}, Final: "no"})
+		if err != nil {
+			c.errorf(model.DocProfile, "/dns", "dns.pattern", "%s", err)
 			continue
 		}
 		matchers[pattern] = r
@@ -96,8 +96,8 @@ func (c *compiler) dns(eff *Effective) {
 	}
 	for _, list := range lists {
 		for _, v := range list {
-			ep, e := RD.ParseEndpoint(v)
-			if e == nil && ep.Via != "" && !targets[ep.Via] {
+			ep, err := RD.ParseEndpoint(v)
+			if err == nil && ep.Via != "" && !targets[ep.Via] {
 				c.errorf(model.DocProfile, "/dns", "dns.target", "unknown DNS outbound %q", ep.Via)
 			}
 		}
@@ -109,8 +109,8 @@ func (c *compiler) dns(eff *Effective) {
 			}
 			p, _ := netip.ParsePrefix(text)
 			for _, o := range eff.Outbounds {
-				a, e := netip.ParseAddr(o.Server)
-				if e == nil && p.Contains(a) {
+				a, err := netip.ParseAddr(o.Server)
+				if err == nil && p.Contains(a) {
 					c.errorf(model.DocProfile, "/dns", "dns.cycle", "node address overlaps fake-IP range")
 				}
 			}

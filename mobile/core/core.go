@@ -184,7 +184,7 @@ func (in *Instance) ReconfigureVPN(fd int, request []byte) []byte {
 		return in.closedReply(request)
 	}
 	var req control.Request
-	if e := json.Unmarshal(request, &req); e != nil || req.Method != "CommitConfiguration" || fd <= 0 {
+	if err := json.Unmarshal(request, &req); err != nil || req.Method != "CommitConfiguration" || fd <= 0 {
 		b, _ := json.Marshal(control.Response{ID: req.ID, Error: &service.Error{Code: service.CodeBadRequest, Message: "reconfigureVPN requires a valid fd and CommitConfiguration request"}})
 		return b
 	}
@@ -199,8 +199,8 @@ func (in *Instance) ReconfigureVPN(fd int, request []byte) []byte {
 		} `json:"result"`
 	}
 	if json.Unmarshal(reply, &result) == nil && result.Result.State == "committed" && eng.TUNSerial() == before {
-		if e := eng.RebuildTUN(); e != nil {
-			b, _ := json.Marshal(control.Response{ID: req.ID, Error: &service.Error{Code: "degraded", Message: e.Error()}})
+		if err := eng.RebuildTUN(); err != nil {
+			b, _ := json.Marshal(control.Response{ID: req.ID, Error: &service.Error{Code: "degraded", Message: err.Error()}})
 			return b
 		}
 	}

@@ -48,16 +48,16 @@ func TestImportedRuleProviderAndGeodataBundle(t *testing.T) {
 rules: ['AND,((RULE-SET,sites),(NETWORK,TCP)),REJECT', 'GEOIP,CN,DIRECT,no-resolve', 'MATCH,REJECT']
 `
 	req := request(data)
-	ps, e := Providers(req)
-	if e != nil || len(ps) != 1 {
-		t.Fatal(ps, e)
+	ps, err := Providers(req)
+	if err != nil || len(ps) != 1 {
+		t.Fatal(ps, err)
 	}
 	payloads := map[string][]byte{ps[0].ID: []byte("GEOSITE,test@cn\nDOMAIN,other.test\n")}
 	geo := map[string][]byte{}
 	for _, kind := range []string{"geoip", "geosite"} {
-		b, e := os.ReadFile("../../../testdata/rules/" + kind + ".dat")
-		if e != nil {
-			t.Fatal(e)
+		b, err := os.ReadFile("../../../testdata/rules/" + kind + ".dat")
+		if err != nil {
+			t.Fatal(err)
 		}
 		geo[kind] = b
 	}

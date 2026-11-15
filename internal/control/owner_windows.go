@@ -13,9 +13,9 @@ func ConfigureOwner(owner string) error {
 	if owner == "" {
 		return nil
 	}
-	s, e := windows.StringToSid(owner)
-	if e != nil {
-		return e
+	s, err := windows.StringToSid(owner)
+	if err != nil {
+		return err
 	}
 	ownerSID = s
 	platform.OwnerSID = owner

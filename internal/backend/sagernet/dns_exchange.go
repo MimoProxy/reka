@@ -6,9 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	RD "github.com/MimoProxy/reka/internal/dns"
-	D "github.com/miekg/dns"
-	M "github.com/sagernet/sing/common/metadata"
 	"io"
 	"net"
 	"net/http"
@@ -16,11 +13,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	D "github.com/miekg/dns"
+	M "github.com/sagernet/sing/common/metadata"
+
+	RD "github.com/MimoProxy/reka/internal/dns"
 )
 
+// dnsTimeout bounds one upstream exchange when the context allows longer.
+const dnsTimeout = 5 * time.Second
+
+// LookupFunc resolves a host name to addresses.
 type LookupFunc func(context.Context, string) ([]netip.Addr, error)
+
 type lookupKey struct{}
 
+// WithLookup attaches the resolver outbounds use for server host names.
 func WithLookup(ctx context.Context, fn LookupFunc) context.Context {
 	if fn == nil {
 		return ctx
@@ -28,37 +36,50 @@ func WithLookup(ctx context.Context, fn LookupFunc) context.Context {
 	return context.WithValue(ctx, lookupKey{}, fn)
 }
 
+// leasedConn holds a lease on its outbound until it is closed.
 type leasedConn struct {
 	net.Conn
 	release func()
 	once    sync.Once
 }
 
-func (c *leasedConn) Close() error { err := c.Conn.Close(); c.once.Do(c.release); return err }
+func (c *leasedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+// Dial opens a connection through the outbound for the kernel's own use
+// (DNS upstreams, downloads). The connection holds a lease, so a replaced
+// outbound drains before it closes.
 func (o *Outbound) Dial(ctx context.Context, network, address string) (net.Conn, error) {
 	if !o.lease.Acquire() {
 		return nil, errors.New("outbound retired")
 	}
-	c, e := o.out.DialContext(ctx, network, M.ParseSocksaddr(address))
-	if e != nil {
+	c, err := o.out.DialContext(ctx, network, M.ParseSocksaddr(address))
+	if err != nil {
 		o.lease.Release()
-		return nil, e
+		return nil, err
 	}
 	return &leasedConn{Conn: c, release: o.lease.Release}, nil
 }
 
-type DNSDial func(context.Context, string, string, string) (net.Conn, error)
+// DNSDial opens a connection to a DNS upstream through the outbound named
+// by via.
+type DNSDial func(ctx context.Context, network, address, via string) (net.Conn, error)
 
+// ExchangeDNS sends q to one upstream endpoint over UDP, TCP, DoT or DoH.
+// A host-name endpoint is first resolved with lookup (the bootstrap path).
 func ExchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(context.Context, string) ([]netip.Addr, error), dial DNSDial) (*D.Msg, error) {
 	return exchangeDNS(ctx, ep, q, lookup, dial, nil)
 }
 
+// exchangeDNS is ExchangeDNS with the TLS roots tests use.
 func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(context.Context, string) ([]netip.Addr, error), dial DNSDial, roots *x509.CertPool) (*D.Msg, error) {
-	tlsConfig := &tls.Config{ServerName: ep.Host, MinVersion: tls.VersionTLS12, RootCAs: roots}
 	host := ep.Host
-	if _, e := netip.ParseAddr(host); e != nil {
-		ips, e := lookup(ctx, host)
-		if e != nil || len(ips) == 0 {
+	if _, err := netip.ParseAddr(host); err != nil {
+		ips, err := lookup(ctx, host)
+		if err != nil || len(ips) == 0 {
 			return nil, errors.New("DNS endpoint bootstrap failed")
 		}
 		host = ips[0].String()
@@ -67,93 +88,195 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 	open := func(ctx context.Context, network string) (net.Conn, error) {
 		return dial(ctx, network, address, ep.Via)
 	}
-	if ep.Scheme == "udp" || ep.Scheme == "tcp" {
-		network := ep.Scheme
-		m, e := exchangePlainDNS(ctx, network, address, ep.Via, q, dial)
-		if e != nil || network != "udp" || !m.Truncated {
-			return m, e
+	// Certificates are checked against the configured name, not the
+	// bootstrap address.
+	tlsConfig := &tls.Config{ServerName: ep.Host, MinVersion: tls.VersionTLS12, RootCAs: roots}
+
+	var (
+		m   *D.Msg
+		err error
+	)
+	switch ep.Scheme {
+	case "udp", "tcp":
+		m, err = exchangePlainDNS(ctx, ep.Scheme, open, q)
+		if err == nil && ep.Scheme == "udp" && m.Truncated {
+			m, err = exchangePlainDNS(ctx, "tcp", open, q)
 		}
-		return exchangePlainDNS(ctx, "tcp", address, ep.Via, q, dial)
-	}
-	if ep.Scheme == "https" {
-		wire, e := q.Pack()
-		if e != nil {
-			return nil, e
-		}
-		tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSClientConfig: tlsConfig, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return open(ctx, "tcp") }}
-		defer tr.CloseIdleConnections()
-		client := &http.Client{Transport: tr, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("DNS redirect forbidden") }}
-		req, e := http.NewRequestWithContext(ctx, "POST", "https://"+net.JoinHostPort(ep.Host, ep.Port)+ep.Path, bytes.NewReader(wire))
-		if e != nil {
-			return nil, e
-		}
-		req.Header.Set("Content-Type", "application/dns-message")
-		req.Header.Set("Accept", "application/dns-message")
-		res, e := client.Do(req)
-		if e != nil {
-			return nil, e
-		}
-		defer res.Body.Close()
-		if res.StatusCode != 200 || !strings.HasPrefix(res.Header.Get("Content-Type"), "application/dns-message") {
-			return nil, errors.New("invalid DoH response")
-		}
-		b, e := io.ReadAll(io.LimitReader(res.Body, 65536))
-		if e != nil || len(b) > 65535 {
-			return nil, errors.New("invalid DoH size")
-		}
-		m := new(D.Msg)
-		if e = m.Unpack(b); e != nil {
-			return nil, e
-		}
-		if m.Id != q.Id || !m.Response {
-			return nil, errors.New("invalid DNS response identity")
-		}
-		return m, nil
-	}
-	if ep.Scheme != "tls" {
+	case "https":
+		m, err = exchangeDoH(ctx, ep, open, tlsConfig, q)
+	case "tls":
+		m, err = exchangeDoT(ctx, open, tlsConfig, q)
+	default:
 		return nil, errors.New("unsupported DNS transport")
 	}
-	exchange := func() (*D.Msg, error) {
-		c, e := open(ctx, "tcp")
-		if e != nil {
-			return nil, e
-		}
-		defer c.Close()
-		tc := tls.Client(c, tlsConfig)
-		if e = tc.HandshakeContext(ctx); e != nil {
-			return nil, e
-		}
-		c = tc
-		deadline := time.Now().Add(5 * time.Second)
-		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-			deadline = d
-		}
-		c.SetDeadline(deadline)
-		dc := &D.Conn{Conn: c, UDPSize: 1232}
-		client := &D.Client{Net: "tcp", Timeout: 5 * time.Second}
-		m, _, e := client.ExchangeWithConnContext(ctx, q, dc)
-		return m, e
+	if err != nil {
+		return nil, err
 	}
-	return exchange()
+	if err := checkReply(q, m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
+// exchangeDeadline is the earlier of the context deadline and dnsTimeout.
+func exchangeDeadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(dnsTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	return deadline
+}
+
+// exchangePlainDNS sends one query on its own connected socket. A UDP
+// socket skips replies whose ID does not match (late answers to earlier
+// queries); the caller checks the rest of the reply.
+func exchangePlainDNS(ctx context.Context, network string, open func(context.Context, string) (net.Conn, error), q *D.Msg) (*D.Msg, error) {
+	c, err := open(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stop()
+	if err := c.SetDeadline(exchangeDeadline(ctx)); err != nil {
+		return nil, err
+	}
+	if network == "tcp" {
+		dc := &D.Conn{Conn: c}
+		if err := dc.WriteMsg(q); err != nil {
+			return nil, err
+		}
+		return dc.ReadMsg()
+	}
+	wire, err := q.Pack()
+	if err != nil {
+		return nil, err
+	}
+	if n, err := c.Write(wire); err != nil {
+		return nil, err
+	} else if n != len(wire) {
+		return nil, io.ErrShortWrite
+	}
+	raw := make([]byte, 65535)
+	for range 16 {
+		n, err := c.Read(raw)
+		if err != nil {
+			return nil, err
+		}
+		m := new(D.Msg)
+		if err := m.Unpack(raw[:n]); err != nil {
+			return nil, err
+		}
+		if m.Id == q.Id {
+			return m, nil
+		}
+	}
+	return nil, errors.New("invalid DNS response identity")
+}
+
+// exchangeDoH posts one query to a DNS-over-HTTPS endpoint. Redirects are
+// refused, and the reply must be a DNS message of at most 64 KiB.
+func exchangeDoH(ctx context.Context, ep RD.Endpoint, open func(context.Context, string) (net.Conn, error), tlsConfig *tls.Config, q *D.Msg) (*D.Msg, error) {
+	wire, err := q.Pack()
+	if err != nil {
+		return nil, err
+	}
+	transport := &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+		TLSClientConfig:   tlsConfig,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return open(ctx, "tcp")
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   dnsTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("DNS redirect forbidden")
+		},
+	}
+	url := "https://" + net.JoinHostPort(ep.Host, ep.Port) + ep.Path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Type"), "application/dns-message") {
+		return nil, errors.New("invalid DoH response")
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, 65536))
+	if err != nil || len(body) > 65535 {
+		return nil, errors.New("invalid DoH size")
+	}
+	m := new(D.Msg)
+	if err := m.Unpack(body); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// exchangeDoT sends one query over a fresh DNS-over-TLS connection.
+func exchangeDoT(ctx context.Context, open func(context.Context, string) (net.Conn, error), tlsConfig *tls.Config, q *D.Msg) (*D.Msg, error) {
+	c, err := open(ctx, "tcp")
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	tc := tls.Client(c, tlsConfig)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := tc.SetDeadline(exchangeDeadline(ctx)); err != nil {
+		return nil, err
+	}
+	client := &D.Client{Net: "tcp", Timeout: dnsTimeout}
+	m, _, err := client.ExchangeWithConnContext(ctx, q, &D.Conn{Conn: tc, UDPSize: 1232})
+	return m, err
+}
+
+// checkReply rejects a reply that does not answer q: wrong ID, opcode or
+// question, or not a response at all.
+func checkReply(q, m *D.Msg) error {
+	if m == nil || !m.Response || m.Id != q.Id || m.Opcode != q.Opcode || len(m.Question) != len(q.Question) {
+		return errors.New("invalid DNS response identity")
+	}
+	for i, want := range q.Question {
+		got := m.Question[i]
+		if !strings.EqualFold(got.Name, want.Name) || got.Qtype != want.Qtype || got.Qclass != want.Qclass {
+			return errors.New("invalid DNS response question")
+		}
+	}
+	return nil
+}
+
+// DNSListener answers DNS queries on one address over UDP and TCP.
 type DNSListener struct{ udp, tcp *D.Server }
 
+// NewDNSListener serves exchange on address. UDP replies are truncated to
+// the client's EDNS size (512 bytes without EDNS, at most 4096).
 func NewDNSListener(address string, exchange func(context.Context, *D.Msg) (*D.Msg, error)) (*DNSListener, error) {
-	packet, e := net.ListenPacket("udp", address)
-	if e != nil {
-		return nil, e
+	packet, err := net.ListenPacket("udp", address)
+	if err != nil {
+		return nil, err
 	}
-	listener, e := net.Listen("tcp", packet.LocalAddr().String())
-	if e != nil {
+	listener, err := net.Listen("tcp", packet.LocalAddr().String())
+	if err != nil {
 		packet.Close()
-		return nil, e
+		return nil, err
 	}
 	handler := D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout+time.Second)
 		defer cancel()
-		m, e := exchange(ctx, q)
-		if e != nil {
+		m, err := exchange(ctx, q)
+		if err != nil {
 			m = new(D.Msg)
 			m.SetRcode(q, D.RcodeServerFailure)
 		}
@@ -166,79 +289,19 @@ func NewDNSListener(address string, exchange func(context.Context, *D.Msg) (*D.M
 		}
 		_ = w.WriteMsg(m)
 	})
-	d := &DNSListener{udp: &D.Server{PacketConn: packet, Handler: handler}, tcp: &D.Server{Listener: listener, Handler: handler}}
+	d := &DNSListener{
+		udp: &D.Server{PacketConn: packet, Handler: handler},
+		tcp: &D.Server{Listener: listener, Handler: handler},
+	}
 	go d.udp.ActivateAndServe()
 	go d.tcp.ActivateAndServe()
 	return d, nil
 }
+
+// Close stops both servers, waiting up to a second for in-flight queries.
 func (d *DNSListener) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = d.udp.ShutdownContext(ctx)
 	_ = d.tcp.ShutdownContext(ctx)
-}
-
-// One bounded connected socket per query, with cancellation and strict reply
-// identity checks. UDP truncation is retried over TCP by exchangeDNS.
-func exchangePlainDNS(ctx context.Context, network, address, via string, q *D.Msg, dial DNSDial) (*D.Msg, error) {
-	c, e := dial(ctx, network, address, via)
-	if e != nil {
-		return nil, e
-	}
-	defer c.Close()
-	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
-	defer stop()
-	deadline := time.Now().Add(5 * time.Second)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	if e = c.SetDeadline(deadline); e != nil {
-		return nil, e
-	}
-	var m *D.Msg
-	if network == "tcp" {
-		dc := &D.Conn{Conn: c}
-		if e = dc.WriteMsg(q); e != nil {
-			return nil, e
-		}
-		m, e = dc.ReadMsg()
-		if e != nil {
-			return nil, e
-		}
-	} else {
-		wire, e := q.Pack()
-		if e != nil {
-			return nil, e
-		}
-		if n, e := c.Write(wire); e != nil {
-			return nil, e
-		} else if n != len(wire) {
-			return nil, io.ErrShortWrite
-		}
-		raw := make([]byte, 65535)
-		for attempt := 0; attempt < 16; attempt++ {
-			n, e := c.Read(raw)
-			if e != nil {
-				return nil, e
-			}
-			m = new(D.Msg)
-			if e = m.Unpack(raw[:n]); e != nil {
-				return nil, e
-			}
-			if m.Id == q.Id {
-				break
-			}
-			m = nil
-		}
-	}
-	if m == nil || !m.Response || m.Id != q.Id || m.Opcode != q.Opcode || len(m.Question) != len(q.Question) {
-		return nil, errors.New("invalid DNS response identity")
-	}
-	for i, v := range q.Question {
-		r := m.Question[i]
-		if !strings.EqualFold(r.Name, v.Name) || r.Qtype != v.Qtype || r.Qclass != v.Qclass {
-			return nil, errors.New("invalid DNS response question")
-		}
-	}
-	return m, nil
 }

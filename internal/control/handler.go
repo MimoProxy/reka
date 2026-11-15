@@ -413,14 +413,6 @@ func capabilities(svc *service.Service) Capabilities {
 	}
 }
 
-// Status is the answer to GetStatus.
-type Status struct {
-	Revision   uint64            `json:"revision"`
-	Runtime    generation.Status `json:"runtime"`
-	StartError string            `json:"start_error,omitempty"`
-	Goroutines int               `json:"goroutines"`
-}
-
 func status(svc *service.Service) Status {
 	st := Status{Revision: svc.ActiveRevision(), Runtime: svc.Engine().Status(), Goroutines: goruntime.NumGoroutine()}
 	st.StartError = svc.StartError()

@@ -25,9 +25,9 @@ func (s NativeSettings) Read(key string) (string, error) {
 	}
 	kind, service := parts[0], parts[1]
 	if kind == "dns" {
-		b, e := command("/usr/sbin/networksetup", "-getdnsservers", service)
-		if e != nil {
-			return "", fmt.Errorf("read DNS: %s: %w", b, e)
+		b, err := command("/usr/sbin/networksetup", "-getdnsservers", service)
+		if err != nil {
+			return "", fmt.Errorf("read DNS: %s: %w", b, err)
 		}
 		v := strings.TrimSpace(string(b))
 		if strings.Contains(v, "There aren't any DNS Servers") {
@@ -35,9 +35,9 @@ func (s NativeSettings) Read(key string) (string, error) {
 		}
 		return v, nil
 	}
-	b, e := command("/usr/sbin/networksetup", "-get"+kind, service)
-	if e != nil {
-		return "", fmt.Errorf("read %s: %s: %w", kind, b, e)
+	b, err := command("/usr/sbin/networksetup", "-get"+kind, service)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %s: %w", kind, b, err)
 	}
 	v := proxyValue{}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -68,9 +68,9 @@ func (s NativeSettings) Write(key, value string) error {
 	}
 	kind, service := parts[0], parts[1]
 	run := func(args ...string) error {
-		b, e := command("/usr/sbin/networksetup", args...)
-		if e != nil {
-			return fmt.Errorf("networksetup: %s: %w", b, e)
+		b, err := command("/usr/sbin/networksetup", args...)
+		if err != nil {
+			return fmt.Errorf("networksetup: %s: %w", b, err)
 		}
 		return nil
 	}
@@ -82,25 +82,25 @@ func (s NativeSettings) Write(key, value string) error {
 		return run(append([]string{"-setdnsservers", service}, v...)...)
 	}
 	var v proxyValue
-	if e := json.Unmarshal([]byte(value), &v); e != nil {
-		return e
+	if err := json.Unmarshal([]byte(value), &v); err != nil {
+		return err
 	}
-	path, present, fields, e := proxyPreferencePath(service)
-	if e != nil {
-		return e
+	path, present, fields, err := proxyPreferencePath(service)
+	if err != nil {
+		return err
 	}
-	script, e := proxyPreferenceScript(path, present, fields, kind, v)
-	if e != nil {
-		return e
+	script, err := proxyPreferenceScript(path, present, fields, kind, v)
+	if err != nil {
+		return err
 	}
-	output, e := commandInput("/usr/sbin/scutil", script, "--prefs")
+	output, err := commandInput("/usr/sbin/scutil", script, "--prefs")
 	text := strings.ToLower(string(output))
 	for _, marker := range []string{"failed", "error", "no such", "not valid", "unknown command", "permission"} {
 		if strings.Contains(text, marker) {
 			return fmt.Errorf("SystemConfiguration proxy update failed: %s", output)
 		}
 	}
-	return e
+	return err
 }
 func SystemSettings(c Network, proxy string) (map[string]string, error) {
 	out := map[string]string{}
@@ -124,17 +124,17 @@ func SystemSettings(c Network, proxy string) (map[string]string, error) {
 	// A PAC/WPAD can override manual endpoints; report conflict instead of
 	// silently claiming system takeover.
 	for _, kind := range []string{"autoproxyurl", "proxyautodiscovery"} {
-		b, e := command("/usr/sbin/networksetup", "-get"+kind, service)
-		if e != nil {
-			return nil, e
+		b, err := command("/usr/sbin/networksetup", "-get"+kind, service)
+		if err != nil {
+			return nil, err
 		}
 		if strings.Contains(string(b), "Enabled: Yes") || strings.Contains(string(b), "On") {
 			return nil, fmt.Errorf("disable PAC/WPAD before manual system proxy takeover")
 		}
 	}
-	host, port, e := net.SplitHostPort(proxy)
-	if e != nil {
-		return nil, e
+	host, port, err := net.SplitHostPort(proxy)
+	if err != nil {
+		return nil, err
 	}
 	n, _ := strconv.Atoi(port)
 	b, _ := json.Marshal(proxyValue{true, host, n})
@@ -147,16 +147,16 @@ func SystemSettings(c Network, proxy string) (map[string]string, error) {
 // Use one preference dictionary commit per endpoint: disabled/empty prior
 // endpoints can be cleared exactly, and a crash cannot split server/port/state.
 func proxyPreferencePath(service string) (string, bool, map[string]json.RawMessage, error) {
-	b, e := command("/usr/bin/plutil", "-extract", "NetworkServices", "json", "-o", "-", "/Library/Preferences/SystemConfiguration/preferences.plist")
-	if e != nil {
-		return "", false, nil, e
+	b, err := command("/usr/bin/plutil", "-extract", "NetworkServices", "json", "-o", "-", "/Library/Preferences/SystemConfiguration/preferences.plist")
+	if err != nil {
+		return "", false, nil, err
 	}
 	var services map[string]struct {
 		UserDefinedName string
 		Proxies         map[string]json.RawMessage
 	}
-	if e = json.Unmarshal(b, &services); e != nil {
-		return "", false, nil, e
+	if err = json.Unmarshal(b, &services); err != nil {
+		return "", false, nil, err
 	}
 	for id, v := range services {
 		if v.UserDefinedName != service {

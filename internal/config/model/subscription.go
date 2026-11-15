@@ -18,8 +18,8 @@ func ValidSubscription(s *Subscription) error {
 			return errors.New("subscription URL reference is empty")
 		}
 	} else {
-		u, e := url.Parse(s.URL)
-		if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Fragment != "" {
+		u, err := url.Parse(s.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Fragment != "" {
 			return errors.New("subscription URL must be HTTP(S) or a secret reference")
 		}
 	}

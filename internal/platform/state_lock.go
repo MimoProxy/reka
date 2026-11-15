@@ -15,17 +15,21 @@ type StateLock struct {
 }
 
 func LockStateRoot(root string) (*StateLock, error) {
-	if e := os.MkdirAll(root, 0700); e != nil {
-		return nil, e
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return nil, err
 	}
-	f, e := os.OpenFile(filepath.Join(root, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if e != nil {
-		return nil, e
+	f, err := os.OpenFile(filepath.Join(root, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
 	}
-	if e = lockStateFile(f); e != nil {
+	if err = lockStateFile(f); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("state root is already in use or cannot be locked: %w", e)
+		return nil, fmt.Errorf("state root is already in use or cannot be locked: %w", err)
 	}
 	return &StateLock{file: f}, nil
 }
-func (l *StateLock) Close() error { var e error; l.once.Do(func() { e = l.file.Close() }); return e }
+func (l *StateLock) Close() error {
+	var err error
+	l.once.Do(func() { err = l.file.Close() })
+	return err
+}

@@ -1,12 +1,10 @@
-package control
+package api
 
 import (
 	"encoding/json"
 	"errors"
 	"net"
 	"sync"
-
-	"github.com/MimoProxy/reka/internal/config/service"
 )
 
 // Client is a control API client. Calls may be made concurrently; events
@@ -18,7 +16,7 @@ type Client struct {
 	nextID  uint64
 	pending map[uint64]chan Message
 	err     error
-	Events  chan service.Event
+	Events  chan Event
 	Hello   HelloResult
 	done    chan struct{}
 }
@@ -34,7 +32,7 @@ func Connect(addr, name string) (*Client, error) {
 
 // NewClient starts a client on an established connection.
 func NewClient(conn net.Conn, name string) (*Client, error) {
-	c := &Client{conn: conn, pending: map[uint64]chan Message{}, Events: make(chan service.Event, 256), done: make(chan struct{})}
+	c := &Client{conn: conn, pending: map[uint64]chan Message{}, Events: make(chan Event, 256), done: make(chan struct{})}
 	go c.read()
 	if err := c.Call("Hello", HelloParams{Versions: []int{APIVersion}, Client: name}, &c.Hello); err != nil {
 		conn.Close()
@@ -83,10 +81,10 @@ func (c *Client) read() {
 }
 
 // ErrClosed is returned for calls on a closed connection.
-var ErrClosed = errors.New("control: connection closed")
+var ErrClosed = errors.New("api: connection closed")
 
 // Call sends a request and decodes the result into out (may be nil). A
-// server-side error is returned as *service.Error.
+// server-side error is returned as *Error.
 func (c *Client) Call(method string, params, out any) error {
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -130,4 +128,7 @@ func (c *Client) Close() error {
 	return err
 }
 
-func withDropped(ev service.Event, n uint64) service.Event { ev.Dropped += n; return ev }
+func withDropped(ev Event, n uint64) Event {
+	ev.Dropped += n
+	return ev
+}

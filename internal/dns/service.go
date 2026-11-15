@@ -39,8 +39,8 @@ type Service struct {
 }
 
 func New(c Config, o Options) (*Service, error) {
-	if e := Validate(&c); e != nil {
-		return nil, e
+	if err := Validate(&c); err != nil {
+		return nil, err
 	}
 	if c.CacheSize == 0 {
 		c.CacheSize = 4096
@@ -115,9 +115,9 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	for _, typ := range types {
 		q := new(D.Msg)
 		q.SetQuestion(D.Fqdn(domain), typ)
-		m, e := s.Exchange(ctx, q, scope, false)
-		if e != nil {
-			last = e
+		m, err := s.Exchange(ctx, q, scope, false)
+		if err != nil {
+			last = err
 			continue
 		}
 		for _, rr := range m.Answer {
@@ -204,9 +204,9 @@ func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake boo
 				r = s.cfg.FakeRange6
 			}
 			prefix, _ := netip.ParsePrefix(r)
-			ip, e := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix, time.Duration(s.cfg.TTL)*time.Second)
-			if e != nil {
-				return nil, e
+			ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix, time.Duration(s.cfg.TTL)*time.Second)
+			if err != nil {
+				return nil, err
 			}
 			m := reply()
 			m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(s.cfg.TTL))}
@@ -361,9 +361,9 @@ func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake boo
 func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope string) (*D.Msg, error) {
 	var last error
 	for _, raw := range servers {
-		ep, e := ParseEndpoint(raw)
-		if e != nil {
-			return nil, e
+		ep, err := ParseEndpoint(raw)
+		if err != nil {
+			return nil, err
 		}
 		if ep.Scheme == "system" {
 			if s.opts.System == nil {
@@ -374,9 +374,9 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 				last = errors.New("system resolver supports address lookups only")
 				continue
 			}
-			a, e := s.opts.System(ctx, strings.TrimSuffix(q.Question[0].Name, "."))
-			if e != nil {
-				last = e
+			a, err := s.opts.System(ctx, strings.TrimSuffix(q.Question[0].Name, "."))
+			if err != nil {
+				last = err
 				continue
 			}
 			m := new(D.Msg)
@@ -398,16 +398,16 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 		if s.opts.Exchange == nil {
 			return nil, errors.New("DNS exchange unavailable")
 		}
-		m, e := s.opts.Exchange(ctx, ep, q, func(ctx context.Context, d string) ([]netip.Addr, error) {
+		m, err := s.opts.Exchange(ctx, ep, q, func(ctx context.Context, d string) ([]netip.Addr, error) {
 			if scope == "bootstrap" {
 				return nil, errors.New("DNS bootstrap cycle")
 			}
 			return s.Lookup(ctx, d, "bootstrap")
 		})
-		if e == nil && m != nil {
+		if err == nil && m != nil {
 			return m, nil
 		}
-		last = e
+		last = err
 	}
 	if last == nil {
 		last = errors.New("no DNS upstream")

@@ -158,57 +158,6 @@ func NewEngine(opts EngineOptions) *Engine {
 // ProcessLookup reports whether process-name rules can match here.
 func (e *Engine) ProcessLookup() bool { return e.backend.CanFindProcess() }
 
-// Change actions in a plan.
-const (
-	ActionKeep    = "keep"
-	ActionCreate  = "create"
-	ActionReplace = "replace"
-	ActionRemove  = "remove"
-	ActionRebind  = "rebind"
-	ActionRestart = "restart"
-)
-
-// ResourceChange is one line of an impact plan.
-type ResourceChange struct {
-	ID     string `json:"id"`
-	Action string `json:"action"`
-	// Connections is how many connections use the instance being replaced
-	// or removed; they keep running on it while it drains.
-	Connections int64  `json:"connections,omitempty"`
-	Listen      string `json:"listen,omitempty"`
-	Note        string `json:"note,omitempty"`
-}
-
-// GroupChange is a selection change.
-type GroupChange struct {
-	ID   string `json:"id"`
-	From string `json:"from,omitempty"`
-	To   string `json:"to"`
-}
-
-// Plan describes what activating a configuration changes. Nothing in it
-// has happened yet.
-type Plan struct {
-	NetworkChanged         bool             `json:"network_changed"`
-	NetworkNote            string           `json:"network_note,omitempty"`
-	DNSChanged             bool             `json:"dns_changed"`
-	AutomaticGroupsChanged bool             `json:"automatic_groups_changed"`
-	Outbounds              []ResourceChange `json:"outbounds"`
-	Listeners              []ResourceChange `json:"listeners"`
-	RulesChanged           bool             `json:"rules_changed"`
-	Rules                  int              `json:"rules"`
-	Groups                 []GroupChange    `json:"groups,omitempty"`
-	LogLevel               string           `json:"log_level,omitempty"`
-	// RestartRequired lists settings that only take effect after the
-	// process restarts.
-	RestartRequired []string `json:"restart_required,omitempty"`
-	// Draining is the number of instances that will be draining after the
-	// switch; Blocked is set when that exceeds the limit.
-	Draining   int    `json:"draining"`
-	Blocked    string `json:"blocked,omitempty"`
-	Interrupts bool   `json:"interrupts,omitempty"`
-}
-
 // ErrBlocked is returned when a commit would leave too many instances
 // draining.
 var ErrBlocked = errors.New("too many replaced outbounds are still draining; wait for their connections to end or close them")
@@ -610,6 +559,21 @@ func parseLevel(s string) slog.Level {
 	return slog.LevelInfo
 }
 
+// usesUpstreamOutbound reports whether an outbound is built from the
+// upstream protocol packages with generic options: the protocols added for
+// subscriptions, and VLESS with a transport or multiplex but without
+// REALITY (REALITY uses Reka's own client).
+func usesUpstreamOutbound(o compile.Outbound) bool {
+	switch o.Type {
+	case "vmess", "trojan", "hysteria2", "tuic", "snell":
+		return true
+	case "vless":
+		hasExtras := o.Transport != nil || o.Multiplex != nil
+		return hasExtras && (o.TLS == nil || o.TLS.Reality == nil)
+	}
+	return false
+}
+
 func specFor(o compile.Outbound) any {
 	tls := func() *sagernet.TLSSpec {
 		if o.TLS == nil {
@@ -621,10 +585,11 @@ func specFor(o compile.Outbound) any {
 		}
 		return t
 	}
-	if o.Type == "vmess" || o.Type == "trojan" || o.Type == "hysteria2" || o.Type == "tuic" || o.Type == "snell" || o.Type == "vless" && (o.Transport != nil || o.Multiplex != nil) && (o.TLS == nil || o.TLS.Reality == nil) {
-
-		raw := protocolOptions(o)
-		return sagernet.ProxySpec{Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, TLS: tls(), Options: raw}
+	if usesUpstreamOutbound(o) {
+		return sagernet.ProxySpec{
+			Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password,
+			TLS: tls(), Options: protocolOptions(o),
+		}
 	}
 	switch o.Type {
 	case model.OutboundHTTP:
@@ -637,18 +602,6 @@ func specFor(o compile.Outbound) any {
 		return sagernet.VLESSSpec{Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls(), Options: protocolOptions(o)}
 	}
 	return sagernet.DirectSpec{}
-}
-
-// FlowInfo is attached to every routed connection.
-type FlowInfo struct {
-	Generation  uint64   `json:"generation"`
-	Revision    uint64   `json:"revision"`
-	RuleIndex   int      `json:"rule_index"`
-	RuleID      string   `json:"rule_id,omitempty"`
-	Rule        string   `json:"rule,omitempty"`
-	Chain       []string `json:"chain,omitempty"`
-	Outbound    string   `json:"outbound"`
-	Fingerprint string   `json:"fingerprint"`
 }
 
 // lookupEnv resolves and finds processes for one connection; results are
@@ -804,40 +757,6 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 	return result
 }
 
-// ExplainRequest describes a hypothetical connection.
-type ExplainRequest struct {
-	Inbound string `json:"inbound,omitempty"`
-	Network string `json:"network,omitempty"`
-	Source  string `json:"source,omitempty"`
-	// Destination is "host:port" or "address:port".
-	Destination string `json:"destination"`
-	// Addresses are used for ip rules instead of resolving the domain.
-	Addresses []string `json:"addresses,omitempty"`
-	// Resolve allows a DNS lookup when an ip rule needs one. Without it
-	// the explanation stops there and says so.
-	Resolve bool `json:"resolve,omitempty"`
-	// Process stands in for the owning process.
-	Process string `json:"process,omitempty"`
-}
-
-// Explanation is the answer to ExplainRoute.
-type Explanation struct {
-	Generation   uint64   `json:"generation"`
-	Revision     uint64   `json:"revision"`
-	Matched      bool     `json:"matched"`
-	RuleIndex    int      `json:"rule_index"`
-	RuleID       string   `json:"rule_id,omitempty"`
-	Rule         string   `json:"rule,omitempty"`
-	Final        bool     `json:"final,omitempty"`
-	Chain        []string `json:"chain,omitempty"`
-	Outbound     string   `json:"outbound,omitempty"`
-	OutboundType string   `json:"outbound_type,omitempty"`
-	Fingerprint  string   `json:"fingerprint,omitempty"`
-	Resolved     []string `json:"resolved,omitempty"`
-	ResolveError string   `json:"resolve_error,omitempty"`
-	Undetermined string   `json:"undetermined,omitempty"`
-}
-
 type explainEnv struct {
 	addrs   []netip.Addr
 	resolve bool
@@ -925,20 +844,6 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 	return out, nil
 }
 
-// Connection is one active connection for listings.
-type Connection struct {
-	ID          uint64    `json:"id"`
-	Inbound     string    `json:"inbound"`
-	Network     string    `json:"network"`
-	Source      string    `json:"source"`
-	Destination string    `json:"destination"`
-	Outbound    string    `json:"outbound"`
-	Start       time.Time `json:"start"`
-	Upload      int64     `json:"upload"`
-	Download    int64     `json:"download"`
-	FlowInfo
-}
-
 // Connections lists active connections.
 func (e *Engine) Connections() []Connection {
 	cs := e.backend.Connections()
@@ -959,19 +864,6 @@ func (e *Engine) Connections() []Connection {
 
 // CloseConnections closes connections by ID (all when ids is nil).
 func (e *Engine) CloseConnections(ids []uint64) int { return e.backend.CloseConnections(ids) }
-
-// Status is a summary of the running state.
-type Status struct {
-	Network     platform.NetworkStatus `json:"network"`
-	Generation  uint64                 `json:"generation"`
-	Revision    uint64                 `json:"revision"`
-	Connections int                    `json:"connections"`
-	Outbounds   []string               `json:"outbounds"`
-	Listeners   []ResourceChange       `json:"listeners"`
-	Draining    int64                  `json:"draining"`
-	Forced      int64                  `json:"forced_closes"`
-	Retries     int64                  `json:"acquire_retries"`
-}
 
 // Status reports the running state.
 func (e *Engine) Status() Status {
@@ -1121,7 +1013,14 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		values["transport"] = transport
 	}
 	if m := o.Multiplex; m != nil {
-		values["multiplex"] = map[string]any{"enabled": m.Enabled, "protocol": m.Protocol, "max_connections": m.MaxConnections, "min_streams": m.MinStreams, "max_streams": m.MaxStreams, "padding": m.Padding}
+		values["multiplex"] = map[string]any{
+			"enabled":         m.Enabled,
+			"protocol":        m.Protocol,
+			"max_connections": m.MaxConnections,
+			"min_streams":     m.MinStreams,
+			"max_streams":     m.MaxStreams,
+			"padding":         m.Padding,
+		}
 	}
 	raw, _ := json.Marshal(values)
 	return raw
@@ -1153,8 +1052,16 @@ func (e *Engine) SubscriptionClient() *http.Client {
 	})
 }
 
-func (e *Engine) SetTUNFD(fd int)   { e.mu.Lock(); defer e.mu.Unlock(); e.opts.TUNFD = fd }
-func (e *Engine) TUNSerial() uint64 { e.mu.Lock(); defer e.mu.Unlock(); return e.tunSerial }
+func (e *Engine) SetTUNFD(fd int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.opts.TUNFD = fd
+}
+func (e *Engine) TUNSerial() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tunSerial
+}
 func (e *Engine) RebuildTUN() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

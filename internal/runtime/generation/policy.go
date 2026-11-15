@@ -80,7 +80,7 @@ func (g *generation) resolveObserved(dec *router.Decision, md router.Metadata, t
 		return
 	}
 	key := md.Domain
-	if host, e := publicsuffix.EffectiveTLDPlusOne(md.Domain); e == nil {
+	if host, err := publicsuffix.EffectiveTLDPlusOne(md.Domain); err == nil {
 		key = host
 	} else if md.Addr.IsValid() {
 		key = md.Addr.String()

@@ -23,8 +23,8 @@ import (
 )
 
 func main() {
-	if e := run(); e != nil {
-		fmt.Fprintln(os.Stderr, e)
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
@@ -98,16 +98,16 @@ dns:
 	client := &http.Client{Transport: tr, Timeout: 15 * time.Second}
 	url := "https://" + netip.AddrPortFrom(netip.MustParseAddr(*v4), 443).String() + "/resolve?name=one.one.one.one&type=1"
 	get := func() error {
-		res, e := client.Get(url)
-		if e != nil {
-			return e
+		res, err := client.Get(url)
+		if err != nil {
+			return err
 		}
 		defer res.Body.Close()
-		_, e = io.Copy(io.Discard, res.Body)
+		_, err = io.Copy(io.Discard, res.Body)
 		if res.StatusCode != 200 {
 			return fmt.Errorf("HTTP %d", res.StatusCode)
 		}
-		return e
+		return err
 	}
 	if e = get(); e != nil {
 		return fmt.Errorf("initial HTTPS: %w", e)
@@ -158,9 +158,9 @@ func checkDNS(ip string, fixture bool) error {
 			q.SetQuestion("one.one.one.one.", D.TypeA)
 		}
 		cl := &D.Client{Net: network, Timeout: 5 * time.Second}
-		m, _, e := cl.Exchange(q, netip.AddrPortFrom(netip.MustParseAddr(ip), 53).String())
-		if e != nil {
-			return fmt.Errorf("%s DNS %s: %w", network, ip, e)
+		m, _, err := cl.Exchange(q, netip.AddrPortFrom(netip.MustParseAddr(ip), 53).String())
+		if err != nil {
+			return fmt.Errorf("%s DNS %s: %w", network, ip, err)
 		}
 		if !fixture {
 			if m.Rcode != D.RcodeSuccess || len(m.Answer) == 0 {

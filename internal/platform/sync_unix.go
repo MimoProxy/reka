@@ -5,9 +5,9 @@ package platform
 import "os"
 
 func syncDirectory(path string) error {
-	f, e := os.Open(path)
-	if e != nil {
-		return e
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
 	defer f.Close()
 	return f.Sync()

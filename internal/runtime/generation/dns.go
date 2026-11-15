@@ -53,11 +53,11 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 	route := func(ctx context.Context, ep RD.Endpoint) string {
 		host := ep.Host
 		var addr netip.Addr
-		if a, e := netip.ParseAddr(host); e == nil {
+		if a, err := netip.ParseAddr(host); err == nil {
 			addr = a
 		} else {
-			ips, e := resolver.Lookup(ctx, host, "bootstrap")
-			if e != nil || len(ips) == 0 {
+			ips, err := resolver.Lookup(ctx, host, "bootstrap")
+			if err != nil || len(ips) == 0 {
 				return ""
 			}
 			addr = ips[0]
@@ -72,8 +72,8 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 			return ""
 		}
 		if p.policies != nil {
-			out, _, e := p.eff.Router.ResolveDynamic(dec.Target, func(g router.Group) string { return p.policies.Choose(g.ID, "DNS:"+ep.Host, g.Selected) })
-			if e != nil {
+			out, _, err := p.eff.Router.ResolveDynamic(dec.Target, func(g router.Group) string { return p.policies.Choose(g.ID, "DNS:"+ep.Host, g.Selected) })
+			if err != nil {
 				return ""
 			}
 			return out

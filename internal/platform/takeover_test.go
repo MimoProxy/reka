@@ -26,16 +26,16 @@ func TestTakeoverReuseRollbackOwnership(t *testing.T) {
 		starts++
 		return fakeTun{&closes}, "test", nil
 	}}
-	k, e := NewTakeover(filepath.Join(t.TempDir(), "state"), h)
-	if e != nil {
-		t.Fatal(e)
+	k, err := NewTakeover(filepath.Join(t.TempDir(), "state"), h)
+	if err != nil {
+		t.Fatal(err)
 	}
 	c := Network{Mode: "tun"}
-	if e = k.Apply(c, ""); e != nil {
-		t.Fatal(e)
+	if err = k.Apply(c, ""); err != nil {
+		t.Fatal(err)
 	}
-	if e = k.Apply(c, ""); e != nil {
-		t.Fatal(e)
+	if err = k.Apply(c, ""); err != nil {
+		t.Fatal(err)
 	}
 	if starts != 1 || closes != 0 {
 		t.Fatal(starts, closes)
@@ -50,18 +50,18 @@ func TestTakeoverReuseRollbackOwnership(t *testing.T) {
 		t.Fatal(k.Status())
 	}
 	bad = false
-	if e = k.Apply(Network{Mode: "off"}, ""); e != nil {
-		t.Fatal(e)
+	if err = k.Apply(Network{Mode: "off"}, ""); err != nil {
+		t.Fatal(err)
 	}
-	if e = k.Apply(c, ""); e != nil {
-		t.Fatal(e)
+	if err = k.Apply(c, ""); err != nil {
+		t.Fatal(err)
 	}
 	os.m["dns"] = "external"
 	if k.Check() == nil {
 		t.Fatal("missing conflict")
 	}
-	if e = k.Close(); e != nil {
-		t.Fatal(e)
+	if err = k.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if os.m["dns"] != "external" {
 		t.Fatal(os.m)
@@ -72,17 +72,17 @@ func TestDegradedRecoveryCanExplicitlyStop(t *testing.T) {
 	root := t.TempDir()
 	f := &fakeSettings{m: map[string]string{"dns": "before"}}
 	j := &Journal{Path: filepath.Join(root, "network", "ownership.json"), OS: f}
-	if e := j.Apply("dns", "ours"); e != nil {
-		t.Fatal(e)
+	if err := j.Apply("dns", "ours"); err != nil {
+		t.Fatal(err)
 	}
 	f.fail = true
-	k, e := NewTakeover(root, NetworkHooks{Settings: f})
-	if e == nil || k.Status().State != "Degraded" {
-		t.Fatal(e, k.Status())
+	k, err := NewTakeover(root, NetworkHooks{Settings: f})
+	if err == nil || k.Status().State != "Degraded" {
+		t.Fatal(err, k.Status())
 	}
 	f.fail = false
-	if e = k.Apply(Network{Mode: "off"}, ""); e != nil {
-		t.Fatal(e)
+	if err = k.Apply(Network{Mode: "off"}, ""); err != nil {
+		t.Fatal(err)
 	}
 	if k.Status().State != "Stopped" || f.m["dns"] != "before" {
 		t.Fatal(k.Status(), f.m)

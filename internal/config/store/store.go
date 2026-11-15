@@ -24,7 +24,6 @@ import (
 
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
-	"github.com/MimoProxy/reka/internal/secret"
 )
 
 // Revision is the metadata of one stored revision.
@@ -108,7 +107,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return secret.WriteFileAtomic(path, append(b, '\n'), 0o600)
+	return writeAtomic(path, append(b, '\n'))
 }
 
 func readJSON(path string, v any) error {
@@ -120,22 +119,6 @@ func readJSON(path string, v any) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	return nil
-}
-
-func writeSynced(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }
 
 // WriteRevision stores an immutable revision and fills its four content hashes.
@@ -167,17 +150,17 @@ func (s *Store) WriteRevision(rev Revision, profile, local []byte, layers ...[]b
 	defer os.RemoveAll(tmp)
 	meta, _ := json.MarshalIndent(rev, "", "  ")
 	for name, data := range map[string][]byte{"profile.yaml": profile, "local.yaml": local, "sources.yaml": sources, "overlay.yaml": overlay, "meta.json": append(meta, '\n')} {
-		if err := writeSynced(filepath.Join(tmp, name), data); err != nil {
+		if err := writeNew(filepath.Join(tmp, name), data); err != nil {
 			return rev, err
 		}
 	}
-	if err := secret.SyncDir(tmp); err != nil {
+	if err := syncDir(tmp); err != nil {
 		return rev, err
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		return rev, err
 	}
-	return rev, secret.SyncDir(filepath.Join(s.root, "revisions"))
+	return rev, syncDir(filepath.Join(s.root, "revisions"))
 }
 
 // ReadRevision loads a revision and checks its content hashes.
@@ -239,7 +222,7 @@ func (s *Store) DeleteRevision(n uint64) error {
 	if err := os.RemoveAll(s.revDir(n)); err != nil {
 		return err
 	}
-	return secret.SyncDir(filepath.Join(s.root, "revisions"))
+	return syncDir(filepath.Join(s.root, "revisions"))
 }
 
 // RevisionNumbers lists stored revisions in ascending order.
@@ -289,9 +272,13 @@ func (s *Store) ReadActive() (*Active, error) {
 	return &a, nil
 }
 
-// WriteActive records the confirmed active revision.
+// WriteActive records the confirmed active revision and makes it durable
+// (with everything written before it).
 func (s *Store) WriteActive(a Active) error {
-	return writeJSON(filepath.Join(s.root, "active.json"), a)
+	if err := writeJSON(filepath.Join(s.root, "active.json"), a); err != nil {
+		return err
+	}
+	return s.Barrier()
 }
 
 var opIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -306,7 +293,8 @@ func ValidOperationID(id string) error {
 
 func (s *Store) opPath(id string) string { return filepath.Join(s.root, "operations", id+".json") }
 
-// WriteOperation creates or replaces an operation record.
+// WriteOperation creates or replaces an operation record. It is synced but
+// becomes durable only at the next Barrier.
 func (s *Store) WriteOperation(op Operation) error {
 	if err := ValidOperationID(op.ID); err != nil {
 		return err

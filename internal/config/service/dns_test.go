@@ -10,9 +10,9 @@ import (
 )
 
 func TestDNSListenersSourceCacheAndFakeReload(t *testing.T) {
-	socket, e := net.ListenPacket("udp", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
+	socket, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
 	up := &D.Server{PacketConn: socket, Handler: D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		m := new(D.Msg)
@@ -31,9 +31,9 @@ func TestDNSListenersSourceCacheAndFakeReload(t *testing.T) {
 	q := new(D.Msg)
 	q.SetQuestion("fake.test.", D.TypeA)
 	client := &D.Client{Net: "udp"}
-	m, _, e := client.Exchange(q, fmt.Sprintf("127.0.0.1:%d", port))
-	if e != nil || len(m.Answer) != 1 {
-		t.Fatal(m, e)
+	m, _, err := client.Exchange(q, fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil || len(m.Answer) != 1 {
+		t.Fatal(m, err)
 	}
 	old := m.Answer[0].(*D.A).A.String()
 	if !strings.HasPrefix(old, "198.18.") {
@@ -41,20 +41,20 @@ func TestDNSListenersSourceCacheAndFakeReload(t *testing.T) {
 	}
 	profile = strings.Replace(profile, "198.18.0.0/29", "198.19.0.0/29", 1)
 	mustLayerCommit(t, s, ChangeRequest{BaseRevision: s.ActiveRevision(), Profile: &profile})
-	m, _, e = client.Exchange(q, fmt.Sprintf("127.0.0.1:%d", port))
-	if e != nil || !strings.HasPrefix(m.Answer[0].(*D.A).A.String(), "198.19.") {
-		t.Fatal(m, e)
+	m, _, err = client.Exchange(q, fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil || !strings.HasPrefix(m.Answer[0].(*D.A).A.String(), "198.19.") {
+		t.Fatal(m, err)
 	}
 	// TCP listener uses the same generation and policy; real lookups bypass Fake IP.
-	m, e = s.Engine().ExchangeDNS(context.Background(), q)
-	if e != nil || len(m.Answer) != 1 {
-		t.Fatal(m, e)
+	m, err = s.Engine().ExchangeDNS(context.Background(), q)
+	if err != nil || len(m.Answer) != 1 {
+		t.Fatal(m, err)
 	}
 	profile = strings.Replace(profile, "enhanced-mode: fake-ip", "enhanced-mode: redir-host", 1)
 	mustLayerCommit(t, s, ChangeRequest{BaseRevision: s.ActiveRevision(), Profile: &profile})
 	client.Net = "tcp"
-	m, _, e = client.Exchange(q, fmt.Sprintf("127.0.0.1:%d", port))
-	if e != nil || m.Answer[0].(*D.A).A.String() != "127.0.0.1" {
-		t.Fatal("real upstream exchange", m, e)
+	m, _, err = client.Exchange(q, fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil || m.Answer[0].(*D.A).A.String() != "127.0.0.1" {
+		t.Fatal("real upstream exchange", m, err)
 	}
 }

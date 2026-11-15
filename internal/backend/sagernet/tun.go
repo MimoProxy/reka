@@ -75,36 +75,36 @@ func (b *Backend) NewTUN(c platform.TUNConfig, fd int, g *SocketGuard, dns func(
 			opts.DNSMode = tun.DNSModeHijack
 		}
 	}
-	var e error
+	var err error
 	if runtime.GOOS == "android" {
-		opts.FileDescriptor, e = duplicateTUNFD(fd)
-		if e != nil {
+		opts.FileDescriptor, err = duplicateTUNFD(fd)
+		if err != nil {
 			cancel()
-			return nil, "", e
+			return nil, "", err
 		}
 	}
-	t.dev, e = tun.New(opts)
-	if e != nil {
+	t.dev, err = tun.New(opts)
+	if err != nil {
 		if runtime.GOOS == "android" {
 			closeTUNFD(opts.FileDescriptor)
 		}
 		cancel()
-		return nil, "", e
+		return nil, "", err
 	}
 	t.name, _ = t.dev.Name()
 	if g.ifMon != nil {
 		g.ifMon.RegisterMyInterface(t.name)
 	}
-	t.stack, e = tun.NewStack(c.Stack, tun.StackOptions{Context: ctx, Tun: t.dev, TunOptions: opts, Handler: t, Logger: opts.Logger, UDPTimeout: 60 * time.Second, ForwarderBindInterface: runtime.GOOS == "darwin", InterfaceFinder: g.finder})
-	if e == nil {
-		e = t.stack.Start()
+	t.stack, err = tun.NewStack(c.Stack, tun.StackOptions{Context: ctx, Tun: t.dev, TunOptions: opts, Handler: t, Logger: opts.Logger, UDPTimeout: 60 * time.Second, ForwarderBindInterface: runtime.GOOS == "darwin", InterfaceFinder: g.finder})
+	if err == nil {
+		err = t.stack.Start()
 	}
-	if e == nil {
-		e = t.dev.Start()
+	if err == nil {
+		err = t.dev.Start()
 	}
-	if e != nil {
+	if err != nil {
 		t.Close()
-		return nil, "", e
+		return nil, "", err
 	}
 	return t, t.name, nil
 }
@@ -122,7 +122,7 @@ func (t *TUNInbound) Close() error {
 }
 func (t *TUNInbound) self(a netip.Addr) bool {
 	for _, s := range []string{t.cfg.Address4, t.cfg.Address6} {
-		if p, e := netip.ParsePrefix(s); e == nil && p.Addr() == a.Unmap() {
+		if p, err := netip.ParsePrefix(s); err == nil && p.Addr() == a.Unmap() {
 			return true
 		}
 	}
@@ -150,23 +150,23 @@ func (t *TUNInbound) NewDNSPacket(payload []byte, source, dest M.Socksaddr, writ
 	go func() {
 		defer t.wg.Done()
 		defer func() { <-t.slots }()
-		if b, e := t.answer(p); e == nil {
+		if b, err := t.answer(p); err == nil {
 			_ = writer.WritePacket(buf.As(b), dest)
 		}
 	}()
 }
 func (t *TUNInbound) answer(p []byte) ([]byte, error) {
 	q := new(D.Msg)
-	if e := q.Unpack(p); e != nil {
-		return nil, e
+	if err := q.Unpack(p); err != nil {
+		return nil, err
 	}
 	if q.Response || len(q.Question) != 1 {
 		return nil, errors.New("invalid DNS question")
 	}
 	ctx, cancel := context.WithTimeout(t.ctx, 6*time.Second)
 	defer cancel()
-	m, e := t.dns(ctx, q)
-	if e != nil {
+	m, err := t.dns(ctx, q)
+	if err != nil {
 		m = new(D.Msg)
 		m.SetRcode(q, D.RcodeServerFailure)
 	}
@@ -196,16 +196,16 @@ func (t *TUNInbound) NewConnectionEx(ctx context.Context, c net.Conn, src, dst M
 			_ = c.SetDeadline(time.Now().Add(6 * time.Second))
 			dc := &D.Conn{Conn: c}
 			for {
-				q, e := dc.ReadMsg()
-				if e != nil {
+				q, err := dc.ReadMsg()
+				if err != nil {
 					return
 				}
-				p, e := q.Pack()
-				if e != nil {
+				p, err := q.Pack()
+				if err != nil {
 					return
 				}
-				p, e = t.answer(p)
-				if e != nil {
+				p, err = t.answer(p)
+				if err != nil {
 					return
 				}
 				m := new(D.Msg)
@@ -243,15 +243,15 @@ func (t *TUNInbound) NewPacketConnectionEx(ctx context.Context, c N.PacketConn, 
 			for {
 				_ = c.SetReadDeadline(time.Now().Add(6 * time.Second))
 				b := buf.NewPacket()
-				to, e := c.ReadPacket(b)
-				if e != nil {
+				to, err := c.ReadPacket(b)
+				if err != nil {
 					b.Release()
 					return
 				}
-				p, e := t.answer(b.Bytes())
+				p, err := t.answer(b.Bytes())
 				b.Release()
-				if e == nil {
-					if e = c.WritePacket(buf.As(p), to); e != nil {
+				if err == nil {
+					if err = c.WritePacket(buf.As(p), to); err != nil {
 						return
 					}
 				}

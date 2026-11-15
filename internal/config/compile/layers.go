@@ -72,7 +72,15 @@ func (c *compiler) layers(profile []byte) {
 	}
 	addDiag := func(doc, path, code, message string, positions model.Positions) {
 		pos := positions[path]
-		c.diags = append(c.diags, model.Diagnostic{Severity: model.SeverityError, Code: code, Document: doc, Path: path, Line: pos.Line, Column: pos.Column, Message: message})
+		c.diags = append(c.diags, model.Diagnostic{
+			Severity: model.SeverityError,
+			Code:     code,
+			Document: doc,
+			Path:     path,
+			Line:     pos.Line,
+			Column:   pos.Column,
+			Message:  message,
+		})
 	}
 	sourceDoc, _ := model.LoadDoc(model.DocSources, c.opts.Sources)
 	doc, _ := model.LoadDoc(model.DocProfile, profile)
@@ -165,7 +173,14 @@ func (c *compiler) layers(profile []byte) {
 		dest := model.JoinPath("", kind, newID)
 		for p, pos := range resourcePositions[old] {
 			if p == old || strings.HasPrefix(p, old+"/") {
-				c.origins[dest+strings.TrimPrefix(p, old)] = Origin{Layer: LayerSource, Source: srcID, Document: model.DocSources, Path: p, Line: pos.Line, Column: pos.Column}
+				c.origins[dest+strings.TrimPrefix(p, old)] = Origin{
+					Layer:    LayerSource,
+					Source:   srcID,
+					Document: model.DocSources,
+					Path:     p,
+					Line:     pos.Line,
+					Column:   pos.Column,
+				}
 			}
 		}
 	}
@@ -297,7 +312,14 @@ func (c *compiler) layers(profile []byte) {
 				}
 				for path, pos := range spos {
 					if path == sourcePrefix || strings.HasPrefix(path, sourcePrefix+"/") {
-						c.origins["/dns"+strings.TrimPrefix(path, sourcePrefix)] = Origin{Layer: LayerSource, Document: model.DocSources, Source: from.Value, Path: path, Line: pos.Line, Column: pos.Column}
+						c.origins["/dns"+strings.TrimPrefix(path, sourcePrefix)] = Origin{
+							Layer:    LayerSource,
+							Document: model.DocSources,
+							Source:   from.Value,
+							Path:     path,
+							Line:     pos.Line,
+							Column:   pos.Column,
+						}
 					}
 				}
 

@@ -103,47 +103,47 @@ func TestProtocolInteroperability(t *testing.T) {
 			raw, _ := json.Marshal(base)
 			server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
 				var in adapter.Inbound
-				var e error
+				var err error
 				logger := b.componentLogger("inbound", tc.typ, "test")
 				switch tc.typ {
 				case "vmess":
 					var o option.VMessInboundOptions
-					e = json.Unmarshal(raw, &o)
-					if e == nil {
-						in, e = vmess.NewInbound(b.ctx, b.router, logger, "test", o)
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = vmess.NewInbound(b.ctx, b.router, logger, "test", o)
 					}
 				case "trojan":
 					var o option.TrojanInboundOptions
-					e = json.Unmarshal(raw, &o)
-					if e == nil {
-						in, e = trojan.NewInbound(b.ctx, b.router, logger, "test", o)
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = trojan.NewInbound(b.ctx, b.router, logger, "test", o)
 					}
 				case "vless":
 					var o option.VLESSInboundOptions
-					e = json.Unmarshal(raw, &o)
-					if e == nil {
-						in, e = vless.NewInbound(b.ctx, b.router, logger, "test", o)
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = vless.NewInbound(b.ctx, b.router, logger, "test", o)
 					}
 				case "hysteria2":
 					var o option.Hysteria2InboundOptions
-					e = json.Unmarshal(raw, &o)
-					if e == nil {
-						in, e = hysteria2.NewInbound(b.ctx, b.router, logger, "test", o)
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = hysteria2.NewInbound(b.ctx, b.router, logger, "test", o)
 					}
 				case "tuic":
 					var o option.TUICInboundOptions
-					e = json.Unmarshal(raw, &o)
-					if e == nil {
-						in, e = tuic.NewInbound(b.ctx, b.router, logger, "test", o)
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = tuic.NewInbound(b.ctx, b.router, logger, "test", o)
 					}
 				case "snell":
 					var o option.SnellInboundOptions
-					e = json.Unmarshal(raw, &o)
-					if e == nil {
-						in, e = snell.NewInbound(b.ctx, b.router, logger, "test", o)
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = snell.NewInbound(b.ctx, b.router, logger, "test", o)
 					}
 				}
-				return in, tc.typ, e
+				return in, tc.typ, err
 			})
 			if err != nil {
 				t.Fatal("server", err)
@@ -245,9 +245,9 @@ func TestRealityTransportAndMux(t *testing.T) {
 			target.StartTLS()
 			defer target.Close()
 			address := netip.MustParseAddrPort(target.Listener.Addr().String())
-			private, e := ecdh.X25519().GenerateKey(rand.Reader)
-			if e != nil {
-				t.Fatal(e)
+			private, err := ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
 			}
 			opts := map[string]any{}
 			var transport json.RawMessage
@@ -262,31 +262,31 @@ func TestRealityTransportAndMux(t *testing.T) {
 				opts["transport"] = value
 			}
 			port := freePort(t)
-			server, e := StartRealityServer(RealityServerOptions{Listen: loopback(port), UUID: testUUID, ServerName: "reality.test", Target: address, PrivateKey: private.Bytes(), ShortID: "abcd", Transport: transport, Multiplex: typ == "smux"}, testLogger(t))
-			if e != nil {
-				t.Fatal(e)
+			server, err := StartRealityServer(RealityServerOptions{Listen: loopback(port), UUID: testUUID, ServerName: "reality.test", Target: address, PrivateKey: private.Bytes(), ShortID: "abcd", Transport: transport, Multiplex: typ == "smux"}, testLogger(t))
+			if err != nil {
+				t.Fatal(err)
 			}
 			defer server.Close()
 			b := New(Options{Logger: testLogger(t)})
 			defer b.Close()
 			raw, _ := json.Marshal(opts)
-			out, e := b.NewOutbound("reality", VLESSSpec{Server: "127.0.0.1", Port: port, UUID: testUUID, TLS: &TLSSpec{ServerName: "reality.test", Fingerprint: "chrome", Reality: &RealitySpec{PublicKey: base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()), ShortID: "abcd"}}, Options: raw})
-			if e != nil {
-				t.Fatal(e)
+			out, err := b.NewOutbound("reality", VLESSSpec{Server: "127.0.0.1", Port: port, UUID: testUUID, TLS: &TLSSpec{ServerName: "reality.test", Fingerprint: "chrome", Reality: &RealitySpec{PublicKey: base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()), ShortID: "abcd"}}, Options: raw})
+			if err != nil {
+				t.Fatal(err)
 			}
 			defer out.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			conn, e := out.Dial(ctx, "tcp", echoServer(t).String())
-			if e != nil {
-				t.Fatal(e)
+			conn, err := out.Dial(ctx, "tcp", echoServer(t).String())
+			if err != nil {
+				t.Fatal(err)
 			}
 			defer conn.Close()
 			conn.SetDeadline(time.Now().Add(5 * time.Second))
 			conn.Write([]byte("reality-transport"))
 			got := make([]byte, len("reality-transport"))
-			if _, e = io.ReadFull(conn, got); e != nil || string(got) != "reality-transport" {
-				t.Fatal(e, string(got))
+			if _, err = io.ReadFull(conn, got); err != nil || string(got) != "reality-transport" {
+				t.Fatal(err, string(got))
 			}
 		})
 	}

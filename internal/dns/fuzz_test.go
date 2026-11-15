@@ -21,23 +21,23 @@ func FuzzDNSMessages(f *testing.F) {
 		if q.Unpack(b) != nil {
 			return
 		}
-		s, e := New(Config{Nameservers: []string{"223.5.5.5"}, CacheSize: 16}, Options{Exchange: func(_ context.Context, _ Endpoint, q *D.Msg, _ func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
+		s, err := New(Config{Nameservers: []string{"223.5.5.5"}, CacheSize: 16}, Options{Exchange: func(_ context.Context, _ Endpoint, q *D.Msg, _ func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
 			m := new(D.Msg)
 			m.SetReply(q)
 			return m, nil
 		}})
-		if e != nil {
-			t.Fatal(e)
+		if err != nil {
+			t.Fatal(err)
 		}
-		m, e := s.Exchange(context.Background(), q, "normal", false)
-		if e == nil {
+		m, err := s.Exchange(context.Background(), q, "normal", false)
+		if err == nil {
 			if m == nil {
 				t.Fatal("nil successful reply")
 			}
-			if wire, e := m.Pack(); e == nil {
+			if wire, err := m.Pack(); err == nil {
 				r := new(D.Msg)
-				if e = r.Unpack(wire); e != nil {
-					t.Fatal(e)
+				if err = r.Unpack(wire); err != nil {
+					t.Fatal(err)
 				}
 			}
 		}

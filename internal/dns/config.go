@@ -59,8 +59,8 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 	if !strings.Contains(raw, "://") {
 		raw = "udp://" + raw
 	}
-	u, e := url.Parse(raw)
-	if e != nil || u.Hostname() == "" || u.User != nil {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.User != nil {
 		return Endpoint{}, fmt.Errorf("invalid DNS endpoint")
 	}
 	switch u.Scheme {
@@ -79,7 +79,7 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 			port = "53"
 		}
 	}
-	if _, e := net.LookupPort("tcp", port); e != nil {
+	if _, err := net.LookupPort("tcp", port); err != nil {
 		return Endpoint{}, fmt.Errorf("invalid DNS port")
 	}
 	if u.Scheme != "https" && (u.Path != "" || u.RawQuery != "") {
@@ -114,21 +114,21 @@ func Validate(c *Config) error {
 		return fmt.Errorf("invalid DNS cache size")
 	}
 	if c.Listen != "" {
-		if _, e := netip.ParseAddrPort(c.Listen); e != nil {
+		if _, err := netip.ParseAddrPort(c.Listen); err != nil {
 			return fmt.Errorf("DNS listen must be IP:port")
 		}
 	}
 	for _, list := range [][]string{c.Bootstrap, c.Proxy, c.Direct, c.Nameservers, c.Fallback} {
 		for _, v := range list {
-			if _, e := ParseEndpoint(v); e != nil {
-				return e
+			if _, err := ParseEndpoint(v); err != nil {
+				return err
 			}
 		}
 	}
 	for _, v := range c.Bootstrap {
 		ep, _ := ParseEndpoint(v)
 		if ep.Scheme != "system" {
-			if _, e := netip.ParseAddr(ep.Host); e != nil {
+			if _, err := netip.ParseAddr(ep.Host); err != nil {
 				return fmt.Errorf("bootstrap DNS endpoint must be an IP")
 			}
 		}
@@ -149,14 +149,14 @@ func Validate(c *Config) error {
 		}
 		seen[p.ID] = true
 		for _, v := range p.Servers {
-			if _, e := ParseEndpoint(v); e != nil {
-				return e
+			if _, err := ParseEndpoint(v); err != nil {
+				return err
 			}
 		}
 	}
 	for _, v := range c.Filter.IPCIDR {
-		if _, e := netip.ParsePrefix(v); e != nil {
-			return e
+		if _, err := netip.ParsePrefix(v); err != nil {
+			return err
 		}
 	}
 	for _, h := range c.Hosts {
@@ -164,23 +164,23 @@ func Validate(c *Config) error {
 			return fmt.Errorf("invalid hosts entry")
 		}
 		for _, a := range h.Addresses {
-			if _, e := netip.ParseAddr(a); e != nil {
-				return e
+			if _, err := netip.ParseAddr(a); err != nil {
+				return err
 			}
 		}
 	}
 	for i, r := range []string{c.FakeRange, c.FakeRange6} {
 		if r != "" {
-			p, e := netip.ParsePrefix(r)
-			if e != nil || i == 0 && !p.Addr().Is4() || i == 1 && !p.Addr().Is6() || p.Bits() > p.Addr().BitLen()-2 {
+			p, err := netip.ParsePrefix(r)
+			if err != nil || i == 0 && !p.Addr().Is4() || i == 1 && !p.Addr().Is6() || p.Bits() > p.Addr().BitLen()-2 {
 				return fmt.Errorf("fake range needs at least four addresses")
 			}
 		}
 	}
 	for _, p := range append(append([]string{}, c.FakeFilter...), c.Filter.Domain...) {
 		if !strings.HasPrefix(p, "geosite:") && !strings.HasPrefix(p, "rule-set:") {
-			if e := router.ValidDomainPattern(p); e != nil {
-				return e
+			if err := router.ValidDomainPattern(p); err != nil {
+				return err
 			}
 		}
 	}

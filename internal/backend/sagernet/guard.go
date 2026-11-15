@@ -41,29 +41,29 @@ func (g *SocketGuard) Set(enabled bool, c platform.TUNConfig) error {
 		return nil
 	}
 	log := newLogger(nil, "network")
-	n, e := tun.NewNetworkUpdateMonitor(log)
-	if e != nil {
-		return e
+	n, err := tun.NewNetworkUpdateMonitor(log)
+	if err != nil {
+		return err
 	}
-	m, e := tun.NewDefaultInterfaceMonitor(n, log, tun.DefaultInterfaceMonitorOptions{InterfaceFinder: g.finder})
-	if e != nil {
+	m, err := tun.NewDefaultInterfaceMonitor(n, log, tun.DefaultInterfaceMonitorOptions{InterfaceFinder: g.finder})
+	if err != nil {
 		n.Close()
-		return e
+		return err
 	}
-	if e = n.Start(); e != nil {
+	if err = n.Start(); err != nil {
 		m.Close()
 		n.Close()
-		return e
+		return err
 	}
-	if e = m.Start(); e != nil {
+	if err = m.Start(); err != nil {
 		m.Close()
 		n.Close()
-		return e
+		return err
 	}
-	if e = g.finder.Update(); e != nil {
+	if err = g.finder.Update(); err != nil {
 		m.Close()
 		n.Close()
-		return e
+		return err
 	}
 	g.netMon = n
 	g.ifMon = m

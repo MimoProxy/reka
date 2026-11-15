@@ -76,16 +76,16 @@ func TestNestedSetOrderNoResolveAndProcess(t *testing.T) {
 }
 func TestLogicalInvalid(t *testing.T) {
 	for _, s := range []string{"NOT,((NETWORK,TCP),(NETWORK,UDP)),direct", "AND,NETWORK,TCP,direct", "AND,(),direct", "AND,((MATCH)),direct", "SUB-RULE,(NETWORK,TCP),x,extra", "AND,((NETWORK,TCP)),direct,no-resolve"} {
-		if _, _, e := ParseClashRule(s); e == nil {
+		if _, _, err := ParseClashRule(s); err == nil {
 			t.Fatal("accepted", s)
 		}
 	}
 }
 
 func TestGeoIPLANAndPatternIndex(t *testing.T) {
-	spec, _, e := ParseClashRule("GEOIP,LAN,proxy,no-resolve")
-	if e != nil {
-		t.Fatal(e)
+	spec, _, err := ParseClashRule("GEOIP,LAN,proxy,no-resolve")
+	if err != nil {
+		t.Fatal(err)
 	}
 	r := mustRouter(t, []RuleSpec{spec}, nil)
 	for ip, want := range map[string]bool{"127.0.0.1": true, "192.168.1.1": true, "169.254.1.1": true, "224.0.0.1": true, "0.0.0.0": true, "::1": true, "fe80::1": true, "192.0.2.1": false} {
@@ -95,9 +95,9 @@ func TestGeoIPLANAndPatternIndex(t *testing.T) {
 		}
 	}
 	specs := []RuleSpec{{Kind: KindDomainPattern, Values: []string{".example.org", "*.wild.test"}, Target: "proxy"}, {Kind: KindDomain, Values: []string{"exact.example.org"}, Target: "reject"}, {Kind: KindDomainSuffix, Values: []string{"example.org"}, Target: "direct"}}
-	set, e := CompileRules(specs)
-	if e != nil {
-		t.Fatal(e)
+	set, err := CompileRules(specs)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(set.strictSuffix) != 1 {
 		t.Fatal("strict suffix not indexed")

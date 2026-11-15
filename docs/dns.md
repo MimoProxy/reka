@@ -49,6 +49,10 @@ Native defaults: bootstrap is `system`; enhanced-mode is redir-host; IPv6/hosts 
 
 Endpoints support bare IP[:port], `udp://`, `tcp://`, `tls://` and `https://`. DoT defaults to 853; DoH defaults to 443 and `/dns-query`. HTTPS query strings are retained. A `#group-or-outbound` fragment selects a native route and follows automatic-group observations. TLS verifies the endpoint host against trusted roots; redirects and environment HTTP proxies are disabled. UDP truncation retries TCP. UDP/TCP use the pinned component transports; DoT/DoH use bounded TLS/HTTP adapters inside the backend. DoQ, HTTP/3, DHCP resolvers and DNS endpoint URI extensions are unavailable.
 
+## Credentials in upstream URLs
+
+Some providers put an account token in the upstream URL. When the configuration is read through the API, an upstream in `nameserver`, `default-nameserver`, `proxy-server-nameserver`, `direct-nameserver`, `fallback` or a `nameserver-policy` server list is masked if it has user info, a query, or (for DoH) a path other than `/dns-query` or `/resolve`, such as `https://dns.example/abc123`. Group health-check URLs are masked when they have user info or a query. Sending the mask back keeps the stored value. A token in the host name (`tls://abc123.dns.example`) cannot be recognized and is shown as written; DNS upstreams do not accept `secret://` references yet. Other DNS fields, such as `fake-ip-filter` and `hosts`, are never masked.
+
 ## Policy and scope
 
 Hosts are checked before upstream resolution. Nameserver-policy uses the first matching entry and bypasses fallback. Selectors support domain patterns, `rule-set:<id>`, and explicit locked geodata; see [rule resources](rule-resources.md). Fallback applies on primary failure, non-success response, a configured domain/IP filter, or an address outside the chosen GeoIP set. GeoIP requires a locked rule set (`geoip-set` or an unambiguous imported GeoIP selector).

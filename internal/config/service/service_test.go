@@ -19,7 +19,7 @@ import (
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
-func freePort(t *testing.T) int {
+func freePort(t testing.TB) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -53,13 +53,13 @@ func localWith(port int) string {
 }
 
 type env struct {
-	t    *testing.T
+	t    testing.TB
 	root string
 	sec  secret.Store
 	fail func(string) error
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t testing.TB) *env {
 	root := t.TempDir()
 	sec, err := secret.NewFileStore(filepath.Join(root, "secrets", "secrets.json"), nil)
 	if err != nil {

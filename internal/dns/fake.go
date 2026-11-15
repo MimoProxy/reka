@@ -94,4 +94,8 @@ func (p *FakePool) Contains(ip netip.Addr) bool {
 	}
 	return false
 }
-func (p *FakePool) Size() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.entries) }
+func (p *FakePool) Size() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.entries)
+}

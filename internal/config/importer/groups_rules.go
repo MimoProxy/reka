@@ -98,16 +98,16 @@ func (c *converter) convertGroups(input []*yaml.Node) {
 		}
 		var filter, exclude *regexp.Regexp
 		if value := r.str("filter"); value != "" {
-			var e error
-			filter, e = regexp.Compile(value)
-			if e != nil {
+			var err error
+			filter, err = regexp.Compile(value)
+			if err != nil {
 				r.fail("filter", "import.group-filter", "invalid filter regex")
 			}
 		}
 		if value := r.str("exclude-filter"); value != "" {
-			var e error
-			exclude, e = regexp.Compile(value)
-			if e != nil {
+			var err error
+			exclude, err = regexp.Compile(value)
+			if err != nil {
 				r.fail("exclude-filter", "import.group-filter", "invalid exclude regex")
 			}
 		}
@@ -207,7 +207,10 @@ func (c *converter) convertGroups(input []*yaml.Node) {
 	}
 }
 
-func splitRule(s string) ([]string, bool) { p, e := router.SplitClash(s); return p, e == nil }
+func splitRule(s string) ([]string, bool) {
+	p, err := router.SplitClash(s)
+	return p, err == nil
+}
 
 func nativeMatch(spec router.RuleSpec) object {
 	m := object{}
@@ -236,8 +239,8 @@ func (c *converter) resolveRule(spec *router.RuleSpec) error {
 		spec.Values = []string{id}
 	}
 	for i := range spec.Children {
-		if e := c.resolveRule(&spec.Children[i]); e != nil {
-			return e
+		if err := c.resolveRule(&spec.Children[i]); err != nil {
+			return err
 		}
 	}
 	return nil

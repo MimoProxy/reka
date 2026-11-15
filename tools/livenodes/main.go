@@ -37,8 +37,8 @@ func main() {
 	flag.Parse()
 	var documents []string
 	if *workspace != "" {
-		data, e := os.ReadFile(*workspace)
-		if e != nil {
+		data, err := os.ReadFile(*workspace)
+		if err != nil {
 			panic("cannot read workspace")
 		}
 		var saved struct {
@@ -58,8 +58,8 @@ func main() {
 		if *path == "" {
 			panic("config or workspace required")
 		}
-		data, e := os.ReadFile(*path)
-		if e != nil {
+		data, err := os.ReadFile(*path)
+		if err != nil {
 			panic("cannot read configuration")
 		}
 		documents = []string{string(data)}
@@ -110,14 +110,14 @@ func main() {
 		}
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		engine := generation.NewEngine(generation.EngineOptions{Backend: sagernet.Options{Logger: logger}})
-		prepared, e := engine.Prepare(eff)
-		if e != nil {
+		prepared, err := engine.Prepare(eff)
+		if err != nil {
 			engine.Close()
 			r.TCP = "prepare-failed"
 			encoder.Encode(r)
 			continue
 		}
-		if _, e = engine.Activate(prepared, 1); e != nil {
+		if _, err = engine.Activate(prepared, 1); err != nil {
 			engine.Close()
 			r.TCP = "activate-failed"
 			encoder.Encode(r)
@@ -126,8 +126,8 @@ func main() {
 		out := engine.OutboundInstance(id)
 		tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: out.Dial}
 		client := &http.Client{Transport: tr, Timeout: 12 * time.Second}
-		response, e := client.Get("https://www.gstatic.com/generate_204")
-		if e != nil {
+		response, err := client.Get("https://www.gstatic.com/generate_204")
+		if err != nil {
 			r.TCP = "http-request-failed"
 		} else {
 			r.HTTP = response.StatusCode
@@ -140,21 +140,21 @@ func main() {
 			r.UDP = "disabled-by-configuration"
 		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			conn, e := out.Dial(ctx, "udp", netip.MustParseAddrPort("1.1.1.1:53").String())
-			if e != nil {
+			conn, err := out.Dial(ctx, "udp", netip.MustParseAddrPort("1.1.1.1:53").String())
+			if err != nil {
 				r.UDP = "dial-failed"
 			} else {
 				conn.SetDeadline(time.Now().Add(6 * time.Second))
 				q := new(D.Msg)
 				q.SetQuestion("example.com.", D.TypeA)
 				wire, _ := q.Pack()
-				_, e = conn.Write(wire)
+				_, err = conn.Write(wire)
 				buffer := make([]byte, 4096)
 				var n int
-				if e == nil {
-					n, e = conn.Read(buffer)
+				if err == nil {
+					n, err = conn.Read(buffer)
 				}
-				if e != nil {
+				if err != nil {
 					r.UDP = "exchange-failed"
 				} else {
 					m := new(D.Msg)

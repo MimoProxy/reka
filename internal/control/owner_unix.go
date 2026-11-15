@@ -14,8 +14,8 @@ func ConfigureOwner(owner string) error {
 	if owner == "" {
 		return nil
 	}
-	n, e := strconv.Atoi(owner)
-	if e != nil || n < 0 {
+	n, err := strconv.Atoi(owner)
+	if err != nil || n < 0 {
 		return fmt.Errorf("owner must be a numeric UID")
 	}
 	if os.Geteuid() != 0 && n != os.Geteuid() {

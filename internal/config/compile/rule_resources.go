@@ -35,9 +35,9 @@ func (r *ruleCompiler) condition(m model.Match, depth int) (router.RuleSpec, err
 	}
 	spec := router.RuleSpec{Kind: k, Values: m.Values, NoResolve: m.NoResolve}
 	for _, ch := range m.Children {
-		s, e := r.condition(ch, depth+1)
-		if e != nil {
-			return spec, e
+		s, err := r.condition(ch, depth+1)
+		if err != nil {
+			return spec, err
 		}
 		spec.Children = append(spec.Children, s)
 	}
@@ -51,17 +51,17 @@ func (r *ruleCompiler) resolve(spec router.RuleSpec, depth int) (router.RuleSpec
 		if len(spec.Values) != 1 {
 			return spec, errors.New("rule-set needs one reference")
 		}
-		ref, e := r.resource(spec.Values[0], depth+1)
-		if e != nil {
-			return spec, e
+		ref, err := r.resource(spec.Values[0], depth+1)
+		if err != nil {
+			return spec, err
 		}
 		spec.Set = ref.set
 		spec.ResourceHash = ref.hash
 	}
 	for i, ch := range spec.Children {
-		s, e := r.resolve(ch, depth+1)
-		if e != nil {
-			return spec, e
+		s, err := r.resolve(ch, depth+1)
+		if err != nil {
+			return spec, err
 		}
 		spec.Children[i] = s
 	}
@@ -90,10 +90,10 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 		}
 		data := r.blobs[def.Hash]
 		if data == nil {
-			var e error
-			data, e = r.c.opts.ReadResource(def.Hash)
-			if e != nil {
-				return compiledResource{}, fmt.Errorf("locked rule resource unavailable: %w", e)
+			var err error
+			data, err = r.c.opts.ReadResource(def.Hash)
+			if err != nil {
+				return compiledResource{}, fmt.Errorf("locked rule resource unavailable: %w", err)
 			}
 			if resource.Hash(data) != def.Hash {
 				return compiledResource{}, errors.New("rule resource hash mismatch")
@@ -104,19 +104,19 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 			}
 			r.blobs[def.Hash] = data
 		}
-		var e error
-		specs, e = rulesdata.Decode(def.Behavior, def.Format, def.Code, data)
-		if e != nil {
-			return compiledResource{}, e
+		var err error
+		specs, err = rulesdata.Decode(def.Behavior, def.Format, def.Code, data)
+		if err != nil {
+			return compiledResource{}, err
 		}
 	} else {
 		if def.Behavior != "" || def.Format != "" || def.Code != "" || len(def.References) > 0 {
 			return compiledResource{}, errors.New("inline rule-set cannot specify resource metadata")
 		}
 		for _, m := range def.Entries {
-			s, e := r.condition(m, depth+1)
-			if e != nil {
-				return compiledResource{}, e
+			s, err := r.condition(m, depth+1)
+			if err != nil {
+				return compiledResource{}, err
 			}
 			specs = append(specs, s)
 		}
@@ -144,9 +144,9 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 		mapRefs(&specs[i])
 	}
 	for i, s := range specs {
-		v, e := r.resolve(s, depth+1)
-		if e != nil {
-			return compiledResource{}, e
+		v, err := r.resolve(s, depth+1)
+		if err != nil {
+			return compiledResource{}, err
 		}
 		specs[i] = v
 	}
@@ -156,9 +156,9 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 			return compiledResource{}, errors.New("total rule entries exceed limit")
 		}
 	}
-	set, e := router.CompileRules(specs)
-	if e != nil {
-		return compiledResource{}, e
+	set, err := router.CompileRules(specs)
+	if err != nil {
+		return compiledResource{}, err
 	}
 	b, _ := json.Marshal(struct {
 		Definition model.RuleSet
@@ -182,8 +182,8 @@ func (c *compiler) prepareRuleResources() *ruleCompiler {
 		r.defs[def.ID] = def
 	}
 	for _, def := range c.profile.RuleSets {
-		if _, e := r.resource(def.ID, 0); e != nil {
-			c.errorf(model.DocProfile, model.JoinPath("/rule-sets", def.ID), "rule-set.resource", "%s", e)
+		if _, err := r.resource(def.ID, 0); err != nil {
+			c.errorf(model.DocProfile, model.JoinPath("/rule-sets", def.ID), "rule-set.resource", "%s", err)
 		}
 	}
 	return r
@@ -376,12 +376,12 @@ func (c *compiler) validateSubRules(rc *ruleCompiler, eff *Effective) {
 	check := func(rules []model.Rule, path string) {
 		for i, r := range rules {
 			p := model.JoinPath(path, seg(r.ID, i))
-			spec, e := rc.condition(r.Match, 0)
-			if e == nil {
-				_, e = router.CompileRules([]router.RuleSpec{spec})
+			spec, err := rc.condition(r.Match, 0)
+			if err == nil {
+				_, err = router.CompileRules([]router.RuleSpec{spec})
 			}
-			if e != nil {
-				c.errorf(model.DocProfile, p+"/match", "rule.match", "%s", e)
+			if err != nil {
+				c.errorf(model.DocProfile, p+"/match", "rule.match", "%s", err)
 			}
 			if r.Outbound != "" && !targets[r.Outbound] {
 				c.errorf(model.DocProfile, p+"/outbound", "rule.outbound", "unknown outbound or group %q", r.Outbound)

@@ -54,24 +54,24 @@ func HTTPClientWithControl(control func(string, string, syscall.RawConn) error, 
 	dial := dialer.DialContext
 	if lookup != nil {
 		dial = func(ctx context.Context, network, address string) (net.Conn, error) {
-			host, port, e := net.SplitHostPort(address)
-			if e != nil {
-				return nil, e
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
 			}
 			if net.ParseIP(host) != nil {
 				return dialer.DialContext(ctx, network, address)
 			}
-			ips, e := lookup(ctx, host)
-			if e != nil {
-				return nil, e
+			ips, err := lookup(ctx, host)
+			if err != nil {
+				return nil, err
 			}
 			var last error
 			for _, ip := range ips {
-				c, e := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-				if e == nil {
+				c, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if err == nil {
 					return c, nil
 				}
-				last = e
+				last = err
 			}
 			if last == nil {
 				last = fmt.Errorf("no bootstrap addresses")

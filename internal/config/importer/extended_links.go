@@ -9,13 +9,13 @@ import (
 )
 
 func parseVMessLink(raw string) (object, error) {
-	b, e := decodeBase64(strings.TrimPrefix(raw, "vmess://"))
-	if e != nil {
-		return nil, e
+	b, err := decodeBase64(strings.TrimPrefix(raw, "vmess://"))
+	if err != nil {
+		return nil, err
 	}
 	var values map[string]json.RawMessage
-	if e = json.Unmarshal(b, &values); e != nil {
-		return nil, e
+	if err = json.Unmarshal(b, &values); err != nil {
+		return nil, err
 	}
 	known := map[string]bool{}
 	for _, key := range []string{"v", "ps", "add", "port", "id", "aid", "scy", "net", "type", "host", "path", "tls", "sni", "alpn", "fp"} {
@@ -37,15 +37,15 @@ func parseVMessLink(raw string) (object, error) {
 		}
 		return ""
 	}
-	port, e := strconv.Atoi(text("port"))
-	if e != nil {
-		return nil, e
+	port, err := strconv.Atoi(text("port"))
+	if err != nil {
+		return nil, err
 	}
 	aid := 0
 	if a := text("aid"); a != "" {
-		aid, e = strconv.Atoi(a)
-		if e != nil {
-			return nil, e
+		aid, err = strconv.Atoi(a)
+		if err != nil {
+			return nil, err
 		}
 	}
 	out := object{"name": text("ps"), "type": "vmess", "server": text("add"), "port": port, "uuid": text("id"), "alterId": aid, "cipher": text("scy"), "udp": true}
@@ -132,9 +132,9 @@ func parseSecureLink(u *url.URL, out object, q url.Values) error {
 	}
 	for from, to := range map[string]string{"insecure": "skip-cert-verify", "allowInsecure": "skip-cert-verify", "zero_rtt": "reduce-rtt"} {
 		if v := q.Get(from); v != "" {
-			b, e := strconv.ParseBool(v)
-			if e != nil {
-				return e
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return err
 			}
 			out[to] = b
 		}

@@ -27,7 +27,10 @@ func Open(root string) (*Store, error) {
 	}
 	return &Store{dir}, nil
 }
-func Hash(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+func Hash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
 func ValidHash(s string) bool { return hashRE.MatchString(s) }
 func (s *Store) Read(hash string) ([]byte, error) {
 	if !ValidHash(hash) {
