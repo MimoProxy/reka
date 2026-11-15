@@ -5,6 +5,7 @@ on:
     paths:
       - 'packaging/windows/**'
       - 'tools/release.py'
+      - 'tools/build-overlay.py'
       - 'tools/windows-installer-runtime.ps1'
       - '.github/workflows/installers.yml'
       - 'cmd/**'

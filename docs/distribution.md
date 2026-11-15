@@ -60,7 +60,9 @@ Windows uses the unmodified official Wintun 0.14.1 DLL embedded by the locked si
 
 ## Build trimming
 
-Default make/release/JNI builds use `reka_minimal` and a generated overlay. The overlay replaces only unsupported upstream ECH entry points with explicit errors. It removes the unused sing-box DNS/router import path; Reka's UDP/TCP DNS exchange uses its own bounded connected-socket implementation, with UDP truncation retry and reply checks. Supported protocol and DNS behavior remains covered by the existing tests.
+Default make/release/JNI builds use `reka_minimal` and a generated overlay. Its ECH replacement returns explicit errors for unsupported upstream ECH entry points. It removes the unused sing-box DNS/router import path; Reka's UDP/TCP DNS exchange uses its own bounded connected-socket implementation, with UDP truncation retry and reply checks. Supported protocol and DNS behavior remains covered by the existing tests.
+
+The generated overlay also corrects the pinned Trojan inbound's authentication-key read to use `io.ReadFull`. Reka uses that inbound for loopback test/tool nodes; a stream read can return a partial key, including data cached during HTTPUpgrade. Deterministic fragmented-key tests cover this correction. The normal proxy client uses the upstream outbound implementation.
 
 Go forbids overlays inside its module cache, so `tools/build-overlay.py` makes an exact generated copy under `bin/upstream`, checks the pinned source hash and full copied tree, and writes a separate `bin/build.mod`. The checked-in module and module cache are unchanged. Upstream changes fail closed and require reviewing this overlay. Normal builds without the overlay remain possible for comparison. The measured size saving is small; do not assume dependency count predicts binary size.
 
