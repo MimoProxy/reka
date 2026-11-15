@@ -28,9 +28,10 @@ import (
 // The Keychain cannot list items cheaply, so names (not values) are kept in
 // an index file under the state root.
 type Keychain struct {
-	service string
-	index   string
-	mu      sync.Mutex
+	keychain string
+	service  string
+	index    string
+	mu       sync.Mutex
 }
 
 const securityTool = "/usr/bin/security"
@@ -47,9 +48,14 @@ func NewKeychain(stateRoot string) (*Keychain, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	keychain := ""
+	if os.Geteuid() == 0 {
+		keychain = "/Library/Keychains/System.keychain"
+	}
 	return &Keychain{
-		service: "org.mimoproxy.reka." + hex.EncodeToString(sum[:6]),
-		index:   filepath.Join(dir, "keychain-index.json"),
+		keychain: keychain,
+		service:  "org.mimoproxy.reka." + hex.EncodeToString(sum[:6]),
+		index:    filepath.Join(dir, "keychain-index.json"),
 	}, nil
 }
 
@@ -82,7 +88,11 @@ func (k *Keychain) Get(name string) (string, error) {
 	if err := ValidName(name); err != nil {
 		return "", err
 	}
-	out, err := k.run(nil, "find-generic-password", "-s", k.service, "-a", name, "-w")
+	args := []string{"find-generic-password", "-s", k.service, "-a", name, "-w"}
+	if k.keychain != "" {
+		args = append(args, k.keychain)
+	}
+	out, err := k.run(nil, args...)
 	if err != nil {
 		return "", err
 	}
@@ -99,6 +109,9 @@ func (k *Keychain) Set(name, value string) error {
 	}
 	enc := hex.EncodeToString([]byte(base64.StdEncoding.EncodeToString([]byte(value))))
 	cmd := fmt.Sprintf("add-generic-password -U -s %s -a %s -l %s -X %s\n", k.service, name, "Reka:"+name, enc)
+	if k.keychain != "" {
+		cmd = strings.TrimSuffix(cmd, "\n") + " " + k.keychain + "\n"
+	}
 	if _, err := k.run([]byte(cmd), "-i"); err != nil {
 		return err
 	}
@@ -114,7 +127,11 @@ func (k *Keychain) Delete(name string) error {
 	if err := ValidName(name); err != nil {
 		return err
 	}
-	if _, err := k.run(nil, "delete-generic-password", "-s", k.service, "-a", name); err != nil {
+	args := []string{"delete-generic-password", "-s", k.service, "-a", name}
+	if k.keychain != "" {
+		args = append(args, k.keychain)
+	}
+	if _, err := k.run(nil, args...); err != nil {
 		return err
 	}
 	return k.updateIndex(func(names []string) []string {

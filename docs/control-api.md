@@ -27,9 +27,14 @@ The server picks a version both sides speak (`unsupported_version` otherwise) an
 
 | method | params | result |
 | --- | --- | --- |
-| `GetCapabilities` | | API and schema versions, outbound, listener and group types, rule conditions, Shadowsocks methods, TLS fingerprints, platform, process lookup |
+| `GetCapabilities` | | API and schema versions, outbound, listener and group types, rule conditions, Shadowsocks methods, TLS fingerprints, platform, process lookup, `configuration_layers`, `source_formats`, `import_support`, `network_modes`, `tun_stacks` |
+| `ConfigureSubscription` | `source_id`, `base_revision`, `subscription` (null removes definition) | configuration commit result |
+| `ListSubscriptions` | | safe observed statuses; see [subscriptions](subscriptions.md) |
+| `RefreshSubscription` | `source_id`, `wait` (default false) | current job status; true waits for the shared job |
+| `ImportSource` | `import` (`source_id`, `format`, `data`, `nodes_only`, `allow_partial`), `reveal` | pure conversion report and normalized sources YAML, masked by default |
+| `GetGroupStatus` | | observed automatic-group choices and member health (`id`, `type`, `selected`, `results`); no configuration writes |
 | `GetStatus` | | active revision, runtime generation, listeners, outbounds, connections, draining instances |
-| `GetConfiguration` | `reveal` | `revision`, `profile`, `local` (inline credentials masked unless `reveal`), `effective` with `provenance`, `diagnostics` |
+| `GetConfiguration` | `reveal` | `revision`, `profile`, `local`, `sources`, `overlay` (inline credentials masked unless `reveal`), `effective` with `provenance`, `diagnostics` |
 | `ValidateConfiguration` | change | `valid`, `diagnostics` |
 | `PlanConfiguration` | change | `plan`, `plan_hash`, `diagnostics`, or `conflict` |
 | `CommitConfiguration` | change + `operation_id`, `plan_hash`, `message` | result |
@@ -56,11 +61,19 @@ A **change** is relative to `base_revision`, which must be the active revision:
     {"op": "insert", "path": "/rules", "before": "final", "value": {"match": {"domain": "a.test"}, "outbound": "direct"}},
     {"op": "remove", "path": "/rules/old-rule"}
   ],
-  "local_patch": []
+  "local_patch": [],
+  "sources": "schema-version: 1\n...",
+  "overlay": "patches: []\n",
+  "sources_patch": [],
+  "overlay_patch": []
 }
 ```
 
-Whole documents and patches can be combined; patches apply afterwards. Paths use IDs, never list indexes (unless an element has no ID: `#3`). Patched documents keep their comments.
+New source/overlay fields are additive to API version 1; discover support through `GetCapabilities`. `source_formats` advertises native snapshots and local `clash`/`links` conversion. Background subscription/provider acquisition has separate APIs; local conversion still does not fetch. A change can include an `import` object to replace one source atomically; see [import API and limits](clash-import.md).
+
+Whole documents and patches can be combined; patches apply afterwards. Paths use IDs, never list indexes (unless an element has no ID: `#3`). Patched documents keep their comments. Source resource IDs contain a slash (`airport/node`), escaped as `~1` in a path. All four documents enter the same revision, plan hash and operation identity; conflict paths for the new documents start with `/sources` and `/overlay`. `effective.source_hashes` contains SHA-256 hashes of the normalized snapshots. Restore restores all four documents, including their source content. See [sources and overlays](source-overlays.md).
+
+Plans also report `dns_changed`, `automatic_groups_changed`, `network_changed` and `network_note`. A takeover rebuild sets `interrupts`; rule-only edits retain the device. Runtime status exposes `runtime.network` (`mode`, `state`, `device`, `ipv6`, `error`), independently of stored intent. Service control may be restricted to an explicitly configured UID/SID owner; see [network takeover](network-takeover.md). DNS changes switch new queries while existing Fake IP leases drain. `effective` deliberately omits DNS/protocol/transport credential payloads; use masked source documents for editing.
 
 A commit **result**:
 
@@ -72,4 +85,4 @@ A commit **result**:
 
 ## Events
 
-`Subscribe` takes an optional cursor (`epoch`, `after`). If the cursor is from this epoch and still in the server's history, missed events are replayed; otherwise the first event is a `snapshot` with the current state. Types: `config.committed`, `config.rejected`, `runtime.generation`, `candidate.invalid`. Each subscriber has a bounded queue; if it reads too slowly, events are dropped and the next delivered event carries `dropped` with the count.
+`Subscribe` takes an optional cursor (`epoch`, `after`). If the cursor is from this epoch and still in the server's history, missed events are replayed; otherwise the first event is a `snapshot` with the current state. Types: `config.committed`, `config.rejected`, `runtime.generation`, `candidate.invalid`, `subscription.updated`. Each subscriber has a bounded queue; if it reads too slowly, events are dropped and the next delivered event carries `dropped` with the count.

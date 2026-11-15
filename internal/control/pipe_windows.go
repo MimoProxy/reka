@@ -58,6 +58,9 @@ func listenPipe(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	if ownerSID != nil {
+		self = ownerSID
+	}
 	sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;" + self.String() + ")(A;;GA;;;SY)")
 	if err != nil {
 		return nil, err

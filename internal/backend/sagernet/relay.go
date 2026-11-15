@@ -12,8 +12,8 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -23,6 +23,10 @@ import (
 // sniffing, TLS fragmenting and URL-test bookkeeping.
 func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	out, release := rt.Outbound, rt.Release
+	if rt.Destination != nil {
+		metadata.Destination = M.ParseSocksaddr(rt.Destination.String())
+	}
+	ctx = WithLookup(ctx, rt.Lookup)
 	ctx = adapter.WithContext(ctx, &metadata)
 	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
 	if err != nil {
@@ -85,8 +89,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 // outright would drop the reply still in flight. For those, drain is called
 // instead: the other direction keeps relaying until it goes idle.
 func copyHalf(source, destination net.Conn, moved *atomic.Int64, finish func(error), drain func()) {
-	count := []N.CountFunc{func(n int64) { moved.Add(n) }}
-	_, err := bufio.CopyWithCounters(destination, source, source, count, nil, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+	err := copyOwned(destination, source, moved)
 	switch {
 	case err != nil:
 		common.Close(source, destination)
@@ -101,6 +104,33 @@ func copyHalf(source, destination net.Conn, moved *atomic.Int64, finish func(err
 		}
 	}
 	finish(err)
+}
+
+// A multiplexed writer may return on session close before its asynchronous
+// sender stops referencing the last write. Keep a private, unpooled buffer for
+// each direction: on error it remains owned by the sender until it is done,
+// instead of being returned to a shared read-wait pool and reused by a relay.
+func copyOwned(destination io.Writer, source io.Reader, moved *atomic.Int64) error {
+	buffer := make([]byte, 32*1024)
+	for {
+		n, readErr := source.Read(buffer)
+		if n > 0 {
+			written, err := destination.Write(buffer[:n])
+			moved.Add(int64(written))
+			if err != nil {
+				return err
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return nil
+			}
+			return readErr
+		}
+	}
 }
 
 // watchIdle closes the pair once moved has not changed for grace, unless
@@ -144,8 +174,10 @@ func kickHandshake(source, destination net.Conn, finish func(error)) bool {
 	}
 	if cached != nil {
 		wrotePayload = true
-		_, err = writer.Write(cached.Bytes())
+		// The same asynchronous-close ownership rule applies to cached input.
+		payload := append([]byte(nil), cached.Bytes()...)
 		cached.Release()
+		_, err = writer.Write(payload)
 	} else {
 		_ = destination.SetWriteDeadline(time.Now().Add(C.ReadPayloadTimeout))
 		_, err = writer.Write(nil)

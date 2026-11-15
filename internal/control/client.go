@@ -46,6 +46,7 @@ func NewClient(conn net.Conn, name string) (*Client, error) {
 func (c *Client) read() {
 	defer close(c.done)
 	defer close(c.Events)
+	var dropped uint64
 	for {
 		frame, err := ReadFrame(c.conn)
 		if err != nil {
@@ -64,8 +65,10 @@ func (c *Client) read() {
 		}
 		if m.Event != nil {
 			select {
-			case c.Events <- *m.Event:
+			case c.Events <- withDropped(*m.Event, dropped):
+				dropped = 0
 			default: // the caller is not reading events
+				dropped += 1 + m.Event.Dropped
 			}
 			continue
 		}
@@ -104,6 +107,7 @@ func (c *Client) Call(method string, params, out any) error {
 	err = WriteFrame(c.conn, b)
 	c.wmu.Unlock()
 	if err != nil {
+		_ = c.conn.Close() // read loop fails every pending call and releases its map entry
 		return err
 	}
 	m, ok := <-ch
@@ -125,3 +129,5 @@ func (c *Client) Close() error {
 	<-c.done
 	return err
 }
+
+func withDropped(ev service.Event, n uint64) service.Event { ev.Dropped += n; return ev }

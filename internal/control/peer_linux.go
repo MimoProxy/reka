@@ -5,7 +5,6 @@ package control
 import (
 	"fmt"
 	"net"
-	"os"
 
 	"golang.org/x/sys/unix"
 )
@@ -34,7 +33,7 @@ func checkPeer(c net.Conn) error {
 	if err != nil {
 		return fmt.Errorf("read peer credentials: %w", err)
 	}
-	if uid != os.Geteuid() && uid != 0 {
+	if !allowUID(uid) {
 		return fmt.Errorf("%w (uid %d)", ErrPeerDenied, uid)
 	}
 	return nil

@@ -22,7 +22,7 @@ import (
 var version = "dev"
 
 func main() {
-	if err := run(); err != nil {
+	if err := serve(run); err != nil {
 		fmt.Fprintln(os.Stderr, "reka:", err)
 		os.Exit(1)
 	}
@@ -31,11 +31,14 @@ func main() {
 func run() error {
 	defRoot, _ := platform.DefaultStateRoot()
 	var (
+		owner     = flag.String("owner", "", "control API owner: numeric UID on Unix, SID on Windows (privileged service)")
 		stateRoot = flag.String("state-root", defRoot, "directory holding configuration revisions and state")
 		ctl       = flag.String("control", "", "control API address (unix:///path or pipe://name); default from local settings or the state root")
 		editDir   = flag.String("edit-dir", "", `directory for candidate files edited by hand; default <state-root>/edit, "-" to disable`)
 		profile   = flag.String("profile", "", "profile to import as revision 1 when the state root is empty")
 		local     = flag.String("local", "", "local settings to import as revision 1 when the state root is empty")
+		sources   = flag.String("sources", "", "normalized sources to import as revision 1")
+		overlay   = flag.String("overlay", "", "overlay to import as revision 1")
 		logLevel  = flag.String("log-level", "", "log level until the configuration sets one (debug, info, warn, error)")
 		showVer   = flag.Bool("version", false, "print the version and exit")
 	)
@@ -43,6 +46,9 @@ func run() error {
 	if *showVer {
 		fmt.Println("reka", version)
 		return nil
+	}
+	if err := control.ConfigureOwner(*owner); err != nil {
+		return err
 	}
 	if *stateRoot == "" {
 		return errors.New("no state root; pass -state-root")
@@ -65,7 +71,7 @@ func run() error {
 	default:
 		opts.EditDir = *editDir
 	}
-	if *profile != "" || *local != "" {
+	if *profile != "" || *local != "" || *sources != "" || *overlay != "" {
 		st, err := store.Open(*stateRoot)
 		if err != nil {
 			return err
@@ -73,12 +79,18 @@ func run() error {
 		if a, err := st.ReadActive(); err != nil {
 			return err
 		} else if a != nil {
-			logger.Warn("state root already has a configuration; -profile and -local are ignored", "revision", a.Revision)
+			logger.Warn("state root already has a configuration; initial document flags are ignored", "revision", a.Revision)
 		} else {
 			if opts.InitialProfile, err = readOptional(*profile); err != nil {
 				return err
 			}
 			if opts.InitialLocal, err = readOptional(*local); err != nil {
+				return err
+			}
+			if opts.InitialSources, err = readOptional(*sources); err != nil {
+				return err
+			}
+			if opts.InitialOverlay, err = readOptional(*overlay); err != nil {
 				return err
 			}
 		}
@@ -94,8 +106,13 @@ func run() error {
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	s := <-sig
-	logger.Info("stopping", "signal", s.String())
+	ready()
+	select {
+	case s := <-sig:
+		logger.Info("stopping", "signal", s.String())
+	case <-serviceStop:
+		logger.Info("stopping service")
+	}
 	k.Close()
 	return nil
 }

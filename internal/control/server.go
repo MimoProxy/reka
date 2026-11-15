@@ -86,6 +86,10 @@ func listenUnix(path string) (net.Listener, error) {
 		l.Close()
 		return nil, err
 	}
+	if err := ownSocket(path); err != nil {
+		l.Close()
+		return nil, err
+	}
 	return &peerListener{Listener: l}, nil
 }
 

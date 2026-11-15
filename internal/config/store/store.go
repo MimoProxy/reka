@@ -1,7 +1,7 @@
 // Package store keeps configuration revisions on disk under a state root:
 //
 //	active.json                the confirmed active revision
-//	revisions/<n>/             immutable profile.yaml, local.yaml, meta.json
+//	revisions/<n>/             immutable profile/local/sources/overlay YAML and meta.json
 //	operations/<id>.json       commit intent, target revision and outcome
 //
 // Every write goes to a temporary name, is synced, renamed into place and
@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
@@ -35,6 +37,8 @@ type Revision struct {
 	Created   time.Time `json:"created"`
 	Profile   string    `json:"profile_sha256"`
 	Local     string    `json:"local_sha256"`
+	Sources   string    `json:"sources_sha256,omitempty"`
+	Overlay   string    `json:"overlay_sha256,omitempty"`
 	// RestoredFrom is set when this revision restores an older one.
 	RestoredFrom uint64 `json:"restored_from,omitempty"`
 }
@@ -44,6 +48,8 @@ type Active struct {
 	Revision  uint64    `json:"revision"`
 	Profile   string    `json:"profile_sha256"`
 	Local     string    `json:"local_sha256"`
+	Sources   string    `json:"sources_sha256,omitempty"`
+	Overlay   string    `json:"overlay_sha256,omitempty"`
 	Operation string    `json:"operation,omitempty"`
 	Updated   time.Time `json:"updated"`
 }
@@ -132,10 +138,24 @@ func writeSynced(path string, data []byte) error {
 	return f.Close()
 }
 
-// WriteRevision stores an immutable revision. rev.Profile and rev.Local are
-// filled in from the content.
-func (s *Store) WriteRevision(rev Revision, profile, local []byte) (Revision, error) {
+// WriteRevision stores an immutable revision and fills its four content hashes.
+// Optional layers are the sources and overlay documents, in that order.
+func (s *Store) WriteRevision(rev Revision, profile, local []byte, layers ...[]byte) (Revision, error) {
+	if len(layers) > 2 {
+		return rev, errors.New("store: expected sources and overlay documents")
+	}
+	var sources, overlay []byte
+	if len(layers) > 0 {
+		sources = layers[0]
+	}
+	if len(layers) > 1 {
+		overlay = layers[1]
+	}
+	if err := s.ValidateResources(sources); err != nil {
+		return rev, err
+	}
 	rev.Profile, rev.Local = Hash(profile), Hash(local)
+	rev.Sources, rev.Overlay = Hash(sources), Hash(overlay)
 	final := s.revDir(rev.Number)
 	if _, err := os.Stat(final); err == nil {
 		return rev, fmt.Errorf("store: revision %d already exists", rev.Number)
@@ -146,7 +166,7 @@ func (s *Store) WriteRevision(rev Revision, profile, local []byte) (Revision, er
 	}
 	defer os.RemoveAll(tmp)
 	meta, _ := json.MarshalIndent(rev, "", "  ")
-	for name, data := range map[string][]byte{"profile.yaml": profile, "local.yaml": local, "meta.json": append(meta, '\n')} {
+	for name, data := range map[string][]byte{"profile.yaml": profile, "local.yaml": local, "sources.yaml": sources, "overlay.yaml": overlay, "meta.json": append(meta, '\n')} {
 		if err := writeSynced(filepath.Join(tmp, name), data); err != nil {
 			return rev, err
 		}
@@ -178,7 +198,40 @@ func (s *Store) ReadRevision(n uint64) (Revision, []byte, []byte, error) {
 	if Hash(profile) != rev.Profile || Hash(local) != rev.Local {
 		return rev, nil, nil, fmt.Errorf("store: revision %d content does not match its hashes", n)
 	}
+	if sources, _, err := s.ReadLayers(n); err != nil {
+		return rev, nil, nil, err
+	} else if err := s.ValidateResources(sources); err != nil {
+		return rev, nil, nil, err
+	}
 	return rev, profile, local, nil
+}
+
+// ReadLayers reads hash-verified source and overlay documents. Older revisions
+// without layer hashes are read as empty layers, without rewriting history.
+func (s *Store) ReadLayers(n uint64) ([]byte, []byte, error) {
+	var rev Revision
+	if err := readJSON(filepath.Join(s.revDir(n), "meta.json"), &rev); err != nil {
+		return nil, nil, err
+	}
+	read := func(name, hash string) ([]byte, error) {
+		if hash == "" {
+			return nil, nil
+		}
+		b, err := os.ReadFile(filepath.Join(s.revDir(n), name))
+		if err != nil {
+			return nil, err
+		}
+		if Hash(b) != hash {
+			return nil, fmt.Errorf("store: revision %d %s content does not match its hash", n, name)
+		}
+		return b, nil
+	}
+	sources, err := read("sources.yaml", rev.Sources)
+	if err != nil {
+		return nil, nil, err
+	}
+	overlay, err := read("overlay.yaml", rev.Overlay)
+	return sources, overlay, err
 }
 
 // DeleteRevision removes a revision that never became active.
@@ -293,4 +346,24 @@ func (s *Store) ListOperations() ([]Operation, error) {
 		out = append(out, op)
 	}
 	return out, nil
+}
+
+// ValidateResources verifies every raw resource pinned by a source revision.
+// This only reads local files; Validate and Plan never fetch the network.
+func (s *Store) ValidateResources(data []byte) error {
+	sources, _, ds := model.ParseSources(data)
+	if ds.HasErrors() {
+		return nil
+	}
+	blobs := resource.At(s.root)
+	for _, source := range sources.Sources {
+		if source.Lock != nil {
+			for _, lock := range source.Lock.Resources {
+				if _, err := blobs.Read(lock.Hash); err != nil {
+					return fmt.Errorf("store: locked subscription resource is unavailable")
+				}
+			}
+		}
+	}
+	return nil
 }

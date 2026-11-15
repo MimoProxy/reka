@@ -159,7 +159,12 @@ func (f *udpFlow) dial() {
 	metadata.Destination = f.dest
 	metadata.Network = N.NetworkUDP
 	ctx := adapter.WithContext(s.ctx, &metadata)
-	remote, err := f.rt.Outbound.out.ListenPacket(ctx, f.dest)
+	ctx = WithLookup(ctx, f.rt.Lookup)
+	dialDest := f.dest
+	if f.rt.Destination != nil {
+		dialDest = M.ParseSocksaddr(f.rt.Destination.String())
+	}
+	remote, err := f.rt.Outbound.out.ListenPacket(ctx, dialDest)
 	s.mu.Lock()
 	if err != nil {
 		f.failed = true
@@ -211,7 +216,11 @@ func (f *udpFlow) send(b *buf.Buffer) {
 func (f *udpFlow) write(b *buf.Buffer) {
 	n := int64(b.Len())
 	b = N.NewReadWaitOptions(nil, f.remote).Copy(b)
-	if err := f.remote.WritePacket(b, f.dest); err != nil {
+	destination := f.dest
+	if f.rt.Destination != nil {
+		destination = M.ParseSocksaddr(f.rt.Destination.String())
+	}
+	if err := f.remote.WritePacket(b, destination); err != nil {
 		b.Leak()
 		f.close()
 		return
@@ -232,7 +241,7 @@ func (f *udpFlow) receive() {
 		opts.PostReturn(b)
 		f.touch()
 		n := int64(b.Len())
-		if !src.IsValid() {
+		if !src.IsValid() || f.rt.Destination != nil {
 			src = f.dest
 		}
 		f.s.writeMu.Lock()

@@ -1,0 +1,40 @@
+name: distribution staging
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Staging version (does not publish a release)
+        default: 1.0.0-dev
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  archives:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      STAGING_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test
+      - name: Android shared library
+        run: |
+          if [[ ! "$STAGING_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z.+_-]{0,79}$ ]]; then exit 1; fi
+          OVERLAY=$(python3 tools/build-overlay.py)
+          CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -modfile bin/build.mod -overlay "$OVERLAY" -trimpath -buildmode=c-shared \
+            -tags with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal -ldflags "-checklinkname=0 -s -w -buildid= -X github.com/MimoProxy/reka/internal/control.Version=$STAGING_VERSION" -o bin/libreka.so ./mobile/jni
+          python3 tools/android-build-info.py bin/libreka.so --version "$STAGING_VERSION"
+      - run: python3 tools/release.py --version "$STAGING_VERSION" --android-library bin/libreka.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-distribution
+          path: |
+            bin/dist/**/*.tar.gz
+            bin/dist/**/*.zip
+            bin/dist/**/SHA256SUMS
+            bin/dist/**/artifacts.json

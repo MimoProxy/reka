@@ -1,0 +1,15 @@
+# Constructed rule-resource fixtures
+
+These small fixtures contain only documentation ranges and `.test` names. They are not additional airport samples or copies of real geodata databases.
+
+`domain.mrs` and `ipcidr.mrs` were written using the DomainSet and IpCidrSet binary writers in [mihomo v1.19.34](https://github.com/MetaCubeX/mihomo/tree/v1.19.34), wrapped in its MRS v1 header and Zstandard stream. `geoip.dat` and `geosite.dat` were serialized using that version's generated protobuf schema. The application decoder is independent and does not link the mihomo runtime.
+
+To regenerate without adding mihomo to the application module, copy `generate-mrs.go` and `generate-geodata.go` into an empty temporary directory, then run:
+
+```sh
+go mod init reka-rule-fixtures
+go get github.com/metacubex/mihomo@v1.19.34
+go run -mod=mod generate-mrs.go generate-geodata.go
+```
+
+The generators are intentionally excluded from ordinary application builds. The fixtures exercise exact, suffix, subdomain-only and label wildcard matching; IPv4/IPv6 ranges; GeoIP reverse matching; and all four GeoSite domain types plus attributes. Tests also truncate/mutate bytes and fuzz the bounded decoder. See `internal/rulesdata/decode_test.go`.

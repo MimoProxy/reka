@@ -52,8 +52,11 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         view = new TextView(this);
         setContentView(view);
-        new Thread(this::runTest).start();
+        if(getIntent().getBooleanExtra("vpn",false)){android.content.Intent permission=android.net.VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,17);else startVPNTest();}else new Thread(this::runTest).start();
     }
+
+    private void startVPNTest(){startService(new android.content.Intent(this,VpnTestService.class).putExtra("full",getIntent().getBooleanExtra("full",false)));}
+    @Override protected void onActivityResult(int request,int result,android.content.Intent data){super.onActivityResult(request,result,data);if(request==17 && result==RESULT_OK)startVPNTest();}
 
     private void log(String line) {
         Log.i(TAG, line);
@@ -147,7 +150,7 @@ public class MainActivity extends Activity {
         try {
             File root = new File(getFilesDir(), "reka-test");
             deleteTree(root);
-            String profile = "schema-version: 1\n"
+            String profile = "schema-version: 1\ndns: {nameserver: [223.5.5.5], default-nameserver: [223.5.5.5]}\n"
                     + "outbounds:\n  - {id: alt, type: direct}\n"
                     + "groups:\n  - {id: proxy, type: select, members: [direct, alt]}\n"
                     + "rules:\n  - {id: blocked, match: {domain-suffix: blocked.test}, outbound: reject}\n"
@@ -157,7 +160,9 @@ public class MainActivity extends Activity {
             handle = Native.start(root.getPath(), profile, local, host);
             if (handle == 0) throw new Exception("start: " + Native.lastError());
             log(String.format("start: %.1f ms", (System.nanoTime() - t0) / 1e6));
-            call("Hello", new JSONObject().put("versions", new JSONArray().put(1)).put("client", "testapp"));
+            JSONObject hello=call("Hello", new JSONObject().put("versions", new JSONArray().put(1)).put("client", "testapp"));
+            if(!hello.getString("server").equals("reka/"+BuildVersion.VERSION))throw new Exception("library version mismatch: "+hello);
+            log("API build version: "+hello.getString("server"));
             call("Subscribe", new JSONObject());
 
             ServerSocket echo = echoServer();

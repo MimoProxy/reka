@@ -1,5 +1,5 @@
 // Package model defines Reka's native configuration documents (the profile
-// and the per-machine local settings), parses them strictly from YAML with
+// and local settings, source snapshots and overlay), parses them strictly with
 // line, column and field-path diagnostics, and edits them structurally
 // without losing comments.
 package model
@@ -21,6 +21,8 @@ const (
 const (
 	DocProfile = "profile"
 	DocLocal   = "local"
+	DocSources = "sources"
+	DocOverlay = "overlay"
 )
 
 // Diagnostic is one problem found while parsing, validating or compiling.

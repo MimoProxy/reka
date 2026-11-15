@@ -32,7 +32,21 @@ func (r *dnsRouter) Lookup(ctx context.Context, domain string, options adapter.D
 	case C.DomainStrategyIPv6Only:
 		network = "ip6"
 	}
-	addrs, err := r.resolver.LookupNetIP(ctx, network, domain)
+	var addrs []netip.Addr
+	var err error
+	if fn, ok := ctx.Value(lookupKey{}).(LookupFunc); ok {
+		addrs, err = fn(ctx, domain)
+	} else {
+		addrs, err = r.resolver.LookupNetIP(ctx, network, domain)
+	}
+	filtered := addrs[:0]
+	for _, a := range addrs {
+		if network == "ip4" && !a.Is4() || network == "ip6" && !a.Is6() {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	addrs = filtered
 	if err != nil {
 		return nil, err
 	}

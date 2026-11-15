@@ -2,6 +2,7 @@ package sagernet
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,6 +68,8 @@ func StartShadowsocksServer(listen netip.AddrPort, method, password string, logg
 
 // RealityServerOptions configure StartRealityServer.
 type RealityServerOptions struct {
+	Transport  json.RawMessage
+	Multiplex  bool
 	Listen     netip.AddrPort
 	UUID       string
 	Flow       string
@@ -83,10 +86,22 @@ func StartRealityServer(o RealityServerOptions, logger *slog.Logger) (*Server, e
 	if len(o.PrivateKey) != 32 {
 		return nil, fmt.Errorf("reality: private key must be 32 bytes")
 	}
+	var transport *option.V2RayTransportOptions
+	if len(o.Transport) > 0 {
+		transport = &option.V2RayTransportOptions{}
+		if err := json.Unmarshal(o.Transport, transport); err != nil {
+			return nil, err
+		}
+	}
+	var multiplex *option.InboundMultiplexOptions
+	if o.Multiplex {
+		multiplex = &option.InboundMultiplexOptions{Enabled: true}
+	}
 	return startNode(logger, func(b *Backend) (adapter.Inbound, string, error) {
 		in, err := vless.NewInbound(b.ctx, b.router, b.componentLogger("inbound", "vless", "server"), "server", option.VLESSInboundOptions{
 			ListenOptions: listenOpts(o.Listen),
-			Users:         []option.VLESSUser{{Name: "user", UUID: o.UUID, Flow: o.Flow}},
+			Transport:     transport, Multiplex: multiplex,
+			Users: []option.VLESSUser{{Name: "user", UUID: o.UUID, Flow: o.Flow}},
 			InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: &option.InboundTLSOptions{
 				Enabled:    true,
 				ServerName: o.ServerName,

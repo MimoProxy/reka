@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/hex"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -144,5 +147,33 @@ func TestStatsCountsNestedLogical(t *testing.T) {
 	}
 	if st.ruleParam.n["IP-CIDR,no-resolve"] != 1 {
 		t.Error("no-resolve not counted")
+	}
+}
+
+func TestSanitizePreservesSyntheticCredentialShapes(t *testing.T) {
+	doc, _ := sanitizeSample(t)
+	proxy := mapGet(docRoot(doc), "proxies").Content[0]
+	uuid := mapGet(proxy, "uuid").Value
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).MatchString(uuid) {
+		t.Fatal("invalid synthetic UUID")
+	}
+	reality := mapGet(proxy, "reality-opts")
+	key, err := base64.RawURLEncoding.DecodeString(mapGet(reality, "public-key").Value)
+	if err != nil || len(key) != 32 {
+		t.Fatal("invalid synthetic REALITY key")
+	}
+	sid, err := hex.DecodeString(mapGet(reality, "short-id").Value)
+	if err != nil || len(sid) > 8 {
+		t.Fatal("invalid synthetic short ID")
+	}
+	var ss yaml.Node
+	if err := yaml.Unmarshal([]byte("proxies: [{name: test, type: ss, server: example.com, cipher: 2022-blake3-aes-128-gcm, password: original-key}]"), &ss); err != nil {
+		t.Fatal(err)
+	}
+	sanitize(&ss)
+	pw := mapGet(mapGet(docRoot(&ss), "proxies").Content[0], "password").Value
+	decoded, err := base64.StdEncoding.DecodeString(pw)
+	if err != nil || len(decoded) != 16 || strings.Contains(pw, "original-key") {
+		t.Fatal("invalid synthetic SS2022 key")
 	}
 }

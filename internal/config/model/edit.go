@@ -90,14 +90,14 @@ func isTopLevelEntry(line string) bool {
 // Op is one structural edit. Paths use stable IDs, as in diagnostics.
 type Op struct {
 	// Op is "set", "remove" or "insert".
-	Op   string `json:"op"`
-	Path string `json:"path"`
+	Op   string `json:"op" yaml:"op"`
+	Path string `json:"path" yaml:"path"`
 	// Value is a JSON value; object key order is kept.
-	Value json.RawMessage `json:"value,omitempty"`
+	Value json.RawMessage `json:"value,omitempty" yaml:"value"`
 	// Before or After place an inserted list element next to the element
 	// with that ID (or "#index"). With neither, it is appended.
-	Before string `json:"before,omitempty"`
-	After  string `json:"after,omitempty"`
+	Before string `json:"before,omitempty" yaml:"before"`
+	After  string `json:"after,omitempty" yaml:"after"`
 }
 
 // ErrPath reports a path that does not resolve.

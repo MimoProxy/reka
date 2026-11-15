@@ -1,0 +1,26 @@
+//go:build reka_minimal && go1.24
+
+// Reka build overlay: ECH is outside the public capability contract. This
+// replacement removes the unused upstream DNS/router dependency, and makes
+// accidental use fail explicitly. The original file hash is checked at build.
+package tls
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"github.com/sagernet/sing-box/option"
+)
+
+func parseECHClientConfig(context.Context, ECHCapableConfig, option.OutboundTLSOptions) (Config, error) {
+	return nil, errors.New("ECH is not supported by Reka")
+}
+func parseECHServerConfig(context.Context, option.InboundTLSOptions, *tls.Config, *string) error {
+	return errors.New("ECH is not supported by Reka")
+}
+func (c *STDServerConfig) setECHServerConfig([]byte) error {
+	return errors.New("ECH is not supported by Reka")
+}
+func UnmarshalECHKeys([]byte) ([]tls.EncryptedClientHelloKey, error) {
+	return nil, errors.New("ECH is not supported by Reka")
+}

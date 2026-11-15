@@ -15,6 +15,9 @@ public final class Native {
         /** VpnService.protect(fd): keep the kernel's own socket out of the VPN. */
         boolean protect(int fd);
 
+        /** Host resolves connection UID to a package name; empty means unknown. */
+        default String findProcess(String network, String source, String destination) { return ""; }
+
         /** Encrypt a secret at rest (for example with an Android Keystore key). */
         byte[] seal(byte[] plain);
 
@@ -31,6 +34,12 @@ public final class Native {
      * Returns a handle, or 0 with the reason in lastError().
      */
     public static native long start(String stateRoot, String profile, String local, Host host);
+
+    /** Borrows fd during this call; the library duplicates it. The host closes its original after return. */
+    public static native long startVPN(String stateRoot, String profile, String local, Host host, int fd);
+
+    /** Borrows a replacement fd while committing local network changes. */
+    public static native String reconfigureVPN(long handle, int fd, String commitRequest);
 
     public static native String lastError();
 

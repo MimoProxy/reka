@@ -13,12 +13,14 @@ import (
 // RuleSet is a compiled, immutable rule list with its domain index. It can
 // be shared by routers that differ only in group selections.
 type RuleSet struct {
-	rules []*rule
+	maxDepth int
+	rules    []*rule
 	// exact and suffix map a normalized domain to the first rule position
 	// that lists it. Only the first matters: a later rule with the same
 	// key can never win.
-	exact  map[string]int
-	suffix map[string]int
+	exact        map[string]int
+	suffix       map[string]int
+	strictSuffix map[string]int
 	// others lists, in order, the positions of rules the index does not
 	// cover; they are checked one by one, but only up to the best indexed
 	// candidate.
@@ -30,9 +32,10 @@ type RuleSet struct {
 // CompileRules compiles specs in order.
 func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 	rs := &RuleSet{
-		rules:  make([]*rule, 0, len(specs)),
-		exact:  make(map[string]int),
-		suffix: make(map[string]int),
+		rules:        make([]*rule, 0, len(specs)),
+		exact:        make(map[string]int),
+		suffix:       make(map[string]int),
+		strictSuffix: make(map[string]int),
 	}
 	var errs []error
 	for i, spec := range specs {
@@ -42,12 +45,22 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 			continue
 		}
 		rs.rules = append(rs.rules, r)
+		rs.maxDepth = max(rs.maxDepth, ruleDepth(r))
 		switch spec.Kind {
 		case KindDomain:
 			for _, d := range r.strs {
 				if _, ok := rs.exact[d]; !ok {
 					rs.exact[d] = i
 				}
+			}
+		case KindDomainPattern:
+			for _, d := range r.strs {
+				if _, ok := rs.strictSuffix[d]; !ok {
+					rs.strictSuffix[d] = i
+				}
+			}
+			if len(r.regexps) > 0 {
+				rs.others = append(rs.others, i)
 			}
 		case KindDomainSuffix:
 			for _, d := range r.strs {
@@ -57,7 +70,7 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 			}
 		default:
 			rs.others = append(rs.others, i)
-			if spec.Kind == KindProcessName {
+			if needsProcess(r) {
 				rs.hasProcess = true
 			}
 		}
@@ -105,9 +118,10 @@ type Env interface {
 var ErrNoLookup = errors.New("router: lookup not allowed")
 
 type evaluation struct {
-	ctx context.Context
-	md  *Metadata
-	env Env
+	noResolve bool
+	ctx       context.Context
+	md        *Metadata
+	env       Env
 
 	resolved    bool
 	addrs       []netip.Addr
@@ -170,6 +184,38 @@ func (e *evaluation) processName(index int) (string, bool) {
 func (e *evaluation) match(index int, r *rule) bool {
 	md := e.md
 	switch r.spec.Kind {
+	case KindAnd, KindOr, KindNot:
+		for _, child := range r.children {
+			hit := e.match(index, child)
+			if e.stopped {
+				return false
+			}
+			if r.spec.Kind == KindNot {
+				return !hit
+			}
+			if r.spec.Kind == KindAnd && !hit {
+				return false
+			}
+			if r.spec.Kind == KindOr && hit {
+				return true
+			}
+		}
+		return r.spec.Kind == KindAnd
+	case KindRuleSet:
+		old := e.noResolve
+		e.noResolve = old || r.spec.NoResolve
+		matched := r.spec.Set.first(e) >= 0
+		e.noResolve = old
+		if e.stopped {
+			e.stoppedAt = index
+		}
+		return matched && !e.stopped
+	case KindGeoIP:
+		if (r.spec.NoResolve || e.noResolve) && !md.Addr.IsValid() && (!e.resolved || len(e.addrs) == 0) {
+			return false
+		}
+		a, ok := e.destinationAddr(index)
+		return ok && (a.IsPrivate() || a.IsUnspecified() || a.IsLoopback() || a.IsMulticast() || a.IsLinkLocalUnicast())
 	case KindMatch:
 		return true
 	case KindDomain:
@@ -194,7 +240,12 @@ func (e *evaluation) match(index int, r *rule) bool {
 			}
 		}
 		return false
-	case KindDomainRegex:
+	case KindDomainRegex, KindDomainPattern:
+		for _, s := range r.strs {
+			if strings.HasSuffix(md.Domain, "."+s) {
+				return true
+			}
+		}
 		if md.Domain == "" {
 			return false
 		}
@@ -205,13 +256,13 @@ func (e *evaluation) match(index int, r *rule) bool {
 		}
 		return false
 	case KindIPCIDR:
-		if r.spec.NoResolve && !md.Addr.IsValid() {
+		if (r.spec.NoResolve || e.noResolve) && !md.Addr.IsValid() && (!e.resolved || len(e.addrs) == 0) {
 			return false
 		}
 		a, ok := e.destinationAddr(index)
-		return ok && matchPrefixes(r.prefixes, a)
+		return ok && (r.ipset.Contains(a.Unmap()) != r.spec.IPInverse)
 	case KindSrcIPCIDR:
-		return matchPrefixes(r.prefixes, md.Source.Addr())
+		return r.ipset.Contains(md.Source.Addr().Unmap())
 	case KindDstPort:
 		return matchPorts(r.ports, md.Port)
 	case KindSrcPort:
@@ -250,6 +301,11 @@ func (rs *RuleSet) first(e *evaluation) int {
 			best = i
 		}
 		for s := d; ; {
+			if s != d {
+				if i, ok := rs.strictSuffix[s]; ok && i < best {
+					best = i
+				}
+			}
 			if i, ok := rs.suffix[s]; ok && i < best {
 				best = i
 			}
@@ -478,4 +534,50 @@ func (r *Router) Explain(ctx context.Context, md Metadata, env Env) Explanation 
 		return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: e.stoppedAt}
 	}
 	return Explanation{Decision: r.decide(e, index)}
+}
+
+func needsProcess(r *rule) bool {
+	if r.spec.Kind == KindProcessName || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
+		return true
+	}
+	for _, ch := range r.children {
+		if needsProcess(ch) {
+			return true
+		}
+	}
+	return false
+}
+
+func ruleDepth(r *rule) int {
+	depth := 1
+	for _, ch := range r.children {
+		depth = max(depth, 1+ruleDepth(ch))
+	}
+	if r.spec.Set != nil {
+		depth = max(depth, 1+r.spec.Set.maxDepth)
+	}
+	return depth
+}
+
+// ResolveDynamic follows the same validated group graph using observed choices.
+func (r *Router) ResolveDynamic(target string, choose func(Group) string) (string, []string, error) {
+	var chain []string
+	for {
+		g, ok := r.groups[target]
+		if !ok {
+			if !r.outbounds[target] {
+				return "", chain, fmt.Errorf("target unavailable")
+			}
+			return target, chain, nil
+		}
+		if slices.Contains(chain, g.ID) {
+			return "", chain, fmt.Errorf("group cycle")
+		}
+		chain = append(chain, g.ID)
+		next := choose(g)
+		if !slices.Contains(g.Members, next) {
+			return "", chain, fmt.Errorf("no healthy group member")
+		}
+		target = next
+	}
 }

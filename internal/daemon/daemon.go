@@ -10,17 +10,21 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/control"
+	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
 // Options configure Start.
 type Options struct {
-	StateRoot string
+	ProcessLookup func(context.Context, sagernet.Metadata) (string, bool)
+	TUNFD         int
+	StateRoot     string
 	// Secrets defaults to the platform store for StateRoot.
 	Secrets  secret.Store
 	Logger   *slog.Logger
@@ -36,12 +40,15 @@ type Options struct {
 	EditDir        string
 	InitialProfile []byte
 	InitialLocal   []byte
+	InitialSources []byte
+	InitialOverlay []byte
 }
 
 // Kernel is a running kernel.
 type Kernel struct {
-	Service *service.Service
-	Handler *control.Handler
+	stateLock *platform.StateLock
+	Service   *service.Service
+	Handler   *control.Handler
 	// ControlAddress is where the control API listens, if anywhere.
 	ControlAddress string
 
@@ -57,6 +64,16 @@ func Start(opts Options) (*Kernel, error) {
 	if opts.StateRoot == "" {
 		return nil, errors.New("state root is required")
 	}
+	stateLock, err := platform.LockStateRoot(opts.StateRoot)
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			stateLock.Close()
+		}
+	}()
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
@@ -69,17 +86,23 @@ func Start(opts Options) (*Kernel, error) {
 	}
 	bopts := sagernet.Options{Logger: opts.Logger, FindProcess: true}
 	bopts.ProtectFD = opts.Protect
-	eng := generation.NewEngine(generation.EngineOptions{Backend: bopts, LogLevel: opts.LogLevel})
+	bopts.ProcessLookup = opts.ProcessLookup
+	eng := generation.NewEngine(generation.EngineOptions{Backend: bopts, LogLevel: opts.LogLevel, StateRoot: opts.StateRoot, TUNFD: opts.TUNFD})
 	svc, err := service.Open(service.Options{
 		StateRoot: opts.StateRoot, Secrets: opts.Secrets, Engine: eng, Logger: opts.Logger,
-		InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal,
+		InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal, InitialSources: opts.InitialSources, InitialOverlay: opts.InitialOverlay,
 	})
 	if err != nil {
 		eng.Close()
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	k := &Kernel{Service: svc, Handler: control.NewHandler(svc), cancel: cancel}
+	k := &Kernel{stateLock: stateLock, Service: svc, Handler: control.NewHandler(svc), cancel: cancel}
+
+	if err := svc.StartSubscriptions(service.RefreshOptions{Client: eng.SubscriptionClient()}); err != nil {
+		k.Close()
+		return nil, err
+	}
 
 	addr := opts.ControlAddress
 	if addr == "" {
@@ -105,6 +128,20 @@ func Start(opts Options) (*Kernel, error) {
 			}
 		}()
 	}
+	k.wg.Add(1)
+	go func() {
+		defer k.wg.Done()
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				eng.CheckNetwork()
+			}
+		}
+	}()
 	if opts.EditDir != "" {
 		c := svc.NewCandidate(opts.EditDir)
 		k.wg.Add(1)
@@ -115,6 +152,7 @@ func Start(opts Options) (*Kernel, error) {
 			}
 		}()
 	}
+	success = true
 	return k, nil
 }
 
@@ -127,5 +165,6 @@ func (k *Kernel) Close() {
 		}
 		k.wg.Wait()
 		k.Service.Close()
+		k.stateLock.Close()
 	})
 }

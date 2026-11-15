@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  TAGS: with_gvisor,with_utls,badlinkname,tfogo_checklinkname0
+  TAGS: with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal
   LDFLAGS: -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -27,6 +27,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: pinned build overlay
+        run: |
+          python3 tools/build-overlay.py
+          echo 'GOFLAGS=-modfile=bin/build.mod -overlay=bin/build-overlay.json' >> "$GITHUB_ENV"
       - name: gofmt
         if: runner.os == 'Linux'
         run: test -z "$(gofmt -l $(git ls-files '*.go'))" || { gofmt -l $(git ls-files '*.go'); exit 1; }
@@ -49,6 +53,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: pinned build overlay
+        run: |
+          python3 tools/build-overlay.py
+          echo 'GOFLAGS=-modfile=bin/build.mod -overlay=bin/build-overlay.json' >> "$GITHUB_ENV"
       - name: race
         # sing-vmess's Vision races between its read and write goroutines
         # (upstream); Vision tests skip themselves under -race. checkptr is
@@ -77,6 +85,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: pinned build overlay
+        run: |
+          python3 tools/build-overlay.py
+          echo 'GOFLAGS=-modfile=bin/build.mod -overlay=bin/build-overlay.json' >> "$GITHUB_ENV"
       - name: build
         env:
           GOOS: ${{ matrix.goos }}
@@ -95,6 +107,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: pinned build overlay
+        run: |
+          python3 tools/build-overlay.py
+          echo 'GOFLAGS=-modfile=bin/build.mod -overlay=bin/build-overlay.json' >> "$GITHUB_ENV"
       - name: libreka.so
         run: |
           CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"

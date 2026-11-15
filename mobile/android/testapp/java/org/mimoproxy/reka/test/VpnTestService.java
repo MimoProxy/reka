@@ -1,0 +1,87 @@
+package org.mimoproxy.reka.test;
+import android.app.*;
+import android.content.Intent;
+import android.net.VpnService;
+import android.os.ParcelFileDescriptor;
+import android.util.Log;
+import org.json.*;
+import org.mimoproxy.reka.Native;
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import javax.net.ssl.*;
+/** Isolated, short-lived production library VPN acceptance. */
+public final class VpnTestService extends VpnService {
+ private long handle; private int protectCalls; private long id; private boolean full; private final StringBuilder report=new StringBuilder();
+ private void log(String s){Log.i("RekaVPNTest",s);report.append(s).append('\n');}
+ private JSONObject call(String method,JSONObject params)throws Exception{JSONObject req=new JSONObject().put("id",++id).put("method",method);if(params!=null)req.put("params",params);JSONObject r=new JSONObject(Native.call(handle,req.toString()));if(r.has("error"))throw new Exception(r.toString());return r.getJSONObject("result");}
+ private Native.Host host=new Native.Host(){public boolean protect(int fd){protectCalls++;return VpnTestService.this.protect(fd);}public byte[] seal(byte[]p){return p;}public byte[] open(byte[]p){return p;}public void onMessage(String s){}};
+ @Override public int onStartCommand(Intent intent,int flags,int startId){
+  full=intent!=null && intent.getBooleanExtra("full",false);
+  NotificationManager nm=getSystemService(NotificationManager.class);nm.createNotificationChannel(new NotificationChannel("vpn","VPN acceptance",NotificationManager.IMPORTANCE_LOW));startForeground(14,new Notification.Builder(this,"vpn").setContentTitle("Reka VPN acceptance").setSmallIcon(android.R.drawable.ic_lock_lock).build());
+  new Thread(()->runTest(),"reka-vpn-test").start();return START_NOT_STICKY;
+ }
+ private void runTest(){boolean pass=true;try{
+  log("scope="+(full?"IPv4 + IPv6 default routes":"selected test-host routes"));
+  for(String mode:new String[]{"all","include","exclude"}){
+   Builder b=builder("Reka acceptance "+mode,1500);
+   if(mode.equals("include"))b.addAllowedApplication(getPackageName());if(mode.equals("exclude"))b.addDisallowedApplication(getPackageName());
+   ParcelFileDescriptor fd=b.establish();if(fd==null)throw new Exception("VPN permission missing");
+   String profile="schema-version: 1\ndns:\n nameserver: [223.5.5.5]\n default-nameserver: [223.5.5.5]\n hosts: [{id: fixture.reka.test, addresses: [192.0.2.7]}]\n use-hosts: true\nrules:\n - {id: probe, match: {and: [{ip-cidr: 223.5.5.5/32}, {dst-port: '443'}, {network: tcp}]}, outbound: direct}\n - {id: final, match: {all: true}, outbound: direct}\n";
+   String appConfig=mode.equals("all")?"":"  apps: ["+getPackageName()+"]\n";
+   String local="network:\n mode: tun\n tun:\n  stack: mixed\n  address6: 'fdfe:dcba:9876::1/126'\n  dns-hijack: true\n  routes: [223.5.5.5/32, '2400:3200::1/128']\n  app-mode: "+mode+"\n"+appConfig;
+   if(full)local=local.replace("  routes: [223.5.5.5/32, '2400:3200::1/128']\n","");
+   File root=new File(getFilesDir(),"vpn-"+mode+"-"+System.nanoTime());handle=Native.startVPN(root.getPath(),profile,local,host,fd.getFd());fd.close();if(handle==0)throw new Exception(Native.lastError());
+   JSONObject hello=call("Hello",new JSONObject().put("versions",new JSONArray().put(1)));
+   if(!hello.getString("server").equals("reka/"+BuildVersion.VERSION))throw new Exception("API version mismatch: "+hello);
+   log("API build version: "+hello.getString("server"));
+   JSONObject status=call("GetStatus",null);if(!status.optString("start_error").isEmpty())throw new Exception(status.toString());
+   Thread.sleep(600);if(!awaitDNS("223.5.5.5",!mode.equals("exclude")))throw new Exception("app routing failed: "+mode);
+   log(mode+" IPv4 DNS app routing PASS");
+   if(!mode.equals("exclude")){
+    if(!awaitDNS("2400:3200::1",true))throw new Exception("IPv6 hijack failed");log(mode+" IPv6 DNS PASS");
+    https("223.5.5.5");log(mode+" IPv4 HTTPS forwarded PASS");
+    https("2400:3200::1");log(mode+" IPv6 HTTPS forwarded PASS");
+    String device=status.getJSONObject("runtime").getJSONObject("network").getString("device");
+    JSONObject result=call("CommitConfiguration",new JSONObject().put("base_revision",status.getLong("revision")).put("patch",new JSONArray().put(new JSONObject().put("op","set").put("path","/rules/probe/outbound").put("value","reject"))));
+    if(!result.getString("state").equals("committed"))throw new Exception(result.toString());
+    String now=call("GetStatus",null).getJSONObject("runtime").getJSONObject("network").getString("device");if(!device.equals(now))throw new Exception("TUN rebuilt");log(mode+" rule update retained TUN PASS");
+    boolean rejected=false;try{https("223.5.5.5");}catch(IOException expected){rejected=true;}if(!rejected)throw new Exception("new HTTPS bypassed reject");log(mode+" new HTTPS rejected PASS");
+    if(mode.equals("all")){
+      String updated=local.replace("  stack: mixed", "  stack: system\n  mtu: 1400");
+      JSONObject change=new JSONObject().put("base_revision",call("GetStatus",null).getLong("revision")).put("local",updated);
+      JSONObject plan=call("PlanConfiguration",change);
+      change.put("plan_hash",plan.getString("plan_hash")).put("operation_id","vpn-rebuild-"+System.nanoTime());
+      ParcelFileDescriptor replacement=builder("Reka host rebuild",1400).establish();
+      if(replacement==null)throw new Exception("replacement VPN missing");
+      JSONObject request=new JSONObject().put("id",++id).put("method","CommitConfiguration").put("params",change);
+      JSONObject rebuilt;
+      try{rebuilt=new JSONObject(Native.reconfigureVPN(handle,replacement.getFd(),request.toString()));}finally{replacement.close();}
+      if(rebuilt.has("error") || !rebuilt.getJSONObject("result").getString("state").equals("committed"))throw new Exception("rebuild failed: "+rebuilt);
+      Thread.sleep(600);
+      if(!awaitDNS("223.5.5.5",true) || !awaitDNS("2400:3200::1",true))throw new Exception("replacement descriptor lost traffic");
+      log("explicit host VPN rebuild + stack/MTU transaction PASS");
+    }
+
+   }
+   Native.stop(handle);handle=0;Thread.sleep(600);
+  }
+  log("scope="+(full?"IPv4 + IPv6 default routes":"selected test-host routes"));log("protect calls="+protectCalls);log("memory="+Native.memStats());
+ }catch(Throwable e){pass=false;log("FAIL "+e);Log.e("RekaVPNTest","test",e);}finally{if(handle!=0){Native.stop(handle);handle=0;}log(pass?"RESULT PASS":"RESULT FAIL");try(FileOutputStream o=new FileOutputStream(new File(getFilesDir(),"vpn-report.txt"))){o.write(report.toString().getBytes("UTF-8"));}catch(Exception ignored){}stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}}
+ private boolean dnsFixture(String host)throws Exception{
+  byte[] q=new byte[]{0x12,0x34,1,0,0,1,0,0,0,0,0,0,7,'f','i','x','t','u','r','e',2,'m','3',4,'t','e','s','t',0,0,1,0,1};
+  try(DatagramSocket s=new DatagramSocket()){s.setSoTimeout(4000);s.send(new DatagramPacket(q,q.length,InetAddress.getByName(host),53));byte[] a=new byte[4096];DatagramPacket p=new DatagramPacket(a,a.length);s.receive(p);int n=p.getLength();return n>=4 && a[n-4]==(byte)192 && a[n-3]==0 && a[n-2]==2 && a[n-1]==7;}catch(SocketTimeoutException e){return false;}
+ }
+ private Builder builder(String name,int mtu){Builder b=new Builder().setSession(name).setMtu(mtu).addAddress("172.19.0.1",30).addAddress("fdfe:dcba:9876::1",126).addDnsServer("172.19.0.2");if(full)b.addRoute("0.0.0.0",0).addRoute("::",0);else b.addRoute("223.5.5.5",32).addRoute("2400:3200::1",128);return b;}
+ private boolean awaitDNS(String host,boolean expected)throws Exception{for(int n=0;n<10;n++){if(dnsFixture(host)==expected)return true;Thread.sleep(250);}return false;}
+ private void https(String address)throws Exception{
+  Socket raw=new Socket();try{raw.connect(new InetSocketAddress(address,443),5000);raw.setSoTimeout(5000);
+   try(SSLSocket tls=(SSLSocket)((SSLSocketFactory)SSLSocketFactory.getDefault()).createSocket(raw,"dns.alidns.com",443,true)){
+    SSLParameters params=tls.getSSLParameters();params.setEndpointIdentificationAlgorithm("HTTPS");tls.setSSLParameters(params);tls.startHandshake();
+    tls.getOutputStream().write("GET /resolve?name=one.one.one.one&type=1 HTTP/1.1\r\nHost: dns.alidns.com\r\nConnection: close\r\n\r\n".getBytes("US-ASCII"));
+    BufferedReader reader=new BufferedReader(new InputStreamReader(tls.getInputStream(),"US-ASCII"));String line=reader.readLine();if(line==null || !line.startsWith("HTTP/1.1 200"))throw new IOException("HTTPS response: "+line);
+   }
+  }finally{raw.close();}
+ }
+ @Override public void onRevoke(){if(handle!=0){Native.stop(handle);handle=0;}stopSelf();}
+}

@@ -9,6 +9,7 @@ package router
 
 import (
 	"fmt"
+	"go4.org/netipx"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -30,6 +31,12 @@ const (
 	KindNetwork
 	KindProcessName
 	KindMatch
+	KindAnd
+	KindOr
+	KindNot
+	KindRuleSet
+	KindGeoIP
+	KindDomainPattern
 )
 
 var kindNames = map[Kind]string{
@@ -44,6 +51,7 @@ var kindNames = map[Kind]string{
 	KindNetwork:       "network",
 	KindProcessName:   "process-name",
 	KindMatch:         "all",
+	KindAnd:           "and", KindOr: "or", KindNot: "not", KindRuleSet: "rule-set", KindGeoIP: "geoip", KindDomainPattern: "domain-pattern",
 }
 
 // String returns the native condition key, for example "domain-suffix".
@@ -67,19 +75,23 @@ func ParseKind(s string) (Kind, bool) {
 // Kinds lists every condition key in a stable order.
 func Kinds() []Kind {
 	return []Kind{KindDomain, KindDomainSuffix, KindDomainKeyword, KindDomainRegex,
-		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch}
+		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch, KindAnd, KindOr, KindNot, KindRuleSet, KindGeoIP, KindDomainPattern}
 }
 
 // usesDestinationIP reports whether a kind matches on the destination
 // address, which may require resolving a domain.
-func (k Kind) usesDestinationIP() bool { return k == KindIPCIDR }
+func (k Kind) usesDestinationIP() bool { return k == KindIPCIDR || k == KindGeoIP || k == KindRuleSet }
 
 // RuleSpec is one rule before compilation. A rule matches when any of its
 // Values matches.
 type RuleSpec struct {
-	ID     string
-	Kind   Kind
-	Values []string
+	IPInverse    bool `json:",omitempty"`
+	ID           string
+	Children     []RuleSpec `json:",omitempty"`
+	Set          *RuleSet   `json:"-"`
+	ResourceHash string     `json:",omitempty"`
+	Kind         Kind
+	Values       []string
 	// NoResolve keeps an IP rule from resolving a domain destination; the
 	// rule then only matches destinations that already are addresses.
 	NoResolve bool
@@ -87,18 +99,26 @@ type RuleSpec struct {
 }
 
 // String renders the rule in Clash's one-line form, for explanations.
-func (r RuleSpec) String() string {
+func (r RuleSpec) String() string { return r.render(true) }
+func (r RuleSpec) render(action bool) string {
 	var b strings.Builder
-	b.WriteString(strings.ToUpper(r.Kind.String()))
 	if r.Kind == KindMatch {
-		b.Reset()
 		b.WriteString("MATCH")
 	} else {
+		b.WriteString(strings.ToUpper(r.Kind.String()))
+	}
+	if r.Kind == KindAnd || r.Kind == KindOr || r.Kind == KindNot {
+		for _, ch := range r.Children {
+			b.WriteString(",(" + ch.render(false) + ")")
+		}
+	} else if r.Kind != KindMatch {
 		b.WriteByte(',')
 		b.WriteString(strings.Join(r.Values, "|"))
 	}
-	b.WriteByte(',')
-	b.WriteString(r.Target)
+	if action {
+		b.WriteByte(',')
+		b.WriteString(r.Target)
+	}
 	if r.NoResolve {
 		b.WriteString(",no-resolve")
 	}
@@ -109,6 +129,8 @@ type portRange struct{ lo, hi uint16 }
 
 type rule struct {
 	spec     RuleSpec
+	children []*rule
+	ipset    *netipx.IPSet
 	prefixes []netip.Prefix
 	ports    []portRange
 	regexps  []*regexp.Regexp
@@ -142,12 +164,47 @@ func NormalizeDomain(s string) string {
 	return s
 }
 
-func compileRule(index int, spec RuleSpec) (*rule, error) {
+func compileRule(index int, spec RuleSpec) (*rule, error) { return compileRuleDepth(index, spec, 0) }
+func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 	r := &rule{spec: spec}
 	fail := func(v string, err error) error { return &RuleError{Index: index, Value: v, Err: err} }
+	if depth > 32 {
+		return nil, fail("", fmt.Errorf("condition nesting exceeds 32"))
+	}
+	if spec.Kind == KindAnd || spec.Kind == KindOr || spec.Kind == KindNot {
+		if len(spec.Values) != 0 || spec.NoResolve || len(spec.Children) == 0 || (spec.Kind == KindNot && len(spec.Children) != 1) {
+			return nil, fail("", fmt.Errorf("invalid logical operands or modifiers"))
+		}
+		for _, child := range spec.Children {
+			cr, err := compileRuleDepth(index, child, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			r.children = append(r.children, cr)
+		}
+		return r, nil
+	}
+	if len(spec.Children) != 0 {
+		return nil, fail("", fmt.Errorf("only logical conditions accept operands"))
+	}
+	if spec.Kind == KindRuleSet {
+		if spec.Set == nil || len(spec.Values) != 1 {
+			return nil, fail("", fmt.Errorf("unresolved rule-set"))
+		}
+		if depth+1+spec.Set.maxDepth > 32 {
+			return nil, fail("", fmt.Errorf("rule-set nesting exceeds 32"))
+		}
+		return r, nil
+	}
+	if spec.Kind == KindGeoIP {
+		if len(spec.Values) != 1 || !strings.EqualFold(spec.Values[0], "LAN") {
+			return nil, fail("", fmt.Errorf("geoip needs a locked database (only LAN is builtin)"))
+		}
+		return r, nil
+	}
 	if spec.Kind == KindMatch {
-		if len(spec.Values) != 0 {
-			return nil, fail("", fmt.Errorf("a match-all rule takes no values"))
+		if len(spec.Values) != 0 || spec.NoResolve {
+			return nil, fail("", fmt.Errorf("a match-all rule takes no values or modifiers"))
 		}
 		return r, nil
 	}
@@ -170,6 +227,29 @@ func compileRule(index int, spec RuleSpec) (*rule, error) {
 				return nil, fail(v, fmt.Errorf("empty keyword"))
 			}
 			r.strs = append(r.strs, strings.ToLower(v))
+		case KindDomainPattern:
+			pattern := strings.ToLower(v)
+			if err := ValidDomainPattern(pattern); err != nil {
+				return nil, fail(v, err)
+			}
+			if strings.HasPrefix(pattern, ".") && !strings.ContainsAny(pattern, "*+") {
+				r.strs = append(r.strs, pattern[1:])
+				continue
+			}
+			prefix, body := "", pattern
+			if strings.HasPrefix(body, "+.") {
+				prefix = "(?:.+\\.)?"
+				body = body[2:]
+			} else if strings.HasPrefix(body, ".") {
+				prefix = ".+\\."
+				body = body[1:]
+			}
+			expr := prefix + strings.ReplaceAll(regexp.QuoteMeta(body), `\*`, `[^.]+`)
+			re, err := regexp.Compile("^" + expr + "$")
+			if err != nil {
+				return nil, fail(v, err)
+			}
+			r.regexps = append(r.regexps, re)
 		case KindDomainRegex:
 			re, err := regexp.Compile(v)
 			if err != nil {
@@ -202,6 +282,17 @@ func compileRule(index int, spec RuleSpec) (*rule, error) {
 		default:
 			return nil, fail("", fmt.Errorf("unknown rule kind %d", spec.Kind))
 		}
+	}
+	if len(r.prefixes) > 0 {
+		var builder netipx.IPSetBuilder
+		for _, p := range r.prefixes {
+			builder.AddPrefix(p)
+		}
+		set, err := builder.IPSet()
+		if err != nil {
+			return nil, fail("", err)
+		}
+		r.ipset = set
 	}
 	return r, nil
 }
@@ -267,4 +358,24 @@ func matchPrefixes(prefixes []netip.Prefix, a netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// ValidDomainPattern checks Clash provider label wildcards before compilation.
+func ValidDomainPattern(s string) error {
+	if s == "" || strings.ContainsAny(s, " /,\\\t\r\n") || strings.HasSuffix(s, ".") {
+		return fmt.Errorf("invalid domain pattern")
+	}
+	labels := strings.Split(s, ".")
+	for i, label := range labels {
+		if label == "" && (i != 0 || len(labels) == 1) {
+			return fmt.Errorf("empty domain label")
+		}
+		if strings.Contains(label, "*") && label != "*" {
+			return fmt.Errorf("wildcard must occupy whole label")
+		}
+		if strings.Contains(label, "+") && (i != 0 || label != "+" || len(labels) == 1) {
+			return fmt.Errorf("invalid suffix wildcard")
+		}
+	}
+	return nil
 }

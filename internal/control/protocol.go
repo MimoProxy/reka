@@ -56,7 +56,10 @@ func WriteFrame(w io.Writer, payload []byte) error {
 	buf := make([]byte, 4+len(payload))
 	binary.BigEndian.PutUint32(buf, uint32(len(payload)))
 	copy(buf[4:], payload)
-	_, err := w.Write(buf)
+	n, err := w.Write(buf)
+	if err == nil && n != len(buf) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 

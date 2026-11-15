@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/config/store"
@@ -26,13 +27,15 @@ import (
 const usage = `usage: rekactl [-c address | -state-root dir] [-json] command [args]
 
 configuration
-  get [profile|local|effective] [-reveal]   print the active configuration
+  get [profile|local|sources|overlay|effective] [-reveal]   print the active configuration
+  subscription list|set ID URL|refresh ID|pause ID|resume ID|remove ID
+  import -source ID [-format auto|clash|links] [-nodes-only] [-allow-partial] [-apply] FILE
   origin PATH                               where an effective field comes from
-  validate [-local] FILE                    check a document, no side effects
-  plan [-local] FILE                        show what committing FILE changes
-  commit [-local] FILE [-base N] [-op ID] [-m MSG] [-yes]
-  set [-local] PATH JSON [-base N]          change one field, e.g. set /log/level '"debug"'
-  remove [-local] PATH [-base N]            remove a field or list element
+  validate [-local|-sources|-overlay] FILE                    check a document, no side effects
+  plan [-local|-sources|-overlay] FILE                        show what committing FILE changes
+  commit [-local|-sources|-overlay] FILE [-base N] [-op ID] [-m MSG] [-yes]
+  set [-local|-sources|-overlay] PATH JSON [-base N]          change one field, e.g. set /log/level '"debug"'
+  remove [-local|-sources|-overlay] PATH [-base N]            remove a field or list element
   select GROUP MEMBER                       change a select group's choice
   revisions                                 list revisions
   restore REVISION [-yes]                   commit an old revision again
@@ -40,6 +43,7 @@ configuration
 
 runtime
   status
+  group-status                               observed automatic choices and health
   explain DESTINATION [-network tcp|udp] [-source ADDR] [-addr IP]... [-resolve] [-process NAME]
   connections
   close ID...|all
@@ -130,6 +134,10 @@ func run(args []string) error {
 	switch cmd {
 	case "get":
 		return cmdGet(rest)
+	case "subscription":
+		return cmdSubscription(rest)
+	case "import":
+		return cmdImport(rest)
 	case "origin":
 		return cmdOrigin(rest)
 	case "validate":
@@ -144,8 +152,7 @@ func run(args []string) error {
 		if len(rest) != 2 {
 			return errors.New("usage: select GROUP MEMBER")
 		}
-		v, _ := json.Marshal(rest[1])
-		return cmdPatch("set", []string{model.JoinPath("/groups", rest[0], "selected"), string(v)})
+		return cmdSelect(rest[0], rest[1])
 	case "revisions":
 		return cmdRevisions()
 	case "restore":
@@ -159,6 +166,17 @@ func run(args []string) error {
 			return err
 		}
 		return printResult(res)
+	case "group-status":
+		var states []struct{ ID, Type, Selected string }
+		if err := call("GetGroupStatus", nil, &states); err != nil {
+			return err
+		}
+		if !*jsonFlag {
+			for _, s := range states {
+				fmt.Printf("%s (%s): %s\n", s.ID, s.Type, s.Selected)
+			}
+		}
+		return nil
 	case "status":
 		return cmdStatus()
 	case "explain":
@@ -197,6 +215,10 @@ func cmdGet(args []string) error {
 		fmt.Print(cfg.Profile)
 	case "local":
 		fmt.Print(cfg.Local)
+	case "sources":
+		fmt.Print(cfg.Sources)
+	case "overlay":
+		fmt.Print(cfg.Overlay)
 	case "effective":
 		b, _ := json.MarshalIndent(cfg.Effective, "", "  ")
 		fmt.Println(string(b))
@@ -217,7 +239,7 @@ func cmdOrigin(args []string) error {
 		return errors.New("usage: origin PATH")
 	}
 	var cfg service.Configuration
-	if err := call("GetConfiguration", nil, &cfg); err != nil {
+	if err := client.Call("GetConfiguration", nil, &cfg); err != nil {
 		return err
 	}
 	if cfg.Effective == nil {
@@ -227,7 +249,16 @@ func cmdOrigin(args []string) error {
 	if !ok {
 		return fmt.Errorf("%s is not set", args[0])
 	}
+	if *jsonFlag {
+		return json.NewEncoder(os.Stdout).Encode(o)
+	}
 	fmt.Printf("%s: %s", args[0], o.Layer)
+	if o.Source != "" {
+		fmt.Printf(" %s", o.Source)
+	}
+	if o.Document != "" {
+		fmt.Printf(" %s%s", o.Document, o.Path)
+	}
 	if o.Line > 0 {
 		fmt.Printf(" (line %d, column %d)", o.Line, o.Column)
 	}
@@ -241,16 +272,18 @@ func cmdOrigin(args []string) error {
 	return nil
 }
 
-// docFlags parses [-local] FILE plus extra flags.
-func docFlags(name string, args []string, extra func(*flag.FlagSet)) (local bool, text string, fs *flag.FlagSet, err error) {
+// docFlags parses [-local|-sources|-overlay] FILE plus extra flags.
+func docFlags(name string, args []string, extra func(*flag.FlagSet)) (document string, text string, fs *flag.FlagSet, err error) {
 	fs = flag.NewFlagSet(name, flag.ExitOnError)
-	l := fs.Bool("local", false, "the file is local settings, not the profile")
+	l := fs.Bool("local", false, "local settings")
+	s := fs.Bool("sources", false, "normalized sources")
+	o := fs.Bool("overlay", false, "overlay")
 	if extra != nil {
 		extra(fs)
 	}
 	parse(fs, args)
 	if fs.NArg() != 1 {
-		return false, "", fs, fmt.Errorf("usage: %s [-local] FILE", name)
+		return "", "", fs, fmt.Errorf("usage: %s [-local|-sources|-overlay] FILE", name)
 	}
 	var b []byte
 	if fs.Arg(0) == "-" {
@@ -258,14 +291,33 @@ func docFlags(name string, args []string, extra func(*flag.FlagSet)) (local bool
 	} else {
 		b, err = os.ReadFile(fs.Arg(0))
 	}
-	return *l, string(b), fs, err
+	document = "profile"
+	count := 0
+	for _, opt := range []struct {
+		enabled bool
+		name    string
+	}{{*l, "local"}, {*s, "sources"}, {*o, "overlay"}} {
+		if opt.enabled {
+			document = opt.name
+			count++
+		}
+	}
+	if count > 1 {
+		return "", "", fs, errors.New("choose one document flag")
+	}
+	return document, string(b), fs, err
 }
 
-func change(local bool, text string, base uint64) service.ChangeRequest {
+func change(document string, text string, base uint64) service.ChangeRequest {
 	req := service.ChangeRequest{BaseRevision: base}
-	if local {
+	switch document {
+	case "local":
 		req.Local = &text
-	} else {
+	case "sources":
+		req.Sources = &text
+	case "overlay":
+		req.Overlay = &text
+	default:
 		req.Profile = &text
 	}
 	return req
@@ -304,6 +356,9 @@ func cmdValidate(args []string) error {
 }
 
 func printPlan(p *generation.Plan) {
+	if p.NetworkChanged {
+		fmt.Println("Network takeover:", p.NetworkNote)
+	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	for _, o := range p.Outbounds {
 		if o.Action == generation.ActionKeep {
@@ -323,6 +378,12 @@ func printPlan(p *generation.Plan) {
 	}
 	for _, g := range p.Groups {
 		fmt.Fprintf(w, "group %s\tselect\t%s -> %s\n", g.ID, g.From, g.To)
+	}
+	if p.DNSChanged {
+		fmt.Fprintln(w, "DNS\tnew queries use the new resolver; existing fake mappings drain")
+	}
+	if p.AutomaticGroupsChanged {
+		fmt.Fprintln(w, "automatic groups\thealth policy changes; manual selections are preserved")
 	}
 	if p.RulesChanged {
 		fmt.Fprintf(w, "rules\treplace\t%d rules\n", p.Rules)
@@ -469,6 +530,8 @@ func cmdCommit(args []string) error {
 func cmdPatch(op string, args []string) error {
 	fs := flag.NewFlagSet(op, flag.ExitOnError)
 	local := fs.Bool("local", false, "edit local settings")
+	sources := fs.Bool("sources", false, "edit normalized sources")
+	overlay := fs.Bool("overlay", false, "edit overlay")
 	base := fs.Uint64("base", 0, "base revision (default: active)")
 	yes := fs.Bool("yes", false, "do not ask before interrupting a listener")
 	parse(fs, args)
@@ -497,12 +560,50 @@ func cmdPatch(op string, args []string) error {
 		}
 	}
 	req := service.ChangeRequest{BaseRevision: b}
-	if *local {
+	count := 0
+	for _, selected := range []bool{*local, *sources, *overlay} {
+		if selected {
+			count++
+		}
+	}
+	if count > 1 {
+		return errors.New("choose one document flag")
+	}
+	if *sources {
+		req.SourcesPatch = []model.Op{o}
+	} else if *overlay {
+		req.OverlayPatch = []model.Op{o}
+	} else if *local {
 		req.LocalPatch = []model.Op{o}
 	} else {
 		req.Patch = []model.Op{o}
 	}
 	return commitWithPlan(req, "", "", "cli", *yes)
+}
+
+func cmdSelect(group, member string) error {
+	value, _ := json.Marshal(member)
+	path := model.JoinPath("/groups", group, "selected")
+	if !strings.Contains(group, "/") {
+		return cmdPatch("set", []string{path, string(value)})
+	}
+	var cfg service.Configuration
+	if err := client.Call("GetConfiguration", nil, &cfg); err != nil {
+		return err
+	}
+	overlay, _, diags := model.ParseOverlay([]byte(cfg.Overlay))
+	if diags.HasErrors() {
+		return diags.Errors()
+	}
+	patch := model.Op{Op: "set", Path: path, Value: value}
+	encoded, _ := json.Marshal(patch)
+	edit := model.Op{Op: "insert", Path: "/patches", Value: encoded}
+	for i, p := range overlay.Patches {
+		if p.Op == "set" && p.Path == path {
+			edit = model.Op{Op: "set", Path: fmt.Sprintf("/patches/#%d/value", i), Value: value}
+		}
+	}
+	return commitWithPlan(service.ChangeRequest{BaseRevision: cfg.Revision, OverlayPatch: []model.Op{edit}}, "", "", "cli", false)
 }
 
 func cmdRevisions() error {
@@ -730,4 +831,142 @@ func cmdSecret(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("secret: unknown command %q", args[0])
+}
+
+func cmdImport(args []string) error {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	id := fs.String("source", "", "stable source ID")
+	format := fs.String("format", "auto", "auto, clash or links")
+	nodesOnly := fs.Bool("nodes-only", false, "explicitly import only proxy nodes")
+	partial := fs.Bool("allow-partial", false, "allow omissions after reviewing their diagnostics")
+	apply := fs.Bool("apply", false, "plan and commit the imported source")
+	parse(fs, args)
+	if *id == "" || fs.NArg() != 1 {
+		return errors.New("usage: import -source ID [-nodes-only] [-allow-partial] [-apply] FILE")
+	}
+	var data []byte
+	var err error
+	if fs.Arg(0) == "-" {
+		data, err = io.ReadAll(io.LimitReader(os.Stdin, model.MaxDocumentSize+1))
+	} else {
+		f, e := os.Open(fs.Arg(0))
+		if e != nil {
+			return e
+		}
+		defer f.Close()
+		data, err = io.ReadAll(io.LimitReader(f, model.MaxDocumentSize+1))
+	}
+	if err != nil {
+		return err
+	}
+	request := importer.Request{SourceID: *id, Format: *format, Data: string(data), NodesOnly: *nodesOnly, AllowPartial: *partial}
+	var preview importer.Preview
+	if err := call("ImportSource", map[string]any{"import": request}, &preview); err != nil {
+		return err
+	}
+	if !*jsonFlag {
+		printDiagnostics(preview.Report.Diagnostics)
+		r := preview.Report
+		fmt.Printf("source %s (%s): nodes %d/%d, groups %d/%d, rules %d/%d; can apply: %t\n", r.SourceID, r.Format, r.Nodes.Imported, r.Nodes.Total, r.Groups.Imported, r.Groups.Total, r.Rules.Imported, r.Rules.Total, r.CanApply)
+	}
+	if !preview.Report.CanApply {
+		return exitError
+	}
+	if !*apply {
+		return nil
+	}
+	base, err := activeRevision()
+	if err != nil {
+		return err
+	}
+	return commitWithPlan(service.ChangeRequest{BaseRevision: base, Import: &request}, "", "import source "+*id, "import", false)
+}
+
+func cmdSubscription(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: subscription list|set|refresh|pause|resume|remove")
+	}
+	action := args[0]
+	if action == "list" {
+		var statuses []service.SubscriptionStatus
+		if err := call("ListSubscriptions", nil, &statuses); err != nil {
+			return err
+		}
+		if !*jsonFlag {
+			for _, status := range statuses {
+				fmt.Printf("%s: %s (%s)\n", status.SourceID, status.State, status.ErrorCode)
+			}
+		}
+		return nil
+	}
+	if action == "refresh" {
+		if len(args) != 2 {
+			return errors.New("usage: subscription refresh ID")
+		}
+		var status service.SubscriptionStatus
+		if err := call("RefreshSubscription", map[string]any{"source_id": args[1], "wait": true}, &status); err != nil {
+			return err
+		}
+		if !*jsonFlag {
+			fmt.Printf("%s: %s (%s)\n", status.SourceID, status.State, status.ErrorCode)
+		}
+		if status.State != "current" {
+			return exitError
+		}
+		return nil
+	}
+	fs := flag.NewFlagSet("subscription", flag.ExitOnError)
+	interval := fs.Int("interval", 3600, "refresh interval in seconds (at least 30)")
+	format := fs.String("format", "auto", "auto, clash or links")
+	nodes := fs.Bool("nodes-only", false, "only nodes, including declared proxy providers")
+	partial := fs.Bool("allow-partial", false, "explicitly accept supported subset")
+	geoip := fs.String("geoip", "", "explicit GeoIP protobuf .dat URL or secret reference")
+	geosite := fs.String("geosite", "", "explicit GeoSite protobuf .dat URL or secret reference")
+	parse(fs, args[1:])
+	want := 1
+	if action == "set" {
+		want = 2
+	}
+	if fs.NArg() != want {
+		return errors.New("usage: subscription set ID URL [-interval N] [-nodes-only] or pause|resume|remove ID")
+	}
+	var cfg service.Configuration
+	// Definition edits must round-trip masked URL/header values without
+	// displaying them. ConfigService restores those masks from stored fields.
+	if err := client.Call("GetConfiguration", nil, &cfg); err != nil {
+		return err
+	}
+	var spec *model.Subscription
+	switch action {
+	case "set":
+		spec = &model.Subscription{URL: fs.Arg(1), Interval: *interval, Format: *format, NodesOnly: *nodes, AllowPartial: *partial}
+		if *geoip != "" {
+			spec.Geodata = append(spec.Geodata, model.GeoAsset{ID: "geoip", URL: *geoip})
+		}
+		if *geosite != "" {
+			spec.Geodata = append(spec.Geodata, model.GeoAsset{ID: "geosite", URL: *geosite})
+		}
+	case "remove":
+	case "pause", "resume":
+		sources, _, ds := model.ParseSources([]byte(cfg.Sources))
+		if ds.HasErrors() {
+			return ds.Errors()
+		}
+		for _, src := range sources.Sources {
+			if src.ID == fs.Arg(0) {
+				spec = src.Subscription
+			}
+		}
+		if spec == nil {
+			return errors.New("subscription not found")
+		}
+		spec.Paused = action == "pause"
+	default:
+		return errors.New("unknown subscription action")
+	}
+	var result service.Result
+	if err := call("ConfigureSubscription", map[string]any{"source_id": fs.Arg(0), "base_revision": cfg.Revision, "subscription": spec}, &result); err != nil {
+		return err
+	}
+	return printResult(result)
 }

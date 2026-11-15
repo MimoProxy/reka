@@ -39,6 +39,8 @@ type candidateFile struct {
 const (
 	profileFile = "profile.yaml"
 	localFile   = "local.yaml"
+	sourcesFile = "sources.yaml"
+	overlayFile = "overlay.yaml"
 )
 
 // NewCandidate prepares candidate files in dir.
@@ -46,15 +48,22 @@ func (s *Service) NewCandidate(dir string) *Candidate {
 	return &Candidate{Dir: dir, svc: s, files: map[string]*candidateFile{
 		"profile": {name: "profile", path: filepath.Join(dir, profileFile)},
 		"local":   {name: "local", path: filepath.Join(dir, localFile)},
+		"sources": {name: "sources", path: filepath.Join(dir, sourcesFile)},
+		"overlay": {name: "overlay", path: filepath.Join(dir, overlayFile)},
 	}}
 }
 
 func (c *Candidate) export() error {
-	rev, profile, local := c.svc.Documents()
+	rev, profile, local, sources, overlay := c.svc.LayerDocuments()
 	for _, f := range c.files {
 		content := profile
-		if f.name == "local" {
+		switch f.name {
+		case "local":
 			content = local
+		case "sources":
+			content = sources
+		case "overlay":
+			content = overlay
 		}
 		cur, err := os.ReadFile(f.path)
 		switch {
@@ -130,11 +139,16 @@ func (c *Candidate) poll(ctx context.Context) {
 		}
 		text := string(data)
 		req := CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: f.base}, Source: "file",
-			Message: "edited " + filepath.Base(f.path), OperationID: fmt.Sprintf("file-%d-%s", f.base, h[:24])}
-		if f.name == "profile" {
+			Message: "edited " + filepath.Base(f.path), OperationID: fmt.Sprintf("file-%s-%d-%s", f.name, f.base, h[:24])}
+		switch f.name {
+		case "profile":
 			req.Profile = &text
-		} else {
+		case "local":
 			req.Local = &text
+		case "sources":
+			req.Sources = &text
+		case "overlay":
+			req.Overlay = &text
 		}
 		res, err := c.svc.Commit(ctx, req)
 		if err != nil {

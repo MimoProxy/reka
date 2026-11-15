@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/router"
@@ -107,10 +108,10 @@ func decode[T any](raw json.RawMessage) (T, error) {
 
 // Methods lists the API methods of this version.
 var Methods = []string{
-	"Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
+	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
-	"SetSecret", "DeleteSecret", "ListSecrets",
+	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 }
 
 func (s *Session) dispatch(req Request) (any, error) {
@@ -128,8 +129,43 @@ func (s *Session) dispatch(req Request) (any, error) {
 		s.hello = true
 		s.mu.Unlock()
 		return HelloResult{Version: APIVersion, Server: "reka/" + Version, SchemaVersions: []int{model.SchemaVersion}, Epoch: svc.Events().Epoch()}, nil
+	case "GetGroupStatus":
+		return svc.Engine().GroupStatus(), nil
 	case "GetCapabilities":
 		return capabilities(svc), nil
+	case "ImportSource":
+		p, err := decode[struct {
+			Import importer.Request `json:"import"`
+			Reveal bool             `json:"reveal"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.PreviewImport(p.Import, p.Reveal), nil
+	case "ConfigureSubscription":
+		p, err := decode[struct {
+			SourceID     string              `json:"source_id"`
+			Base         uint64              `json:"base_revision"`
+			Subscription *model.Subscription `json:"subscription"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ConfigureSubscription(s.ctx, p.Base, p.SourceID, p.Subscription)
+	case "ListSubscriptions":
+		return svc.ListSubscriptions()
+	case "RefreshSubscription":
+		p, err := decode[struct {
+			SourceID string `json:"source_id"`
+			Wait     bool   `json:"wait"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.Wait {
+			return svc.RefreshSubscription(s.ctx, p.SourceID)
+		}
+		return svc.QueueSubscription(s.ctx, p.SourceID)
 	case "GetStatus":
 		return status(svc), nil
 	case "GetConfiguration":
@@ -326,17 +362,22 @@ func (s *Session) subscribe(types []string, epoch string, after uint64) {
 
 // Capabilities describes what this build supports.
 type Capabilities struct {
-	APIVersion         int      `json:"api_version"`
-	SchemaVersion      int      `json:"schema_version"`
-	Methods            []string `json:"methods"`
-	OutboundTypes      []string `json:"outbound_types"`
-	ListenerTypes      []string `json:"listener_types"`
-	GroupTypes         []string `json:"group_types"`
-	RuleConditions     []string `json:"rule_conditions"`
-	ShadowsocksMethods []string `json:"shadowsocks_methods"`
-	TLSFingerprints    []string `json:"tls_fingerprints"`
-	Platform           string   `json:"platform"`
-	ProcessLookup      bool     `json:"process_lookup"`
+	NetworkModes        []string           `json:"network_modes"`
+	TUNStacks           []string           `json:"tun_stacks,omitempty"`
+	ConfigurationLayers []string           `json:"configuration_layers"`
+	SourceFormats       []string           `json:"source_formats"`
+	ImportSupport       []importer.Support `json:"import_support"`
+	APIVersion          int                `json:"api_version"`
+	SchemaVersion       int                `json:"schema_version"`
+	Methods             []string           `json:"methods"`
+	OutboundTypes       []string           `json:"outbound_types"`
+	ListenerTypes       []string           `json:"listener_types"`
+	GroupTypes          []string           `json:"group_types"`
+	RuleConditions      []string           `json:"rule_conditions"`
+	ShadowsocksMethods  []string           `json:"shadowsocks_methods"`
+	TLSFingerprints     []string           `json:"tls_fingerprints"`
+	Platform            string             `json:"platform"`
+	ProcessLookup       bool               `json:"process_lookup"`
 }
 
 func capabilities(svc *service.Service) Capabilities {
@@ -344,18 +385,31 @@ func capabilities(svc *service.Service) Capabilities {
 	for _, k := range router.Kinds() {
 		conds = append(conds, k.String())
 	}
-	return Capabilities{
-		APIVersion:         APIVersion,
-		SchemaVersion:      model.SchemaVersion,
-		Methods:            Methods,
-		OutboundTypes:      compile.OutboundTypes(),
-		ListenerTypes:      []string{model.ListenerMixed, model.ListenerSOCKS, model.ListenerHTTP},
-		GroupTypes:         []string{model.GroupSelect},
-		RuleConditions:     conds,
-		ShadowsocksMethods: compile.ShadowsocksMethods,
-		TLSFingerprints:    compile.Fingerprints,
-		Platform:           goruntime.GOOS + "/" + goruntime.GOARCH,
-		ProcessLookup:      svc.Engine().ProcessLookup(),
+	modes := []string{"off"}
+	var stacks []string
+	switch goruntime.GOOS {
+	case "darwin", "windows":
+		modes = append(modes, "system-proxy", "tun")
+		stacks = svc.Engine().TUNStacks()
+	case "android":
+		modes = append(modes, "tun")
+		stacks = svc.Engine().TUNStacks()
+	}
+	return Capabilities{NetworkModes: modes, TUNStacks: stacks,
+		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
+		SourceFormats:       []string{"native", "clash", "links"},
+		ImportSupport:       importer.SupportMatrix(),
+		APIVersion:          APIVersion,
+		SchemaVersion:       model.SchemaVersion,
+		Methods:             Methods,
+		OutboundTypes:       compile.OutboundTypes(),
+		ListenerTypes:       []string{model.ListenerMixed, model.ListenerSOCKS, model.ListenerHTTP},
+		GroupTypes:          []string{model.GroupSelect, "url-test", "fallback", "load-balance"},
+		RuleConditions:      conds,
+		ShadowsocksMethods:  compile.ShadowsocksMethods,
+		TLSFingerprints:     compile.Fingerprints,
+		Platform:            goruntime.GOOS + "/" + goruntime.GOARCH,
+		ProcessLookup:       svc.Engine().ProcessLookup(),
 	}
 }
 

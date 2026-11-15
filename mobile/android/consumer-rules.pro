@@ -1,0 +1,3 @@
+-keep class org.mimoproxy.reka.Native { *; }
+-keep interface org.mimoproxy.reka.Native$Host { *; }
+-keepclassmembers class * implements org.mimoproxy.reka.Native$Host { public *; }

@@ -42,6 +42,8 @@ type Metadata struct {
 
 // Route is the routing decision for one connection.
 type Route struct {
+	Lookup      LookupFunc
+	Destination *Destination
 	// Outbound carries the connection, with a lease already taken (see
 	// Outbound.Lease). Nil rejects the connection.
 	Outbound *Outbound

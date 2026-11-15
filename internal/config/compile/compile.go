@@ -1,7 +1,7 @@
-// Package compile validates the profile and local settings and composes
-// them into an effective configuration: defaults, then the profile, then
-// local settings, recording where every field came from. Compilation has
-// no side effects beyond reading secrets.
+// Package compile composes and validates native configuration layers:
+// defaults, source imports, profile, overlay, then local settings, recording
+// where every field came from. Compilation has
+// no side effects beyond reading secrets and immutable locked resources.
 package compile
 
 import (
@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
@@ -19,12 +20,18 @@ import (
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
+	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/platform"
+	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
 // Options for Compile.
 type Options struct {
+	ReadResource func(string) ([]byte, error)
+	Sources      []byte
+	Overlay      []byte
 	// Secrets resolves "secret://" references. Nil makes every reference
 	// an error.
 	Secrets secret.Store
@@ -42,9 +49,12 @@ const (
 
 // Origin says where an effective field came from.
 type Origin struct {
-	Layer  string `json:"layer"`
-	Line   int    `json:"line,omitempty"`
-	Column int    `json:"column,omitempty"`
+	Layer    string `json:"layer"`
+	Document string `json:"document,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
 	// Overrides is set when a local setting replaced a profile value.
 	Overrides *Origin `json:"overrides,omitempty"`
 }
@@ -53,18 +63,22 @@ type Origin struct {
 // changes whenever anything that affects the instance changes, including
 // a resolved secret; equal fingerprints mean the instance can be reused.
 type Outbound struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Type        string `json:"type"`
-	Server      string `json:"server,omitempty"`
-	Port        uint16 `json:"port,omitempty"`
-	UDP         bool   `json:"udp"`
-	Username    string `json:"username,omitempty"`
-	Method      string `json:"method,omitempty"`
-	Flow        string `json:"flow,omitempty"`
-	TLS         *TLS   `json:"tls,omitempty"`
-	Builtin     bool   `json:"builtin,omitempty"`
-	Fingerprint string `json:"fingerprint"`
+	PacketEncoding string           `json:"packet-encoding,omitempty"`
+	Protocol       *model.Protocol  `json:"-"`
+	Transport      *model.Transport `json:"-"`
+	Multiplex      *model.Multiplex `json:"multiplex,omitempty"`
+	ID             string           `json:"id"`
+	Name           string           `json:"name,omitempty"`
+	Type           string           `json:"type"`
+	Server         string           `json:"server,omitempty"`
+	Port           uint16           `json:"port,omitempty"`
+	UDP            bool             `json:"udp"`
+	Username       string           `json:"-"`
+	Method         string           `json:"method,omitempty"`
+	Flow           string           `json:"flow,omitempty"`
+	TLS            *TLS             `json:"tls,omitempty"`
+	Builtin        bool             `json:"builtin,omitempty"`
+	Fingerprint    string           `json:"fingerprint"`
 
 	// Resolved credentials; never serialized.
 	Password string `json:"-"`
@@ -96,16 +110,29 @@ type Listener struct {
 	Fingerprint string         `json:"fingerprint"`
 }
 
-// Effective is the composed configuration a runtime generation is built
-// from. It is immutable once returned.
+// GroupMetadata contains display fields that do not affect routing or instances.
+type GroupMetadata struct {
+	Name string `json:"name,omitempty"`
+	Icon string `json:"icon,omitempty"`
+}
+
+// Effective is the immutable configuration used by the runtime.
 type Effective struct {
-	Outbounds []Outbound        `json:"outbounds"`
-	Groups    []router.Group    `json:"groups"`
-	Rules     []router.RuleSpec `json:"-"`
-	RuleIDs   []string          `json:"-"`
-	Listeners []Listener        `json:"listeners"`
-	LogLevel  string            `json:"log-level"`
-	Control   string            `json:"control,omitempty"`
+	Network          platform.Network          `json:"network"`
+	GroupUDPDisabled map[string]bool           `json:"group-udp-disabled,omitempty"`
+	AutoGroups       []policy.Group            `json:"automatic-groups,omitempty"`
+	DNS              *RD.Config                `json:"-"`
+	DNSFingerprint   string                    `json:"dns-fingerprint,omitempty"`
+	DNSMatches       map[string]*router.Router `json:"-"`
+	GroupMetadata    map[string]GroupMetadata  `json:"group_metadata,omitempty"`
+	SourceHashes     map[string]string         `json:"source_hashes,omitempty"`
+	Outbounds        []Outbound                `json:"outbounds"`
+	Groups           []router.Group            `json:"groups"`
+	Rules            []router.RuleSpec         `json:"-"`
+	RuleIDs          []string                  `json:"-"`
+	Listeners        []Listener                `json:"listeners"`
+	LogLevel         string                    `json:"log-level"`
+	Control          string                    `json:"control,omitempty"`
 	// Final is the target when no rule matches.
 	Final string `json:"final"`
 	// RulesFingerprint changes whenever the rule list changes.
@@ -144,12 +171,15 @@ func (e *Effective) Outbound(id string) (Outbound, bool) {
 }
 
 type compiler struct {
-	opts    Options
-	diags   model.Diagnostics
-	ppos    model.Positions
-	lpos    model.Positions
-	profile *model.Profile
-	local   *model.LocalSettings
+	origins      map[string]Origin
+	scopedIDs    map[string]bool
+	sourceHashes map[string]string
+	opts         Options
+	diags        model.Diagnostics
+	ppos         model.Positions
+	lpos         model.Positions
+	profile      *model.Profile
+	local        *model.LocalSettings
 }
 
 func (c *compiler) add(sev model.Severity, doc, path, code, format string, args ...any) {
@@ -183,7 +213,24 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	if c.diags.HasErrors() {
 		return nil, c.diags
 	}
+	needsLayers := len(opts.Sources) > 0 || len(opts.Overlay) > 0 || len(c.profile.Imports) > 0
+	for _, rule := range c.profile.Rules {
+		needsLayers = needsLayers || rule.Source != ""
+	}
+	if needsLayers {
+		c.layers(profile)
+	}
+	if c.diags.HasErrors() {
+		return nil, c.diags
+	}
 	eff := c.compose()
+	for i, d := range c.diags {
+		if d.Document == model.DocProfile {
+			if o, ok := originAt(c.origins, d.Path); ok {
+				c.diags[i].Document, c.diags[i].Path, c.diags[i].Line, c.diags[i].Column = o.Document, o.Path, o.Line, o.Column
+			}
+		}
+	}
 	if c.diags.HasErrors() {
 		return nil, c.diags
 	}
@@ -204,7 +251,7 @@ func (c *compiler) checkID(doc, path, id string) bool {
 		c.errorf(doc, path, "schema.id", "id is required")
 		return false
 	}
-	if !idRE.MatchString(id) {
+	if !idRE.MatchString(id) && !c.scopedIDs[id] {
 		c.errorf(doc, path+"/id", "schema.id", "id %q must start with a letter or digit and contain only letters, digits, '.', '_' and '-' (at most 64)", id)
 		return false
 	}
@@ -212,15 +259,23 @@ func (c *compiler) checkID(doc, path, id string) bool {
 }
 
 func (c *compiler) compose() *Effective {
-	eff := &Effective{Provenance: map[string]Origin{}, Final: model.OutboundDirect}
+	eff := &Effective{Provenance: map[string]Origin{}, Final: model.OutboundDirect, SourceHashes: c.sourceHashes}
 	for p, pos := range c.ppos {
 		eff.Provenance[p] = Origin{Layer: LayerProfile, Line: pos.Line, Column: pos.Column}
+	}
+	if c.origins != nil {
+		eff.Provenance = make(map[string]Origin, len(c.origins))
+		for p, o := range c.origins {
+			eff.Provenance[p] = o
+		}
 	}
 
 	c.outbounds(eff)
 	c.groups(eff)
 	c.rules(eff)
+	c.dns(eff)
 	c.listenersAndLocal(eff)
+	c.network(eff)
 	if c.diags.HasErrors() {
 		return eff
 	}
@@ -251,7 +306,12 @@ var fieldsByType = map[string][]string{
 	model.OutboundHTTP:        {"server", "port", "username", "password", "tls"},
 	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp"},
 	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp"},
-	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "packet-encoding", "tls", "udp"},
+	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "packet-encoding", "tls", "udp", "transport", "multiplex"},
+	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
+	"trojan":                  {"server", "port", "password", "tls", "udp", "transport", "multiplex"},
+	"hysteria2":               {"server", "port", "password", "tls", "udp", "protocol"},
+	"tuic":                    {"server", "port", "uuid", "password", "tls", "udp", "protocol"},
+	"snell":                   {"server", "port", "password", "udp", "protocol"},
 }
 
 var commonFields = []string{"id", "name", "type"}
@@ -341,7 +401,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		if (ob.ID == model.OutboundDirect && ob.Type != model.OutboundDirect) || (ob.ID == model.OutboundReject && ob.Type != model.OutboundReject) {
 			c.errorf(doc, base+"/type", "outbound.builtin", "id %q is reserved for the built-in %s outbound", ob.ID, ob.ID)
 		}
-		out := Outbound{ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
+		out := Outbound{PacketEncoding: ob.PacketEncoding, Protocol: ob.Protocol, Transport: ob.Transport, Multiplex: ob.Multiplex, ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
 		out.UDP = ob.UDP == nil || *ob.UDP
 		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundReject {
 			out.UDP = false
@@ -391,6 +451,7 @@ func (c *compiler) outbounds(eff *Effective) {
 				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs tls")
 			}
 		}
+		c.protocol(base, ob, &out)
 		if ob.TLS != nil {
 			out.TLS = c.tls(base+"/tls", ob)
 		}
@@ -403,7 +464,11 @@ func (c *compiler) outbounds(eff *Effective) {
 		}
 	}
 	for i := range eff.Outbounds {
-		eff.Outbounds[i].Fingerprint = fingerprint(eff.Outbounds[i], eff.Outbounds[i].Password, eff.Outbounds[i].UUID)
+		identity := eff.Outbounds[i]
+		identity.Name = "" // display metadata must not rebuild a live outbound
+		params, _ := json.Marshal(identity.Protocol)
+		transport, _ := json.Marshal(identity.Transport)
+		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, string(params), string(transport))
 	}
 }
 
@@ -476,6 +541,53 @@ func (c *compiler) groups(eff *Effective) {
 	for _, o := range eff.Outbounds {
 		targets[o.ID] = true
 	}
+	for i := range c.profile.Groups {
+		g := &c.profile.Groups[i]
+		members := append([]string{}, g.Members...)
+		if g.IncludeAll {
+			for _, o := range eff.Outbounds {
+				if !o.Builtin && !slices.Contains(members, o.ID) {
+					if c.scopedIDs[g.ID] {
+						owner, _, _ := strings.Cut(g.ID, "/")
+						if !strings.HasPrefix(o.ID, owner+"/") {
+							continue
+						}
+					}
+					members = append(members, o.ID)
+				}
+			}
+		}
+		var include, exclude *regexp.Regexp
+		var err error
+		if g.Filter != "" {
+			include, err = regexp.Compile(g.Filter)
+			if err != nil {
+				c.errorf(doc, model.JoinPath("/groups", g.ID, "filter"), "group.filter", "invalid filter")
+				continue
+			}
+		}
+		if g.ExcludeFilter != "" {
+			exclude, err = regexp.Compile(g.ExcludeFilter)
+			if err != nil {
+				c.errorf(doc, model.JoinPath("/groups", g.ID, "exclude-filter"), "group.filter", "invalid filter")
+				continue
+			}
+		}
+		g.Members = nil
+		for _, id := range members {
+			name := id
+			for _, o := range eff.Outbounds {
+				if o.ID == id && o.Name != "" {
+					name = o.Name
+					break
+				}
+			}
+			if include != nil && !include.MatchString(name) || exclude != nil && exclude.MatchString(name) {
+				continue
+			}
+			g.Members = append(g.Members, id)
+		}
+	}
 	seen := map[string]bool{}
 	for i, g := range c.profile.Groups {
 		base := model.JoinPath("/groups", seg(g.ID, i))
@@ -490,8 +602,8 @@ func (c *compiler) groups(eff *Effective) {
 	}
 	for i, g := range c.profile.Groups {
 		base := model.JoinPath("/groups", seg(g.ID, i))
-		if g.Type != model.GroupSelect {
-			c.errorf(doc, base+"/type", "group.type", "unsupported group type %q (supported: select)", g.Type)
+		if g.Type != model.GroupSelect && g.Type != "url-test" && g.Type != "fallback" && g.Type != "load-balance" {
+			c.errorf(doc, base+"/type", "group.type", "unsupported group type %q (supported: select, url-test, fallback, load-balance)", g.Type)
 			continue
 		}
 		if len(g.Members) == 0 {
@@ -515,7 +627,40 @@ func (c *compiler) groups(eff *Effective) {
 			c.errorf(doc, base+"/selected", "group.selected", "selected %q is not a member", g.Selected)
 			ok = false
 		}
+		if g.Type != "select" {
+			if g.URL == "" {
+				g.URL = "https://www.gstatic.com/generate_204"
+			}
+			u, err := url.Parse(g.URL)
+			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" {
+				c.errorf(doc, base+"/url", "group.url", "health URL must be HTTP(S)")
+				ok = false
+			}
+			if g.Interval < 0 || g.Interval > 604800 || g.Timeout < 0 || g.Timeout > 60000 || g.Tolerance < 0 {
+				c.errorf(doc, base, "group.health", "invalid health-check limits")
+				ok = false
+			}
+			if g.Strategy != "" && g.Strategy != "consistent-hashing" && g.Strategy != "round-robin" {
+				c.errorf(doc, base, "group.strategy", "unsupported load-balance strategy")
+				ok = false
+			}
+			lazy := true
+			if g.Lazy != nil {
+				lazy = *g.Lazy
+			}
+			eff.AutoGroups = append(eff.AutoGroups, policy.Group{ID: g.ID, Type: g.Type, Members: g.Members, Selected: g.Selected, URL: g.URL, Interval: g.Interval, Timeout: g.Timeout, Tolerance: g.Tolerance, Lazy: lazy, Strategy: g.Strategy})
+		}
+		if g.DisableUDP {
+			if eff.GroupUDPDisabled == nil {
+				eff.GroupUDPDisabled = map[string]bool{}
+			}
+			eff.GroupUDPDisabled[g.ID] = true
+		}
 		if ok {
+			if eff.GroupMetadata == nil {
+				eff.GroupMetadata = map[string]GroupMetadata{}
+			}
+			eff.GroupMetadata[g.ID] = GroupMetadata{Name: g.Name, Icon: g.Icon}
 			eff.Groups = append(eff.Groups, router.Group{ID: g.ID, Members: g.Members, Selected: g.Selected})
 		}
 	}
@@ -561,6 +706,15 @@ func findCycle(start string, groups map[string]router.Group) string {
 }
 
 func (c *compiler) rules(eff *Effective) {
+	rc := c.prepareRuleResources()
+	c.validateSubRules(rc, eff)
+	c.expandSubRules()
+	for path, origin := range c.origins {
+		eff.Provenance[path] = origin
+	}
+	if c.diags.HasErrors() {
+		return
+	}
 	const doc = model.DocProfile
 	targets := map[string]bool{}
 	for _, o := range eff.Outbounds {
@@ -575,7 +729,7 @@ func (c *compiler) rules(eff *Effective) {
 	for i, r := range c.profile.Rules {
 		base := model.JoinPath("/rules", seg(r.ID, i))
 		if r.ID != "" {
-			if !idRE.MatchString(r.ID) {
+			if !idRE.MatchString(r.ID) && !c.scopedIDs[r.ID] {
 				c.errorf(doc, base+"/id", "schema.id", "invalid rule id %q", r.ID)
 				continue
 			}
@@ -593,13 +747,15 @@ func (c *compiler) rules(eff *Effective) {
 			c.errorf(doc, base+"/outbound", "rule.outbound", "unknown outbound or group %q", r.Outbound)
 			continue
 		}
-		kind, ok := router.ParseKind(r.Match.Kind)
-		if !ok {
-			c.errorf(doc, base+"/match", "rule.match", "unsupported condition %q", r.Match.Kind)
+		spec, err := rc.condition(r.Match, 0)
+		if err != nil {
+			c.errorf(doc, base+"/match", "rule.match", "%s", err)
 			continue
 		}
-		spec := router.RuleSpec{ID: r.ID, Kind: kind, Values: r.Match.Values, NoResolve: r.Match.NoResolve, Target: r.Outbound}
-		if _, err := router.CompileRules([]router.RuleSpec{spec}); err != nil {
+		spec.ID, spec.Target = r.ID, r.Outbound
+		kind := spec.Kind
+		validated, ruleErr := router.CompileRules([]router.RuleSpec{spec})
+		if err := ruleErr; err != nil {
 			var re *router.RuleError
 			msg := err.Error()
 			if errors.As(err, &re) {
@@ -617,7 +773,7 @@ func (c *compiler) rules(eff *Effective) {
 		if kind == router.KindMatch && catchAll < 0 {
 			catchAll = i
 		}
-		if kind == router.KindProcessName && !c.opts.ProcessLookup {
+		if validated.NeedsProcess() && !c.opts.ProcessLookup {
 			c.warnf(doc, base, "rule.process", "this platform cannot identify processes; the rule never matches")
 		}
 		eff.Rules = append(eff.Rules, spec)

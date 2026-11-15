@@ -1,14 +1,21 @@
 package model
 
+import RD "github.com/MimoProxy/reka/internal/dns"
+import "github.com/MimoProxy/reka/internal/platform"
+
 // SchemaVersion is the only document version this build reads and writes.
 const SchemaVersion = 1
 
 // Profile is the user's main configuration document.
 type Profile struct {
+	DNS           *RD.Config `yaml:"dns"`
 	SchemaVersion int        `yaml:"schema-version"`
+	Imports       []Import   `yaml:"imports"`
 	Outbounds     []Outbound `yaml:"outbounds"`
 	Groups        []Group    `yaml:"groups"`
 	Rules         []Rule     `yaml:"rules"`
+	RuleSets      []RuleSet  `yaml:"rule-sets"`
+	SubRules      []SubRules `yaml:"sub-rules"`
 	// Listeners and Log may also be set in the profile; local settings
 	// override them on each machine.
 	Listeners []Listener `yaml:"listeners"`
@@ -18,10 +25,11 @@ type Profile struct {
 // LocalSettings are per-machine settings kept apart from the profile, so
 // switching profiles never changes ports or the control endpoint.
 type LocalSettings struct {
-	SchemaVersion int        `yaml:"schema-version"`
-	Listeners     []Listener `yaml:"listeners"`
-	Log           *Log       `yaml:"log"`
-	Control       *Control   `yaml:"control"`
+	Network       *platform.Network `yaml:"network"`
+	SchemaVersion int               `yaml:"schema-version"`
+	Listeners     []Listener        `yaml:"listeners"`
+	Log           *Log              `yaml:"log"`
+	Control       *Control          `yaml:"control"`
 }
 
 // Outbound types.
@@ -37,9 +45,12 @@ const (
 // Outbound is one proxy node or built-in action. Which fields apply depends
 // on Type; a field that does not apply is an error, not ignored.
 type Outbound struct {
-	ID   string `yaml:"id"`
-	Name string `yaml:"name"`
-	Type string `yaml:"type"`
+	Protocol  *Protocol  `yaml:"protocol"`
+	Transport *Transport `yaml:"transport"`
+	Multiplex *Multiplex `yaml:"multiplex"`
+	ID        string     `yaml:"id"`
+	Name      string     `yaml:"name"`
+	Type      string     `yaml:"type"`
 
 	Server string `yaml:"server"`
 	Port   int    `yaml:"port"`
@@ -83,6 +94,18 @@ const GroupSelect = "select"
 
 // Group is a policy group.
 type Group struct {
+	URL           string `yaml:"url"`
+	Interval      int    `yaml:"interval"`
+	Timeout       int    `yaml:"timeout"`
+	Tolerance     int    `yaml:"tolerance"`
+	Lazy          *bool  `yaml:"lazy"`
+	Strategy      string `yaml:"strategy"`
+	IncludeAll    bool   `yaml:"include-all"`
+	Filter        string `yaml:"filter"`
+	ExcludeFilter string `yaml:"exclude-filter"`
+	DisableUDP    bool   `yaml:"disable-udp"`
+
+	Icon    string   `yaml:"icon"`
 	ID      string   `yaml:"id"`
 	Name    string   `yaml:"name"`
 	Type    string   `yaml:"type"`
@@ -95,9 +118,73 @@ type Group struct {
 // Rule routes connections that match to Outbound, which names an outbound
 // or a group.
 type Rule struct {
-	ID       string `yaml:"id"`
+	ID string `yaml:"id"`
+	// Source expands that source's rules here instead of matching a flow.
+	Source   string `yaml:"source"`
 	Match    Match  `yaml:"match"`
 	Outbound string `yaml:"outbound"`
+	Call     string `yaml:"call"`
+}
+
+// Import selects which resources from a source are visible to the profile.
+type Import struct {
+	RuleSets  bool   `yaml:"rule-sets"`
+	SubRules  bool   `yaml:"sub-rules"`
+	Source    string `yaml:"source"`
+	Outbounds bool   `yaml:"outbounds"`
+	Groups    bool   `yaml:"groups"`
+}
+
+// Sources contains normalized, immutable source snapshots. Downloading and
+// importing external formats happens before submitting these documents.
+type Sources struct {
+	SchemaVersion int      `yaml:"schema-version"`
+	Sources       []Source `yaml:"sources"`
+}
+
+type Subscription struct {
+	Geodata      []GeoAsset           `yaml:"geodata" json:"geodata,omitempty"`
+	URL          string               `yaml:"url" json:"url"`
+	Format       string               `yaml:"format" json:"format,omitempty"`
+	Interval     int                  `yaml:"interval" json:"interval,omitempty"`
+	NodesOnly    bool                 `yaml:"nodes-only" json:"nodes_only,omitempty"`
+	AllowPartial bool                 `yaml:"allow-partial" json:"allow_partial,omitempty"`
+	Paused       bool                 `yaml:"paused" json:"paused,omitempty"`
+	Headers      []SubscriptionHeader `yaml:"headers" json:"headers,omitempty"`
+}
+type SubscriptionHeader struct {
+	Name  string `yaml:"name" json:"name"`
+	Value string `yaml:"value" json:"value"`
+}
+type SourceLock struct {
+	Root      string         `yaml:"root" json:"root"`
+	Resources []ResourceLock `yaml:"resources" json:"resources"`
+}
+type ResourceLock struct {
+	Format   string `yaml:"format" json:"format,omitempty"`
+	Behavior string `yaml:"behavior" json:"behavior,omitempty"`
+	ID       string `yaml:"id" json:"id"`
+	Kind     string `yaml:"kind" json:"kind"`
+	Name     string `yaml:"name" json:"name,omitempty"`
+	Hash     string `yaml:"hash" json:"hash"`
+	Request  string `yaml:"request" json:"request"`
+}
+type Source struct {
+	DNS          *RD.Config    `yaml:"dns"`
+	Subscription *Subscription `yaml:"subscription"`
+	Lock         *SourceLock   `yaml:"lock"`
+	ID           string        `yaml:"id"`
+	Outbounds    []Outbound    `yaml:"outbounds"`
+	Groups       []Group       `yaml:"groups"`
+	Rules        []Rule        `yaml:"rules"`
+	RuleSets     []RuleSet     `yaml:"rule-sets"`
+	SubRules     []SubRules    `yaml:"sub-rules"`
+}
+
+// Overlay contains explicit edits against the composed source/profile view.
+type Overlay struct {
+	SchemaVersion int  `yaml:"schema-version"`
+	Patches       []Op `yaml:"patches"`
 }
 
 // Match is a rule condition: exactly one condition key, with one value or
@@ -107,6 +194,7 @@ type Match struct {
 	Kind      string
 	Values    []string
 	NoResolve bool
+	Children  []Match
 }
 
 // Listener types.
@@ -134,4 +222,67 @@ type Log struct {
 // Control is where the control API listens. It is read at startup.
 type Control struct {
 	Listen string `yaml:"listen"`
+}
+
+// RuleSet pins external bytes or carries explicit inline condition entries.
+type RuleSet struct {
+	ID         string          `yaml:"id"`
+	Behavior   string          `yaml:"behavior"`
+	Format     string          `yaml:"format"`
+	Hash       string          `yaml:"hash"`
+	Code       string          `yaml:"code"`
+	Entries    []Match         `yaml:"entries"`
+	References []RuleReference `yaml:"references"`
+}
+type SubRules struct {
+	ID    string `yaml:"id"`
+	Rules []Rule `yaml:"rules"`
+}
+
+type GeoAsset struct {
+	ID  string `yaml:"id" json:"id"`
+	URL string `yaml:"url" json:"url"`
+}
+
+type RuleReference struct {
+	Name string `yaml:"name"`
+	To   string `yaml:"to"`
+}
+
+type Protocol struct {
+	Security   string `yaml:"security"`
+	AlterID    int    `yaml:"alter-id"`
+	Version    int    `yaml:"version"`
+	UserKey    string `yaml:"user-key"`
+	Mode       string `yaml:"mode"`
+	Reuse      bool   `yaml:"reuse"`
+	UpMbps     int    `yaml:"up-mbps"`
+	DownMbps   int    `yaml:"down-mbps"`
+	Congestion string `yaml:"congestion-control"`
+	UDPMode    string `yaml:"udp-relay-mode"`
+	ZeroRTT    bool   `yaml:"zero-rtt"`
+	Heartbeat  int    `yaml:"heartbeat"`
+	Obfs       *Obfs  `yaml:"obfs"`
+}
+type Obfs struct {
+	Type     string `yaml:"type"`
+	Password string `yaml:"password"`
+	Host     string `yaml:"host"`
+}
+type Transport struct {
+	Type        string               `yaml:"type"`
+	Path        string               `yaml:"path"`
+	Host        string               `yaml:"host"`
+	Service     string               `yaml:"service-name"`
+	Headers     []SubscriptionHeader `yaml:"headers"`
+	EarlyData   int                  `yaml:"max-early-data"`
+	EarlyHeader string               `yaml:"early-data-header"`
+}
+type Multiplex struct {
+	Enabled        bool   `yaml:"enabled"`
+	Protocol       string `yaml:"protocol"`
+	MaxConnections int    `yaml:"max-connections"`
+	MinStreams     int    `yaml:"min-streams"`
+	MaxStreams     int    `yaml:"max-streams"`
+	Padding        bool   `yaml:"padding"`
 }

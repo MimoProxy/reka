@@ -1,0 +1,31 @@
+# Requires a dedicated ARM64 Android device with USB debugging and VPN consent.
+# This is deliberately separate from the hosted cross-compile job.
+name: android runtime
+on:
+  workflow_dispatch:
+    inputs:
+      serial:
+        description: Dedicated adb device serial
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: [self-hosted, android, ARM64]
+    timeout-minutes: 15
+    env:
+      ANDROID_SERIAL: ${{ inputs.serial }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make android
+      - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --output bin/android/loopback.json
+      - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --skip-install --vpn --output bin/android/vpn.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-runtime-evidence
+          path: bin/android/*.json

@@ -2,6 +2,7 @@ package model
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -85,6 +86,18 @@ func ParseLocal(data []byte) (*LocalSettings, Positions, Diagnostics) {
 		l.SchemaVersion = SchemaVersion
 	}
 	return l, pos, diags
+}
+
+func ParseSources(data []byte) (*Sources, Positions, Diagnostics) {
+	s := &Sources{}
+	p, d := decodeDocument(DocSources, data, s, false)
+	return s, p, d
+}
+
+func ParseOverlay(data []byte) (*Overlay, Positions, Diagnostics) {
+	o := &Overlay{}
+	p, d := decodeDocument(DocOverlay, data, o, false)
+	return o, p, d
 }
 
 func decodeDocument(doc string, data []byte, out any, requireVersion bool) (Positions, Diagnostics) {
@@ -207,6 +220,15 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 	if !ok {
 		return
 	}
+	if v.Type() == reflect.TypeFor[json.RawMessage]() {
+		value := d.jsonValue(n, path, depth)
+		b, err := json.Marshal(value)
+		if err != nil {
+			d.errorf(n, path, "yaml.value", "value cannot be represented as JSON")
+		}
+		v.SetBytes(b)
+		return
+	}
 	if u, ok := v.Addr().Interface().(unmarshaler); ok {
 		u.decodeYAML(d, n, path)
 		return
@@ -291,6 +313,53 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 	}
 }
 
+// jsonValue validates arbitrary patch values with the same depth, alias and
+// duplicate-key limits as the typed documents.
+func (d *decoder) jsonValue(n *yaml.Node, path string, depth int) any {
+	n, ok := d.visit(n, path, depth)
+	if !ok {
+		return nil
+	}
+	switch n.Kind {
+	case yaml.MappingNode:
+		out := map[string]any{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.Kind != yaml.ScalarNode || k.Tag != "!!str" {
+				d.errorf(k, path, "yaml.key", "patch object keys must be strings")
+				continue
+			}
+			p := JoinPath(path, k.Value)
+			if _, exists := out[k.Value]; exists {
+				d.errorf(k, p, "yaml.duplicate", "duplicate key %q", k.Value)
+			}
+			out[k.Value] = d.jsonValue(n.Content[i+1], p, depth+1)
+		}
+		return out
+	case yaml.SequenceNode:
+		out := make([]any, len(n.Content))
+		for i, v := range n.Content {
+			out[i] = d.jsonValue(v, JoinPath(path, ElementSegment(v, i)), depth+1)
+		}
+		return out
+	case yaml.ScalarNode:
+		var out any
+		if err := n.Decode(&out); err != nil {
+			d.errorf(n, path, "yaml.value", "invalid patch value")
+			return nil
+		}
+		// Restrict tags to JSON-compatible scalars (timestamps remain strings).
+		switch n.Tag {
+		case "!!str", "!!timestamp":
+			return n.Value
+		case "!!null", "!!bool", "!!int", "!!float":
+			return out
+		}
+	}
+	d.errorf(n, path, "yaml.value", "unsupported patch value")
+	return nil
+}
+
 // ElementSegment is the path segment for a list element: its id when it
 // has a scalar one, otherwise "#index".
 func ElementSegment(n *yaml.Node, index int) string {
@@ -332,8 +401,8 @@ func structFields(t reflect.Type) map[string]int {
 
 // MatchKeys are the rule condition keys, in documentation order.
 var MatchKeys = []string{
-	"domain", "domain-suffix", "domain-keyword", "domain-regex",
-	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "all",
+	"domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern",
+	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "rule-set", "geoip", "and", "or", "not", "all",
 }
 
 func isMatchKey(k string) bool {
@@ -374,6 +443,9 @@ func (m *Match) decodeYAML(d *decoder, n *yaml.Node, path string) {
 				continue
 			}
 			m.NoResolve = val.Value == "true"
+		case k.Value == "and" || k.Value == "or" || k.Value == "not":
+			d.setKind(m, k, kp, k.Value)
+			d.decode(val, kp, reflect.ValueOf(&m.Children).Elem(), strings.Count(kp, "/"))
 		case k.Value == "all":
 			if val.Kind != yaml.ScalarNode || val.Tag != "!!bool" || val.Value != "true" {
 				d.errorf(val, kp, "yaml.type", "all must be true")

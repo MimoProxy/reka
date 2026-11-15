@@ -1,0 +1,23 @@
+name: stability
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '19 18 * * *'
+permissions:
+  contents: read
+jobs:
+  fuzz-and-soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: python3 tools/fuzz.py --seconds 60
+      - run: REKA_SOAK_SECONDS=600 make test TEST_TIMEOUT=30m
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stability-evidence
+          path: bin/fuzz

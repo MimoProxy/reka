@@ -13,7 +13,7 @@ static JavaVM *g_vm;
 
 typedef struct {
 	jobject host;
-	jmethodID protect, seal, open, onMessage;
+	jmethodID protect, seal, open, onMessage, findProcess;
 } host_t;
 
 static int init_vm(JNIEnv *env) {
@@ -27,7 +27,9 @@ static host_t *new_host(JNIEnv *env, jobject host) {
 	h->protect = (*env)->GetMethodID(env, cls, "protect", "(I)Z");
 	h->seal = (*env)->GetMethodID(env, cls, "seal", "([B)[B");
 	h->open = (*env)->GetMethodID(env, cls, "open", "([B)[B");
-	h->onMessage = (*env)->GetMethodID(env, cls, "onMessage", "(Ljava/lang/String;)V");
+	h->findProcess = (*env)->GetMethodID(env, cls, "findProcess", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+ if (!h->findProcess) (*env)->ExceptionClear(env);
+ h->onMessage = (*env)->GetMethodID(env, cls, "onMessage", "(Ljava/lang/String;)V");
 	(*env)->DeleteLocalRef(env, cls);
 	if (!h->protect || !h->seal || !h->open || !h->onMessage) {
 		(*env)->ExceptionClear(env);
@@ -104,6 +106,16 @@ static void host_message(host_t *h, const char *msg) {
 	detach(attached);
 }
 
+static char *host_find_process(host_t *h, const char *network, const char *source, const char *destination) {
+ if (!h->findProcess) return NULL;
+ int attached; JNIEnv *env = attach(&attached); if (!env) return NULL;
+ jstring n=(*env)->NewStringUTF(env,network), s=(*env)->NewStringUTF(env,source), d=(*env)->NewStringUTF(env,destination);
+ jstring result=(*env)->CallObjectMethod(env,h->host,h->findProcess,n,s,d);char *out=NULL;
+ if ((*env)->ExceptionCheck(env)) {(*env)->ExceptionClear(env);result=NULL;}
+ if (result) {const char *v=(*env)->GetStringUTFChars(env,result,NULL);if(v){out=strdup(v);(*env)->ReleaseStringUTFChars(env,result,v);}(*env)->DeleteLocalRef(env,result);}
+ (*env)->DeleteLocalRef(env,n);(*env)->DeleteLocalRef(env,s);(*env)->DeleteLocalRef(env,d);detach(attached);return out;
+}
+
 static const char *get_utf(JNIEnv *env, jstring s) { return s ? (*env)->GetStringUTFChars(env, s, NULL) : NULL; }
 static void release_utf(JNIEnv *env, jstring s, const char *c) { if (s) (*env)->ReleaseStringUTFChars(env, s, c); }
 static jstring new_utf(JNIEnv *env, const char *c) { return (*env)->NewStringUTF(env, c); }
@@ -124,11 +136,51 @@ import (
 
 func main() {}
 
-type jniHost struct{ h *C.host_t }
+type jniHost struct {
+	h      *C.host_t
+	mu     sync.RWMutex
+	closed bool
+}
 
-func (j jniHost) Protect(fd int) bool { return C.host_protect(j.h, C.int(fd)) != 0 }
+func (j *jniHost) Close() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.closed {
+		j.closed = true
+		C.free_host(j.h)
+	}
+}
 
-func (j jniHost) bytes(which int, in []byte) ([]byte, error) {
+func (j *jniHost) FindProcess(network, source, destination string) string {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if j.closed {
+		return ""
+	}
+	n, s, d := C.CString(network), C.CString(source), C.CString(destination)
+	defer C.free(unsafe.Pointer(n))
+	defer C.free(unsafe.Pointer(s))
+	defer C.free(unsafe.Pointer(d))
+	v := C.host_find_process(j.h, n, s, d)
+	if v == nil {
+		return ""
+	}
+	defer C.free(unsafe.Pointer(v))
+	return C.GoString(v)
+}
+
+func (j *jniHost) Protect(fd int) bool {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return !j.closed && C.host_protect(j.h, C.int(fd)) != 0
+}
+
+func (j *jniHost) bytes(which int, in []byte) ([]byte, error) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if j.closed {
+		return nil, errors.New("host closed")
+	}
 	var p unsafe.Pointer
 	if len(in) > 0 {
 		p = unsafe.Pointer(&in[0])
@@ -142,9 +194,14 @@ func (j jniHost) bytes(which int, in []byte) ([]byte, error) {
 	return C.GoBytes(out, n), nil
 }
 
-func (j jniHost) Seal(p []byte) ([]byte, error) { return j.bytes(0, p) }
-func (j jniHost) Open(p []byte) ([]byte, error) { return j.bytes(1, p) }
-func (j jniHost) OnMessage(b []byte) {
+func (j *jniHost) Seal(p []byte) ([]byte, error) { return j.bytes(0, p) }
+func (j *jniHost) Open(p []byte) ([]byte, error) { return j.bytes(1, p) }
+func (j *jniHost) OnMessage(b []byte) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if j.closed {
+		return
+	}
 	c := C.CString(string(b))
 	defer C.free(unsafe.Pointer(c))
 	C.host_message(j.h, c)
@@ -159,7 +216,7 @@ var (
 
 type instance struct {
 	in   *core.Instance
-	host *C.host_t
+	host *jniHost
 }
 
 func goString(env *C.JNIEnv, s C.jstring) string {
@@ -179,6 +236,14 @@ func jstr(env *C.JNIEnv, s string) C.jstring {
 
 //export Java_org_mimoproxy_reka_Native_start
 func Java_org_mimoproxy_reka_Native_start(env *C.JNIEnv, _ C.jclass, jroot, jprofile, jlocal C.jstring, jhost C.jobject) C.jlong {
+	return startJNI(env, jroot, jprofile, jlocal, jhost, 0)
+}
+
+//export Java_org_mimoproxy_reka_Native_startVPN
+func Java_org_mimoproxy_reka_Native_startVPN(env *C.JNIEnv, _ C.jclass, jroot, jprofile, jlocal C.jstring, jhost C.jobject, fd C.jint) C.jlong {
+	return startJNI(env, jroot, jprofile, jlocal, jhost, int(fd))
+}
+func startJNI(env *C.JNIEnv, jroot, jprofile, jlocal C.jstring, jhost C.jobject, fd int) C.jlong {
 	fail := func(err error) C.jlong {
 		mu.Lock()
 		lastErr = err.Error()
@@ -192,22 +257,23 @@ func Java_org_mimoproxy_reka_Native_start(env *C.JNIEnv, _ C.jclass, jroot, jpro
 	if h == nil {
 		return fail(errors.New("host object lacks protect, seal, open or onMessage"))
 	}
-	opts := core.Options{StateRoot: goString(env, jroot), Logger: slog.Default()}
+	opts := core.Options{TUNFD: fd, StateRoot: goString(env, jroot), Logger: slog.Default()}
 	if p := goString(env, jprofile); p != "" {
 		opts.InitialProfile = []byte(p)
 	}
 	if l := goString(env, jlocal); l != "" {
 		opts.InitialLocal = []byte(l)
 	}
-	in, err := core.Start(opts, jniHost{h})
+	host := &jniHost{h: h}
+	in, err := core.Start(opts, host)
 	if err != nil {
-		C.free_host(h)
+		host.Close()
 		return fail(err)
 	}
 	mu.Lock()
 	nextID++
 	id := nextID
-	instances[id] = &instance{in: in, host: h}
+	instances[id] = &instance{in: in, host: host}
 	mu.Unlock()
 	return C.jlong(id)
 }
@@ -238,7 +304,7 @@ func Java_org_mimoproxy_reka_Native_stop(env *C.JNIEnv, _ C.jclass, handle C.jlo
 	mu.Unlock()
 	if inst != nil {
 		inst.in.Stop()
-		C.free_host(inst.host)
+		inst.host.Close()
 	}
 }
 
@@ -250,4 +316,15 @@ func Java_org_mimoproxy_reka_Native_memStats(env *C.JNIEnv, _ C.jclass) C.jstrin
 	runtime.ReadMemStats(&ms)
 	return jstr(env, fmt.Sprintf(`{"sys_mb":%.1f,"heap_inuse_mb":%.1f,"goroutines":%d}`,
 		float64(ms.Sys)/(1<<20), float64(ms.HeapInuse)/(1<<20), runtime.NumGoroutine()))
+}
+
+//export Java_org_mimoproxy_reka_Native_reconfigureVPN
+func Java_org_mimoproxy_reka_Native_reconfigureVPN(env *C.JNIEnv, _ C.jclass, handle C.jlong, fd C.jint, request C.jstring) C.jstring {
+	mu.Lock()
+	in := instances[int64(handle)]
+	mu.Unlock()
+	if in == nil {
+		return jstr(env, `{"error":{"code":"closed","message":"unknown instance"}}`)
+	}
+	return jstr(env, string(in.in.ReconfigureVPN(int(fd), []byte(goString(env, request)))))
 }

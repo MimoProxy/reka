@@ -12,20 +12,28 @@ NDK=${ANDROID_NDK_HOME:-$(ls -d "$SDK"/ndk/* | sort -V | tail -1)}
 BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
 PLATFORM=$(ls -d "$SDK"/platforms/android-* | sort -V | tail -1)
 MIN_API=26
+VERSION=${REKA_VERSION:-dev}
+case "$VERSION" in ''|*[!A-Za-z0-9.+_-]*) echo 'Invalid REKA_VERSION' >&2; exit 1;; esac
 OUT=$ROOT/bin/android
 BUILD=$OUT/build
 rm -rf "$BUILD" && mkdir -p "$BUILD/classes" "$BUILD/apk/lib/arm64-v8a"
 
-TAGS=with_gvisor,with_utls,badlinkname,tfogo_checklinkname0
+TAGS=with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal
+OVERLAY=$(python3 "$ROOT/tools/build-overlay.py")
 HOST_TAG=$(ls "$NDK/toolchains/llvm/prebuilt" | head -1)
 CC="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android$MIN_API-clang"
-(cd "$ROOT" && CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -trimpath -buildmode=c-shared \
-	-tags "$TAGS" -ldflags "-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid=" \
+(cd "$ROOT" && CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -modfile "$ROOT/bin/build.mod" -overlay "$OVERLAY" -trimpath -buildmode=c-shared \
+	-tags "$TAGS" -ldflags "-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid= -X github.com/MimoProxy/reka/internal/control.Version=$VERSION" \
 	-o "$BUILD/apk/lib/arm64-v8a/libreka.so" ./mobile/jni)
 rm -f "$BUILD/apk/lib/arm64-v8a/libreka.h"
 cp "$BUILD/apk/lib/arm64-v8a/libreka.so" "$OUT/libreka.so"
+python3 "$ROOT/tools/android-build-info.py" "$OUT/libreka.so" --version "$VERSION"
+cat > "$BUILD/BuildVersion.java" <<EOF
+package org.mimoproxy.reka.test;
+public final class BuildVersion { public static final String VERSION = "$VERSION"; }
+EOF
 
-javac --release 11 -nowarn -classpath "$PLATFORM/android.jar" -d "$BUILD/classes" $(find java testapp/java -name '*.java')
+javac --release 11 -nowarn -classpath "$PLATFORM/android.jar" -d "$BUILD/classes" $(find java testapp/java -name '*.java') "$BUILD/BuildVersion.java"
 "$BT/d8" --release --min-api $MIN_API --lib "$PLATFORM/android.jar" --output "$BUILD/apk" $(find "$BUILD/classes" -name '*.class')
 "$BT/aapt2" link -o "$BUILD/base.apk" --manifest testapp/AndroidManifest.xml -I "$PLATFORM/android.jar" \
 	--min-sdk-version $MIN_API --target-sdk-version 35

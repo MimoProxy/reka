@@ -5,8 +5,10 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"log/slog"
 	"sync"
 
@@ -30,9 +32,12 @@ type Host interface {
 
 // Options for Start.
 type Options struct {
+	TUNFD          int
 	StateRoot      string
 	InitialProfile []byte
 	InitialLocal   []byte
+	InitialSources []byte
+	InitialOverlay []byte
 	// ControlSocket optionally also serves the API on a Unix socket in
 	// the app's directory, for the app's other processes. Empty: none.
 	ControlSocket string
@@ -41,9 +46,12 @@ type Options struct {
 
 // Instance is a running kernel inside the host app.
 type Instance struct {
-	k    *daemon.Kernel
-	sess *control.Session
-	host Host
+	life    sync.RWMutex
+	stopped bool
+	vpnMu   sync.Mutex
+	k       *daemon.Kernel
+	sess    *control.Session
+	host    Host
 
 	mu      sync.Mutex
 	waiting map[uint64]chan []byte
@@ -67,8 +75,17 @@ func Start(opts Options, host Host) (*Instance, error) {
 		logger = slog.Default()
 	}
 	k, err := daemon.Start(daemon.Options{
+		TUNFD: opts.TUNFD, ProcessLookup: func(ctx context.Context, md sagernet.Metadata) (string, bool) {
+			if h, ok := host.(interface {
+				FindProcess(network, source, destination string) string
+			}); ok {
+				s := h.FindProcess(md.Network, md.Source.String(), md.Destination.String())
+				return s, s != ""
+			}
+			return "", false
+		},
 		StateRoot: opts.StateRoot, Secrets: sec, Logger: logger, LogLevel: level,
-		ControlAddress: addr, InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal,
+		ControlAddress: addr, InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal, InitialSources: opts.InitialSources, InitialOverlay: opts.InitialOverlay,
 		Protect: func(fd int) error {
 			if !host.Protect(fd) {
 				return errProtect
@@ -79,6 +96,7 @@ func Start(opts Options, host Host) (*Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	k.Service.Engine().SetTUNFD(0) // fd is borrowed only during this start call
 	in := &Instance{k: k, host: host, waiting: map[uint64]chan []byte{}}
 	in.sess = k.Handler.NewSession(in.send)
 	return in, nil
@@ -107,7 +125,21 @@ func (in *Instance) send(b []byte) error {
 
 // Call handles one request message and returns its response message.
 // Calls may run concurrently if their IDs differ.
+func (in *Instance) closedReply(request []byte) []byte {
+	var r control.Request
+	_ = json.Unmarshal(request, &r)
+	b, _ := json.Marshal(control.Response{ID: r.ID, Error: &service.Error{Code: service.CodeBlocked, Message: "kernel stopped"}})
+	return b
+}
 func (in *Instance) Call(request []byte) []byte {
+	in.life.RLock()
+	defer in.life.RUnlock()
+	if in.stopped {
+		return in.closedReply(request)
+	}
+	return in.call(request)
+}
+func (in *Instance) call(request []byte) []byte {
 	var head struct {
 		ID uint64 `json:"id"`
 	}
@@ -131,6 +163,46 @@ func (in *Instance) Call(request []byte) []byte {
 
 // Stop shuts the kernel down.
 func (in *Instance) Stop() {
+	in.life.Lock()
+	defer in.life.Unlock()
+	if in.stopped {
+		return
+	}
+	in.stopped = true
 	in.sess.Close()
 	in.k.Close()
+}
+
+// ReconfigureVPN borrows a newly established descriptor for a synchronous
+// configuration commit. The library duplicates it; the host retains ownership.
+func (in *Instance) ReconfigureVPN(fd int, request []byte) []byte {
+	in.vpnMu.Lock()
+	defer in.vpnMu.Unlock()
+	in.life.RLock()
+	defer in.life.RUnlock()
+	if in.stopped {
+		return in.closedReply(request)
+	}
+	var req control.Request
+	if e := json.Unmarshal(request, &req); e != nil || req.Method != "CommitConfiguration" || fd <= 0 {
+		b, _ := json.Marshal(control.Response{ID: req.ID, Error: &service.Error{Code: service.CodeBadRequest, Message: "reconfigureVPN requires a valid fd and CommitConfiguration request"}})
+		return b
+	}
+	eng := in.k.Service.Engine()
+	before := eng.TUNSerial()
+	eng.SetTUNFD(fd)
+	defer eng.SetTUNFD(0)
+	reply := in.call(request)
+	var result struct {
+		Result struct {
+			State string `json:"state"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(reply, &result) == nil && result.Result.State == "committed" && eng.TUNSerial() == before {
+		if e := eng.RebuildTUN(); e != nil {
+			b, _ := json.Marshal(control.Response{ID: req.ID, Error: &service.Error{Code: "degraded", Message: e.Error()}})
+			return b
+		}
+	}
+	return reply
 }

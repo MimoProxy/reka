@@ -15,7 +15,7 @@
 
 Reka (the Reka proxy core) is a headless proxy kernel for macOS, Windows and Android. It is being built as the core of the [Mimo](https://github.com/MimoProxy/Mimo) clients, and any GUI can drive it through its control API.
 
-> **Status: early development.** Reka runs as a local proxy configured by hand. Clash subscription import, DNS policy and fake IP, rule sets and GeoIP, automatic groups, TUN and system proxy are not implemented yet. There are no releases.
+> **Status: in development; nothing is released yet.** Subscriptions, DNS, automatic groups, system takeover and packaging tooling are implemented. Before a 1.0 release, sleep/wake, network changes, coexistence with other VPNs and long-running Android use still need platform testing, and builds are not signed yet. Locally built packages are unsigned staging builds, not releases.
 
 ## Why
 
@@ -27,13 +27,16 @@ Clash-style cores read one flat configuration file. GUIs regenerate it, API chan
 ## What works today
 
 - **Configuration**: a native YAML profile plus per-machine local settings, composed with a recorded origin for every field. Strict parsing with line, column and field-path diagnostics. Edits made by the kernel keep your comments.
+- **Sources and overlays**: explicit imports with source namespaces, rule insertion points and persistent parameter/selection edits. Replacing a snapshot uses the same configuration transaction and rejects dangling references. Local Clash/share-link conversion is available with an explicit compatibility report; background HTTP(S) refreshes and referenced HTTP/inline providers are available with pinned originals and conditional caches.
 - **Transactions**: revision history and restore, conflict detection between clients, idempotent retries by operation ID, crash recovery at every step, and hand-edited files committed through the same path.
 - **Hot updates**: outbounds are reused or replaced by fingerprint and drained before closing; listeners bind the new port before the old one stops; a port that is already in use is caught before anything changes.
-- **Routing**: ordered first-match rules (`domain`, `domain-suffix`, `domain-keyword`, `domain-regex`, `ip-cidr`, `src-ip-cidr`, `dst-port`, `src-port`, `network`, `process-name`, match-all), with indexed domain rules, select groups, and route explanations that make no network requests.
-- **Protocols**: mixed, SOCKS5 and HTTP listeners, including per-destination UDP; DIRECT, REJECT, HTTP, SOCKS5, Shadowsocks and VLESS + REALITY + Vision + XUDP outbounds. The REALITY client is Reka's own and supports X25519MLKEM768.
+- **Routing**: ordered first-match rules (`domain`, `domain-suffix`, `domain-keyword`, `domain-regex`, `ip-cidr`, `src-ip-cidr`, `dst-port`, `src-port`, `network`, `process-name`, match-all), with indexed domain rules, locked rule sets/geodata, recursive logic and sub-rules, and route explanations that make no network requests.
+- **Protocols**: mixed, SOCKS5 and HTTP listeners, including per-destination UDP; DIRECT, REJECT, HTTP, SOCKS5, Shadowsocks, VLESS + REALITY + Vision + XUDP, VMess, Trojan, Hysteria2, TUIC v5 and Snell v5/v6 outbounds; non-Vision VLESS/VMess/Trojan support WS, gRPC, HTTPUpgrade and multiplex. The REALITY client is Reka's own and supports X25519MLKEM768.
+- **DNS and groups**: scoped DNS policy/bootstrap/fallback/hosts caches, DoT/DoH and generation-aware persisted Fake IP; select/url-test/fallback/load-balance with bounded health probes and separate observed state.
 - **Secrets**: `secret://` references stored in the macOS Keychain, Windows DPAPI, an Android Keystore callback, or a 0600 file.
 - **Control API**: length-prefixed JSON over a Unix socket or a Windows named pipe, restricted to the current user, with an event stream; `rekactl` on the command line.
-- **Android**: a JNI library with a Kotlin wrapper that takes the same API messages.
+- **System takeover**: local network intent, production TUN routing/DNS hijack, conditional OS-setting recovery, and launchd/SCM installation. Rule-only updates retain the device; runtime verification scope is documented.
+- **Android**: JNI/Kotlin binding, borrowed/duplicated VpnService descriptors, protect callbacks, app routing and explicit host VPN rebuilds.
 
 ## Build
 
@@ -92,7 +95,18 @@ The state lives in `~/Library/Application Support/Reka` (macOS), `%LOCALAPPDATA%
 
 ## Documentation
 
+- [Distribution and installation](docs/distribution.md)
+- [System takeover](docs/network-takeover.md)
+- [GUI integration and native example](docs/gui-integration.md)
+- [Android integration](docs/android-integration.md)
 - [Configuration reference](docs/configuration.md)
+- [Background subscriptions and providers](docs/subscriptions.md)
+- [DNS and Fake IP](docs/dns.md)
+- [Automatic groups and health checks](docs/automatic-groups.md)
+- [Rule resources, logic and geodata](docs/rule-resources.md)
+- [Clash import and limits](docs/clash-import.md)
+- [Field support table](docs/clash-support.md)
+- [Sources and overlays](docs/source-overlays.md)
 - [Control API](docs/control-api.md)
 
 ## License

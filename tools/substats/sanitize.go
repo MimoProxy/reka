@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
@@ -171,10 +172,38 @@ var proxyKeep = map[string]bool{
 }
 
 func (s *sanitizer) proxy(px *yaml.Node) {
+	cipher := ""
+	if n := mapGet(px, "cipher"); n != nil {
+		cipher = n.Value
+	}
 	rewriteLeaves("", px, func(path string, v *yaml.Node) {
 		switch {
 		case path == "name":
 			v.Value = s.ref(v.Value)
+		case path == "uuid":
+			sum := sha256.Sum256([]byte("synthetic-uuid:" + v.Value))
+			v.Value = fmt.Sprintf("%x-%x-%x-%x-%x", sum[:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
+			v.Tag = "!!str"
+		case path == "reality-opts.public-key":
+			sum := sha256.Sum256([]byte("synthetic-key:" + v.Value))
+			v.Value = base64.RawURLEncoding.EncodeToString(sum[:])
+			v.Tag = "!!str"
+		case path == "reality-opts.short-id":
+			if v.Value != "" {
+				sum := sha256.Sum256([]byte("synthetic-id:" + v.Value))
+				v.Value = hex.EncodeToString(sum[:8])
+				v.Tag = "!!str"
+			}
+		case path == "password" && strings.HasPrefix(cipher, "2022-"):
+			size := 32
+			if cipher == "2022-blake3-aes-128-gcm" {
+				size = 16
+			}
+			sum := sha256.Sum256([]byte("synthetic-password:" + v.Value))
+			v.Value = base64.StdEncoding.EncodeToString(sum[:size])
+			v.Tag = "!!str"
+		case path == "servername" || path == "sni":
+			v.Value = s.host(v.Value)
 		case path == "dialer-proxy":
 			v.Value = s.ref(v.Value)
 		case path == "server" || path == "ip" || path == "ipv6" || path == "peers[].server":

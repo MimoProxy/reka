@@ -34,6 +34,7 @@ import (
 // X25519MLKEM768 key share stays in the ClientHello, as current Xray servers
 // may require. sing-box always strips it.
 type realityClient struct {
+	alpn        []string
 	serverName  string
 	fingerprint utls.ClientHelloID
 	publicKey   *ecdh.PublicKey
@@ -62,6 +63,7 @@ func newRealityClient(t *TLSSpec) (*realityClient, error) {
 	}
 	c := &realityClient{
 		serverName:  t.ServerName,
+		alpn:        append([]string{}, t.ALPN...),
 		fingerprint: fp,
 		publicKey:   pub,
 		mlkem:       t.Reality.X25519MLKEM768,
@@ -124,6 +126,16 @@ func (c *realityClient) Handshake(ctx context.Context, conn net.Conn) (net.Conn,
 	uConn := utls.UClient(conn, config, c.fingerprint)
 	if err := uConn.BuildHandshakeState(); err != nil {
 		return nil, err
+	}
+	if len(c.alpn) > 0 {
+		for _, ext := range uConn.Extensions {
+			if a, ok := ext.(*utls.ALPNExtension); ok {
+				a.AlpnProtocols = c.alpn
+			}
+		}
+		if err := uConn.BuildHandshakeState(); err != nil {
+			return nil, err
+		}
 	}
 	if !c.mlkem {
 		removeMLKEM(uConn)

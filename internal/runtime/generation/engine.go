@@ -6,21 +6,31 @@ package generation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
+	"reflect"
 	"slices"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
+	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/platform"
+	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime"
+	"github.com/MimoProxy/reka/internal/subscription"
+	"io"
+	goruntime "runtime"
 )
 
 // Defaults for EngineOptions.
@@ -32,7 +42,10 @@ const (
 
 // EngineOptions configure an Engine.
 type EngineOptions struct {
-	Backend sagernet.Options
+	StateRoot    string
+	TUNFD        int
+	NetworkHooks *platform.NetworkHooks
+	Backend      sagernet.Options
 	// DrainTimeout bounds how long a replaced outbound waits for its
 	// connections before it is closed anyway.
 	DrainTimeout time.Duration
@@ -48,6 +61,8 @@ type EngineOptions struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
+	policies *policy.Manager
+	dns      *RD.Service
 	revision uint64
 	eff      *compile.Effective
 	router   *router.Router
@@ -60,9 +75,16 @@ type generation struct {
 // switches atomically. Commits are serialized by the caller (ConfigService)
 // and additionally by an internal lock.
 type Engine struct {
-	opts    EngineOptions
-	backend *sagernet.Backend
-	rt      *runtime.Runtime[*sagernet.Outbound]
+	tunSerial   uint64
+	takeover    *platform.Takeover
+	networkErr  error
+	guard       *sagernet.SocketGuard
+	fake        *RD.FakePool
+	dnsListener *sagernet.DNSListener
+	dnsAddress  string
+	opts        EngineOptions
+	backend     *sagernet.Backend
+	rt          *runtime.Runtime[*sagernet.Outbound]
 
 	mu        sync.Mutex
 	listeners map[string]*listener
@@ -83,11 +105,36 @@ func NewEngine(opts EngineOptions) *Engine {
 	if opts.MaxRetiring <= 0 {
 		opts.MaxRetiring = DefaultMaxRetiring
 	}
-	if opts.Resolver == nil {
-		opts.Resolver = net.DefaultResolver
+
+	e := &Engine{fake: RD.NewFakePool(65536), opts: opts, listeners: map[string]*listener{}}
+	e.guard = sagernet.NewSocketGuard(opts.Backend.ProtectFD)
+	oldProtect := opts.Backend.Protect
+	opts.Backend.Protect = func(n, a string, c syscall.RawConn) error {
+		if oldProtect != nil {
+			if err := oldProtect(n, a, c); err != nil {
+				return err
+			}
+		}
+		return e.guard.Control(n, a, c)
 	}
-	e := &Engine{opts: opts, listeners: map[string]*listener{}}
+	opts.Backend.ProtectFD = nil
 	e.backend = sagernet.New(opts.Backend)
+	if opts.StateRoot != "" {
+		hooks := platform.NetworkHooks{Settings: platform.NativeSettings{}, SettingsFor: platform.SystemSettings, Bypass: e.guard.Set, StartTUN: func(c platform.TUNConfig) (io.Closer, string, error) {
+			d, name, err := e.backend.NewTUN(c, e.opts.TUNFD, e.guard, e.ExchangeDNS)
+			if err == nil {
+				e.tunSerial++
+			}
+			return d, name, err
+		}}
+		if opts.NetworkHooks != nil {
+			hooks = *opts.NetworkHooks
+		}
+		e.takeover, e.networkErr = platform.NewTakeover(opts.StateRoot, hooks)
+	}
+	if e.opts.Resolver == nil {
+		e.opts.Resolver = e.backend.Resolver()
+	}
 	e.rt = runtime.NewValue[*sagernet.Outbound](nil, &generation{}, runtime.Options{
 		DrainTimeout: opts.DrainTimeout,
 		MaxRetiring:  opts.MaxRetiring,
@@ -142,12 +189,16 @@ type GroupChange struct {
 // Plan describes what activating a configuration changes. Nothing in it
 // has happened yet.
 type Plan struct {
-	Outbounds    []ResourceChange `json:"outbounds"`
-	Listeners    []ResourceChange `json:"listeners"`
-	RulesChanged bool             `json:"rules_changed"`
-	Rules        int              `json:"rules"`
-	Groups       []GroupChange    `json:"groups,omitempty"`
-	LogLevel     string           `json:"log_level,omitempty"`
+	NetworkChanged         bool             `json:"network_changed"`
+	NetworkNote            string           `json:"network_note,omitempty"`
+	DNSChanged             bool             `json:"dns_changed"`
+	AutomaticGroupsChanged bool             `json:"automatic_groups_changed"`
+	Outbounds              []ResourceChange `json:"outbounds"`
+	Listeners              []ResourceChange `json:"listeners"`
+	RulesChanged           bool             `json:"rules_changed"`
+	Rules                  int              `json:"rules"`
+	Groups                 []GroupChange    `json:"groups,omitempty"`
+	LogLevel               string           `json:"log_level,omitempty"`
 	// RestartRequired lists settings that only take effect after the
 	// process restarts.
 	RestartRequired []string `json:"restart_required,omitempty"`
@@ -184,6 +235,23 @@ func (e *Engine) Plan(eff *compile.Effective) Plan {
 func (e *Engine) plan(eff *compile.Effective) Plan {
 	snap, gen := e.current()
 	p := Plan{Rules: len(eff.Rules)}
+	oldNetwork := platform.Network{Mode: "off"}
+	if gen.eff != nil {
+		oldNetwork = gen.eff.Network
+	}
+	p.NetworkChanged = !reflect.DeepEqual(oldNetwork, eff.Network)
+	if eff.Network.Mode == "system-proxy" && proxyEndpoint(gen.eff) != proxyEndpoint(eff) {
+		p.NetworkChanged = true
+	}
+	if p.NetworkChanged {
+		p.Interrupts = true
+		p.NetworkNote = "rebuilds system takeover; TUN flows may disconnect; Android host must rebuild VpnService for address, route or app changes"
+	}
+	if eff.Network.Mode != "off" && (e.takeover == nil || e.networkErr != nil) {
+		p.Blocked = "network takeover unavailable or recovery incomplete"
+	}
+	p.DNSChanged = gen.eff == nil && eff.DNS != nil || gen.eff != nil && gen.eff.DNSFingerprint != eff.DNSFingerprint
+	p.AutomaticGroupsChanged = gen.eff == nil && len(eff.AutoGroups) > 0 || gen.eff != nil && !reflect.DeepEqual(gen.eff.AutoGroups, eff.AutoGroups)
 	keepIDs := map[string]bool{}
 	for _, o := range eff.Outbounds {
 		if o.Type == model.OutboundReject {
@@ -305,10 +373,14 @@ func (e *Engine) listenerChanges(eff *compile.Effective) []listenerChange {
 // Prepared holds instances built for a configuration that is not active
 // yet. Pass it to Activate or Abort exactly once.
 type Prepared struct {
-	eff       *compile.Effective
-	plan      Plan
-	outbounds map[string]*sagernet.Outbound
-	created   []*sagernet.Outbound
+	policies    *policy.Manager
+	dns         *RD.Service
+	dnsListener *sagernet.DNSListener
+	dnsBound    bool
+	eff         *compile.Effective
+	plan        Plan
+	outbounds   map[string]*sagernet.Outbound
+	created     []*sagernet.Outbound
 	// bound are new listeners already accepting connections (bind-first).
 	bound map[string]*sagernet.Inbound
 	// changes are the listener changes, applied in Activate.
@@ -350,6 +422,9 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		e.mu.Unlock()
 		return nil, err
 	}
+	if goruntime.GOOS == "android" && eff.Network.Mode == "tun" && p.plan.NetworkChanged && e.opts.TUNFD <= 0 {
+		return fail(&PrepareError{Path: "/network", Err: errors.New("host must supply a freshly established VpnService fd through reconfigureVPN")})
+	}
 	for _, o := range eff.Outbounds {
 		if o.Type == model.OutboundReject {
 			continue
@@ -365,6 +440,10 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		p.created = append(p.created, out)
 		p.outbounds[o.ID] = out
 	}
+	if err := e.prepareDNS(p); err != nil {
+		return fail(&PrepareError{Path: "/dns", Err: err})
+	}
+	e.preparePolicies(p)
 	p.changes = e.listenerChanges(eff)
 	for _, ch := range p.changes {
 		if ch.Action != ActionCreate && ch.Action != ActionRebind {
@@ -380,6 +459,9 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 }
 
 func (e *Engine) release(p *Prepared) {
+	if p.dnsBound {
+		p.dnsListener.Close()
+	}
 	for _, o := range p.created {
 		o.Close()
 	}
@@ -419,7 +501,8 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	defer e.mu.Unlock()
 	p.done = true
 	eff := p.eff
-	g := &generation{revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}}
+	_, previousGeneration := e.current()
+	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 	}
@@ -435,6 +518,20 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 			in.Close()
 		}
 		return 0, &ActivateError{Err: err}
+	}
+	if e.dnsListener != nil && e.dnsListener != p.dnsListener {
+		e.dnsListener.Close()
+	}
+	e.dnsListener = p.dnsListener
+	e.dnsAddress = ""
+	if eff.DNS != nil {
+		e.dnsAddress = eff.DNS.Listen
+	}
+	if previousGeneration.policies != nil {
+		previousGeneration.policies.Close()
+	}
+	if g.policies != nil {
+		g.policies.Start()
 	}
 	// Listeners: bound ones replace their predecessors; restarts stop the
 	// holder first, then bind.
@@ -480,6 +577,21 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	if e.opts.LogLevel != nil {
 		e.opts.LogLevel.Set(parseLevel(eff.LogLevel))
 	}
+	if e.takeover != nil {
+		proxy := ""
+		for _, l := range eff.Listeners {
+			if l.ID == eff.Network.ProxyListener {
+				proxy = l.Listen.String()
+			}
+		}
+		if err := e.takeover.Apply(eff.Network, proxy); err != nil {
+			errs = append(errs, err)
+			degraded = e.takeover.Status().State == "Degraded"
+		} else if eff.Network.Mode == "off" {
+			e.networkErr = nil
+		}
+
+	}
 	if len(errs) > 0 {
 		return genNo, &ActivateError{Err: errors.Join(errs...), Degraded: degraded}
 	}
@@ -509,6 +621,11 @@ func specFor(o compile.Outbound) any {
 		}
 		return t
 	}
+	if o.Type == "vmess" || o.Type == "trojan" || o.Type == "hysteria2" || o.Type == "tuic" || o.Type == "snell" || o.Type == "vless" && (o.Transport != nil || o.Multiplex != nil) && (o.TLS == nil || o.TLS.Reality == nil) {
+
+		raw := protocolOptions(o)
+		return sagernet.ProxySpec{Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, TLS: tls(), Options: raw}
+	}
 	switch o.Type {
 	case model.OutboundHTTP:
 		return sagernet.HTTPSpec{Server: o.Server, Port: o.Port, Username: o.Username, Password: o.Password, TLS: tls()}
@@ -517,7 +634,7 @@ func specFor(o compile.Outbound) any {
 	case model.OutboundShadowsocks:
 		return sagernet.ShadowsocksSpec{Server: o.Server, Port: o.Port, Method: o.Method, Password: o.Password}
 	case model.OutboundVLESS:
-		return sagernet.VLESSSpec{Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls()}
+		return sagernet.VLESSSpec{Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls(), Options: protocolOptions(o)}
 	}
 	return sagernet.DirectSpec{}
 }
@@ -537,8 +654,9 @@ type FlowInfo struct {
 // lookupEnv resolves and finds processes for one connection; results are
 // cached so a retried evaluation does not look up again.
 type lookupEnv struct {
-	e  *Engine
-	md sagernet.Metadata
+	dns *RD.Service
+	e   *Engine
+	md  sagernet.Metadata
 
 	resolved bool
 	addrs    []netip.Addr
@@ -553,7 +671,11 @@ func (l *lookupEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, e
 		l.resolved = true
 		ctx, cancel := context.WithTimeout(ctx, defaultLookup)
 		defer cancel()
-		l.addrs, l.err = l.e.opts.Resolver.LookupNetIP(ctx, "ip", domain)
+		if l.dns != nil {
+			l.addrs, l.err = l.dns.Lookup(ctx, domain, "normal")
+		} else {
+			l.addrs, l.err = l.e.opts.Resolver.LookupNetIP(ctx, "ip", domain)
+		}
 	}
 	return l.addrs, l.err
 }
@@ -578,6 +700,31 @@ func routerMetadata(md sagernet.Metadata) router.Metadata {
 }
 
 func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route {
+	var fakeRelease func()
+	if md.Destination.Addr.IsValid() {
+		if domain, release, ok := e.fake.Acquire(md.Destination.Addr); ok {
+			fakeRelease = release
+			md.Destination.Domain = domain
+			md.Destination.Addr = netip.Addr{}
+		} else {
+			unknown := e.fake.Contains(md.Destination.Addr)
+			_, active := e.current()
+			if active.dns != nil {
+				cfg := active.dns.Config()
+				if cfg.Mode == "fake-ip" {
+					for _, text := range []string{cfg.FakeRange, cfg.FakeRange6} {
+						prefix, err := netip.ParsePrefix(text)
+						if err == nil && prefix.Contains(md.Destination.Addr) {
+							unknown = true
+						}
+					}
+				}
+			}
+			if unknown {
+				return sagernet.Route{}
+			}
+		}
+	}
 	env := &lookupEnv{e: e, md: md}
 	var (
 		dec router.Decision
@@ -588,11 +735,27 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 		if g.router == nil {
 			return nil, false
 		}
-		if md.Network == "udp" && !g.inUDP[md.Inbound] {
+		udpAllowed := g.inUDP[md.Inbound]
+		if md.InboundType == "tun" {
+			udpAllowed = g.eff.Network.Mode == "tun"
+		}
+		if md.Network == "udp" && !udpAllowed {
 			dec = router.Decision{RuleIndex: -1, Outbound: model.OutboundReject}
 			return nil, false
 		}
+		env.dns = g.dns
 		dec = g.router.Route(ctx, routerMetadata(md), env)
+		g.resolveObserved(&dec, routerMetadata(md), true)
+		if g.policies != nil {
+			g.policies.MarkUsed(dec.Outbound)
+		}
+		if md.Network == "udp" {
+			for _, id := range dec.Chain {
+				if g.eff.GroupUDPDisabled[id] {
+					return nil, false
+				}
+			}
+		}
 		if md.Network == "udp" && !g.outUDP[dec.Outbound] {
 			return nil, false
 		}
@@ -612,9 +775,33 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 		}
 	}
 	if !ok {
+		if fakeRelease != nil {
+			fakeRelease()
+		}
 		return sagernet.Route{Info: info}
 	}
-	return sagernet.Route{Outbound: out, Release: release, Info: info}
+	baseRelease := release
+	release = func() {
+		baseRelease()
+		if fakeRelease != nil {
+			fakeRelease()
+		}
+	}
+	result := sagernet.Route{Outbound: out, Release: release, Info: info}
+	if fakeRelease != nil {
+		d := md.Destination
+		result.Destination = &d
+	}
+	if g.dns != nil {
+		result.Lookup = func(ctx context.Context, d string) ([]netip.Addr, error) {
+			scope := "proxy"
+			if out.Type() == "direct" {
+				scope = "direct"
+			}
+			return g.dns.Lookup(ctx, d, scope)
+		}
+	}
+	return result
 }
 
 // ExplainRequest describes a hypothetical connection.
@@ -703,7 +890,7 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 			return Explanation{}, fmt.Errorf("source: %w", err)
 		}
 	}
-	env := &explainEnv{resolve: req.Resolve, l: &lookupEnv{e: e}, process: req.Process}
+	env := &explainEnv{resolve: req.Resolve, l: &lookupEnv{e: e, dns: g.dns}, process: req.Process}
 	for _, s := range req.Addresses {
 		a, err := netip.ParseAddr(s)
 		if err != nil {
@@ -712,6 +899,9 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 		env.addrs = append(env.addrs, a)
 	}
 	x := g.router.Explain(ctx, md, env)
+	if !x.Undetermined {
+		g.resolveObserved(&x.Decision, md, false)
+	}
 	out := Explanation{Generation: snap.Generation, Revision: g.revision, RuleIndex: x.RuleIndex}
 	if x.Undetermined {
 		out.Undetermined = fmt.Sprintf("rule %d (%s) needs the destination address; pass resolve or addresses", x.StoppedAt, g.router.Rules().Rule(x.StoppedAt))
@@ -772,14 +962,15 @@ func (e *Engine) CloseConnections(ids []uint64) int { return e.backend.CloseConn
 
 // Status is a summary of the running state.
 type Status struct {
-	Generation  uint64           `json:"generation"`
-	Revision    uint64           `json:"revision"`
-	Connections int              `json:"connections"`
-	Outbounds   []string         `json:"outbounds"`
-	Listeners   []ResourceChange `json:"listeners"`
-	Draining    int64            `json:"draining"`
-	Forced      int64            `json:"forced_closes"`
-	Retries     int64            `json:"acquire_retries"`
+	Network     platform.NetworkStatus `json:"network"`
+	Generation  uint64                 `json:"generation"`
+	Revision    uint64                 `json:"revision"`
+	Connections int                    `json:"connections"`
+	Outbounds   []string               `json:"outbounds"`
+	Listeners   []ResourceChange       `json:"listeners"`
+	Draining    int64                  `json:"draining"`
+	Forced      int64                  `json:"forced_closes"`
+	Retries     int64                  `json:"acquire_retries"`
 }
 
 // Status reports the running state.
@@ -797,6 +988,11 @@ func (e *Engine) Status() Status {
 		s.Listeners = append(s.Listeners, ResourceChange{ID: l.cfg.ID, Action: l.cfg.Type, Listen: l.cfg.Listen.String()})
 	}
 	e.mu.Unlock()
+	if e.takeover != nil {
+		s.Network = e.takeover.Status()
+	} else {
+		s.Network = platform.NetworkStatus{Mode: "off", State: "Stopped"}
+	}
 	sortChanges(s.Listeners)
 	return s
 }
@@ -810,6 +1006,19 @@ func (e *Engine) Close() {
 		return
 	}
 	e.closed = true
+	if e.takeover != nil {
+		if err := e.takeover.Close(); err != nil {
+			slog.Error("network recovery incomplete", "err", err)
+		}
+	}
+	e.guard.Close()
+	_, g := e.current()
+	if g.policies != nil {
+		g.policies.Close()
+	}
+	if e.dnsListener != nil {
+		e.dnsListener.Close()
+	}
 	for _, l := range e.listeners {
 		l.in.Close()
 	}
@@ -848,3 +1057,123 @@ func (e *Engine) ListenerInstance(id string) any {
 	}
 	return nil
 }
+
+func protocolOptions(o compile.Outbound) json.RawMessage {
+	values := map[string]any{}
+	if o.Type == "vmess" {
+		values["security"], values["packet_encoding"] = "auto", o.PacketEncoding
+	}
+	if p := o.Protocol; p != nil {
+		switch o.Type {
+		case "vmess":
+			if p.Security != "" {
+				values["security"] = p.Security
+			}
+			values["alter_id"] = p.AlterID
+		case "hysteria2":
+			values["up_mbps"], values["down_mbps"] = p.UpMbps, p.DownMbps
+			if p.Obfs != nil {
+				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password}
+			}
+		case "tuic":
+			values["congestion_control"], values["udp_relay_mode"], values["zero_rtt_handshake"] = p.Congestion, p.UDPMode, p.ZeroRTT
+			if p.Heartbeat > 0 {
+				values["heartbeat"] = fmt.Sprintf("%dms", p.Heartbeat)
+			}
+		case "snell":
+			version := p.Version
+			if version == 5 {
+				version = 4
+			}
+			values["version"], values["userkey"], values["reuse"] = version, p.UserKey, p.Reuse
+			if p.Version == 6 {
+				values["mode"] = p.Mode
+			} else if p.Obfs != nil {
+				values["obfs_mode"], values["obfs_host"] = p.Obfs.Type, p.Obfs.Host
+			}
+		}
+	}
+	if o.Type == "vless" {
+		values["flow"], values["packet_encoding"] = o.Flow, o.PacketEncoding
+	}
+	if t := o.Transport; t != nil {
+		headers := map[string][]string{}
+		for _, h := range t.Headers {
+			key := http.CanonicalHeaderKey(h.Name)
+			headers[key] = append(headers[key], h.Value)
+		}
+		if t.Host != "" {
+			headers["Host"] = []string{t.Host}
+		}
+		transport := map[string]any{"type": t.Type}
+		switch t.Type {
+		case "ws":
+			transport["path"], transport["headers"], transport["max_early_data"], transport["early_data_header_name"] = t.Path, headers, t.EarlyData, t.EarlyHeader
+		case "grpc":
+			transport["service_name"] = t.Service
+		case "httpupgrade":
+			host := t.Host
+			if host == "" && len(headers["Host"]) > 0 {
+				host = headers["Host"][0]
+			}
+			transport["host"], transport["path"], transport["headers"] = host, t.Path, headers
+		}
+		values["transport"] = transport
+	}
+	if m := o.Multiplex; m != nil {
+		values["multiplex"] = map[string]any{"enabled": m.Enabled, "protocol": m.Protocol, "max_connections": m.MaxConnections, "min_streams": m.MinStreams, "max_streams": m.MaxStreams, "padding": m.Padding}
+	}
+	raw, _ := json.Marshal(values)
+	return raw
+}
+
+// CheckNetwork detects external ownership changes without retaking settings.
+func (e *Engine) CheckNetwork() {
+	if e.takeover != nil {
+		_ = e.takeover.Check()
+	}
+}
+
+// SubscriptionClient shares socket bypass and the active explicit bootstrap.
+func (e *Engine) SubscriptionClient() *http.Client {
+	return subscription.HTTPClientWithControl(e.guard.Control, func(ctx context.Context, host string) ([]net.IP, error) {
+		_, g := e.current()
+		var ips []netip.Addr
+		var err error
+		if g.dns != nil {
+			ips, err = g.dns.Lookup(ctx, host, "bootstrap")
+		} else {
+			ips, err = e.opts.Resolver.LookupNetIP(ctx, "ip", host)
+		}
+		out := make([]net.IP, len(ips))
+		for i, a := range ips {
+			out[i] = net.IP(a.AsSlice())
+		}
+		return out, err
+	})
+}
+
+func (e *Engine) SetTUNFD(fd int)   { e.mu.Lock(); defer e.mu.Unlock(); e.opts.TUNFD = fd }
+func (e *Engine) TUNSerial() uint64 { e.mu.Lock(); defer e.mu.Unlock(); return e.tunSerial }
+func (e *Engine) RebuildTUN() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.takeover == nil {
+		return errors.New("TUN unavailable")
+	}
+	return e.takeover.Rebuild()
+}
+
+func proxyEndpoint(eff *compile.Effective) string {
+	if eff == nil {
+		return ""
+	}
+	for _, l := range eff.Listeners {
+		if l.ID == eff.Network.ProxyListener {
+			return l.Listen.String()
+		}
+	}
+	return ""
+}
+
+func (e *Engine) TUNStacks() []string { return sagernet.TUNStacks() }

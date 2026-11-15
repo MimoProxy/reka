@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -38,8 +39,10 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/store"
+	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
 )
@@ -54,6 +57,8 @@ type Options struct {
 	// root is empty. Without them revision 1 is an empty profile.
 	InitialProfile []byte
 	InitialLocal   []byte
+	InitialSources []byte
+	InitialOverlay []byte
 	// FailPoint, for tests, is called at each persistence and switch
 	// point; a non-nil error aborts the commit on the spot, as a crash
 	// would, leaving disk and runtime as they are.
@@ -92,6 +97,7 @@ func errf(code, format string, args ...any) *Error {
 // revision: whole documents, patches, or both (patches apply after the
 // documents).
 type ChangeRequest struct {
+	Import *importer.Request `json:"import,omitempty"`
 	// BaseRevision is the revision the client edited. It must be the
 	// active revision.
 	BaseRevision uint64     `json:"base_revision"`
@@ -99,6 +105,10 @@ type ChangeRequest struct {
 	Local        *string    `json:"local,omitempty"`
 	Patch        []model.Op `json:"patch,omitempty"`
 	LocalPatch   []model.Op `json:"local_patch,omitempty"`
+	Sources      *string    `json:"sources,omitempty"`
+	Overlay      *string    `json:"overlay,omitempty"`
+	SourcesPatch []model.Op `json:"sources_patch,omitempty"`
+	OverlayPatch []model.Op `json:"overlay_patch,omitempty"`
 }
 
 // CommitRequest is a ChangeRequest to activate.
@@ -147,16 +157,21 @@ type Result struct {
 
 // Service is the ConfigService.
 type Service struct {
-	opts   Options
-	store  *store.Store
-	engine *generation.Engine
-	events *Broker
-	log    *slog.Logger
+	refreshMu sync.Mutex
+	refresh   *RefreshManager
+	closed    bool
+	opts      Options
+	store     *store.Store
+	engine    *generation.Engine
+	events    *Broker
+	log       *slog.Logger
 
 	mu       sync.Mutex
 	active   uint64
 	profile  []byte
 	local    []byte
+	sources  []byte
+	overlay  []byte
 	eff      *compile.Effective
 	warnings model.Diagnostics
 	// startErr is set when the active revision could not be started.
@@ -173,6 +188,12 @@ func Open(opts Options) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{opts: opts, store: st, engine: opts.Engine, events: NewBroker(), log: opts.Logger}
+	if opts.Engine == nil {
+		return nil, fmt.Errorf("runtime engine required")
+	}
+	if err := s.engine.DNSState(filepath.Join(opts.StateRoot, "cache", "fake-ip.json")); err != nil {
+		return nil, fmt.Errorf("restore fake-IP state: %w", err)
+	}
 	if s.log == nil {
 		s.log = slog.Default()
 	}
@@ -189,8 +210,9 @@ func Open(opts Options) (*Service, error) {
 			profile = []byte(DefaultProfile)
 		}
 		p, l := string(profile), string(local)
+		ss, oo := string(opts.InitialSources), string(opts.InitialOverlay)
 		res, err := s.Commit(context.Background(), CommitRequest{
-			ChangeRequest: ChangeRequest{Profile: &p, Local: &l},
+			ChangeRequest: ChangeRequest{Profile: &p, Local: &l, Sources: &ss, Overlay: &oo},
 			OperationID:   "initial", Source: "initial",
 		})
 		if err != nil {
@@ -203,7 +225,7 @@ func Open(opts Options) (*Service, error) {
 			// The documents are valid but reference secrets that cannot be
 			// stored before the kernel runs. Keep them as revision 1 without
 			// starting them; storing the secrets re-applies them.
-			if err := s.storeUnstarted(profile, local, res.Diagnostics); err != nil {
+			if err := s.storeUnstarted(profile, local, opts.InitialSources, opts.InitialOverlay, res.Diagnostics); err != nil {
 				return nil, err
 			}
 			s.log.Warn("the initial configuration needs secrets before it can start", "missing", res.Diagnostics.Errors().Error())
@@ -245,10 +267,10 @@ func onlySecretErrors(res Result) bool {
 
 // storeUnstarted records the initial documents as revision 1 without
 // running them, for an empty state root whose import needs secrets.
-func (s *Service) storeUnstarted(profile, local []byte, diags model.Diagnostics) error {
+func (s *Service) storeUnstarted(profile, local, sources, overlay []byte, diags model.Diagnostics) error {
 	now := time.Now().UTC()
 	if _, err := s.store.WriteRevision(store.Revision{Number: 1, Operation: "initial", Source: "initial", Created: now,
-		Message: "imported; waiting for secrets"}, profile, local); err != nil {
+		Message: "imported; waiting for secrets"}, profile, local, sources, overlay); err != nil {
 		return err
 	}
 	res := Result{OperationID: "initial", State: store.OpCommitted, Revision: 1, Diagnostics: diags}
@@ -258,11 +280,12 @@ func (s *Service) storeUnstarted(profile, local []byte, diags model.Diagnostics)
 		return err
 	}
 	if err := s.store.WriteActive(store.Active{Revision: 1, Profile: store.Hash(profile), Local: store.Hash(local),
-		Operation: "initial", Updated: now}); err != nil {
+		Sources: store.Hash(sources), Overlay: store.Hash(overlay), Operation: "initial", Updated: now}); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.active, s.profile, s.local, s.warnings = 1, profile, local, diags
+	s.sources, s.overlay = sources, overlay
 	s.startErr = diags.Errors()
 	s.mu.Unlock()
 	return nil
@@ -319,8 +342,8 @@ func (s *Service) recover() error {
 	return nil
 }
 
-func (s *Service) compileOpts() compile.Options {
-	return compile.Options{Secrets: s.opts.Secrets, ProcessLookup: s.engine.ProcessLookup()}
+func (s *Service) compileOpts(sources, overlay []byte) compile.Options {
+	return compile.Options{ReadResource: resource.At(s.store.Root()).Read, Secrets: s.opts.Secrets, ProcessLookup: s.engine.ProcessLookup(), Sources: sources, Overlay: overlay}
 }
 
 func (s *Service) startActive(a *store.Active) error {
@@ -328,8 +351,13 @@ func (s *Service) startActive(a *store.Active) error {
 	if err != nil {
 		return err
 	}
+	sources, overlay, err := s.store.ReadLayers(a.Revision)
+	if err != nil {
+		return err
+	}
 	s.active, s.profile, s.local = a.Revision, profile, local
-	eff, diags := compile.Compile(profile, local, s.compileOpts())
+	s.sources, s.overlay = sources, overlay
+	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	s.warnings = diags
 	if eff == nil {
 		return diags.Errors()
@@ -375,13 +403,13 @@ func newOperationID() string {
 
 // candidate builds the documents a change request describes, against the
 // active documents. Called with s.mu held.
-func (s *Service) candidate(req ChangeRequest) (profile, local []byte, err error) {
+func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay []byte, err error) {
 	build := func(name string, active []byte, whole *string, patch []model.Op) ([]byte, error) {
 		base := active
 		if whole != nil {
 			base = []byte(*whole)
 		}
-		masked := name == model.DocProfile && containsMask(base)
+		masked := name != model.DocLocal && containsMask(base)
 		if len(patch) == 0 && !masked {
 			return base, nil
 		}
@@ -396,7 +424,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local []byte, err error
 		if err := doc.Apply(patch...); err != nil {
 			return nil, errf(CodeBadRequest, "%s patch: %v", name, err)
 		}
-		if name == model.DocProfile {
+		if name != model.DocLocal {
 			activeDoc, _ := model.LoadDoc(name, active)
 			if err := doc.UnmaskSecrets(activeDoc); err != nil {
 				return nil, errf(CodeBadRequest, "%v", err)
@@ -405,12 +433,26 @@ func (s *Service) candidate(req ChangeRequest) (profile, local []byte, err error
 		return doc.Bytes(), nil
 	}
 	if profile, err = build(model.DocProfile, s.profile, req.Profile, req.Patch); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if local, err = build(model.DocLocal, s.local, req.Local, req.LocalPatch); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return profile, local, nil
+	if sources, err = build(model.DocSources, s.sources, req.Sources, req.SourcesPatch); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if overlay, err = build(model.DocOverlay, s.overlay, req.Overlay, req.OverlayPatch); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if req.Import != nil {
+		if sources, err = mergeImport(sources, req.Import); err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	if err := s.store.ValidateResources(sources); err != nil {
+		return nil, nil, nil, nil, errf(CodeInvalid, "%s", err)
+	}
+	return profile, local, sources, overlay, nil
 }
 
 func containsMask(b []byte) bool { return bytes.Contains(b, []byte(model.Mask)) }
@@ -424,6 +466,11 @@ func (s *Service) conflict(base uint64) *Conflict {
 		return c
 	}
 	c.Changes = append(diffDocs(model.DocProfile, "", bp, s.profile), diffDocs(model.DocLocal, "/local", bl, s.local)...)
+	bs, bo, err := s.store.ReadLayers(base)
+	if err == nil {
+		c.Changes = append(c.Changes, diffDocs(model.DocSources, "/sources", bs, s.sources)...)
+		c.Changes = append(c.Changes, diffDocs(model.DocOverlay, "/overlay", bo, s.overlay)...)
+	}
 	return c
 }
 
@@ -433,7 +480,7 @@ func diffDocs(name, prefix string, a, b []byte) []FieldChange {
 		if diags.HasErrors() {
 			return map[string]any{}
 		}
-		if name == model.DocProfile {
+		if name != model.DocLocal {
 			doc.MaskSecrets()
 		}
 		return model.Flatten(doc.Mapping())
@@ -458,9 +505,12 @@ func diffDocs(name, prefix string, a, b []byte) []FieldChange {
 }
 
 // PlanHash binds a plan to its base revision and candidate content.
-func PlanHash(base uint64, profile, local []byte) string {
+func PlanHash(base uint64, profile, local []byte, layers ...[]byte) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%d\x00%s\x00%s", base, store.Hash(profile), store.Hash(local))
+	for _, layer := range layers {
+		fmt.Fprintf(h, "\x00%s", store.Hash(layer))
+	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
@@ -473,12 +523,16 @@ type ValidateResult struct {
 // Validate compiles a candidate without any side effect.
 func (s *Service) Validate(req ChangeRequest) (ValidateResult, error) {
 	s.mu.Lock()
-	profile, local, err := s.candidate(req)
+	profile, local, sources, overlay, err := s.candidate(req)
 	s.mu.Unlock()
 	if err != nil {
+		var failure *importFailure
+		if errors.As(err, &failure) {
+			return ValidateResult{Diagnostics: failure.diagnostics()}, nil
+		}
 		return ValidateResult{}, err
 	}
-	eff, diags := compile.Compile(profile, local, s.compileOpts())
+	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	return ValidateResult{Valid: eff != nil, Diagnostics: diags}, nil
 }
 
@@ -499,18 +553,22 @@ func (s *Service) Plan(req ChangeRequest) (PlanResult, error) {
 	if req.BaseRevision != s.active {
 		return PlanResult{Base: req.BaseRevision, Conflict: s.conflict(req.BaseRevision)}, nil
 	}
-	profile, local, err := s.candidate(req)
+	profile, local, sources, overlay, err := s.candidate(req)
 	if err != nil {
+		var failure *importFailure
+		if errors.As(err, &failure) {
+			return PlanResult{Base: s.active, Diagnostics: failure.diagnostics()}, nil
+		}
 		return PlanResult{}, err
 	}
-	eff, diags := compile.Compile(profile, local, s.compileOpts())
+	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	res := PlanResult{Base: s.active, Diagnostics: diags, Valid: eff != nil}
 	if eff == nil {
 		return res, nil
 	}
 	plan := s.engine.Plan(eff)
 	res.Plan = &plan
-	res.PlanHash = PlanHash(s.active, profile, local)
+	res.PlanHash = PlanHash(s.active, profile, local, sources, overlay)
 	return res, nil
 }
 
@@ -571,23 +629,28 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 		res.Conflict = s.conflict(req.BaseRevision)
 		return reject(errf(CodeConflict, "revision %d is active, not %d", s.active, req.BaseRevision))
 	}
-	profile, local, err := s.candidate(req.ChangeRequest)
+	profile, local, sources, overlay, err := s.candidate(req.ChangeRequest)
 	if err != nil {
+		var failure *importFailure
+		if errors.As(err, &failure) {
+			res.Diagnostics = failure.diagnostics()
+			return reject(errf(CodeInvalid, "%s", failure.Error()))
+		}
 		var e *Error
 		if errors.As(err, &e) {
 			return reject(e)
 		}
 		return Result{}, err
 	}
-	if req.PlanHash != "" && req.PlanHash != PlanHash(s.active, profile, local) {
+	if req.PlanHash != "" && req.PlanHash != PlanHash(s.active, profile, local, sources, overlay) {
 		return reject(errf(CodePlanChanged, "the candidate differs from the one that was planned"))
 	}
-	eff, diags := compile.Compile(profile, local, s.compileOpts())
+	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	res.Diagnostics = diags
 	if eff == nil {
 		return reject(errf(CodeInvalid, "the configuration has %d errors", len(diags.Errors())))
 	}
-	if !initial && s.startErr == nil && string(profile) == string(s.profile) && string(local) == string(s.local) && sameInstances(s.eff, eff) {
+	if !initial && s.startErr == nil && string(profile) == string(s.profile) && string(local) == string(s.local) && bytes.Equal(sources, s.sources) && bytes.Equal(overlay, s.overlay) && sameInstances(s.eff, eff) {
 		res.State, res.Revision, res.NoChange = store.OpCommitted, s.active, true
 		op.State, op.Revision = store.OpCommitted, s.active
 		op.Result, _ = json.Marshal(res)
@@ -615,7 +678,7 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 	}
 	rev := store.Revision{Number: number, Base: s.active, Operation: req.OperationID, Source: req.Source,
 		Message: req.Message, Created: now, RestoredFrom: req.restoredFrom}
-	if _, err := s.store.WriteRevision(rev, profile, local); err != nil {
+	if _, err := s.store.WriteRevision(rev, profile, local, sources, overlay); err != nil {
 		s.engine.Abort(prepared)
 		return Result{}, err
 	}
@@ -644,7 +707,7 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 		return Result{}, err
 	}
 	if err := s.store.WriteActive(store.Active{Revision: number, Profile: store.Hash(profile), Local: store.Hash(local),
-		Operation: req.OperationID, Updated: time.Now().UTC()}); err != nil {
+		Sources: store.Hash(sources), Overlay: store.Hash(overlay), Operation: req.OperationID, Updated: time.Now().UTC()}); err != nil {
 		// The runtime runs the new revision but it is not durable: go back
 		// to the old one so what runs matches what is recorded.
 		return s.rollback(op, res, number, err)
@@ -653,6 +716,7 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (Result, error)
 		return Result{}, err
 	}
 	s.active, s.profile, s.local, s.eff, s.warnings, s.startErr = number, profile, local, eff, diags, nil
+	s.sources, s.overlay = sources, overlay
 	res.State, res.Generation = store.OpCommitted, gen
 	op.State = store.OpCommitted
 	op.Updated = time.Now().UTC()
@@ -744,6 +808,8 @@ type Configuration struct {
 	Revision    uint64             `json:"revision"`
 	Profile     string             `json:"profile"`
 	Local       string             `json:"local"`
+	Sources     string             `json:"sources"`
+	Overlay     string             `json:"overlay"`
 	Masked      int                `json:"masked,omitempty"`
 	Effective   *compile.Effective `json:"effective,omitempty"`
 	Diagnostics model.Diagnostics  `json:"diagnostics,omitempty"`
@@ -756,14 +822,23 @@ type Configuration struct {
 func (s *Service) GetConfiguration(reveal bool) Configuration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := Configuration{Revision: s.active, Profile: string(s.profile), Local: string(s.local), Effective: s.eff, Diagnostics: s.warnings}
+	c := Configuration{Revision: s.active, Profile: string(s.profile), Local: string(s.local), Sources: string(s.sources), Overlay: string(s.overlay), Effective: s.eff, Diagnostics: s.warnings}
 	if s.startErr != nil {
 		c.StartError = s.startErr.Error()
 	}
 	if !reveal {
-		if doc, diags := model.LoadDoc(model.DocProfile, s.profile); !diags.HasErrors() {
-			if n := doc.MaskSecrets(); n > 0 {
-				c.Profile, c.Masked = string(doc.Bytes()), n
+		for _, item := range []struct {
+			name string
+			data []byte
+			dest *string
+		}{
+			{model.DocProfile, s.profile, &c.Profile}, {model.DocSources, s.sources, &c.Sources}, {model.DocOverlay, s.overlay, &c.Overlay},
+		} {
+			if doc, diags := model.LoadDoc(item.name, item.data); !diags.HasErrors() {
+				if n := doc.MaskSecrets(); n > 0 {
+					*item.dest = string(doc.Bytes())
+					c.Masked += n
+				}
 			}
 		}
 	}
@@ -776,6 +851,13 @@ func (s *Service) Documents() (revision uint64, profile, local []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.active, s.profile, s.local
+}
+
+// LayerDocuments returns a consistent copy of all four active documents.
+func (s *Service) LayerDocuments() (revision uint64, profile, local, sources, overlay []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active, bytes.Clone(s.profile), bytes.Clone(s.local), bytes.Clone(s.sources), bytes.Clone(s.overlay)
 }
 
 // ListRevisions lists stored revisions, newest first.
@@ -795,9 +877,13 @@ func (s *Service) RestoreRevision(ctx context.Context, req RestoreRequest) (Resu
 	if err != nil {
 		return Result{}, errf(CodeNotFound, "revision %d: %v", req.Revision, err)
 	}
-	p, l := string(profile), string(local)
+	sources, overlay, err := s.store.ReadLayers(req.Revision)
+	if err != nil {
+		return Result{}, errf(CodeNotFound, "revision %d: %v", req.Revision, err)
+	}
+	p, l, ss, oo := string(profile), string(local), string(sources), string(overlay)
 	return s.Commit(ctx, CommitRequest{
-		ChangeRequest: ChangeRequest{BaseRevision: req.BaseRevision, Profile: &p, Local: &l},
+		ChangeRequest: ChangeRequest{BaseRevision: req.BaseRevision, Profile: &p, Local: &l, Sources: &ss, Overlay: &oo},
 		OperationID:   req.OperationID, Source: "restore",
 		Message:      fmt.Sprintf("restore revision %d", req.Revision),
 		restoredFrom: req.Revision,
@@ -806,6 +892,13 @@ func (s *Service) RestoreRevision(ctx context.Context, req RestoreRequest) (Resu
 
 // Close stops the runtime.
 func (s *Service) Close() {
+	s.refreshMu.Lock()
+	s.closed = true
+	m := s.refresh
+	s.refreshMu.Unlock()
+	if m != nil {
+		m.Close()
+	}
 	s.engine.Close()
 }
 

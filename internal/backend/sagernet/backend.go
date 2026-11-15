@@ -2,6 +2,7 @@ package sagernet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 
 // Options configures a Backend.
 type Options struct {
+	ProcessLookup func(context.Context, Metadata) (string, bool)
 	// Logger receives all upstream logs. Defaults to slog.Default().
 	Logger *slog.Logger
 	// Protect, when set, is applied to every outbound socket before it
@@ -56,12 +58,14 @@ const defaultHalfCloseTimeout = 2 * time.Second
 // from it are independent instances: each has its own lifecycle scope and can
 // be closed without touching the others.
 type Backend struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	slog   *slog.Logger
-	logger *slogLogger
-	router *router
-	conns  connTable
+	processLookup func(context.Context, Metadata) (string, bool)
+	resolver      *net.Resolver
+	ctx           context.Context
+	cancel        context.CancelFunc
+	slog          *slog.Logger
+	logger        *slogLogger
+	router        *router
+	conns         connTable
 
 	halfCloseTimeout time.Duration
 	udpTimeout       time.Duration
@@ -75,10 +79,11 @@ func New(opts Options) *Backend {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = service.ContextWithDefaultRegistry(ctx)
 	b := &Backend{
-		ctx:    ctx,
-		cancel: cancel,
-		slog:   opts.Logger,
-		logger: newLogger(opts.Logger, "backend"),
+		processLookup: opts.ProcessLookup,
+		ctx:           ctx,
+		cancel:        cancel,
+		slog:          opts.Logger,
+		logger:        newLogger(opts.Logger, "backend"),
 
 		halfCloseTimeout: opts.HalfCloseTimeout,
 	}
@@ -107,7 +112,14 @@ func New(opts Options) *Backend {
 		}
 	}
 	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: protect})
-	service.MustRegister[adapter.DNSRouter](ctx, &dnsRouter{resolver: net.DefaultResolver})
+	b.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		d := &net.Dialer{}
+		if protect != nil {
+			d.Control = protect
+		}
+		return d.DialContext(ctx, network, address)
+	}}
+	service.MustRegister[adapter.DNSRouter](ctx, &dnsRouter{resolver: b.resolver})
 	service.MustRegister[adapter.DNSTransportManager](ctx, &dnsTransportManager{})
 	service.MustRegister[adapter.Router](ctx, b.router)
 	return b
@@ -130,11 +142,14 @@ func (b *Backend) Close() error {
 }
 
 // CanFindProcess reports whether FindProcess can return results.
-func (b *Backend) CanFindProcess() bool { return b.searcher != nil }
+func (b *Backend) CanFindProcess() bool { return b.searcher != nil || b.processLookup != nil }
 
 // FindProcess returns the path of the process that opened the connection
 // described by md, if the platform can tell.
 func (b *Backend) FindProcess(ctx context.Context, md Metadata) (string, bool) {
+	if b.processLookup != nil {
+		return b.processLookup(ctx, md)
+	}
 	if b.searcher == nil || !md.Source.IsValid() {
 		return "", false
 	}
@@ -233,11 +248,12 @@ type SOCKSSpec struct {
 
 // VLESSSpec is a VLESS client. Flow is "" or "xtls-rprx-vision".
 type VLESSSpec struct {
-	Server string
-	Port   uint16
-	UUID   string
-	Flow   string
-	TLS    *TLSSpec
+	Options json.RawMessage
+	Server  string
+	Port    uint16
+	UUID    string
+	Flow    string
+	TLS     *TLSSpec
 }
 
 // TLSSpec is client TLS. Fingerprint enables uTLS (for example "chrome").
@@ -268,6 +284,9 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		err error
 	)
 	switch s := spec.(type) {
+	case ProxySpec:
+		typ = s.Type
+		out, err = b.newProtocol(tag, s)
 	case DirectSpec:
 		typ = "direct"
 		out, err = direct.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.DirectOutboundOptions{})
@@ -403,3 +422,5 @@ func (b *Backend) adoptInbound(tag, typ string, in adapter.Inbound, logger log.C
 	}
 	return &Inbound{tag: tag, typ: typ, in: in, scope: scope}, nil
 }
+
+func (b *Backend) Resolver() *net.Resolver { return b.resolver }

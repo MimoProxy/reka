@@ -1,0 +1,5 @@
+
+S
+TESTsuffix.test
+cn
+exact.test	keyword^regex[0-9]+\.test$
