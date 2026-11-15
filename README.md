@@ -15,7 +15,7 @@
 
 Reka (the Reka proxy core) is a headless proxy kernel for macOS, Windows and Android. It is being built as the core of the [Mimo](https://github.com/MimoProxy/Mimo) clients, and any GUI can drive it through its control API.
 
-> **Status: in development; nothing is released yet.** Subscriptions, DNS, automatic groups, system takeover and packaging tooling are implemented. Before a 1.0 release, sleep/wake, network changes, coexistence with other VPNs and long-running Android use still need platform testing, and builds are not signed yet. Locally built packages are unsigned staging builds, not releases.
+> **Status: in development; nothing is released yet.** Subscriptions, DNS, automatic groups, system takeover and packaging tooling are implemented. Before a 1.0 release, sleep/wake, network changes, coexistence with other VPNs and long-running Android use still need platform testing. Builds are not code-signed; verify them with the SHA-256 checksums and build metadata shipped alongside. Locally built packages are staging builds, not releases.
 
 ## Why
 

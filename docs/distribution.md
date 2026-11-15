@@ -1,6 +1,6 @@
 # Distribution and installation
 
-Current artifacts are **unsigned local staging packages**, version `1.0.0-dev`. They are reviewable build outputs, not a published 1.0 release. Signing identities, notarization credentials, publication and any GitHub release are separate authorized operations.
+Current artifacts are **unsigned local staging packages**, version `1.0.0-dev`. They are reviewable build outputs, not a published 1.0 release. Reka's own releases are not code-signed; their integrity comes from `SHA256SUMS`, build metadata and the corresponding source. Applications that bundle the kernel, such as Mimo, sign it as part of their own packages. The signing scripts below support that. Signing identities, notarization credentials, publication and any GitHub release are separate authorized operations.
 
 ```sh
 make build
