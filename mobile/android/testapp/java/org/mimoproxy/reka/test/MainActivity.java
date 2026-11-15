@@ -52,10 +52,10 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         view = new TextView(this);
         setContentView(view);
-        if(getIntent().getBooleanExtra("vpn",false)){android.content.Intent permission=android.net.VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,17);else startVPNTest();}else new Thread(this::runTest).start();
+        if(getIntent().getBooleanExtra("vpn",false) || getIntent().getIntExtra("battery-minutes",0)>0){android.content.Intent permission=android.net.VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,17);else startVPNTest();}else new Thread(this::runTest).start();
     }
 
-    private void startVPNTest(){startService(new android.content.Intent(this,VpnTestService.class).putExtra("full",getIntent().getBooleanExtra("full",false)));}
+    private void startVPNTest(){int minutes=getIntent().getIntExtra("battery-minutes",0);if(minutes>0){view.setText("Idle A/B acceptance: unplug USB, keep Wi-Fi, turn the screen off. Baseline and full VPN: at least "+minutes+" minutes each.");startService(new android.content.Intent(this,PowerTestService.class).putExtra("minutes",minutes).putExtra("diagnostic",getIntent().getBooleanExtra("diagnostic",false)).putExtra("seconds",getIntent().getIntExtra("seconds",15)));}else startService(new android.content.Intent(this,VpnTestService.class).putExtra("full",getIntent().getBooleanExtra("full",false)).putExtra("network-cycle",getIntent().getBooleanExtra("network-cycle",false)));}
     @Override protected void onActivityResult(int request,int result,android.content.Intent data){super.onActivityResult(request,result,data);if(request==17 && result==RESULT_OK)startVPNTest();}
 
     private void log(String line) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -74,8 +75,11 @@ func Start(opts Options) (*Kernel, error) {
 			stateLock.Close()
 		}
 	}()
+	if opts.LogLevel == nil {
+		opts.LogLevel = new(slog.LevelVar)
+	}
 	if opts.Logger == nil {
-		opts.Logger = slog.Default()
+		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: opts.LogLevel}))
 	}
 	if opts.Secrets == nil {
 		s, err := secret.Default(opts.StateRoot)
