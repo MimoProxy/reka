@@ -15,7 +15,7 @@
 
 Reka (the Reka proxy core) is a headless proxy kernel for macOS, Windows and Android. It is being built as the core of the [Mimo](https://github.com/MimoProxy/Mimo) clients, and any GUI can drive it through its control API.
 
-> **Status: in development; nothing is released yet.** Subscriptions, DNS, automatic groups, system takeover and packaging tooling are implemented. Before a 1.0 release, sleep/wake, network changes, coexistence with other VPNs and long-running Android use still need platform testing. Builds are not code-signed; verify them with the SHA-256 checksums and build metadata shipped alongside. Locally built packages are staging builds, not releases.
+> **Status: preparing 1.0; no published version yet.** Implementation and platform evidence are recorded in the [candidate validation report](docs/validation.md), with [reproducible benchmarks](docs/benchmarks.md). Builds are unsigned; verify the supplied SHA-256 checksums, build metadata and corresponding source. Publication follows release review.
 
 ## Why
 
@@ -27,12 +27,12 @@ Clash-style cores read one flat configuration file. GUIs regenerate it, API chan
 ## What works today
 
 - **Configuration**: a native YAML profile plus per-machine local settings, composed with a recorded origin for every field. Strict parsing with line, column and field-path diagnostics. Edits made by the kernel keep your comments.
-- **Sources and overlays**: explicit imports with source namespaces, rule insertion points and persistent parameter/selection edits. Replacing a snapshot uses the same configuration transaction and rejects dangling references. Local Clash/share-link conversion is available with an explicit compatibility report; background HTTP(S) refreshes and referenced HTTP/inline providers are available with pinned originals and conditional caches.
+- **Sources and overlays**: explicit imports with source namespaces, rule insertion points and persistent parameter/selection edits. Replacing a snapshot uses the same configuration transaction and rejects dangling references. Local Clash/share-link conversion is available with an explicit compatibility report; background HTTP(S) refreshes and referenced HTTP/inline/file providers are available with pinned originals and conditional caches.
 - **Transactions**: revision history and restore, conflict detection between clients, idempotent retries by operation ID, crash recovery at every step, and hand-edited files committed through the same path.
 - **Hot updates**: outbounds are reused or replaced by fingerprint and drained before closing; listeners bind the new port before the old one stops; a port that is already in use is caught before anything changes.
 - **Routing**: ordered first-match rules (`domain`, `domain-suffix`, `domain-keyword`, `domain-regex`, `ip-cidr`, `src-ip-cidr`, `dst-port`, `src-port`, `network`, `process-name`, match-all), with indexed domain rules, locked rule sets/geodata, recursive logic and sub-rules, and route explanations that make no network requests.
-- **Protocols**: mixed, SOCKS5 and HTTP listeners, including per-destination UDP; DIRECT, REJECT, HTTP, SOCKS5, Shadowsocks, VLESS + REALITY + Vision + XUDP, VMess, Trojan, Hysteria2, TUIC v5 and Snell v5/v6 outbounds; non-Vision VLESS/VMess/Trojan support WS, gRPC, HTTPUpgrade and multiplex. The REALITY client is Reka's own and supports X25519MLKEM768.
-- **DNS and groups**: scoped DNS policy/bootstrap/fallback/hosts caches, DoT/DoH and generation-aware persisted Fake IP; select/url-test/fallback/load-balance with bounded health probes and separate observed state.
+- **Protocols**: mixed, SOCKS5 and HTTP listeners, including per-destination UDP; DIRECT, REJECT, HTTP, SOCKS5, Shadowsocks, VLESS + REALITY + Vision + XUDP, VMess, Trojan, Hysteria2, TUIC v5 and Snell v5/v6 outbounds; VLESS encryption also carries Vision over the documented stream transports; VMess/VLESS/Trojan support WS, gRPC, HTTPUpgrade and H2, with generic multiplex and ShadowTLS/Restls/JLS security carriers. Shadowsocks includes all seven documented plugin families. The REALITY client is Reka's own and supports X25519MLKEM768.
+- **DNS and groups**: scoped DNS policy/bootstrap/fallback/hosts caches, DoT/DoH/DoQ/DoH3, hosts aliases and generation-aware persisted Fake IP; select/url-test/fallback/load-balance with bounded health probes and separate observed state.
 - **Secrets**: `secret://` references stored in the macOS Keychain, Windows DPAPI, an Android Keystore callback, or a 0600 file.
 - **Control API**: length-prefixed JSON over a Unix socket or a Windows named pipe, restricted to the current user, with an event stream; `rekactl` on the command line.
 - **System takeover**: local network intent, production TUN routing/DNS hijack, conditional OS-setting recovery, and launchd/SCM installation. Rule-only updates retain the device; runtime verification scope is documented.
@@ -95,6 +95,7 @@ The state lives in `~/Library/Application Support/Reka` (macOS), `%LOCALAPPDATA%
 
 ## Documentation
 
+- [Candidate validation](docs/validation.md) · [Benchmarks and raw data](docs/benchmarks.md)
 - [Distribution and installation](docs/distribution.md)
 - [System takeover](docs/network-takeover.md)
 - [GUI integration and native example](docs/gui-integration.md)

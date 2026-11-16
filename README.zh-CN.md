@@ -15,7 +15,7 @@
 
 Reka（Reka proxy core）是一个无界面的代理内核，面向 macOS、Windows 和 Android。它正作为 [Mimo](https://github.com/MimoProxy/Mimo) 客户端的内核开发，任何 GUI 都可以通过它的控制 API 驱动它。
 
-> **状态：开发中，尚未发布任何版本。** 订阅、DNS、自动策略组、系统接管和打包工具都已实现。发布 1.0 之前，睡眠唤醒、网络切换、与其他 VPN 共存以及 Android 长时间运行仍需在各平台上测试。构建不做代码签名，请用随附的 SHA-256 校验和与构建元数据核对。本地打出的包是测试构建，不是正式发布。
+> **状态：1.0 候选验收阶段，尚未正式发布。** 实现与实测范围见[候选验收说明](docs/validation.md)，固定参数性能结果见[可复现对照报告](docs/benchmarks.md)。构建不签名，请核对随附的 SHA-256、构建元数据和对应源码；正式发布在发行评审后进行。
 
 ## 为什么
 
@@ -27,15 +27,16 @@ Clash 系内核只读一份扁平的配置文件：GUI 每次重新生成它，A
 ## 现在能做什么
 
 - **配置**：原生 YAML 主配置加本机设置，合成时记录每个字段的来源。严格解析，诊断带行号、列号和字段路径。内核写回配置时保留你的注释。
-- **来源与覆盖**：主配置显式引用原生来源快照，节点与组按来源命名空间隔离，规则在指定位置展开；覆盖参数和手动选组独立保存。来源替换通过同一个配置事务生效，引用失效时拒绝激活。已支持 Clash/分享链接的本地转换和兼容报告，已支持 HTTP(S) 后台刷新与引用的 HTTP/inline provider，原文独立锁定，失败保留旧版。
+- **来源与覆盖**：主配置显式引用原生来源快照，节点与组按来源命名空间隔离，规则在指定位置展开；覆盖参数和手动选组独立保存。来源替换通过同一个配置事务生效，引用失效时拒绝激活。已支持 Clash/分享链接的本地转换和兼容报告，已支持 HTTP(S) 后台刷新与引用的 HTTP/inline/file provider，原文独立锁定，失败保留旧版。
 - **事务**：版本历史与恢复、多个客户端之间的冲突检测、按操作 ID 安全重试、每一步都能崩溃恢复；手动编辑的文件也走同一个提交流程。
 - **热更新**：出站按指纹复用或替换，旧实例排空后才关闭；监听器先绑定新端口再停止旧端口；端口被占用时在任何改动生效之前就会被发现。
 - **路由**：按顺序首条命中的规则（`domain`、`domain-suffix`、`domain-keyword`、`domain-regex`、`ip-cidr`、`src-ip-cidr`、`dst-port`、`src-port`、`network`、`process-name`、全匹配），域名规则带索引；锁定规则集/地理库、递归逻辑与子规则；不发起网络请求的路由解释。
-- **协议**：mixed、SOCKS5、HTTP 监听器，UDP 按目标分流；DIRECT、REJECT、HTTP、SOCKS5、Shadowsocks、VLESS + REALITY + Vision + XUDP、VMess、Trojan、Hysteria2、TUIC v5、Snell v5/v6 出站；非 Vision 的 VLESS/VMess/Trojan 支持 WS、gRPC、HTTPUpgrade 和多路复用。REALITY 客户端由 Reka 自己实现，支持 X25519MLKEM768。
-- **DNS 与自动组**：按作用域的 DNS 策略、bootstrap、fallback、hosts 和缓存，DoT/DoH 与持久化 Fake IP 世代；select/url-test/fallback/load-balance 的健康检查有并发限制，观测状态不写配置。
+- **协议**：mixed、SOCKS5、HTTP 监听器，UDP 按目标分流；DIRECT、REJECT、HTTP、SOCKS5、Shadowsocks、VLESS + REALITY + Vision + XUDP、VMess、Trojan、Hysteria2、TUIC v5、Snell v5/v6 出站；VLESS encryption 还支持 Vision 与已列出的流式传输组合；VMess/VLESS/Trojan 支持 WS、gRPC、HTTPUpgrade、H2、通用多路复用及 ShadowTLS/Restls/JLS 安全载体，Shadowsocks 支持文档列出的七类插件。REALITY 客户端由 Reka 自己实现，支持 X25519MLKEM768。
+- **DNS 与自动组**：按作用域的 DNS 策略、bootstrap、fallback、hosts 和缓存，DoT/DoH/DoQ/DoH3、hosts 别名与持久化 Fake IP 世代；select/url-test/fallback/load-balance 的健康检查有并发限制，观测状态不写配置。
 - **秘密**：`secret://` 引用，保存在 macOS 钥匙串、Windows DPAPI、Android Keystore 回调或权限为 0600 的文件中。
 - **控制 API**：在 Unix 域套接字或 Windows 命名管道上传输长度前缀的 JSON，只接受当前用户连接，带事件流；命令行工具 `rekactl`。
-- **Android**：JNI 库加 Kotlin 封装，接收同样的 API 消息。
+- **系统接管**：本机网络意图、TUN 路由与 DNS 劫持、系统设置条件恢复以及 launchd/SCM 服务；只改规则不替换设备，实测范围见验收说明。
+- **Android**：JNI/Kotlin、VpnService fd、socket protect、分应用路由及显式 VPN 重建。
 
 ## 构建
 
@@ -94,6 +95,7 @@ printf '%s' '<base64 密钥>' | ./bin/rekactl secret set outbounds/my-ss/passwor
 
 ## 文档
 
+- [候选验收说明](docs/validation.md) · [性能与原始数据](docs/benchmarks.md)
 - [分发与安装](docs/distribution.md)
 - [系统接管](docs/network-takeover.md)
 - [GUI 接入与原生示例](docs/gui-integration.md)
