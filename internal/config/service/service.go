@@ -173,7 +173,14 @@ func Open(opts Options) (*Service, error) {
 	}
 	if err := s.startActive(a); err != nil {
 		if opts.DeferNetwork {
-			return nil, fmt.Errorf("defer network takeover: %w", err)
+			// A loaded, already-off document is safe to expose for repair even
+			// when its profile cannot compile (for example a missing secret).
+			// Never turn a failed standby conversion or unreadable local state
+			// into a control-only success: its takeover intent is unconfirmed.
+			_, changed, localErr := networkOffDocument(s.local)
+			if s.active == 0 || s.active != a.Revision || localErr != nil || changed {
+				return nil, fmt.Errorf("defer network takeover: %w", err)
+			}
 		}
 		s.startErr = err
 		s.log.Error("active configuration did not start; fix it with a new commit", "revision", a.Revision, "err", err)
