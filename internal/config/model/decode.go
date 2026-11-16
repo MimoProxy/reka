@@ -266,6 +266,17 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 			return
 		}
 		v.SetInt(i)
+	case reflect.Uint64:
+		if n.Kind != yaml.ScalarNode || n.Tag != "!!int" {
+			d.errorf(n, path, "yaml.type", "expected an unsigned integer, got %s", kindName(n))
+			return
+		}
+		i, err := strconv.ParseUint(n.Value, 0, 64)
+		if err != nil {
+			d.errorf(n, path, "yaml.type", "unsigned integer out of range")
+			return
+		}
+		v.SetUint(i)
 	case reflect.Slice:
 		if isNull {
 			return
@@ -402,7 +413,7 @@ func structFields(t reflect.Type) map[string]int {
 // MatchKeys are the rule condition keys, in documentation order.
 var MatchKeys = []string{
 	"domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern",
-	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "rule-set", "geoip", "and", "or", "not", "all",
+	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "rule-set", "geoip", "and", "or", "not", "all",
 }
 
 func isMatchKey(k string) bool {

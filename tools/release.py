@@ -31,6 +31,17 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def copy_public_docs(destination):
+    """Ship repository documentation, excluding local maintainer evidence."""
+    for raw in run(['git', 'ls-files', '-z', '--', 'docs']).split(b'\0'):
+        if not raw:
+            continue
+        source = ROOT / os.fsdecode(raw)
+        target = destination / source.relative_to(ROOT / 'docs')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+
 def json_objects(raw):
     text = raw.decode()
     decoder = json.JSONDecoder()
@@ -98,6 +109,9 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9A-Za-z][0-9A-Za-z.+_-]{0,79}', args.version):
         parser.error('invalid version')
+    pkg_version = args.version.split('-', 1)[0].split('+', 1)[0]
+    if args.macos_pkg and not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', pkg_version):
+        parser.error('macOS packages require a numeric major.minor.patch version')
     output = ROOT / args.output / args.version
     output.mkdir(parents=True, exist_ok=True)
     overlay = run(['python3', 'tools/build-overlay.py']).decode().strip()
@@ -118,7 +132,7 @@ def main():
         for command in ('reka', 'rekactl'):
             filename = command + ('.exe' if goos == 'windows' else '')
             run(['go', 'build', *flags, '-trimpath', '-tags', TAGS, '-ldflags', LDFLAGS + ' -X main.version=' + args.version, '-o', str(stage / filename), './cmd/' + command], env=env)
-        shutil.copytree(ROOT / 'docs', stage / 'docs')
+        copy_public_docs(stage / 'docs')
         shutil.copytree(ROOT / 'examples', stage / 'examples', ignore=shutil.ignore_patterns('__pycache__'))
         shutil.copytree(ROOT / 'packaging', stage / 'packaging')
         for file in ('LICENSE', 'README.md', 'README.zh-CN.md'):
@@ -134,7 +148,8 @@ def main():
         print(path.relative_to(ROOT), flush=True)
         if args.macos_pkg and goos=='darwin':
             package=output/(name+'.pkg')
-            run(['pkgbuild','--root',str(stage),'--identifier','org.mimoproxy.reka.staging.'+goarch,'--version','1.0.0','--ownership','recommended','--install-location','/Library/Application Support/Reka/distribution',str(package)])
+            pkg_namespace = 'staging.' if '-' in args.version else 'distribution.'
+            run(['pkgbuild','--root',str(stage),'--identifier','org.mimoproxy.reka.'+pkg_namespace+goarch,'--version',pkg_version,'--ownership','recommended','--install-location','/Library/Application Support/Reka/distribution',str(package)])
             built.append(package)
             print(package.relative_to(ROOT),flush=True)
     if args.android_library:
@@ -153,7 +168,7 @@ def main():
         shutil.copyfile(ROOT/'mobile/android/consumer-rules.pro',stage/'consumer-rules.pro')
         for folder in ('java', 'kotlin'):
             shutil.copytree(ROOT / 'mobile/android' / folder, stage / folder)
-        shutil.copytree(ROOT / 'docs', stage / 'docs')
+        copy_public_docs(stage / 'docs')
         sdk=Path(os.environ.get('ANDROID_HOME',str(Path.home()/'Library/Android/sdk')))
         ndk=Path(os.environ['ANDROID_NDK_HOME']) if os.environ.get('ANDROID_NDK_HOME') else sorted((sdk/'ndk').iterdir(),key=lambda p:tuple(map(int,p.name.split('.'))))[-1]
         host=next((ndk/'toolchains/llvm/prebuilt').iterdir())
@@ -199,8 +214,11 @@ def main():
             target=stage/'module-cache'/relative/original.name
             target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(original,target)
-    # Go may need metadata for unlinked graph nodes during version selection.
-    for metadata in json_objects(run(['go','list','-modfile',str(ROOT/'bin/build.mod'),'-m','-json','all'])):
+    # Local replacements expose graph metadata that package builds can prune.
+    # Allow Go to record those .mod checksums in the generated build.sum;
+    # listing modules downloads metadata, not unlinked platform library zips.
+    # The checked-in go.mod/go.sum remain untouched.
+    for metadata in json_objects(run(['go','list','-mod=mod','-modfile',str(ROOT/'bin/build.mod'),'-m','-json','all'])):
         version=metadata.get('Version')
         if not version:
             continue

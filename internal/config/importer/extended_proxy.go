@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"github.com/MimoProxy/reka/internal/config/model"
 	"go.yaml.in/yaml/v3"
 	"strconv"
 	"strings"
@@ -10,7 +11,12 @@ func (r *proxyReader) number(key string, def int) int {
 	if get(r.n, key) == nil {
 		return def
 	}
-	v, err := strconv.Atoi(r.str(key))
+	base := 10
+	if get(r.n, key).Tag == "!!int" {
+		base = 0
+	}
+	value, err := strconv.ParseInt(r.str(key), base, 64)
+	v := int(value)
 	if err != nil {
 		r.fail(key, "import.type", "expected an integer")
 	}
@@ -26,7 +32,12 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	}
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
-	out := object{"id": id, "name": name, "type": nativeType, "server": r.str("server"), "port": r.port(), "udp": r.boolean("udp", false)}
+	port := 0
+	realmEnabled := nativeType == "hysteria2" && text(get(get(n, "realm-opts"), "enable")) == "true"
+	if !realmEnabled && (nativeType != "hysteria2" || empty(get(n, "ports")) || (!empty(get(n, "port")) && text(get(n, "port")) != "0")) {
+		port = r.port()
+	}
+	out := object{"id": id, "name": name, "type": nativeType, "server": r.str("server"), "port": port, "udp": r.boolean("udp", false)}
 	allowed := map[string]bool{}
 	for _, k := range []string{"name", "type", "server", "port", "udp", "tls", "servername", "sni", "skip-cert-verify", "client-fingerprint", "alpn"} {
 		allowed[k] = true
@@ -39,7 +50,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	p := object{}
 	switch nativeType {
 	case "vmess":
-		permit("uuid", "alterId", "cipher", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux", "packet-encoding")
+		permit("uuid", "alterId", "cipher", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "h2-opts", "http-opts", "smux", "packet-encoding")
 		out["uuid"] = r.str("uuid")
 		security := r.str("cipher")
 		if security == "" {
@@ -53,11 +64,39 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		permit("password", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux")
 		out["password"] = r.str("password")
 	case "hysteria2":
-		permit("password", "up", "down", "obfs", "obfs-password")
+		permit("password", "up", "down", "obfs", "obfs-password", "ports", "hop-interval", "realm-opts", "obfs-min-packet-size", "obfs-max-packet-size")
+		if ports := r.str("ports"); ports != "" {
+			ranges, err := model.PortHops(ports)
+			if err != nil {
+				r.fail("ports", "import.ports", err.Error())
+			} else {
+				p["server-ports"] = ranges
+			}
+			lo, hi, err := model.HopSeconds(r.str("hop-interval"))
+			if err != nil {
+				r.fail("hop-interval", "import.ports", err.Error())
+			} else {
+				p["hop-interval-seconds"], p["hop-interval-max-seconds"] = lo, hi
+			}
+		} else if get(n, "hop-interval") != nil {
+			c.report.Ignored = append(c.report.Ignored, path+"/hop-interval")
+		}
 		out["password"] = r.str("password")
-		p["up-mbps"], p["down-mbps"] = r.number("up", 0), r.number("down", 0)
+		for _, key := range []string{"up", "down"} {
+			rate, err := model.BandwidthBytes(r.str(key))
+			if err != nil {
+				r.fail(key, "import.bandwidth", err.Error())
+			} else {
+				p[key+"-bps"] = rate
+			}
+		}
+		if value := get(n, "realm-opts"); value != nil {
+			c.convertRealm(&r, value, p)
+		}
 		if obfs := r.str("obfs"); obfs != "" {
-			p["obfs"] = object{"type": obfs, "password": r.str("obfs-password")}
+			p["obfs"] = object{"type": obfs, "password": r.str("obfs-password"), "min-packet-size": r.number("obfs-min-packet-size", 0), "max-packet-size": r.number("obfs-max-packet-size", 0)}
+		} else if get(n, "obfs-min-packet-size") != nil || get(n, "obfs-max-packet-size") != nil {
+			r.fail("obfs", "import.obfs", "packet sizes require gecko obfs")
 		}
 	case "tuic":
 		permit("uuid", "password", "congestion-controller", "udp-relay-mode", "reduce-rtt", "heartbeat-interval")
@@ -82,6 +121,8 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	if len(p) > 0 {
 		out["protocol"] = p
 	}
+	c.convertDialer(&r, out, allowed)
+	permitTLSExtras(nativeType, allowed)
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		key, v := n.Content[i].Value, n.Content[i+1]
 		if !allowed[key] {
@@ -93,6 +134,9 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	}
 	tlsEnabled := nativeType == "trojan" || nativeType == "hysteria2" || nativeType == "tuic"
 	tlsEnabled = r.boolean("tls", tlsEnabled)
+	if nativeType == "vmess" && r.str("network") == "h2" {
+		tlsEnabled = true
+	}
 	if nativeType == "snell" && tlsEnabled {
 		r.fail("tls", "import.tls", "Snell TLS is an obfs option, not outer TLS")
 	}
@@ -125,7 +169,9 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 			}
 		}
 	}
+	c.convertTLSExtras(&r, nativeType, out)
 	c.convertTransport(&r, out)
+	c.convertMultiplex(&r, out)
 	if !r.bad && !c.validateOutbound(out, n, path) {
 		r.bad = true
 	}
@@ -148,6 +194,8 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 			key = "grpc-opts"
 		case "httpupgrade":
 			key = "http-upgrade-opts"
+		case "http", "h2":
+			key = network + "-opts"
 		default:
 			r.fail("network", "import.transport", "unsupported transport")
 			return
@@ -157,10 +205,20 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 			for i := 0; i+1 < len(opts.Content); i += 2 {
 				field := opts.Content[i].Value
 				switch field {
+				case "method":
+					t["method"] = br.str(field)
 				case "path":
-					t["path"] = br.str(field)
+					if network == "http" {
+						t["paths"] = transportStrings(&br, opts, field)
+					} else {
+						t["path"] = br.str(field)
+					}
 				case "host":
-					t["host"] = br.str(field)
+					if network == "h2" {
+						t["hosts"] = transportStrings(&br, opts, field)
+					} else {
+						t["host"] = br.str(field)
+					}
 				case "grpc-service-name":
 					t["service-name"] = br.str(field)
 				case "max-early-data":
@@ -175,6 +233,12 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 						continue
 					}
 					for j := 0; j+1 < len(v.Content); j += 2 {
+						if network == "http" {
+							for _, value := range transportStrings(&br, v, v.Content[j].Value) {
+								headers = append(headers, object{"name": v.Content[j].Value, "value": value})
+							}
+							continue
+						}
 						if v.Content[j+1].Kind != yaml.ScalarNode {
 							br.fail(field, "import.type", "headers must be scalar")
 							continue
@@ -190,29 +254,28 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 		}
 		out["transport"] = t
 	}
-	if mux := get(r.n, "smux"); !empty(mux) {
-		br := proxyReader{c: c, n: mux, path: r.path + "/smux"}
-		m := object{"enabled": br.boolean("enabled", false)}
-		for i := 0; i+1 < len(mux.Content); i += 2 {
-			key := mux.Content[i].Value
-			switch key {
-			case "enabled":
-			case "protocol":
-				m[key] = br.str(key)
-			case "max-connections", "min-streams", "max-streams":
-				m[key] = br.number(key, 0)
-			case "padding":
-				m[key] = br.boolean(key, false)
-			default:
-				br.fail(key, "import.multiplex", "unsupported multiplex option")
-			}
-		}
-		r.bad = r.bad || br.bad
-		out["multiplex"] = m
-	}
 	for _, key := range []string{"ws-opts", "grpc-opts", "http-upgrade-opts"} {
 		if !empty(get(r.n, key)) && strings.TrimSpace(network) == "" {
 			r.fail(key, "import.transport", "transport options require network")
 		}
 	}
+}
+
+// Clash HTTP obfuscation selects one value from each configured list.
+func transportStrings(r *proxyReader, n *yaml.Node, key string) []string {
+	v := get(n, key)
+	if v == nil || v.Kind != yaml.SequenceNode {
+		r.fail(key, "import.transport", "expected a list of strings")
+		return nil
+	}
+	values := []string{}
+	for _, item := range v.Content {
+		item = deref(item)
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			r.fail(key, "import.transport", "expected a list of strings")
+			continue
+		}
+		values = append(values, item.Value)
+	}
+	return values
 }

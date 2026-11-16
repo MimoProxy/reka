@@ -53,7 +53,7 @@ func (e *Engine) preparePolicies(p *Prepared) {
 		}
 		defer res.Body.Close()
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
-		if res.StatusCode < 200 || res.StatusCode >= 400 {
+		if !policy.ExpectedStatusAllows(ctx, res.StatusCode) {
 			return fmt.Errorf("health HTTP status %d", res.StatusCode)
 		}
 		return nil

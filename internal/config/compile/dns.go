@@ -20,6 +20,12 @@ func (c *compiler) dns(eff *Effective) {
 	rc := c.prepareRuleResources()
 	matchers := map[string]*router.Router{}
 	patterns := append(append([]string{}, cfg.FakeFilter...), cfg.Filter.Domain...)
+	for _, p := range cfg.Filter.GeoSite {
+		if !strings.HasPrefix(p, "rule-set:") && !strings.HasPrefix(p, "geosite:") {
+			p = "geosite:" + strings.ToLower(p)
+		}
+		patterns = append(patterns, p)
+	}
 	for _, p := range cfg.Policies {
 		patterns = append(patterns, p.Pattern)
 	}

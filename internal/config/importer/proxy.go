@@ -3,7 +3,6 @@ package importer
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
@@ -49,9 +48,8 @@ func (r *proxyReader) boolean(key string, def bool) bool {
 	return n.Value == "true"
 }
 func (r *proxyReader) port() int {
-	s := r.str("port")
-	p, err := strconv.Atoi(s)
-	if err != nil || p < 1 || p > 65535 {
+	p := r.number("port", 0)
+	if p < 1 || p > 65535 {
 		r.fail("port", "import.port", "port must be between 1 and 65535")
 		return 0
 	}
@@ -77,7 +75,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
 	allowed := map[string]bool{"name": true, "type": true}
-	for _, key := range []string{"server", "port", "udp", "username", "password", "cipher", "uuid", "flow", "packet-encoding", "network", "tls", "servername", "sni", "client-fingerprint", "skip-cert-verify", "alpn", "reality-opts", "encryption", "xudp", "packet-addr", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux"} {
+	for _, key := range []string{"server", "port", "udp", "username", "password", "cipher", "uuid", "flow", "packet-encoding", "network", "tls", "servername", "sni", "client-fingerprint", "skip-cert-verify", "alpn", "reality-opts", "encryption", "xudp", "packet-addr", "ws-opts", "grpc-opts", "http-upgrade-opts", "h2-opts", "http-opts", "smux"} {
 		switch key {
 		case "server", "port":
 			allowed[key] = typ != "direct" && typ != "reject"
@@ -92,11 +90,37 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		case "tls", "skip-cert-verify":
 			allowed[key] = typ == "http" || typ == "socks5" || typ == "vless"
 		case "sni":
-			allowed[key] = typ == "http"
+			allowed[key] = typ == "http" || typ == "socks5"
 		default:
 			allowed[key] = typ == "vless"
 		}
 	}
+	if typ == "ss" {
+		allowed["plugin"], allowed["plugin-opts"], allowed["client-fingerprint"] = true, true, true
+		c.convertSSPlugin(&r, out)
+		allowed["udp-over-tcp"], allowed["udp-over-tcp-version"] = true, true
+		out["udp-over-tcp"], out["udp-over-tcp-version"] = r.boolean("udp-over-tcp", false), r.number("udp-over-tcp-version", 0)
+	}
+	if typ == "http" {
+		allowed["headers"] = true
+		if h := get(n, "headers"); h != nil {
+			if h.Kind != yaml.MappingNode {
+				r.fail("headers", "import.headers", "headers must be a mapping")
+			} else {
+				headers := []object{}
+				for i := 0; i+1 < len(h.Content); i += 2 {
+					if h.Content[i+1].Kind != yaml.ScalarNode {
+						r.fail("headers", "import.headers", "header values must be scalar strings")
+						continue
+					}
+					headers = append(headers, object{"name": h.Content[i].Value, "value": h.Content[i+1].Value})
+				}
+				out["headers"] = headers
+			}
+		}
+	}
+	c.convertDialer(&r, out, allowed)
+	permitTLSExtras(typ, allowed)
 	// These disabled options do not change the wire format. Enabled values
 	// must never be silently dropped.
 	for i := 0; i+1 < len(n.Content); i += 2 {
@@ -139,34 +163,45 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	if typ == "vless" {
 
-		if encryption := r.str("encryption"); encryption != "" && encryption != "none" {
-			r.fail("encryption", "import.encryption", "VLESS encryption is not implemented")
+		if encryption := r.str("encryption"); encryption != "" {
+			out["encryption"] = encryption
 		}
 		encoding := r.str("packet-encoding")
-		// The locked mihomo implementation defaults to XUDP, despite older
-		// documentation describing an empty value as raw UDP.
-		if encoding != "" && encoding != "xudp" {
-			r.fail("packet-encoding", "import.packet-encoding", "only XUDP packet encoding is implemented")
+		addr := r.boolean("packet-addr", false)
+		xudp := r.boolean("xudp", false)
+		switch encoding {
+		case "packet", "packetaddr":
+			addr = true
+			xudp = false
+		case "", "xudp", "none":
+			if encoding == "none" {
+				c.diag(get(n, "packet-encoding"), path+"/packet-encoding", "import.ignored-field", "the pinned reference treats none as its default packet selection; native raw UDP is selected separately", false)
+			}
+			if !addr {
+				xudp = true
+			}
+		default:
+			r.fail("packet-encoding", "import.packet-encoding", "unknown VLESS packet encoding")
 		}
-		if r.boolean("packet-addr", false) {
-			r.fail("packet-addr", "import.packet-encoding", "packet-address encoding is not implemented")
+		if xudp {
+			addr = false
 		}
-		if get(n, "xudp") != nil {
-			_ = r.boolean("xudp", false)
-		} // locked mihomo still defaults this to true
 		out["packet-encoding"] = "xudp"
+		if addr {
+			out["packet-encoding"] = "packetaddr"
+		}
 	}
 	tlsEnabled := false
 	if allowed["tls"] {
 		tlsEnabled = r.boolean("tls", false)
 	}
-	if typ == "socks5" && tlsEnabled {
-		r.fail("tls", "import.tls", "TLS on SOCKS5 is not implemented")
+	if typ == "vless" && r.str("network") == "h2" {
+		tlsEnabled = true
 	}
-	if tlsEnabled && (typ == "http" || typ == "vless") {
+	if tlsEnabled && (typ == "http" || typ == "vless" || typ == "socks5") {
 		tls := object{}
 		sniKey := "servername"
-		if typ == "http" {
+		if typ == "http" || typ == "socks5" {
 			sniKey = "sni"
 		}
 		if get(n, sniKey) != nil {
@@ -206,6 +241,10 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 							rr.fail(key, "import.unsupported-field", "unknown REALITY option")
 						}
 					}
+					if tls["insecure"] == true {
+						tls["insecure"] = false
+						c.diag(get(n, "skip-cert-verify"), path+"/skip-cert-verify", "import.ignored-field", "REALITY authenticates its configured public key; this certificate flag has no effect", false)
+					}
 					tls["reality"] = object{"public-key": rr.str("public-key"), "short-id": rr.str("short-id"), "x25519mlkem768": rr.boolean("support-x25519mlkem768", false)}
 					r.bad = r.bad || rr.bad
 				}
@@ -222,6 +261,8 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	if typ == "vless" {
 		c.convertTransport(&r, out)
 	}
+	c.convertTLSExtras(&r, typ, out)
+	c.convertMultiplex(&r, out)
 	if !r.bad {
 		r.bad = !c.validateOutbound(out, n, path)
 	}
@@ -238,7 +279,7 @@ func (c *converter) validateOutbound(out object, n *yaml.Node, path string) bool
 	_, diags := compile.Compile(b, nil, compile.Options{ProcessLookup: true})
 	valid := true
 	for _, d := range diags {
-		if d.Severity != model.SeverityError || strings.HasPrefix(d.Code, "secret.") {
+		if d.Severity != model.SeverityError || strings.HasPrefix(d.Code, "secret.") || d.Code == "outbound.detour" {
 			continue
 		}
 		if d.Code == "outbound.auth" {

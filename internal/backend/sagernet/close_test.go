@@ -304,13 +304,12 @@ func TestCloseSemantics(t *testing.T) {
 		{name: "shadowsocks", newOutbound: specOutbound(ShadowsocksSpec{Server: "127.0.0.1", Port: ss.Port(), Method: ssMethod, Password: ssPass})},
 		{name: "vless-reality", newOutbound: specOutbound(realitySpec(reality, testUUID, "", pub, sid))},
 	}
-	if !raceEnabled {
-		cases = append(cases, closeCase{
-			name:        "vless-reality-vision-inner-tls",
-			useTLS:      true,
-			newOutbound: specOutbound(realitySpec(vision, testUUID, "xtls-rprx-vision", vpub, vsid)),
-		})
-	}
+	cases = append(cases, closeCase{
+		name:        "vless-reality-vision-inner-tls",
+		useTLS:      true,
+		newOutbound: specOutbound(realitySpec(vision, testUUID, "xtls-rprx-vision", vpub, vsid)),
+	})
+
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := runReplaceAndClose(t, c)

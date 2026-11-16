@@ -39,9 +39,6 @@ func (c *converter) convertDNS(root *yaml.Node) {
 	}
 	if get(normalized, "fake-ip-ttl") == nil {
 		putField(normalized, "fake-ip-ttl", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "1"})
-	} else if text(get(normalized, "fake-ip-ttl")) == "0" {
-		c.unsupported(n, "/dns/fake-ip-ttl", "import.dns", "zero fake-IP TTL is unavailable")
-		return
 	}
 	if get(normalized, "fake-ip-filter") == nil {
 		filters := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
@@ -109,6 +106,21 @@ func (c *converter) convertDNS(root *yaml.Node) {
 			remapPattern(v)
 		}
 	}
+	if filter := get(normalized, "fallback-filter"); filter != nil {
+		if sites := get(filter, "geosite"); sites != nil {
+			if sites.Kind != yaml.SequenceNode {
+				c.unsupported(sites, "/dns/fallback-filter/geosite", "import.dns", "geosite must be a list")
+				return
+			}
+			for _, v := range sites.Content {
+				if v.Kind != yaml.ScalarNode {
+					c.unsupported(v, "/dns/fallback-filter/geosite", "import.dns", "geosite selector must be a string")
+					return
+				}
+				v.Value = "geosite:" + strings.ToLower(v.Value)
+			}
+		}
+	}
 	remapPattern(normalized)
 	if filter := get(normalized, "fallback-filter"); filter != nil && text(get(filter, "geoip")) == "true" {
 		if fallback := get(normalized, "fallback"); fallback != nil && len(fallback.Content) > 0 {
@@ -131,10 +143,12 @@ func (c *converter) convertDNS(root *yaml.Node) {
 	var remap func(*yaml.Node)
 	remap = func(node *yaml.Node) {
 		if node.Kind == yaml.ScalarNode && strings.Contains(node.Value, "#") {
-			endpoint, ref, _ := strings.Cut(node.Value, "#")
-			if id, ok := c.target(ref); ok {
-				node.Value = endpoint + "#" + id
-			}
+			node.Value = RD.RemapEndpointTarget(node.Value, func(ref string) string {
+				if id, ok := c.target(ref); ok {
+					return id
+				}
+				return ref
+			})
 		}
 		for _, v := range node.Content {
 			remap(v)

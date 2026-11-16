@@ -123,17 +123,14 @@ func TestImportUnsupportedIsExplicitAndAtomic(t *testing.T) {
 	}
 	cases := []struct{ name, data, code string }{
 		{"type", strings.Replace(sample, "type: socks5", "type: unsupported-protocol", 1), "import.protocol"},
-		{"tls socks", strings.Replace(sample, "type: socks5", "type: socks5, tls: true", 1), "import.tls"},
-		{"pinning", strings.Replace(sample, "type: socks5", "type: socks5, fingerprint: pinned", 1), "import.unsupported-field"},
+		{"pinning", strings.Replace(sample, "type: socks5", "type: socks5, tls: true, fingerprint: pinned", 1), "import.tls.certificate-pin"},
 		{"transport", strings.Replace(sample, "type: vless", "type: vless, network: quic", 1), "import.transport"},
-		{"VLESS encryption", strings.Replace(sample, "encryption: none", "encryption: encrypted", 1), "import.encryption"},
+		{"malformed VLESS encryption", strings.Replace(sample, "encryption: none", "encryption: encrypted", 1), "import.outbound.encryption"},
 		{"REALITY without TLS", strings.Replace(sample, "tls: true", "tls: false", 1), "import.tls"},
-		{"packet", strings.Replace(sample, "encryption: none", "packet-encoding: packetaddr", 1), "import.packet-encoding"},
 		{"group", strings.Replace(sample, "type: select", "type: relay", 1), "import.group-type"},
 		{"filter", strings.Replace(sample, "type: select", "type: select, made-up: HK", 1), "import.unsupported-field"},
 		{"unknown target", strings.Replace(sample, "DOMAIN-SUFFIX,example.org,Choice", "DOMAIN-SUFFIX,example.org,missing", 1), "import.rule-target"},
-		{"process regex", strings.Replace(sample, "MATCH,Choice", "PROCESS-NAME-REGEX,^test$,REJECT", 1), "import.rule-unsupported"},
-		{"unknown node field", strings.Replace(sample, "port: 8388", "port: 8388, dialer-proxy: Choice", 1), "import.unsupported-field"},
+		{"unknown node field", strings.Replace(sample, "port: 8388", "port: 8388, made-up-node-field: Choice", 1), "import.unsupported-field"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

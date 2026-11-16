@@ -3,18 +3,33 @@ module github.com/MimoProxy/reka
 go 1.27
 
 require (
+	github.com/dlclark/regexp2 v1.12.0
+	github.com/golang/snappy v1.0.0
 	github.com/klauspost/compress v1.19.1
+	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796
+	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604
+	github.com/metacubex/restls-client-go v0.1.9
 	github.com/metacubex/utls v1.8.7
 	github.com/miekg/dns v1.1.72
+	github.com/oschwald/maxminddb-golang v1.13.1
+	github.com/sagernet/quic-go v0.61.0-sing-box-mod.12
 	github.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf
 	github.com/sagernet/sing-box v1.14.4
+	github.com/sagernet/sing-mux v0.3.10-0.20260929204512-caf09fe32475
+	github.com/sagernet/sing-quic v0.7.2-0.20261020082049-7e0a5869a5f4
+	github.com/sagernet/sing-shadowsocks2 v0.2.2-0.20260929152114-a69d1086332b
+	github.com/sagernet/sing-shadowtls v0.2.2-0.20260928201441-a9c0127d5c99
 	github.com/sagernet/sing-tun v0.9.7-0.20261023115432-040db71fcd33
 	github.com/sagernet/sing-vmess v0.2.9-0.20261019223527-a0c58542bd9d
+	github.com/sagernet/smux v1.5.50-sing-box-mod.1
+	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854
 	go.yaml.in/yaml/v3 v3.0.6
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
+	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.11
+	lukechampine.com/blake3 v1.3.0
 )
 
 require (
@@ -26,6 +41,7 @@ require (
 	github.com/database64128/tfo-go/v2 v2.3.2 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
+	github.com/gaukas/godicttls v0.0.4 // indirect
 	github.com/go-chi/chi/v5 v5.2.5 // indirect
 	github.com/go-chi/render v1.0.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -40,6 +56,7 @@ require (
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
+	github.com/klauspost/reedsolomon v1.12.3 // indirect
 	github.com/koron/go-ssdp v0.0.4 // indirect
 	github.com/libdns/acmedns v0.5.0 // indirect
 	github.com/libdns/alidns v1.0.6 // indirect
@@ -50,21 +67,21 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/mdlayher/netlink v1.11.2 // indirect
 	github.com/mdlayher/socket v0.6.0 // indirect
+	github.com/metacubex/blake3 v0.1.0 // indirect
+	github.com/metacubex/cpu v0.1.0 // indirect
+	github.com/metacubex/hkdf v0.1.0 // indirect
+	github.com/metacubex/hpke v0.1.0 // indirect
+	github.com/metacubex/mlkem v0.1.0 // indirect
+	github.com/metacubex/randv2 v0.2.0 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/sagernet/fswatch v0.1.2 // indirect
 	github.com/sagernet/gvisor v0.0.0-20260727.0-sing-box-mod.1 // indirect
 	github.com/sagernet/netlink v0.0.0-20260814022025-64455d367bbf // indirect
 	github.com/sagernet/nftables v0.3.0-mod.4 // indirect
-	github.com/sagernet/quic-go v0.61.0-sing-box-mod.12 // indirect
-	github.com/sagernet/sing-mux v0.3.10-0.20260929204512-caf09fe32475 // indirect
-	github.com/sagernet/sing-quic v0.7.2-0.20261020082049-7e0a5869a5f4 // indirect
 	github.com/sagernet/sing-shadowsocks v0.2.9-0.20260929204512-65740e0f0e3e // indirect
-	github.com/sagernet/sing-shadowsocks2 v0.2.2-0.20260929152114-a69d1086332b // indirect
 	github.com/sagernet/sing-snell v0.0.0-20260904135315-bc5a12ac736f // indirect
 	github.com/sagernet/sing-usbip v0.0.0-20260817040617-28bd42667eca // indirect
-	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
-	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
@@ -73,11 +90,9 @@ require (
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
-	lukechampine.com/blake3 v1.3.0 // indirect
 )

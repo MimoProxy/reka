@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime"
 	"github.com/MimoProxy/reka/internal/subscription"
+	D "github.com/miekg/dns"
 	"io"
 	goruntime "runtime"
 )
@@ -61,13 +63,14 @@ type EngineOptions struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
-	policies *policy.Manager
-	dns      *RD.Service
-	revision uint64
-	eff      *compile.Effective
-	router   *router.Router
-	outUDP   map[string]bool
-	inUDP    map[string]bool
+	policies   *policy.Manager
+	dns        *RD.Service
+	revision   uint64
+	eff        *compile.Effective
+	router     *router.Router
+	outUDP     map[string]bool
+	packetAddr map[string]bool
+	inUDP      map[string]bool
 }
 
 // Engine turns effective configurations into running generations: it
@@ -203,7 +206,7 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	p.AutomaticGroupsChanged = gen.eff == nil && len(eff.AutoGroups) > 0 || gen.eff != nil && !reflect.DeepEqual(gen.eff.AutoGroups, eff.AutoGroups)
 	keepIDs := map[string]bool{}
 	for _, o := range eff.Outbounds {
-		if o.Type == model.OutboundReject {
+		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
 		}
 		keepIDs[o.ID] = true
@@ -322,6 +325,8 @@ func (e *Engine) listenerChanges(eff *compile.Effective) []listenerChange {
 // Prepared holds instances built for a configuration that is not active
 // yet. Pass it to Activate or Abort exactly once.
 type Prepared struct {
+	ready       atomic.Bool
+	detours     []*outboundDetour
 	policies    *policy.Manager
 	dns         *RD.Service
 	dnsListener *sagernet.DNSListener
@@ -375,24 +380,73 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		return fail(&PrepareError{Path: "/network", Err: errors.New("host must supply a freshly established VpnService fd through reconfigureVPN")})
 	}
 	for _, o := range eff.Outbounds {
-		if o.Type == model.OutboundReject {
+		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
 		}
 		if old, ok := snap.Resources[o.ID]; ok && fingerprintOf(gen, o.ID) == o.Fingerprint {
 			p.outbounds[o.ID] = old
 			continue
 		}
-		out, err := e.backend.NewOutbound(o.ID, specFor(o))
+		spec := specFor(o)
+		var owner atomic.Pointer[sagernet.Outbound]
+
+		if proxy, ok := spec.(sagernet.ProxySpec); ok {
+			tlsSpecs := []*sagernet.TLSSpec{proxy.TLS}
+			if proxy.Plugin != nil {
+				tlsSpecs = append(tlsSpecs, proxy.Plugin.TLS)
+			}
+			for _, tlsSpec := range tlsSpecs {
+				if tlsSpec == nil || tlsSpec.ECH == nil {
+					continue
+				}
+				tlsSpec.ECH.Lookup = func(ctx context.Context, name string) ([]byte, error) {
+					if !p.ready.Load() {
+						return nil, errors.New("ECH resolver is not prepared")
+					}
+					resolver := p.dns
+					current, g := e.current()
+					if current.Resources[o.ID] == owner.Load() {
+						resolver = g.dns
+					}
+					if resolver == nil {
+						return nil, errors.New("automatic ECH requires configured proxy-server DNS")
+					}
+					return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
+				}
+			}
+			spec = proxy
+		}
+
+		var detour *outboundDetour
+		if o.Dialer != nil && o.Dialer.Proxy != "" {
+			detour = e.newDetour(p, o)
+			spec = setSpecDetour(spec, detour.spec())
+		}
+		out, err := e.backend.NewOutbound(o.ID, spec)
 		if err != nil {
 			return fail(&PrepareError{Path: "/outbounds/" + o.ID, Err: err})
 		}
+		owner.Store(out)
+		if detour != nil {
+			detour.owner.Store(out)
+			p.detours = append(p.detours, detour)
+		}
 		p.created = append(p.created, out)
 		p.outbounds[o.ID] = out
+	}
+	for _, detour := range p.detours {
+		if err := detour.attach(); err != nil {
+			return fail(&PrepareError{Path: "/outbounds/" + detour.node + "/dialer/proxy", Err: err})
+		}
 	}
 	if err := e.prepareDNS(p); err != nil {
 		return fail(&PrepareError{Path: "/dns", Err: err})
 	}
 	e.preparePolicies(p)
+	p.ready.Store(true)
+	for _, detour := range p.detours {
+		detour.ready.Store(true)
+	}
 	p.changes = e.listenerChanges(eff)
 	for _, ch := range p.changes {
 		if ch.Action != ActionCreate && ch.Action != ActionRebind {
@@ -451,9 +505,10 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	p.done = true
 	eff := p.eff
 	_, previousGeneration := e.current()
-	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}}
+	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
+		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
 	}
 	for _, l := range eff.Listeners {
 		g.inUDP[l.ID] = l.UDP
@@ -560,16 +615,20 @@ func parseLevel(s string) slog.Level {
 }
 
 // usesUpstreamOutbound reports whether an outbound is built from the
-// upstream protocol packages with generic options: the protocols added for
-// subscriptions, and VLESS with a transport or multiplex but without
-// REALITY (REALITY uses Reka's own client).
+// upstream protocol packages with generic options. REALITY keeps Reka's own
+// handshake client; all other TLS protocols use the scoped component adapter.
 func usesUpstreamOutbound(o compile.Outbound) bool {
+	if o.Multiplex != nil && o.Multiplex.Enabled && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
+		return true
+	}
+	if (o.TLS != nil && o.TLS.Carrier != nil || o.Plugin != nil || o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
+		return true
+	}
 	switch o.Type {
-	case "vmess", "trojan", "hysteria2", "tuic", "snell":
+	case "http", "socks", "vmess", "trojan", "hysteria2", "tuic", "snell":
 		return true
 	case "vless":
-		hasExtras := o.Transport != nil || o.Multiplex != nil
-		return hasExtras && (o.TLS == nil || o.TLS.Reality == nil)
+		return o.TLS == nil || o.TLS.Reality == nil
 	}
 	return false
 }
@@ -579,19 +638,37 @@ func specFor(o compile.Outbound) any {
 		if o.TLS == nil {
 			return nil
 		}
-		t := &sagernet.TLSSpec{ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
+		t := &sagernet.TLSSpec{Carrier: tlsCarrierSpec(o.TLS.Carrier), CertificatePin: o.TLS.CertificatePin, VerifyName: o.TLS.VerifyName, Certificate: o.TLS.Certificate, PrivateKey: o.TLS.PrivateKey, ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
+		if ech := o.TLS.ECH; ech != nil && ech.Enabled {
+			t.ECH = &sagernet.ECHSpec{Config: ech.Config, QueryServerName: ech.QueryServerName}
+		}
 		if r := o.TLS.Reality; r != nil {
 			t.Reality = &sagernet.RealitySpec{PublicKey: r.PublicKey, ShortID: r.ShortID, X25519MLKEM768: r.X25519MLKEM768}
 		}
 		return t
 	}
 	if usesUpstreamOutbound(o) {
+		var up, down *uint64
+		var realm *sagernet.RealmSpec
+		if p := o.Protocol; p != nil && o.Type == "hysteria2" {
+			up, down = p.UpBPS, p.DownBPS
+			if r := p.Realm; r != nil && r.Enabled {
+				realm = &sagernet.RealmSpec{ServerURL: r.ServerURL, Token: r.Token, RealmID: r.RealmID, STUNServers: r.STUNServers}
+				if t := r.TLS; t != nil {
+					realm.TLS = &sagernet.TLSSpec{ServerName: t.ServerName, Insecure: t.Insecure, ALPN: t.ALPN, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: t.Certificate, PrivateKey: t.PrivateKey}
+				}
+			}
+		}
 		return sagernet.ProxySpec{
-			Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password,
+			Realm: realm, UpBPS: up, DownBPS: down, Plugin: ssPluginSpec(o.Plugin),
+			Encryption: o.Encryption,
+			Type:       o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, Username: o.Username, Method: o.Method,
 			TLS: tls(), Options: protocolOptions(o),
 		}
 	}
 	switch o.Type {
+	case "reject-drop":
+		return sagernet.DropSpec{}
 	case model.OutboundHTTP:
 		return sagernet.HTTPSpec{Server: o.Server, Port: o.Port, Username: o.Username, Password: o.Password, TLS: tls()}
 	case model.OutboundSOCKS:
@@ -599,7 +676,7 @@ func specFor(o compile.Outbound) any {
 	case model.OutboundShadowsocks:
 		return sagernet.ShadowsocksSpec{Server: o.Server, Port: o.Port, Method: o.Method, Password: o.Password}
 	case model.OutboundVLESS:
-		return sagernet.VLESSSpec{Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls(), Options: protocolOptions(o)}
+		return sagernet.VLESSSpec{Encryption: o.Encryption, Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls(), Options: protocolOptions(o)}
 	}
 	return sagernet.DirectSpec{}
 }
@@ -697,8 +774,7 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 			return nil, false
 		}
 		env.dns = g.dns
-		dec = g.router.Route(ctx, routerMetadata(md), env)
-		g.resolveObserved(&dec, routerMetadata(md), true)
+		dec = g.router.RouteWithResolver(ctx, routerMetadata(md), env, func(dec *router.Decision) { g.resolveObserved(dec, routerMetadata(md), true) })
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
 		}
@@ -741,7 +817,25 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 		}
 	}
 	result := sagernet.Route{Outbound: out, Release: release, Info: info}
-	if fakeRelease != nil {
+	if md.Network == "udp" && md.Destination.Domain != "" && g.packetAddr[dec.Outbound] {
+		addresses, err := env.Resolve(ctx, md.Destination.Domain)
+		if err != nil || len(addresses) == 0 {
+			release()
+			return sagernet.Route{Info: info}
+		}
+		addr := addresses[0]
+		for _, a := range addresses {
+			if a.Unmap().Is4() {
+				addr = a.Unmap()
+				break
+			}
+		}
+		destination := md.Destination
+		destination.Domain = ""
+		destination.Addr = addr
+		result.Destination = &destination
+	}
+	if fakeRelease != nil && result.Destination == nil {
 		d := md.Destination
 		result.Destination = &d
 	}
@@ -817,10 +911,7 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 		}
 		env.addrs = append(env.addrs, a)
 	}
-	x := g.router.Explain(ctx, md, env)
-	if !x.Undetermined {
-		g.resolveObserved(&x.Decision, md, false)
-	}
+	x := g.router.ExplainWithResolver(ctx, md, env, func(dec *router.Decision) { g.resolveObserved(dec, md, false) })
 	out := Explanation{Generation: snap.Generation, Revision: g.revision, RuleIndex: x.RuleIndex}
 	if x.Undetermined {
 		out.Undetermined = fmt.Sprintf("rule %d (%s) needs the destination address; pass resolve or addresses", x.StoppedAt, g.router.Rules().Rule(x.StoppedAt))
@@ -952,6 +1043,27 @@ func (e *Engine) ListenerInstance(id string) any {
 
 func protocolOptions(o compile.Outbound) json.RawMessage {
 	values := map[string]any{}
+	if d := o.Dialer; d != nil {
+		values["bind_interface"], values["routing_mark"], values["tcp_fast_open"], values["tcp_multi_path"] = d.Interface, d.RoutingMark, d.TFO, d.MPTCP
+		strategy := map[string]string{"ipv4": "ipv4_only", "ipv6": "ipv6_only", "ipv4-prefer": "prefer_ipv4", "ipv6-prefer": "prefer_ipv6"}[d.IPVersion]
+		if strategy != "" {
+			values["domain_strategy"] = strategy
+		}
+	}
+	if o.UDPOverTCP {
+		values["udp_over_tcp"] = map[string]any{"enabled": true, "version": o.UDPOverTCPVersion}
+	}
+	if len(o.Headers) > 0 {
+		headers := map[string][]string{}
+		for _, h := range o.Headers {
+			key := http.CanonicalHeaderKey(h.Name)
+			headers[key] = append(headers[key], h.Value)
+		}
+		if o.Username != "" {
+			delete(headers, "Proxy-Authorization")
+		}
+		values["headers"] = headers
+	}
 	if o.Type == "vmess" {
 		values["security"], values["packet_encoding"] = "auto", o.PacketEncoding
 	}
@@ -963,9 +1075,20 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			}
 			values["alter_id"] = p.AlterID
 		case "hysteria2":
+			if len(p.ServerPorts) > 0 {
+				values["server_ports"] = p.ServerPorts
+				interval := p.HopInterval
+				if interval == 0 {
+					interval = 30
+				} else if interval < 5 {
+					interval = 5
+				}
+				maximum := max(p.HopIntervalMax, interval)
+				values["hop_interval"], values["hop_interval_max"] = fmt.Sprintf("%ds", interval), fmt.Sprintf("%ds", maximum)
+			}
 			values["up_mbps"], values["down_mbps"] = p.UpMbps, p.DownMbps
 			if p.Obfs != nil {
-				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password}
+				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password, "min_packet_size": p.Obfs.MinPacketSize, "max_packet_size": p.Obfs.MaxPacketSize}
 			}
 		case "tuic":
 			values["congestion_control"], values["udp_relay_mode"], values["zero_rtt_handshake"] = p.Congestion, p.UDPMode, p.ZeroRTT
@@ -986,7 +1109,11 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		}
 	}
 	if o.Type == "vless" {
-		values["flow"], values["packet_encoding"] = o.Flow, o.PacketEncoding
+		encoding := o.PacketEncoding
+		if encoding == "none" {
+			encoding = ""
+		}
+		values["flow"], values["packet_encoding"] = o.Flow, encoding
 	}
 	if t := o.Transport; t != nil {
 		headers := map[string][]string{}
@@ -999,6 +1126,10 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		}
 		transport := map[string]any{"type": t.Type}
 		switch t.Type {
+		case "http":
+			values["reka_http"] = map[string]any{"method": t.Method, "paths": t.Paths, "host": t.Host, "headers": headers}
+		case "h2":
+			transport["type"], transport["host"], transport["path"] = "http", t.Hosts, t.Path
 		case "ws":
 			transport["path"], transport["headers"], transport["max_early_data"], transport["early_data_header_name"] = t.Path, headers, t.EarlyData, t.EarlyHeader
 		case "grpc":
@@ -1010,16 +1141,22 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			}
 			transport["host"], transport["path"], transport["headers"] = host, t.Path, headers
 		}
-		values["transport"] = transport
+		if t.Type != "http" {
+			values["transport"] = transport
+		}
 	}
 	if m := o.Multiplex; m != nil {
 		values["multiplex"] = map[string]any{
+			"only_tcp":        m.OnlyTCP,
 			"enabled":         m.Enabled,
 			"protocol":        m.Protocol,
 			"max_connections": m.MaxConnections,
 			"min_streams":     m.MinStreams,
 			"max_streams":     m.MaxStreams,
 			"padding":         m.Padding,
+		}
+		if m.Brutal != nil {
+			values["multiplex"].(map[string]any)["brutal"] = map[string]any{"enabled": m.Brutal.Enabled, "up_bps": m.Brutal.UpBPS, "down_bps": m.Brutal.DownBPS}
 		}
 	}
 	raw, _ := json.Marshal(values)
@@ -1084,3 +1221,28 @@ func proxyEndpoint(eff *compile.Effective) string {
 }
 
 func (e *Engine) TUNStacks() []string { return sagernet.TUNStacks() }
+
+func ssPluginSpec(p *model.SSPlugin) *sagernet.SSPluginSpec {
+	if p == nil {
+		return nil
+	}
+	out := &sagernet.SSPluginSpec{Username: p.Username, ClientFingerprint: p.ClientFingerprint, VersionHint: p.VersionHint, RestlsScript: p.RestlsScript, ForceTLS12: p.ForceTLS12, ALPN: p.ALPN, KCP: p.KCP, Type: p.Type, Mode: p.Mode, Host: p.Host, Path: p.Path, Password: p.Password, Version: p.Version, HTTPUpgrade: p.HTTPUpgrade, FastOpen: p.FastOpen, Headers: http.Header{}}
+	out.Mux = p.Mux == nil || *p.Mux
+	for _, h := range p.Headers {
+		out.Headers.Add(h.Name, h.Value)
+	}
+	if t := p.TLS; t != nil {
+		out.TLS = &sagernet.TLSSpec{ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: t.Certificate, PrivateKey: t.PrivateKey}
+		if t.ECH != nil && t.ECH.Enabled {
+			out.TLS.ECH = &sagernet.ECHSpec{Config: t.ECH.Config, QueryServerName: t.ECH.QueryServerName}
+		}
+	}
+	return out
+}
+
+func tlsCarrierSpec(c *model.TLSCarrier) *sagernet.TLSCarrierSpec {
+	if c == nil {
+		return nil
+	}
+	return &sagernet.TLSCarrierSpec{Type: c.Type, Username: c.Username, Password: c.Password, Version: c.Version, VersionHint: c.VersionHint, Script: c.Script}
+}

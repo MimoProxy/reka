@@ -362,7 +362,9 @@ func jsonNode(dec *json.Decoder) (*yaml.Node, error) {
 	case json.Number:
 		tag := "!!int"
 		if _, err := strconv.ParseInt(string(t), 10, 64); err != nil {
-			tag = "!!float"
+			if _, err := strconv.ParseUint(string(t), 10, 64); err != nil {
+				tag = "!!float"
+			}
 		}
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: string(t)}, nil
 	case bool:

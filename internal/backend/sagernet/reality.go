@@ -46,6 +46,9 @@ type realityClient struct {
 const realityHandshakeTimeout = 15 * time.Second
 
 func newRealityClient(t *TLSSpec) (*realityClient, error) {
+	if t.Carrier != nil {
+		return nil, errors.New("REALITY is mutually exclusive with other security carriers")
+	}
 	if t.ServerName == "" {
 		return nil, errors.New("reality: server_name is required")
 	}

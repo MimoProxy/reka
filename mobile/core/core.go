@@ -71,15 +71,19 @@ func Start(opts Options, host Host) (*Instance, error) {
 	}
 	level := new(slog.LevelVar)
 	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 	k, err := daemon.Start(daemon.Options{
 		TUNFD: opts.TUNFD, ProcessLookup: func(ctx context.Context, md sagernet.Metadata) (string, bool) {
 			if h, ok := host.(interface {
 				FindProcess(network, source, destination string) string
 			}); ok {
-				s := h.FindProcess(md.Network, md.Source.String(), md.Destination.String())
+				// Ownership belongs to the original socket tuple. Fake IP routing
+				// can replace Destination with a domain before process rules run;
+				// Local retains the packet destination (or loopback listener).
+				destination := md.Destination.String()
+				if md.Local.IsValid() {
+					destination = md.Local.String()
+				}
+				s := h.FindProcess(md.Network, md.Source.String(), destination)
 				return s, s != ""
 			}
 			return "", false

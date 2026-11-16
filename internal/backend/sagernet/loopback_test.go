@@ -12,12 +12,14 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
-	"sync/atomic"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +39,7 @@ func testLogger(t *testing.T) *slog.Logger {
 		level = levelTrace
 	}
 	w := &testWriter{t: t}
-	t.Cleanup(func() { w.done.Store(true) })
+	t.Cleanup(func() { w.mu.Lock(); w.done = true; w.mu.Unlock() })
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
@@ -45,11 +47,14 @@ func testLogger(t *testing.T) *slog.Logger {
 // still log while connections wind down, and t.Log panics after completion.
 type testWriter struct {
 	t    *testing.T
-	done atomic.Bool
+	mu   sync.Mutex
+	done bool
 }
 
 func (w *testWriter) Write(p []byte) (int, error) {
-	if w.done.Load() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
 		return len(p), nil
 	}
 	w.t.Helper()
@@ -59,12 +64,26 @@ func (w *testWriter) Write(p []byte) (int, error) {
 
 func freePort(t *testing.T) uint16 {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// These fixtures often listen on TCP and UDP at the same port. Starting
+	// from UDP detects both Windows exclusion tables. Random explicit ports
+	// avoid walking an entire reserved TCP range with consecutive ephemeral
+	// allocations. Production listeners still report bind failures.
+	for attempt := 0; attempt < 64; attempt++ {
+		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(1024+mrand.IntN(65536-1024)))
+		packet, err := net.ListenPacket("udp", address)
+		if err != nil {
+			continue
+		}
+		listener, err := net.Listen("tcp", packet.LocalAddr().String())
+		port := packet.LocalAddr().(*net.UDPAddr).Port
+		packet.Close()
+		if err == nil {
+			listener.Close()
+			return uint16(port)
+		}
 	}
-	defer l.Close()
-	return uint16(l.Addr().(*net.TCPAddr).Port)
+	t.Fatal("no common TCP/UDP fixture port")
+	return 0
 }
 
 func loopback(port uint16) netip.AddrPort {
@@ -344,9 +363,6 @@ func TestRealityWrongKey(t *testing.T) {
 }
 
 func TestLoopbackVLESSRealityVision(t *testing.T) {
-	if raceEnabled {
-		t.Skip("sing-vmess Vision has an upstream data race between Read and Write")
-	}
 	const flow = "xtls-rprx-vision"
 	server, pub, sid := realityServer(t, testUUID, flow)
 	socks, out := startClient(t, realitySpec(server, testUUID, flow, pub, sid))

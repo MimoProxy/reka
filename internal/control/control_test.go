@@ -235,6 +235,26 @@ func TestSlowConsumer(t *testing.T) {
 	}
 	call(1, "Hello", `{"versions":[1]}`)
 	call(2, "Subscribe", `{}`)
+	// Requests are asynchronous. Confirm the subscription exists before
+	// flooding; otherwise fast publishers can finish before Subscribe runs.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		frame, err := ReadFrame(conn)
+		if err != nil {
+			t.Fatal("subscription acknowledgement", err)
+		}
+		var message Message
+		if err = json.Unmarshal(frame, &message); err != nil {
+			t.Fatal(err)
+		}
+		if message.ID == 2 {
+			if message.Error != nil {
+				t.Fatal(message.Error)
+			}
+			break
+		}
+	}
+	conn.SetReadDeadline(time.Time{})
 	// Flood far more events than socket buffers and the queue hold.
 	payload := strings.Repeat("x", 4096)
 	done := make(chan struct{})

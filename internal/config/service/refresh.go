@@ -20,6 +20,7 @@ import (
 )
 
 type RefreshOptions struct {
+	ClientFor    func(source, name string) (*http.Client, error)
 	Client       *http.Client
 	Protect      func(int) error
 	PollInterval time.Duration
@@ -71,6 +72,9 @@ func (s *Service) manager(opts RefreshOptions) (*RefreshManager, error) {
 					m.client = subscription.HTTPClient(opts.Protect)
 				}
 				m.options.Protect = opts.Protect
+			}
+			if opts.ClientFor != nil {
+				m.options.ClientFor = opts.ClientFor
 			}
 			if opts.PollInterval > 0 {
 				m.options.PollInterval = opts.PollInterval
@@ -359,6 +363,13 @@ func (m *RefreshManager) work(id string, force bool, job *refreshJob) {
 		record.Status.ErrorCode = ""
 		record.Status.Revision = revision
 		record.Status.RootHash = entries["root"].Hash
+		record.Status.FallbackResources = nil
+		for id, entry := range entries {
+			if entry.Fallback {
+				record.Status.FallbackResources = append(record.Status.FallbackResources, id)
+			}
+		}
+		sort.Strings(record.Status.FallbackResources)
 		record.Status.LastSuccess = time.Now().UTC()
 		record.Status.NextAttempt = next
 	} else {
@@ -459,6 +470,16 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 		return fail(subscription.Code(err))
 	}
 	request := importer.Request{SourceID: id, Format: spec.Format, Data: string(root), NodesOnly: spec.NodesOnly, AllowPartial: spec.AllowPartial}
+	if len(spec.CertificateFiles) > 0 {
+		request.CertificateFiles = map[string]string{}
+		for _, attachment := range spec.CertificateFiles {
+			contents, err := m.resolve(attachment.Value)
+			if err != nil {
+				return fail("credentials_unavailable")
+			}
+			request.CertificateFiles[attachment.Path] = contents
+		}
+	}
 	providers, err := importer.Providers(request)
 	if err != nil {
 		return fail(err.Error())
@@ -466,10 +487,34 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 	payloads := map[string][]byte{}
 	for _, p := range providers {
 		var data []byte
-		if p.Type == "inline" {
+		var routed *http.Client
+		if p.Proxy != "" && p.Type == "http" {
+			if m.options.ClientFor == nil {
+				return fail("provider_proxy_unavailable")
+			}
+			routed, err = m.options.ClientFor(id, p.Proxy)
+			if err != nil {
+				return fail("provider_proxy_unavailable")
+			}
+			fetcher.Client = routed
+		} else {
+			fetcher.Client = m.client
+		}
+		if p.Type == "file" {
+			data, err = readProviderFile(spec.ProviderDirectory, p.Path)
+			if err != nil {
+				return fail(err.Error())
+			}
+			if err == nil {
+				data, err = batch.Inline(p.ID, p.Kind, p.Name, data)
+			}
+		} else if p.Type == "inline" {
 			data, err = batch.Inline(p.ID, p.Kind, p.Name, p.Inline)
 		} else {
-			data, err = batch.Fetch(ctx, p.ID, p.Kind, p.Name, p.URL, http.Header(p.Headers), p.Interval)
+			data, err = batch.FetchFallback(ctx, p.ID, p.Kind, p.Name, p.URL, http.Header(p.Headers), p.Interval, p.Fallback)
+		}
+		if routed != nil {
+			routed.CloseIdleConnections()
 		}
 		if err != nil {
 			return fail(subscription.Code(err))
@@ -488,6 +533,7 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 			}
 		}
 	}
+	fetcher.Client = m.client
 	geo := map[string][]byte{}
 	if !spec.NodesOnly {
 		for _, a := range spec.Geodata {
@@ -563,6 +609,7 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 	// Restore only masked fields whose stored identity is unchanged.
 	if spec != nil {
 		copy := *spec
+		copy.CertificateFiles = append([]model.CertificateFile{}, spec.CertificateFiles...)
 		copy.Geodata = append([]model.GeoAsset{}, spec.Geodata...)
 		copy.Headers = append([]model.SubscriptionHeader{}, spec.Headers...)
 		spec = &copy
@@ -608,6 +655,23 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 				}
 			}
 		}
+		for i, file := range spec.CertificateFiles {
+			if file.Value != model.Mask {
+				continue
+			}
+			found := false
+			if existing != nil && existing.Subscription != nil {
+				for _, old := range existing.Subscription.CertificateFiles {
+					if old.Path == file.Path {
+						spec.CertificateFiles[i].Value, found = old.Value, true
+						break
+					}
+				}
+			}
+			if !found {
+				return Result{}, errf(CodeBadRequest, "masked certificate attachment has no stored value")
+			}
+		}
 	}
 	// Reuse native ID validation without making any network request.
 	if spec != nil {
@@ -630,14 +694,16 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 			headers = append(headers, map[string]string{"name": h.Name, "value": h.Value})
 		}
 		value := map[string]any{
-			"url":           spec.URL,
-			"format":        spec.Format,
-			"interval":      spec.Interval,
-			"nodes-only":    spec.NodesOnly,
-			"allow-partial": spec.AllowPartial,
-			"paused":        spec.Paused,
-			"headers":       headers,
-			"geodata":       spec.Geodata,
+			"certificate-files":  spec.CertificateFiles,
+			"url":                spec.URL,
+			"format":             spec.Format,
+			"interval":           spec.Interval,
+			"nodes-only":         spec.NodesOnly,
+			"allow-partial":      spec.AllowPartial,
+			"paused":             spec.Paused,
+			"headers":            headers,
+			"geodata":            spec.Geodata,
+			"provider-directory": spec.ProviderDirectory,
 		}
 		if doc.Get(path) == nil {
 			encoded, _ := json.Marshal(map[string]any{"id": id, "subscription": value})

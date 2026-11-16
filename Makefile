@@ -27,10 +27,9 @@ build:
 test:
 	go test $(GO_OVERLAY) -timeout "$(TEST_TIMEOUT)" -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
 
-# The race detector needs cgo. checkptr is off because sing-vmess's Vision
-# reads TLS connection internals through unsafe offsets.
+# The pinned overlays make Vision and SOCKS UDP race/checkptr-testable.
 race:
-	CGO_ENABLED=1 go test $(GO_OVERLAY) -race -gcflags=all=-d=checkptr=0 -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
+	CGO_ENABLED=1 go test $(GO_OVERLAY) -race -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
 
 vet:
 	go vet $(GO_OVERLAY) -tags "$(TAGS)" $(PKGS)

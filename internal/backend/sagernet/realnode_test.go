@@ -26,9 +26,6 @@ func TestRealNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse REKA_TEST_NODE: %v", err)
 	}
-	if spec.Flow != "" && raceEnabled {
-		t.Skip("sing-vmess Vision has an upstream data race between Read and Write")
-	}
 	socks, out := startClient(t, spec)
 	target := os.Getenv("REKA_TEST_URL")
 	if target == "" {

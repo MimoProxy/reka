@@ -41,12 +41,25 @@ func logger(t *testing.T) *slog.Logger {
 
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// These fixtures often listen on TCP and UDP at the same port. Starting
+	// from UDP detects both Windows exclusion tables. Random explicit ports
+	// avoid walking an entire reserved TCP range with consecutive ephemeral
+	// allocations. Production listeners still report bind failures.
+	for attempt := 0; attempt < 64; attempt++ {
+		packet, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", 1024+mrand.IntN(65536-1024)))
+		if err != nil {
+			continue
+		}
+		listener, err := net.Listen("tcp", packet.LocalAddr().String())
+		port := packet.LocalAddr().(*net.UDPAddr).Port
+		packet.Close()
+		if err == nil {
+			listener.Close()
+			return port
+		}
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("no common TCP/UDP fixture port")
+	return 0
 }
 
 // harness is one kernel on a temporary state root with a mixed listener.
@@ -327,7 +340,7 @@ func ssServer(t *testing.T, password string) netip.AddrPort {
 const testUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
 // realityServer returns a node and the outbound YAML fields for it.
-func realityServer(t *testing.T) (listen netip.AddrPort, outboundYAML string) {
+func realityServer(t *testing.T, multiplex ...bool) (listen netip.AddrPort, outboundYAML string) {
 	t.Helper()
 	priv, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	sid := make([]byte, 4)
@@ -338,7 +351,7 @@ func realityServer(t *testing.T) (listen netip.AddrPort, outboundYAML string) {
 	t.Cleanup(target.Close)
 	listen = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(freePort(t)))
 	s, err := sagernet.StartRealityServer(sagernet.RealityServerOptions{
-		Listen: listen, UUID: testUUID, ServerName: "reality.test",
+		Listen: listen, UUID: testUUID, ServerName: "reality.test", Multiplex: len(multiplex) > 0 && multiplex[0],
 		Target: target.Listener.Addr().(*net.TCPAddr).AddrPort(), PrivateKey: priv.Bytes(), ShortID: hex.EncodeToString(sid),
 	}, logger(t))
 	if err != nil {

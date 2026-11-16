@@ -15,9 +15,13 @@ jobs:
         with:
           go-version-file: go.mod
       - run: python3 tools/fuzz.py --seconds 60
-      - run: REKA_SOAK_SECONDS=600 make test TEST_TIMEOUT=30m
+      - run: |
+          set -euo pipefail
+          REKA_SOAK_SECONDS=600 make test TEST_TIMEOUT=30m 2>&1 | tee bin/stability-soak.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: stability-evidence
-          path: bin/fuzz
+          path: |
+            bin/fuzz
+            bin/stability-soak.log

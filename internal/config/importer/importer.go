@@ -17,14 +17,18 @@ import (
 const ReferenceVersion = "v1.19.34"
 
 type Request struct {
-	displayNames  map[string]string
-	ruleSets      []object
-	resourceNames map[string]string
-	SourceID      string `json:"source_id"`
-	Format        string `json:"format,omitempty"`
-	Data          string `json:"data"`
-	NodesOnly     bool   `json:"nodes_only,omitempty"`
-	AllowPartial  bool   `json:"allow_partial,omitempty"`
+	// CertificateFiles contains explicit, caller-supplied file contents, keyed
+	// by the exact path string used by the foreign configuration. Import never
+	// opens those paths. Contents are consumed into the masked TLS identity.
+	CertificateFiles map[string]string `json:"certificate_files,omitempty"`
+	displayNames     map[string]string
+	ruleSets         []object
+	resourceNames    map[string]string
+	SourceID         string `json:"source_id"`
+	Format           string `json:"format,omitempty"`
+	Data             string `json:"data"`
+	NodesOnly        bool   `json:"nodes_only,omitempty"`
+	AllowPartial     bool   `json:"allow_partial,omitempty"`
 }
 type Count struct {
 	Total       int `json:"total"`
@@ -168,7 +172,11 @@ func importDirect(req Request) Result {
 		c.diag(nil, "/source_id", "import.source-id", "source_id must be a native stable ID", true)
 		return c.finish()
 	}
-	if len(req.Data) > model.MaxDocumentSize {
+	total := len(req.Data)
+	for name, value := range req.CertificateFiles {
+		total += len(name) + len(value)
+	}
+	if total > model.MaxDocumentSize || len(req.CertificateFiles) > 64 {
 		c.diag(nil, "/", "import.size", "input exceeds the document size limit", true)
 		return c.finish()
 	}
@@ -273,7 +281,7 @@ func (c *converter) register(n *yaml.Node, kind, path string) bool {
 		c.diag(n, path, "import.name", "a resource needs a name", true)
 		return false
 	}
-	if _, ok := c.names[name]; ok || name == "DIRECT" || name == "REJECT" {
+	if _, ok := c.names[name]; ok || name == "DIRECT" || name == "REJECT" || name == "COMPATIBLE" || name == "PASS" || name == "REJECT-DROP" {
 		c.diag(get(n, "name"), path+"/name", "import.duplicate-name", "duplicate or reserved resource name", true)
 		return false
 	}
@@ -300,6 +308,12 @@ func (c *converter) clash(data []byte) {
 		groups = c.items(root, "proxy-groups")
 		rules = c.items(root, "rules")
 	}
+	if c.req.NodesOnly {
+		groups = detourOnlyGroups(root, proxies)
+	}
+	if !c.req.NodesOnly {
+		groups = ensureGlobalGroup(root, proxies, groups)
+	}
 	c.report.Nodes.Total = len(proxies)
 	c.report.Groups.Total = len(groups)
 	c.report.Rules.Total = len(rules)
@@ -315,8 +329,11 @@ func (c *converter) clash(data []byte) {
 	for i, p := range proxies {
 		c.convertProxy(p, fmt.Sprintf("/proxies/#%d", i))
 	}
-	if !c.req.NodesOnly {
+	if len(groups) > 0 {
 		c.convertGroups(groups)
+	}
+	c.validateDetourGraph()
+	if !c.req.NodesOnly {
 		c.convertRuleBlocks(root, rules)
 		c.convertDNS(root)
 	}

@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -41,6 +42,10 @@ import javax.crypto.spec.GCMParameterSpec;
 public class MainActivity extends Activity {
     private static final String TAG = "RekaTest";
     private static final int PROXY_PORT = 17990;
+    // Activity recreation must not delete the running test's state or bind its
+    // ports again. The runtime harness force-stops between independent modes.
+    private static final AtomicBoolean started = new AtomicBoolean();
+    private static final AtomicBoolean vpnStarted = new AtomicBoolean();
     private final StringBuilder report = new StringBuilder();
     private final AtomicInteger events = new AtomicInteger();
     private final AtomicLong ids = new AtomicLong();
@@ -52,10 +57,20 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         view = new TextView(this);
         setContentView(view);
-        if(getIntent().getBooleanExtra("vpn",false)){android.content.Intent permission=android.net.VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,17);else startVPNTest();}else new Thread(this::runTest).start();
+        // Keep only the short interactive checks in the foreground. Power
+        // measurement must retain ordinary screen-off and Doze behavior.
+        if (getIntent().getIntExtra("battery-minutes", 0) == 0) {
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        if (!started.compareAndSet(false, true)) {
+            view.setText("Acceptance already started; results are in logcat (RekaTest).");
+            return;
+        }
+        if(getIntent().getBooleanExtra("kotlin",false)){new Thread(()->{try{log(KotlinAcceptance.run(this));log("RESULT PASS");}catch(Throwable error){Log.e(TAG,"Kotlin acceptance",error);log("FAIL "+error);log("RESULT FAIL");}},"reka-kotlin-test").start();return;}
+        if(getIntent().getBooleanExtra("vpn",false) || getIntent().getIntExtra("battery-minutes",0)>0){android.content.Intent permission=android.net.VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,17);else startVPNTest();}else new Thread(this::runTest).start();
     }
 
-    private void startVPNTest(){startService(new android.content.Intent(this,VpnTestService.class).putExtra("full",getIntent().getBooleanExtra("full",false)));}
+    private void startVPNTest(){if(!vpnStarted.compareAndSet(false,true))return;int minutes=getIntent().getIntExtra("battery-minutes",0);if(minutes>0){view.setText("Idle A/B acceptance: unplug USB, keep Wi-Fi, turn the screen off. Baseline and full VPN: at least "+minutes+" minutes each.");startService(new android.content.Intent(this,PowerTestService.class).putExtra("minutes",minutes).putExtra("diagnostic",getIntent().getBooleanExtra("diagnostic",false)).putExtra("seconds",getIntent().getIntExtra("seconds",15)));}else startService(new android.content.Intent(this,VpnTestService.class).putExtra("full",getIntent().getBooleanExtra("full",false)).putExtra("network-cycle",getIntent().getBooleanExtra("network-cycle",false)));}
     @Override protected void onActivityResult(int request,int result,android.content.Intent data){super.onActivityResult(request,result,data);if(request==17 && result==RESULT_OK)startVPNTest();}
 
     private void log(String line) {

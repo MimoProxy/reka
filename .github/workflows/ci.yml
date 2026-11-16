@@ -10,6 +10,31 @@ env:
   LDFLAGS: -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
 
 jobs:
+  reference:
+    name: test (pinned compatibility reference)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/mihomodiff/go.mod
+          cache-dependency-path: tools/mihomodiff/go.sum
+      - name: Rule and observed policy differential
+        working-directory: tools/mihomodiff
+        run: go run .
+      - name: Reference units and encrypted VLESS transport
+        working-directory: tools/mihomodiff
+        run: go test -race ./...
+      - name: Build unmodified reference plugin peer
+        working-directory: tools/mihomodiff
+        run: |
+          mkdir -p ../../bin
+          go build -o ../../bin/referencepeer ./referencepeer
+      - name: Native SS plugins against reference peers
+        run: |
+          python3 tools/build-overlay.py
+          CGO_ENABLED=1 REKA_REFERENCE_PEER="$GITHUB_WORKSPACE/bin/referencepeer" go test -modfile bin/build.mod -overlay bin/build-overlay.json -race -tags "$TAGS" -ldflags "$LDFLAGS" ./internal/backend/sagernet -run '^Test(SSPlugins|TLSCarriers)AgainstPinnedReference$' -count=3
+
   # Jobs named "test" run the tests on that platform; jobs named "build"
   # only compile.
   test:
@@ -44,6 +69,18 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
+      - name: Cross-UID filesystem and peer credential rejection
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d /tmp/reka-peer-ci.XXXXXX)
+          trap 'sudo rm -rf "$stage"' EXIT
+          chmod 755 "$stage"
+          go build -tags "$TAGS" -ldflags "$LDFLAGS" -o "$stage/peersmoke" ./tools/peersmoke
+          chmod 755 "$stage/peersmoke"
+          sudo "$stage/peersmoke" -owner "$(id -u)" -negative 65534 -output "$stage/result.json"
+          mkdir -p bin
+          sudo cat "$stage/result.json" | tee bin/peer-credentials.json
 
   race:
     name: test (race, ubuntu-latest)
@@ -58,14 +95,12 @@ jobs:
           python3 tools/build-overlay.py
           echo 'GOFLAGS=-modfile=bin/build.mod -overlay=bin/build-overlay.json' >> "$GITHUB_ENV"
       - name: race
-        # sing-vmess's Vision races between its read and write goroutines
-        # (upstream); Vision tests skip themselves under -race. checkptr is
-        # off because Vision reads TLS internals through unsafe offsets.
+        # Pinned overlays cover Vision and SOCKS UDP without race exemptions.
         env:
           CGO_ENABLED: "1"
         run: |
           PKGS=$(go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
-          go test -race -gcflags=all=-d=checkptr=0 -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
+          go test -race -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
 
   build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -117,3 +152,5 @@ jobs:
           CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -trimpath -buildmode=c-shared \
             -tags "$TAGS" -ldflags "$LDFLAGS -s -w" -o out/libreka.so ./mobile/jni
           ls -l out/libreka.so
+      - name: Compile public Kotlin wrapper and acceptance app
+        run: mobile/android/build.sh

@@ -13,10 +13,11 @@ import (
 // tolerated by the default dialer but not by the domain resolver path, so one
 // is always registered.
 //
-// Interface monitoring, auto-detect-interface and TUN integration come later
-// later. protect is the hook for Android's VpnService.protect().
+// Reka owns network monitoring and TUN takeover outside this adapter. protect
+// includes Android's VpnService.protect() and desktop TUN bypass controls.
 type networkManager struct {
-	protect control.Func
+	explicitProtect bool
+	protect         control.Func
 }
 
 var _ adapter.NetworkManager = (*networkManager)(nil)
@@ -30,18 +31,26 @@ func (m *networkManager) UpdateInterfaces() error                            { r
 func (m *networkManager) DefaultNetworkInterface() *adapter.NetworkInterface { return nil }
 func (m *networkManager) NetworkInterfaces() []adapter.NetworkInterface      { return nil }
 func (m *networkManager) NetworkEnvironment() uint64                         { return 0 }
-func (m *networkManager) AutoDetectInterface() bool                          { return m.protect != nil }
+func (m *networkManager) AutoDetectInterface() bool                          { return m.protect != nil && !m.explicitProtect }
 func (m *networkManager) AutoDetectInterfaceFunc() control.Func              { return m.protect }
 func (m *networkManager) ProtectFunc() control.Func                          { return m.protect }
 func (m *networkManager) DefaultOptions() adapter.NetworkOptions             { return adapter.NetworkOptions{} }
 func (m *networkManager) RegisterAutoRedirectOutputMark(uint32) error        { return nil }
 func (m *networkManager) AutoRedirectOutputMark() uint32                     { return 0 }
-func (m *networkManager) AutoRedirectOutputMarkFunc() control.Func           { return nil }
-func (m *networkManager) NetworkMonitor() tun.NetworkUpdateMonitor           { return nil }
-func (m *networkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor      { return nil }
-func (m *networkManager) PackageManager() tun.PackageManager                 { return nil }
-func (m *networkManager) NeedWIFIState() bool                                { return false }
-func (m *networkManager) WIFIState() adapter.WIFIState                       { return adapter.WIFIState{} }
-func (m *networkManager) UpdateWIFIState(context.Context)                    {}
-func (m *networkManager) ResetNetwork(context.Context)                       {}
-func (m *networkManager) FlushSystemDNSCache()                               {}
+
+// Explicit interface binding suppresses upstream auto-detect hooks. Keep the
+// mandatory Android protect control on the unconditional socket-control path.
+func (m *networkManager) AutoRedirectOutputMarkFunc() control.Func {
+	if m.explicitProtect {
+		return m.protect
+	}
+	return nil
+}
+func (m *networkManager) NetworkMonitor() tun.NetworkUpdateMonitor      { return nil }
+func (m *networkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor { return nil }
+func (m *networkManager) PackageManager() tun.PackageManager            { return nil }
+func (m *networkManager) NeedWIFIState() bool                           { return false }
+func (m *networkManager) WIFIState() adapter.WIFIState                  { return adapter.WIFIState{} }
+func (m *networkManager) UpdateWIFIState(context.Context)               {}
+func (m *networkManager) ResetNetwork(context.Context)                  {}
+func (m *networkManager) FlushSystemDNSCache()                          {}

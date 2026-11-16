@@ -1,4 +1,5 @@
 # Requires a dedicated ARM64 Android device with USB debugging and VPN consent.
+run-name: ${{ inputs.runner_label }}
 # This is deliberately separate from the hosted cross-compile job.
 name: android runtime
 on:
@@ -8,24 +9,38 @@ on:
         description: Dedicated adb device serial
         required: true
         type: string
+      runner_label:
+        description: Unique label of this one-shot device runner
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
   runtime:
-    runs-on: [self-hosted, android, ARM64]
+    runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 15
     env:
       ANDROID_SERIAL: ${{ inputs.serial }}
+      REKA_VERSION: 1.0.0-dev
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
       - run: make android
       - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --output bin/android/loopback.json
+      - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --skip-install --kotlin --output bin/android/kotlin.json
       - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --skip-install --vpn --output bin/android/vpn.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: android-runtime-evidence
-          path: bin/android/*.json
+          path: |
+            bin/android/loopback.json
+            bin/android/kotlin.json
+            bin/android/vpn.json
+            bin/android/libreka.build.json

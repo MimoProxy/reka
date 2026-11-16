@@ -1,0 +1,37 @@
+{
+  "Go": "go1.27.4",
+  "OS": "darwin",
+  "Arch": "arm64",
+  "At": "2026-11-16T08:08:43.7384Z",
+  "Results": [
+    {
+      "name": "rule-only-commit",
+      "count": 10000,
+      "samples": 20,
+      "p50_ms": 55.047625,
+      "p95_ms": 56.432709,
+      "pass": true
+    },
+    {
+      "name": "rule-set-query",
+      "count": 100000,
+      "samples": 100000,
+      "p50_ms": 0.000125,
+      "p95_ms": 0.00025,
+      "retained_heap_bytes": 9193808,
+      "build_ms": 29.842125,
+      "pass": true
+    },
+    {
+      "name": "rule-set-query",
+      "count": 1000000,
+      "samples": 100000,
+      "p50_ms": 0.00025,
+      "p95_ms": 0.000417,
+      "retained_heap_bytes": 112537232,
+      "build_ms": 377.923041,
+      "pass": true
+    }
+  ],
+  "source_commit": "3623b7e"
+}

@@ -509,9 +509,6 @@ func udpEcho(t *testing.T) netip.AddrPort {
 // UDP is split by destination: in one association each destination is
 // routed on its own and keeps the generation it was created in.
 func TestUDPPerDestination(t *testing.T) {
-	if raceEnabled {
-		t.Skip("sing's SOCKS5 UDP associate conn races between its read and write paths (upstream)")
-	}
 	a, b, c := udpEcho(t), udpEcho(t), udpEcho(t)
 	profile := fmt.Sprintf(`schema-version: 1
 rules:

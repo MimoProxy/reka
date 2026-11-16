@@ -64,7 +64,7 @@ func TestClashDNSDefaultsAndHosts(t *testing.T) {
 		t.Fatal(r.Report)
 	}
 	d := snapshot(t, r).DNS
-	if d == nil || !d.UseHosts || !d.SystemHosts || d.TTL != 1 || len(d.FakeFilter) != 3 || len(d.Hosts) != 1 {
+	if d == nil || !d.UseHosts || !d.SystemHosts || d.FakeTTL() != 1 || len(d.FakeFilter) != 3 || len(d.Hosts) != 1 {
 		t.Fatal(d)
 	}
 	for _, ignored := range r.Report.Ignored {
@@ -76,10 +76,10 @@ func TestClashDNSDefaultsAndHosts(t *testing.T) {
 	if r = Import(request("proxies: [{name: n, type: direct}]\ndns: {nameserver: [1.1.1.1]}")); !r.Report.CanApply || snapshot(t, r).DNS != nil {
 		t.Fatal("absent enable must leave DNS disabled", r.Report)
 	}
-	for _, suffix := range []string{", fallback: [8.8.8.8]", ", fake-ip-ttl: 0"} {
+	for _, suffix := range []string{", fallback: [8.8.8.8]"} {
 		r = Import(request("dns: {enable: true, nameserver: [1.1.1.1]" + suffix + "}"))
 		if r.Report.CanApply {
-			t.Fatal("missing locked GeoIP or zero TTL accepted", r.Report)
+			t.Fatal("missing locked GeoIP accepted", r.Report)
 		}
 	}
 	r = Import(request("dns: {enable: true, nameserver: [1.1.1.1], fallback: [8.8.8.8], fallback-filter: {geoip: false}}"))

@@ -86,6 +86,19 @@ func TestEncryptedDNS(t *testing.T) {
 	for _, endpoint := range []string{"tls://" + listener.Addr().String() + "#proxy", https.URL + "/dns-query#proxy"} {
 		ep, _ := RD.ParseEndpoint(endpoint)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if ep.Scheme == "https" {
+			ep.PreferH3 = true
+			probeDial := func(ctx context.Context, network, address, via string) (net.Conn, error) {
+				if via != "proxy" {
+					t.Error("probe lost routing", via)
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}
+			if m, e := exchangeDNS(ctx, ep, q, nil, probeDial, roots); e != nil || len(m.Answer) != 1 {
+				t.Fatal("prefer-h3 TLS fallback", m, e)
+			}
+			ep.PreferH3 = false
+		}
 		m, err := exchangeDNS(ctx, ep, q, nil, dial, roots)
 		if err != nil || len(m.Answer) != 1 || m.Id != q.Id {
 			t.Fatal(endpoint, m, err)
@@ -93,6 +106,25 @@ func TestEncryptedDNS(t *testing.T) {
 		if _, err = ExchangeDNS(ctx, ep, q, nil, dial); err == nil {
 			t.Fatal("untrusted TLS certificate accepted")
 		}
+		ep.Params = map[string]string{"skip-cert-verify": "true"}
+		if _, err = ExchangeDNS(ctx, ep, q, nil, dial); err != nil {
+			t.Fatal("explicit TLS verification skip", err)
+		}
+		name := "example.com"
+		if len(root.DNSNames) > 0 {
+			name = root.DNSNames[0]
+		} else if len(root.IPAddresses) > 0 {
+			name = root.IPAddresses[0].String()
+		}
+		ep.Params = map[string]string{"name-cert-verify": name}
+		if _, err = exchangeDNS(ctx, ep, q, nil, dial, roots); err != nil {
+			t.Fatal("explicit certificate name", err)
+		}
+		ep.Params = map[string]string{"skip-cert-verify": "true", "name-cert-verify": "wrong.invalid"}
+		if _, err = exchangeDNS(ctx, ep, q, nil, dial, roots); err == nil {
+			t.Fatal("verification name was ignored")
+		}
+
 		cancel()
 	}
 	invalid.Store(true)

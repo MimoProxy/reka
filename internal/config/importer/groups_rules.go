@@ -3,19 +3,25 @@ package importer
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"github.com/dlclark/regexp2"
 	"slices"
+	"strings"
 
+	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"go.yaml.in/yaml/v3"
 )
 
 func (c *converter) target(name string) (string, bool) {
 	switch name {
-	case "DIRECT":
+	case "DIRECT", "COMPATIBLE":
 		return "direct", true
 	case "REJECT":
 		return "reject", true
+	case "PASS":
+		return "pass", true
+	case "REJECT-DROP":
+		return "reject-drop", true
 	}
 	return c.names[name], c.available[name]
 }
@@ -38,23 +44,33 @@ func (c *converter) convertGroups(input []*yaml.Node) {
 		groups = append(groups, g)
 		byName[name] = g
 		if !slices.Contains([]string{"select", "url-test", "fallback", "load-balance"}, r.str("type")) {
-			r.fail("type", "import.group-type", "unsupported group type")
+			message := "unsupported group type"
+			if r.str("type") == "relay" {
+				message = "relay was removed from the pinned reference; use dialer-proxy on nodes"
+			}
+			r.fail("type", "import.group-type", message)
 		}
 		for j := 0; j+1 < len(n.Content); j += 2 {
 			key := n.Content[j].Value
-			if !slices.Contains([]string{"name", "type", "proxies", "icon", "url", "interval", "timeout", "tolerance", "lazy", "strategy", "filter", "exclude-filter", "include-all", "include-all-proxies", "include-all-providers", "disable-udp"}, key) {
+			if !slices.Contains([]string{"name", "type", "proxies", "icon", "url", "interval", "timeout", "tolerance", "lazy", "strategy", "filter", "exclude-filter", "include-all", "include-all-proxies", "include-all-providers", "disable-udp", "expected-status"}, key) {
 				r.fail(key, "import.unsupported-field", "group option is not supported")
 			}
 		}
 		if icon := get(n, "icon"); icon != nil {
 			g.native["icon"] = r.str("icon")
 		}
-		for _, key := range []string{"url", "interval", "timeout", "tolerance", "lazy", "strategy", "disable-udp"} {
+		for _, key := range []string{"url", "interval", "timeout", "tolerance", "lazy", "strategy", "disable-udp", "expected-status"} {
 			if v := get(n, key); v != nil {
 				var raw any
 				_ = v.Decode(&raw)
 				g.native[key] = raw
 			}
+		}
+		if _, err := policy.ParseExpectedStatus(r.str("expected-status")); err != nil {
+			r.fail("expected-status", "import.group-health", "invalid HTTP status ranges")
+		}
+		if r.str("expected-status") == "" {
+			g.native["expected-status"] = "*"
 		}
 		members := get(n, "proxies")
 		includeRoot := r.boolean("include-all", false) || r.boolean("include-all-proxies", false)
@@ -79,7 +95,7 @@ func (c *converter) convertGroups(input []*yaml.Node) {
 				}
 				seen[m.Value] = true
 				g.members = append(g.members, m.Value)
-				if _, exists := c.names[m.Value]; !exists && m.Value != "DIRECT" && m.Value != "REJECT" {
+				if _, exists := c.names[m.Value]; !exists && m.Value != "DIRECT" && m.Value != "REJECT" && m.Value != "PASS" && m.Value != "COMPATIBLE" && m.Value != "REJECT-DROP" {
 					r.fail("proxies", "import.group-reference", "unknown group member")
 				}
 			}
@@ -96,33 +112,67 @@ func (c *converter) convertGroups(input []*yaml.Node) {
 				}
 			}
 		}
-		var filter, exclude *regexp.Regexp
-		if value := r.str("filter"); value != "" {
-			var err error
-			filter, err = regexp.Compile(value)
-			if err != nil {
-				r.fail("filter", "import.group-filter", "invalid filter regex")
-			}
-		}
-		if value := r.str("exclude-filter"); value != "" {
-			var err error
-			exclude, err = regexp.Compile(value)
-			if err != nil {
-				r.fail("exclude-filter", "import.group-filter", "invalid exclude regex")
-			}
-		}
-		selected := g.members[:0]
-		for _, name := range g.members {
-			display := name
-			if original := c.req.displayNames[name]; original != "" {
-				display = original
-			}
-			if filter != nil && !filter.MatchString(display) || exclude != nil && exclude.MatchString(display) {
+
+		var filters, excludes []*regexp2.Regexp
+		for _, field := range []string{"filter", "exclude-filter"} {
+			value := r.str(field)
+			if value == "" {
 				continue
 			}
-			selected = append(selected, name)
+			for _, part := range strings.Split(value, "`") {
+				pattern, err := providerRegex(part)
+				if err != nil {
+					r.fail(field, "import.group-filter", "invalid filter regex")
+					continue
+				}
+				if field == "filter" {
+					filters = append(filters, pattern)
+				} else {
+					excludes = append(excludes, pattern)
+				}
+			}
+		}
+		if len(filters) == 0 {
+			filters = append(filters, nil)
+		}
+		selected := []string{}
+		seen := map[string]bool{}
+		for _, filter := range filters {
+			for _, name := range g.members {
+				if seen[name] {
+					continue
+				}
+				display := name
+				if original := c.req.displayNames[name]; original != "" {
+					display = original
+				}
+				excluded := false
+				for _, pattern := range excludes {
+					matched, err := pattern.MatchString(display)
+					if err != nil {
+						r.fail("exclude-filter", "import.group-filter", "filter match budget exceeded")
+						excluded = true
+					}
+					excluded = excluded || matched
+				}
+				if excluded {
+					continue
+				}
+				if filter != nil {
+					matched, err := filter.MatchString(display)
+					if err != nil {
+						r.fail("filter", "import.group-filter", "filter match budget exceeded")
+					}
+					if err != nil || !matched {
+						continue
+					}
+				}
+				seen[name] = true
+				selected = append(selected, name)
+			}
 		}
 		g.members = selected
+
 		g.bad = r.bad
 	}
 	// Identify cycles before pruning; never choose a cyclic group's other

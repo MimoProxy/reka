@@ -15,6 +15,23 @@ Start Reka normally, then preview a local file:
 
 A report gives imported/total counts, unavailable resources, ignored fields, original-name-to-ID mappings and diagnostics with document, path, line and column. The JSON result also contains normalized `sources` YAML with credentials masked. Preview has no side effects. A blocked preview exits nonzero.
 
+For TLS client identities named by file paths, explicitly attach each local
+file. The left side is the exact foreign path; the right side is the local
+file the CLI is authorized to read (at most 1 MiB each). Repeat the option for
+the certificate and private key:
+
+```sh
+./bin/rekactl import -source airport \
+  -certificate-file '/foreign/client.pem=/local/client.pem' \
+  -certificate-file '/foreign/client.key=/local/client.key' subscription.yaml
+```
+
+The API equivalent is `certificate_files: {"/foreign/client.pem": "PEM contents"}`
+in the import request. Import never opens a path from downloaded YAML. The
+matching identity is normalized to inline PEM and masked in previews. Scheduled
+subscriptions can retain the explicit mapping as `certificate-files` entries
+with `path` and `value`; `value` accepts PEM or a local `secret://` reference.
+
 The default full conversion reports unsupported nodes, groups, rules, provider fields and DNS fields; **any unavailable content blocks application**. To import just the supported nodes explicitly:
 
 ```sh
@@ -49,7 +66,7 @@ Select groups retain supported members in original order. Unsupported group type
 ./bin/rekactl import -source links -format links -apply links.txt
 ```
 
-Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, plugins and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
 
 ## API
 
@@ -75,3 +92,35 @@ The existing `ValidateConfiguration`, `PlanConfiguration` and `CommitConfigurati
 ```
 
 Whole documents/patches are built first, then import replaces/inserts the named source. A single request can also update profile references or an overlay when these must change atomically. Incomplete imports return `invalid` with their diagnostics, leaving the active revision unchanged. Import request data participates in operation identity; the normalized four documents participate in the plan hash. `ImportSource` preview output with masked credentials is for review; submit the original input in the transaction, not its masked preview.
+
+### File providers, transformations and download routes
+
+Set the local subscription `provider-directory` (or `rekactl subscription set
+-provider-directory /absolute/directory ...`) before refreshing file providers.
+Provider `path` values resolve inside that directory using `os.Root`; traversal,
+absolute paths and symlinks escaping the root fail. Pure import never reads files:
+`ImportProviders` accepts already loaded and locked resource bytes.
+
+Proxy-provider filters run against original names, in backtick-separated filter
+priority, before overrides. Structured overrides, regex name replacement,
+prefix/suffix and the pinned reference's `override-expr` subset run before node
+validation. Unknown options or invalid output reject the bundle.
+
+A provider's `proxy` uses an already active outbound/group; missing or rejected
+routes fail without direct fallback. An HTTP provider may declare startup
+`payload`: on its initial transport/status failure this is locked as the actual
+resource and listed in `fallback_resources`. A later failure preserves the
+committed snapshot. Invalid response bodies do not select startup fallback.
+
+`PASS` continues rule matching after resolving the current group choice;
+existing connections keep their original route. `COMPATIBLE` has direct-routing
+semantics. `REJECT-DROP` accepts the local TCP/UDP flow and discards data without
+opening a remote socket or immediately rejecting the client. A referenced
+`GLOBAL` uses the source's explicit group, or a generated select group with
+DIRECT, REJECT, source nodes and groups in reference order (DIRECT selected by
+default). A source cannot create a cyclic group graph through GLOBAL.
+
+SS SIP003 links support obfs aliases, v2ray-plugin, gost-plugin, ShadowTLS,
+Restls, JLS and kcptun. Escaped semicolons/equal signs are retained. Structured
+headers/ECH options require a configuration document. Plugin credentials and
+JLS usernames/kcptun keys remain masked in profile, source and overlay reads.

@@ -281,6 +281,18 @@ func (e *evaluation) match(index int, r *rule) bool {
 			}
 		}
 		return false
+	case KindProcessNameRegex:
+		p, ok := e.processName(index)
+		if !ok {
+			return false
+		}
+		name := processBase(p)
+		for _, re := range r.processRegexps {
+			if matched, err := re.MatchString(name); err == nil && matched {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
@@ -494,11 +506,43 @@ type Decision struct {
 // Route evaluates md. It never returns an error for a connection: a
 // failed lookup just makes the rules that needed it not match.
 func (r *Router) Route(ctx context.Context, md Metadata, env Env) Decision {
-	e := &evaluation{ctx: ctx, md: &md, env: env}
-	d := r.decide(e, r.rules.first(e))
-	return d
+	return r.RouteWithResolver(ctx, md, env, nil)
 }
 
+// RouteWithResolver resolves observed group choices before deciding whether a
+// PASS target falls through. The indexed first match remains the normal path;
+// only rules after an actual PASS need a linear continuation.
+func (r *Router) RouteWithResolver(ctx context.Context, md Metadata, env Env, resolve func(*Decision)) Decision {
+	e := &evaluation{ctx: ctx, md: &md, env: env}
+	return r.decideWithPass(e, resolve)
+}
+func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision {
+	index := r.rules.first(e)
+	for {
+		d := r.decide(e, index)
+		if resolve != nil {
+			resolve(&d)
+		}
+		if d.Outbound != "pass" {
+			return d
+		}
+		if index < 0 {
+			d.Outbound = ""
+			return d
+		}
+		next := -1
+		for i := index + 1; i < len(r.rules.rules); i++ {
+			if e.match(i, r.rules.rules[i]) {
+				next = i
+				break
+			}
+			if e.stopped {
+				return Decision{RuleIndex: -1}
+			}
+		}
+		index = next
+	}
+}
 func (r *Router) decide(e *evaluation, index int) Decision {
 	d := Decision{RuleIndex: index, Resolved: e.addrs, ResolveError: e.resolveErr, Process: e.process}
 	if index >= 0 {
@@ -528,16 +572,19 @@ type Explanation struct {
 // evaluation stops there and the explanation says so, instead of
 // guessing.
 func (r *Router) Explain(ctx context.Context, md Metadata, env Env) Explanation {
+	return r.ExplainWithResolver(ctx, md, env, nil)
+}
+func (r *Router) ExplainWithResolver(ctx context.Context, md Metadata, env Env, resolve func(*Decision)) Explanation {
 	e := &evaluation{ctx: ctx, md: &md, env: env}
-	index := r.rules.first(e)
+	d := r.decideWithPass(e, resolve)
 	if e.stopped {
 		return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: e.stoppedAt}
 	}
-	return Explanation{Decision: r.decide(e, index)}
+	return Explanation{Decision: d}
 }
 
 func needsProcess(r *rule) bool {
-	if r.spec.Kind == KindProcessName || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
+	if r.spec.Kind == KindProcessName || r.spec.Kind == KindProcessNameRegex || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
 		return true
 	}
 	for _, ch := range r.children {

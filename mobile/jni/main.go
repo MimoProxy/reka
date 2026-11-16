@@ -125,7 +125,6 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -257,7 +256,7 @@ func startJNI(env *C.JNIEnv, jroot, jprofile, jlocal C.jstring, jhost C.jobject,
 	if h == nil {
 		return fail(errors.New("host object lacks protect, seal, open or onMessage"))
 	}
-	opts := core.Options{TUNFD: fd, StateRoot: goString(env, jroot), Logger: slog.Default()}
+	opts := core.Options{TUNFD: fd, StateRoot: goString(env, jroot)}
 	if p := goString(env, jprofile); p != "" {
 		opts.InitialProfile = []byte(p)
 	}

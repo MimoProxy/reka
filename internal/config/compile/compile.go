@@ -6,7 +6,9 @@ package compile
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,12 +21,14 @@ import (
 	"strconv"
 	"strings"
 
+	VE "github.com/MimoProxy/reka/internal/compat/vlessenc"
 	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/secret"
+	"golang.org/x/net/http/httpguts"
 )
 
 // Options for Compile.
@@ -63,22 +67,28 @@ type Origin struct {
 // changes whenever anything that affects the instance changes, including
 // a resolved secret; equal fingerprints mean the instance can be reused.
 type Outbound struct {
-	PacketEncoding string           `json:"packet-encoding,omitempty"`
-	Protocol       *model.Protocol  `json:"-"`
-	Transport      *model.Transport `json:"-"`
-	Multiplex      *model.Multiplex `json:"multiplex,omitempty"`
-	ID             string           `json:"id"`
-	Name           string           `json:"name,omitempty"`
-	Type           string           `json:"type"`
-	Server         string           `json:"server,omitempty"`
-	Port           uint16           `json:"port,omitempty"`
-	UDP            bool             `json:"udp"`
-	Username       string           `json:"-"`
-	Method         string           `json:"method,omitempty"`
-	Flow           string           `json:"flow,omitempty"`
-	TLS            *TLS             `json:"tls,omitempty"`
-	Builtin        bool             `json:"builtin,omitempty"`
-	Fingerprint    string           `json:"fingerprint"`
+	Plugin            *model.SSPlugin            `json:"-"`
+	Encryption        string                     `json:"-"`
+	UDPOverTCP        bool                       `json:"udp-over-tcp,omitempty"`
+	UDPOverTCPVersion int                        `json:"udp-over-tcp-version,omitempty"`
+	Headers           []model.SubscriptionHeader `json:"-"`
+	Dialer            *model.Dialer              `json:"dialer,omitempty"`
+	PacketEncoding    string                     `json:"packet-encoding,omitempty"`
+	Protocol          *model.Protocol            `json:"-"`
+	Transport         *model.Transport           `json:"-"`
+	Multiplex         *model.Multiplex           `json:"multiplex,omitempty"`
+	ID                string                     `json:"id"`
+	Name              string                     `json:"name,omitempty"`
+	Type              string                     `json:"type"`
+	Server            string                     `json:"server,omitempty"`
+	Port              uint16                     `json:"port,omitempty"`
+	UDP               bool                       `json:"udp"`
+	Username          string                     `json:"-"`
+	Method            string                     `json:"method,omitempty"`
+	Flow              string                     `json:"flow,omitempty"`
+	TLS               *TLS                       `json:"tls,omitempty"`
+	Builtin           bool                       `json:"builtin,omitempty"`
+	Fingerprint       string                     `json:"fingerprint"`
 
 	// Resolved credentials; never serialized.
 	Password string `json:"-"`
@@ -87,11 +97,17 @@ type Outbound struct {
 
 // TLS is validated client TLS.
 type TLS struct {
-	ServerName  string   `json:"server-name,omitempty"`
-	Insecure    bool     `json:"insecure,omitempty"`
-	Fingerprint string   `json:"fingerprint,omitempty"`
-	ALPN        []string `json:"alpn,omitempty"`
-	Reality     *Reality `json:"reality,omitempty"`
+	Carrier        *model.TLSCarrier `json:"-"`
+	ECH            *model.ECH        `json:"ech,omitempty"`
+	CertificatePin string            `json:"certificate-sha256,omitempty"`
+	VerifyName     string            `json:"verify-name,omitempty"`
+	Certificate    string            `json:"-"`
+	PrivateKey     string            `json:"-"`
+	ServerName     string            `json:"server-name,omitempty"`
+	Insecure       bool              `json:"insecure,omitempty"`
+	Fingerprint    string            `json:"fingerprint,omitempty"`
+	ALPN           []string          `json:"alpn,omitempty"`
+	Reality        *Reality          `json:"reality,omitempty"`
 }
 
 // Reality is validated REALITY client configuration.
@@ -272,6 +288,7 @@ func (c *compiler) compose() *Effective {
 
 	c.outbounds(eff)
 	c.groups(eff)
+	c.detours(eff)
 	c.rules(eff)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
@@ -301,12 +318,13 @@ func (c *compiler) compose() *Effective {
 // fieldsByType lists, per outbound type, the fields that apply. Anything
 // else written for that type is an error.
 var fieldsByType = map[string][]string{
-	model.OutboundDirect:      {"udp"},
-	model.OutboundReject:      {},
-	model.OutboundHTTP:        {"server", "port", "username", "password", "tls"},
-	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp"},
-	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp"},
-	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "packet-encoding", "tls", "udp", "transport", "multiplex"},
+	model.OutboundDirect: {"udp"},
+	model.OutboundReject: {},
+	"pass":               {}, "reject-drop": {},
+	model.OutboundHTTP:        {"server", "port", "username", "password", "tls", "headers"},
+	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp", "tls"},
+	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version", "plugin"},
+	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "encryption", "packet-encoding", "tls", "udp", "transport", "multiplex"},
 	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
 	"trojan":                  {"server", "port", "password", "tls", "udp", "transport", "multiplex"},
 	"hysteria2":               {"server", "port", "password", "tls", "udp", "protocol"},
@@ -314,7 +332,7 @@ var fieldsByType = map[string][]string{
 	"snell":                   {"server", "port", "password", "udp", "protocol"},
 }
 
-var commonFields = []string{"id", "name", "type"}
+var commonFields = []string{"id", "name", "type", "dialer", "multiplex"}
 
 // ShadowsocksMethods are the ciphers the Shadowsocks outbound accepts.
 var ShadowsocksMethods = []string{
@@ -402,17 +420,52 @@ func (c *compiler) outbounds(eff *Effective) {
 			c.errorf(doc, base+"/type", "outbound.builtin", "id %q is reserved for the built-in %s outbound", ob.ID, ob.ID)
 		}
 		out := Outbound{PacketEncoding: ob.PacketEncoding, Protocol: ob.Protocol, Transport: ob.Transport, Multiplex: ob.Multiplex, ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
+		if ob.Dialer != nil {
+			value := *ob.Dialer
+			if ob.Type == model.OutboundReject || ob.Type == "pass" || ob.Type == "reject-drop" {
+				c.errorf(doc, base+"/dialer", "outbound.dialer", "reject does not dial a connection")
+			}
+			if value.RoutingMark < 0 || uint64(value.RoutingMark) > uint64(^uint32(0)) {
+				c.errorf(doc, base+"/dialer/routing-mark", "outbound.dialer", "routing-mark must be a uint32")
+			}
+			if len(value.Interface) > 255 || strings.ContainsAny(value.Interface, "\x00\r\n") {
+				c.errorf(doc, base+"/dialer/interface-name", "outbound.dialer", "invalid interface name")
+			}
+			if !slices.Contains([]string{"", "dual", "ipv4", "ipv6", "ipv4-prefer", "ipv6-prefer"}, value.IPVersion) {
+				c.errorf(doc, base+"/dialer/ip-version", "outbound.dialer", "invalid IP version policy")
+			}
+			out.Dialer = &value
+		}
+		out.UDPOverTCP, out.UDPOverTCPVersion = ob.UDPOverTCP, ob.UDPOverTCPVersion
+		if out.UDPOverTCP && out.UDPOverTCPVersion == 0 {
+			out.UDPOverTCPVersion = 1
+		}
+		if !slices.Contains([]int{0, 1, 2}, out.UDPOverTCPVersion) {
+			c.errorf(doc, base+"/udp-over-tcp-version", "outbound.uot", "UoT version must be 1 or 2")
+		}
+		out.Headers = slices.Clone(ob.Headers)
+		for i := range out.Headers {
+			h := &out.Headers[i]
+			h.Value = c.resolveSecret(fmt.Sprintf("%s/headers/#%d/value", base, i), h.Value)
+			if !httpguts.ValidHeaderFieldName(h.Name) || !httpguts.ValidHeaderFieldValue(h.Value) {
+				c.errorf(doc, base+"/headers", "outbound.headers", "invalid HTTP header")
+			}
+		}
 		out.UDP = ob.UDP == nil || *ob.UDP
 		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundReject {
 			out.UDP = false
 		}
-		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject {
-			if ob.Server == "" {
+		if ob.Multiplex != nil && ob.Multiplex.Enabled && !ob.Multiplex.OnlyTCP {
+			out.UDP = true
+		}
+		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject && ob.Type != "pass" && ob.Type != "reject-drop" {
+			realmEnabled := ob.Type == "hysteria2" && ob.Protocol != nil && ob.Protocol.Realm != nil && ob.Protocol.Realm.Enabled
+			if ob.Server == "" && !realmEnabled {
 				c.errorf(doc, base, "outbound.server", "server is required")
 			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
 				c.errorf(doc, base+"/server", "outbound.server", "server must be a host name or an IP address")
 			}
-			if ob.Port < 1 || ob.Port > 65535 {
+			if (ob.Port < 1 || ob.Port > 65535) && !(ob.Type == "hysteria2" && ob.Port == 0 && ob.Protocol != nil && (len(ob.Protocol.ServerPorts) > 0 || realmEnabled)) {
 				c.errorf(doc, base+"/port", "outbound.port", "port must be between 1 and 65535")
 			}
 			out.Server, out.Port = strings.Trim(ob.Server, "[]"), uint16(ob.Port)
@@ -420,8 +473,16 @@ func (c *compiler) outbounds(eff *Effective) {
 		out.Username = c.resolveSecret(base+"/username", ob.Username)
 		out.Password = c.resolveSecret(base+"/password", ob.Password)
 		out.UUID = c.resolveSecret(base+"/uuid", ob.UUID)
+		out.Encryption = c.resolveSecret(base+"/encryption", ob.Encryption)
 		switch ob.Type {
 		case model.OutboundShadowsocks:
+			out.Plugin = c.ssPlugin(base+"/plugin", ob.Plugin)
+			if out.Plugin != nil && out.Plugin.Type == "kcptun" {
+				out.UDPOverTCP = true
+				if out.UDPOverTCPVersion == 0 {
+					out.UDPOverTCPVersion = 1
+				}
+			}
 			if !slices.Contains(ShadowsocksMethods, ob.Method) {
 				c.errorf(doc, base+"/method", "outbound.method", "unsupported method %q (supported: %s)", ob.Method, strings.Join(ShadowsocksMethods, ", "))
 			}
@@ -438,17 +499,26 @@ func (c *compiler) outbounds(eff *Effective) {
 				c.errorf(doc, base, "outbound.auth", "set both username and password, or neither")
 			}
 		case model.OutboundVLESS:
+			if _, err := VE.NewClient(out.Encryption); err != nil {
+				c.errorf(doc, base+"/encryption", "outbound.encryption", "invalid VLESS encryption configuration")
+			}
 			if !uuidRE.MatchString(out.UUID) && !c.hasErrorAt(base+"/uuid") {
 				c.errorf(doc, base+"/uuid", "outbound.uuid", "uuid is required and must be a UUID")
 			}
 			if ob.Flow != "" && ob.Flow != "xtls-rprx-vision" {
 				c.errorf(doc, base+"/flow", "outbound.flow", "flow must be empty or xtls-rprx-vision")
 			}
-			if ob.PacketEncoding != "" && ob.PacketEncoding != "xudp" {
-				c.errorf(doc, base+"/packet-encoding", "outbound.packet-encoding", "packet-encoding must be xudp")
+			if !slices.Contains([]string{"", "xudp", "none", "packetaddr", "packet"}, ob.PacketEncoding) {
+				c.errorf(doc, base+"/packet-encoding", "outbound.packet-encoding", "packet-encoding must be xudp, none or packetaddr")
 			}
-			if ob.Flow != "" && ob.TLS == nil {
-				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs tls")
+			if out.PacketEncoding == "" {
+				out.PacketEncoding = "xudp"
+			}
+			if out.PacketEncoding == "packet" {
+				out.PacketEncoding = "packetaddr"
+			}
+			if ob.Flow != "" && ob.TLS == nil && (out.Encryption == "" || out.Encryption == "none") {
+				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs TLS or VLESS encryption")
 			}
 		}
 		c.protocol(base, ob, &out)
@@ -463,12 +533,55 @@ func (c *compiler) outbounds(eff *Effective) {
 			eff.Provenance["/outbounds/"+b] = Origin{Layer: LayerDefault}
 		}
 	}
+	for _, action := range []string{"pass", "reject-drop"} {
+		if seen[action] {
+			continue
+		}
+		needed := false
+		for _, node := range c.profile.Outbounds {
+			if node.Dialer != nil && node.Dialer.Proxy == action {
+				needed = true
+			}
+		}
+		for _, g := range c.profile.Groups {
+			if slices.Contains(g.Members, action) {
+				needed = true
+			}
+		}
+		for _, r := range c.profile.Rules {
+			if r.Outbound == action {
+				needed = true
+			}
+		}
+		for _, block := range c.profile.SubRules {
+			for _, r := range block.Rules {
+				if r.Outbound == action {
+					needed = true
+				}
+			}
+		}
+		if needed {
+			eff.Outbounds = append(eff.Outbounds, Outbound{ID: action, Type: action, Builtin: true, UDP: true})
+		}
+	}
 	for i := range eff.Outbounds {
 		identity := eff.Outbounds[i]
 		identity.Name = "" // display metadata must not rebuild a live outbound
+		if identity.Multiplex != nil {
+			m := *identity.Multiplex
+			m.Statistic = false
+			identity.Multiplex = &m
+		}
+		plugin, _ := json.Marshal(identity.Plugin)
 		params, _ := json.Marshal(identity.Protocol)
 		transport, _ := json.Marshal(identity.Transport)
-		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, string(params), string(transport))
+		headers, _ := json.Marshal(identity.Headers)
+		tlsSecrets := ""
+		if identity.TLS != nil {
+			carrier, _ := json.Marshal(identity.TLS.Carrier)
+			tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey + "\x00" + string(carrier)
+		}
+		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(plugin), string(params), string(transport), string(headers), tlsSecrets)
 	}
 }
 
@@ -489,8 +602,45 @@ func isIP(s string) bool {
 func (c *compiler) tls(path string, ob model.Outbound) *TLS {
 	const doc = model.DocProfile
 	t := ob.TLS
-	out := &TLS{ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
-	if t.Fingerprint != "" && !slices.Contains(Fingerprints, t.Fingerprint) {
+	out := &TLS{Carrier: c.tlsCarrier(path+"/carrier", ob), ECH: t.ECH, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: c.resolveSecret(path+"/certificate", t.Certificate), PrivateKey: c.resolveSecret(path+"/private-key", t.PrivateKey), ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
+	if ech := t.ECH; ech != nil && ech.Enabled {
+		if ech.Config != "" {
+			data, err := base64.StdEncoding.DecodeString(ech.Config)
+			valid := err == nil && len(data) >= 6 && len(data) <= 65537 && int(binary.BigEndian.Uint16(data)) == len(data)-2
+			if valid {
+				for rest := data[2:]; len(rest) > 0; {
+					if len(rest) < 4 || int(binary.BigEndian.Uint16(rest[2:])) > len(rest)-4 {
+						valid = false
+						break
+					}
+					rest = rest[4+int(binary.BigEndian.Uint16(rest[2:])):]
+				}
+			}
+			if !valid {
+				c.errorf(doc, path+"/ech/config", "tls.ech", "expected a base64 ECHConfigList with valid framing")
+			}
+		}
+		if strings.ContainsAny(ech.QueryServerName, " /\\\r\n\x00") {
+			c.errorf(doc, path+"/ech/query-server-name", "tls.ech", "invalid ECH query server name")
+		}
+		if t.Reality != nil {
+			c.errorf(doc, path+"/ech", "tls.ech", "ECH does not apply to a REALITY handshake")
+		}
+	}
+	if out.Certificate != "" || out.PrivateKey != "" {
+		if _, err := tls.X509KeyPair([]byte(out.Certificate), []byte(out.PrivateKey)); err != nil {
+			c.errorf(doc, path+"/private-key", "tls.client-certificate", "client certificate and key must be a matching inline PEM pair or secret references")
+		}
+	}
+	if pin := strings.ReplaceAll(strings.TrimSpace(t.CertificatePin), ":", ""); pin != "" {
+		if b, err := hex.DecodeString(pin); err != nil || len(b) != 32 {
+			c.errorf(doc, path+"/certificate-sha256", "tls.certificate-pin", "expected a full certificate SHA256 hex digest")
+		}
+	}
+	if strings.ContainsAny(t.VerifyName, " /\\\r\n\x00") {
+		c.errorf(doc, path+"/verify-name", "tls.verify-name", "invalid certificate verification name")
+	}
+	if t.Fingerprint != "" && (t.Carrier == nil || t.Carrier.Type == "shadow-tls") && !slices.Contains(Fingerprints, t.Fingerprint) {
 		c.errorf(doc, path+"/fingerprint", "tls.fingerprint", "unknown fingerprint %q (supported: %s)", t.Fingerprint, strings.Join(Fingerprints, ", "))
 	}
 	if t.Reality == nil {
@@ -498,6 +648,9 @@ func (c *compiler) tls(path string, ob model.Outbound) *TLS {
 			out.ServerName = ob.Server
 		}
 		return out
+	}
+	if t.CertificatePin != "" || t.VerifyName != "" || out.Certificate != "" || out.PrivateKey != "" {
+		c.errorf(doc, path, "tls.reality", "REALITY uses its authenticated handshake rather than ordinary certificate options")
 	}
 	if ob.Type != model.OutboundVLESS {
 		c.errorf(doc, path+"/reality", "tls.reality", "reality is only supported on vless outbounds")
@@ -627,6 +780,10 @@ func (c *compiler) groups(eff *Effective) {
 			c.errorf(doc, base+"/selected", "group.selected", "selected %q is not a member", g.Selected)
 			ok = false
 		}
+		if _, err := policy.ParseExpectedStatus(g.ExpectedStatus); err != nil {
+			c.errorf(doc, base+"/expected-status", "group.health", "%s", err)
+			ok = false
+		}
 		if g.Type != "select" {
 			if g.URL == "" {
 				g.URL = "https://www.gstatic.com/generate_204"
@@ -648,7 +805,7 @@ func (c *compiler) groups(eff *Effective) {
 			if g.Lazy != nil {
 				lazy = *g.Lazy
 			}
-			eff.AutoGroups = append(eff.AutoGroups, policy.Group{ID: g.ID, Type: g.Type, Members: g.Members, Selected: g.Selected, URL: g.URL, Interval: g.Interval, Timeout: g.Timeout, Tolerance: g.Tolerance, Lazy: lazy, Strategy: g.Strategy})
+			eff.AutoGroups = append(eff.AutoGroups, policy.Group{ExpectedStatus: g.ExpectedStatus, ID: g.ID, Type: g.Type, Members: g.Members, Selected: g.Selected, URL: g.URL, Interval: g.Interval, Timeout: g.Timeout, Tolerance: g.Tolerance, Lazy: lazy, Strategy: g.Strategy})
 		}
 		if g.DisableUDP {
 			if eff.GroupUDPDisabled == nil {

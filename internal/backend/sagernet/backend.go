@@ -2,13 +2,16 @@ package sagernet
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,7 +26,6 @@ import (
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/socks"
-	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/common/json/badoption"
@@ -58,6 +60,7 @@ const defaultHalfCloseTimeout = 2 * time.Second
 // from it are independent instances: each has its own lifecycle scope and can
 // be closed without touching the others.
 type Backend struct {
+	protect       control.Func
 	processLookup func(context.Context, Metadata) (string, bool)
 	resolver      *net.Resolver
 	ctx           context.Context
@@ -111,6 +114,7 @@ func New(opts Options) *Backend {
 			return perr
 		}
 	}
+	b.protect = protect
 	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: protect})
 	b.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		d := &net.Dialer{}
@@ -186,12 +190,14 @@ func (b *Backend) start(name string, component any, logger log.ContextLogger) (*
 // Outbound is one upstream outbound instance. Every relay through it holds
 // one lease on it; see Lease.
 type Outbound struct {
-	tag   string
-	typ   string
-	out   adapter.Outbound
-	scope *adapter.Scope
-	lease *lease.Lease
-	once  sync.Once
+	dependencyPins   atomic.Int64
+	dependencyCloser *DetourSpec
+	tag              string
+	typ              string
+	out              adapter.Outbound
+	scope            *adapter.Scope
+	lease            *lease.Lease
+	once             sync.Once
 }
 
 func (o *Outbound) Tag() string  { return o.tag }
@@ -203,7 +209,7 @@ func (o *Outbound) Type() string { return o.typ }
 func (o *Outbound) Lease() *lease.Lease { return o.lease }
 
 // Active reports how many relayed connections currently use this instance.
-func (o *Outbound) Active() int64 { return o.lease.Active() }
+func (o *Outbound) Active() int64 { return max(0, o.lease.Active()-o.dependencyPins.Load()) }
 
 // Close retires and closes this instance and whatever its scope opened. It
 // does not wait for connections still relaying through it: without
@@ -213,7 +219,7 @@ func (o *Outbound) Close() error {
 	var err error
 	o.once.Do(func() {
 		o.lease.Retire()
-		err = errors.Join(common.Close(o.out), o.scope.Close())
+		err = errors.Join(common.Close(o.out), o.scope.Close(), o.dependencyCloser.Close())
 	})
 	return err
 }
@@ -248,21 +254,26 @@ type SOCKSSpec struct {
 
 // VLESSSpec is a VLESS client. Flow is "" or "xtls-rprx-vision".
 type VLESSSpec struct {
-	Options json.RawMessage
-	Server  string
-	Port    uint16
-	UUID    string
-	Flow    string
-	TLS     *TLSSpec
+	Encryption string
+	Detour     *DetourSpec
+	Options    json.RawMessage
+	Server     string
+	Port       uint16
+	UUID       string
+	Flow       string
+	TLS        *TLSSpec
 }
 
 // TLSSpec is client TLS. Fingerprint enables uTLS (for example "chrome").
 type TLSSpec struct {
-	ServerName  string
-	Insecure    bool
-	Fingerprint string
-	ALPN        []string
-	Reality     *RealitySpec
+	Carrier                                             *TLSCarrierSpec
+	ECH                                                 *ECHSpec
+	CertificatePin, VerifyName, Certificate, PrivateKey string
+	ServerName                                          string
+	Insecure                                            bool
+	Fingerprint                                         string
+	ALPN                                                []string
+	Reality                                             *RealitySpec
 }
 
 // RealitySpec is the client side of REALITY. X25519MLKEM768 keeps the
@@ -279,14 +290,20 @@ type RealitySpec struct {
 // DirectSpec, HTTPSpec, SOCKSSpec, ShadowsocksSpec or VLESSSpec.
 func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	var (
-		typ string
-		out adapter.Outbound
-		err error
+		typ        string
+		out        adapter.Outbound
+		err        error
+		dependency *DetourSpec
+		multiplex  *multiplexSpec
 	)
 	switch s := spec.(type) {
 	case ProxySpec:
+		dependency = s.Detour
 		typ = s.Type
 		out, err = b.newProtocol(tag, s)
+	case DropSpec:
+		typ = "reject-drop"
+		out = newDropOutbound(tag)
 	case DirectSpec:
 		typ = "direct"
 		out, err = direct.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.DirectOutboundOptions{})
@@ -314,25 +331,60 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 			Password:      s.Password,
 		})
 	case VLESSSpec:
+		dependency = s.Detour
 		typ = "vless"
-		if s.TLS != nil && s.TLS.Reality != nil {
-			// Reka's own REALITY client; see vless.go.
-			out, err = newVLESSRealityOutbound(b.ctx, b.componentLogger("outbound", typ, tag), tag, s)
+		if s.TLS == nil || s.TLS.Reality == nil {
+			var values map[string]any
+			values, err = decodeProtocolOptions(s.Options)
+			if err != nil {
+				break
+			}
+			if s.Flow != "" {
+				values["flow"] = s.Flow
+			}
+			s.Options, _ = json.Marshal(values)
+			out, err = b.newProtocol(tag, ProxySpec{Type: typ, Server: s.Server, Port: s.Port, UUID: s.UUID, Encryption: s.Encryption, TLS: s.TLS, Options: s.Options, Detour: s.Detour})
 			break
 		}
-		out, err = vless.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.VLESSOutboundOptions{
-			ServerOptions:               option.ServerOptions{Server: s.Server, ServerPort: s.Port},
-			UUID:                        s.UUID,
-			Flow:                        s.Flow,
-			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: s.TLS.build()},
-		})
+		ctx := detourContext(b.ctx, s.Detour)
+		var values map[string]any
+		values, err = decodeProtocolOptions(s.Options)
+		if err != nil {
+			break
+		}
+		multiplex, err = popMultiplex(values)
+		if err != nil {
+			break
+		}
+		if s.Detour != nil {
+			values["detour"] = "reka-detour"
+		}
+		s.Options, _ = json.Marshal(values)
+		// Reka's own REALITY client; see vless.go.
+		out, err = newVLESSRealityOutbound(ctx, b.componentLogger("outbound", typ, tag), tag, s)
 	default:
 		return nil, fmt.Errorf("reka: unsupported outbound spec %T", spec)
 	}
 	if err != nil {
+		dependency.Close()
 		return nil, fmt.Errorf("create outbound/%s[%s]: %w", typ, tag, err)
 	}
-	return b.adoptOutbound(tag, typ, out)
+	if multiplex != nil {
+		base := out
+		out, err = wrapMultiplex(base, multiplex, b.componentLogger("multiplex", typ, tag))
+		if err != nil {
+			common.Close(base)
+			dependency.Close()
+			return nil, err
+		}
+	}
+	wrapped, err := b.adoptOutbound(tag, typ, out)
+	if err != nil {
+		dependency.Close()
+		return nil, err
+	}
+	wrapped.dependencyCloser = dependency
+	return wrapped, nil
 }
 
 // adoptOutbound starts an already constructed upstream outbound in its own
@@ -355,6 +407,17 @@ func (t *TLSSpec) build() *option.OutboundTLSOptions {
 		ServerName: t.ServerName,
 		Insecure:   t.Insecure,
 		ALPN:       t.ALPN,
+	}
+	if t.ECH != nil {
+		o.ECH = &option.OutboundECHOptions{Enabled: true, QueryServerName: t.ECH.QueryServerName}
+		if t.ECH.Config != "" {
+			data, _ := base64.StdEncoding.DecodeString(t.ECH.Config)
+			o.ECH.Config = []string{string(pem.EncodeToMemory(&pem.Block{Type: "ECH CONFIGS", Bytes: data}))}
+		}
+	}
+	if t.Certificate != "" {
+		o.ClientCertificate = []string{t.Certificate}
+		o.ClientKey = []string{t.PrivateKey}
 	}
 	if t.Fingerprint != "" {
 		o.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: t.Fingerprint}

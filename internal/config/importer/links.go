@@ -153,12 +153,42 @@ func parseLink(raw string) (object, error) {
 		}
 		out["cipher"], out["password"] = method, password
 		for key := range query {
-			if key != "plugin" {
+			switch key {
+			case "plugin":
+				if query.Get(key) != "" {
+					name, options, err := ssLinkPlugin(query.Get(key))
+					if err != nil {
+						return nil, err
+					}
+					out["plugin"], out["plugin-opts"] = name, options
+				}
+			case "client-fingerprint":
+				out[key] = query.Get(key)
+			case "udp-over-tcp":
+				flag, err := strconv.ParseBool(query.Get(key))
+				if err != nil {
+					return nil, fmt.Errorf("invalid UDP-over-TCP flag")
+				}
+				out["udp-over-tcp"] = flag
+			case "uot":
+				if query.Get(key) != "0" && query.Get(key) != "1" {
+					return nil, fmt.Errorf("invalid UoT flag")
+				}
+				if query.Get(key) == "1" {
+					out["udp-over-tcp"] = true
+				}
+			case "udp-over-tcp-version":
+				version, err := strconv.Atoi(query.Get(key))
+				if err != nil {
+					return nil, fmt.Errorf("invalid UoT version")
+				}
+				out[key] = version
+			default:
 				return nil, fmt.Errorf("unknown SS option")
 			}
-			if query.Get(key) != "" {
-				out["plugin"] = query.Get(key)
-			}
+		}
+		if query.Get("uot") == "1" {
+			out["udp-over-tcp"] = true
 		}
 	case "vless":
 		if _, hasPassword := u.User.Password(); hasPassword {

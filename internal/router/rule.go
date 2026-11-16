@@ -14,6 +14,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/dlclark/regexp2"
 )
 
 // Kind is a rule condition type.
@@ -37,21 +40,23 @@ const (
 	KindRuleSet
 	KindGeoIP
 	KindDomainPattern
+	KindProcessNameRegex
 )
 
 var kindNames = map[Kind]string{
-	KindDomain:        "domain",
-	KindDomainSuffix:  "domain-suffix",
-	KindDomainKeyword: "domain-keyword",
-	KindDomainRegex:   "domain-regex",
-	KindIPCIDR:        "ip-cidr",
-	KindSrcIPCIDR:     "src-ip-cidr",
-	KindDstPort:       "dst-port",
-	KindSrcPort:       "src-port",
-	KindNetwork:       "network",
-	KindProcessName:   "process-name",
-	KindMatch:         "all",
-	KindAnd:           "and", KindOr: "or", KindNot: "not", KindRuleSet: "rule-set", KindGeoIP: "geoip", KindDomainPattern: "domain-pattern",
+	KindDomain:           "domain",
+	KindDomainSuffix:     "domain-suffix",
+	KindDomainKeyword:    "domain-keyword",
+	KindDomainRegex:      "domain-regex",
+	KindIPCIDR:           "ip-cidr",
+	KindSrcIPCIDR:        "src-ip-cidr",
+	KindDstPort:          "dst-port",
+	KindSrcPort:          "src-port",
+	KindNetwork:          "network",
+	KindProcessName:      "process-name",
+	KindProcessNameRegex: "process-name-regex",
+	KindMatch:            "all",
+	KindAnd:              "and", KindOr: "or", KindNot: "not", KindRuleSet: "rule-set", KindGeoIP: "geoip", KindDomainPattern: "domain-pattern",
 }
 
 // String returns the native condition key, for example "domain-suffix".
@@ -75,7 +80,7 @@ func ParseKind(s string) (Kind, bool) {
 // Kinds lists every condition key in a stable order.
 func Kinds() []Kind {
 	return []Kind{KindDomain, KindDomainSuffix, KindDomainKeyword, KindDomainRegex,
-		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch, KindAnd, KindOr, KindNot, KindRuleSet, KindGeoIP, KindDomainPattern}
+		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch, KindAnd, KindOr, KindNot, KindRuleSet, KindGeoIP, KindDomainPattern, KindProcessNameRegex}
 }
 
 // usesDestinationIP reports whether a kind matches on the destination
@@ -128,13 +133,14 @@ func (r RuleSpec) render(action bool) string {
 type portRange struct{ lo, hi uint16 }
 
 type rule struct {
-	spec     RuleSpec
-	children []*rule
-	ipset    *netipx.IPSet
-	prefixes []netip.Prefix
-	ports    []portRange
-	regexps  []*regexp.Regexp
-	strs     []string // keywords, process names, networks (normalized)
+	spec           RuleSpec
+	children       []*rule
+	ipset          *netipx.IPSet
+	prefixes       []netip.Prefix
+	ports          []portRange
+	regexps        []*regexp.Regexp
+	processRegexps []*regexp2.Regexp
+	strs           []string // keywords, process names, networks (normalized)
 }
 
 // RuleError is a compile error for one rule.
@@ -279,6 +285,13 @@ func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 				return nil, fail(v, fmt.Errorf("empty process name"))
 			}
 			r.strs = append(r.strs, v)
+		case KindProcessNameRegex:
+			re, err := regexp2.Compile(v, regexp2.IgnoreCase)
+			if err != nil {
+				return nil, fail(v, err)
+			}
+			re.MatchTimeout = 50 * time.Millisecond
+			r.processRegexps = append(r.processRegexps, re)
 		default:
 			return nil, fail("", fmt.Errorf("unknown rule kind %d", spec.Kind))
 		}

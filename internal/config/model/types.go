@@ -1,5 +1,6 @@
 package model
 
+import KC "github.com/MimoProxy/reka/internal/compat/kcptun"
 import RD "github.com/MimoProxy/reka/internal/dns"
 import "github.com/MimoProxy/reka/internal/platform"
 
@@ -45,12 +46,18 @@ const (
 // Outbound is one proxy node or built-in action. Which fields apply depends
 // on Type; a field that does not apply is an error, not ignored.
 type Outbound struct {
-	Protocol  *Protocol  `yaml:"protocol"`
-	Transport *Transport `yaml:"transport"`
-	Multiplex *Multiplex `yaml:"multiplex"`
-	ID        string     `yaml:"id"`
-	Name      string     `yaml:"name"`
-	Type      string     `yaml:"type"`
+	Plugin            *SSPlugin            `yaml:"plugin"`
+	Encryption        string               `yaml:"encryption"`
+	UDPOverTCP        bool                 `yaml:"udp-over-tcp"`
+	UDPOverTCPVersion int                  `yaml:"udp-over-tcp-version"`
+	Headers           []SubscriptionHeader `yaml:"headers"`
+	Dialer            *Dialer              `yaml:"dialer"`
+	Protocol          *Protocol            `yaml:"protocol"`
+	Transport         *Transport           `yaml:"transport"`
+	Multiplex         *Multiplex           `yaml:"multiplex"`
+	ID                string               `yaml:"id"`
+	Name              string               `yaml:"name"`
+	Type              string               `yaml:"type"`
 
 	Server string `yaml:"server"`
 	Port   int    `yaml:"port"`
@@ -64,20 +71,41 @@ type Outbound struct {
 	UUID string `yaml:"uuid"` // vless
 	// Flow is "" or "xtls-rprx-vision".
 	Flow string `yaml:"flow"`
-	// PacketEncoding is "xudp" (default) or "none" for vless UDP.
+	// PacketEncoding is xudp (default), packetaddr, or none for raw VLESS UDP.
 	PacketEncoding string `yaml:"packet-encoding"`
 
 	TLS *TLS `yaml:"tls"` // http, vless
 }
 
 // TLS is client TLS for an outbound.
+type TLSCarrier struct {
+	Type        string `yaml:"type"`
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
+	Version     int    `yaml:"version"`
+	VersionHint string `yaml:"version-hint"`
+	Script      string `yaml:"script"`
+}
 type TLS struct {
-	ServerName string `yaml:"server-name"`
-	Insecure   bool   `yaml:"insecure"`
+	Carrier *TLSCarrier `yaml:"carrier"`
+
+	ECH            *ECH   `yaml:"ech"`
+	CertificatePin string `yaml:"certificate-sha256"`
+	VerifyName     string `yaml:"verify-name"`
+	Certificate    string `yaml:"certificate"`
+	PrivateKey     string `yaml:"private-key"`
+	ServerName     string `yaml:"server-name"`
+	Insecure       bool   `yaml:"insecure"`
 	// Fingerprint selects a uTLS ClientHello, for example "chrome".
 	Fingerprint string   `yaml:"fingerprint"`
 	ALPN        []string `yaml:"alpn"`
 	Reality     *Reality `yaml:"reality"`
+}
+
+type ECH struct {
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Config          string `yaml:"config" json:"config,omitempty"`
+	QueryServerName string `yaml:"query-server-name" json:"query-server-name,omitempty"`
 }
 
 // Reality is the client side of REALITY.
@@ -94,16 +122,17 @@ const GroupSelect = "select"
 
 // Group is a policy group.
 type Group struct {
-	URL           string `yaml:"url"`
-	Interval      int    `yaml:"interval"`
-	Timeout       int    `yaml:"timeout"`
-	Tolerance     int    `yaml:"tolerance"`
-	Lazy          *bool  `yaml:"lazy"`
-	Strategy      string `yaml:"strategy"`
-	IncludeAll    bool   `yaml:"include-all"`
-	Filter        string `yaml:"filter"`
-	ExcludeFilter string `yaml:"exclude-filter"`
-	DisableUDP    bool   `yaml:"disable-udp"`
+	ExpectedStatus string `yaml:"expected-status"`
+	URL            string `yaml:"url"`
+	Interval       int    `yaml:"interval"`
+	Timeout        int    `yaml:"timeout"`
+	Tolerance      int    `yaml:"tolerance"`
+	Lazy           *bool  `yaml:"lazy"`
+	Strategy       string `yaml:"strategy"`
+	IncludeAll     bool   `yaml:"include-all"`
+	Filter         string `yaml:"filter"`
+	ExcludeFilter  string `yaml:"exclude-filter"`
+	DisableUDP     bool   `yaml:"disable-udp"`
 
 	Icon    string   `yaml:"icon"`
 	ID      string   `yaml:"id"`
@@ -143,14 +172,23 @@ type Sources struct {
 }
 
 type Subscription struct {
-	Geodata      []GeoAsset           `yaml:"geodata" json:"geodata,omitempty"`
-	URL          string               `yaml:"url" json:"url"`
-	Format       string               `yaml:"format" json:"format,omitempty"`
-	Interval     int                  `yaml:"interval" json:"interval,omitempty"`
-	NodesOnly    bool                 `yaml:"nodes-only" json:"nodes_only,omitempty"`
-	AllowPartial bool                 `yaml:"allow-partial" json:"allow_partial,omitempty"`
-	Paused       bool                 `yaml:"paused" json:"paused,omitempty"`
-	Headers      []SubscriptionHeader `yaml:"headers" json:"headers,omitempty"`
+	CertificateFiles  []CertificateFile    `yaml:"certificate-files" json:"certificate_files,omitempty"`
+	ProviderDirectory string               `yaml:"provider-directory" json:"provider_directory,omitempty"`
+	Geodata           []GeoAsset           `yaml:"geodata" json:"geodata,omitempty"`
+	URL               string               `yaml:"url" json:"url"`
+	Format            string               `yaml:"format" json:"format,omitempty"`
+	Interval          int                  `yaml:"interval" json:"interval,omitempty"`
+	NodesOnly         bool                 `yaml:"nodes-only" json:"nodes_only,omitempty"`
+	AllowPartial      bool                 `yaml:"allow-partial" json:"allow_partial,omitempty"`
+	Paused            bool                 `yaml:"paused" json:"paused,omitempty"`
+	Headers           []SubscriptionHeader `yaml:"headers" json:"headers,omitempty"`
+}
+
+// CertificateFile attaches local TLS identity material to a foreign path name.
+// Value is inline PEM or a secret reference, never a path to open remotely.
+type CertificateFile struct {
+	Path  string `yaml:"path" json:"path"`
+	Value string `yaml:"value" json:"value"`
 }
 type SubscriptionHeader struct {
 	Name  string `yaml:"name" json:"name"`
@@ -249,27 +287,47 @@ type RuleReference struct {
 	To   string `yaml:"to"`
 }
 
+type HysteriaRealm struct {
+	Enabled     bool     `yaml:"enabled"`
+	ServerURL   string   `yaml:"server-url"`
+	Token       string   `yaml:"token"`
+	RealmID     string   `yaml:"realm-id"`
+	STUNServers []string `yaml:"stun-servers"`
+	TLS         *TLS     `yaml:"tls"`
+}
+
 type Protocol struct {
-	Security   string `yaml:"security"`
-	AlterID    int    `yaml:"alter-id"`
-	Version    int    `yaml:"version"`
-	UserKey    string `yaml:"user-key"`
-	Mode       string `yaml:"mode"`
-	Reuse      bool   `yaml:"reuse"`
-	UpMbps     int    `yaml:"up-mbps"`
-	DownMbps   int    `yaml:"down-mbps"`
-	Congestion string `yaml:"congestion-control"`
-	UDPMode    string `yaml:"udp-relay-mode"`
-	ZeroRTT    bool   `yaml:"zero-rtt"`
-	Heartbeat  int    `yaml:"heartbeat"`
-	Obfs       *Obfs  `yaml:"obfs"`
+	Realm          *HysteriaRealm `yaml:"realm"`
+	UpBPS          *uint64        `yaml:"up-bps"`
+	DownBPS        *uint64        `yaml:"down-bps"`
+	ServerPorts    []string       `yaml:"server-ports"`
+	HopInterval    int            `yaml:"hop-interval-seconds"`
+	HopIntervalMax int            `yaml:"hop-interval-max-seconds"`
+	Security       string         `yaml:"security"`
+	AlterID        int            `yaml:"alter-id"`
+	Version        int            `yaml:"version"`
+	UserKey        string         `yaml:"user-key"`
+	Mode           string         `yaml:"mode"`
+	Reuse          bool           `yaml:"reuse"`
+	UpMbps         int            `yaml:"up-mbps"`
+	DownMbps       int            `yaml:"down-mbps"`
+	Congestion     string         `yaml:"congestion-control"`
+	UDPMode        string         `yaml:"udp-relay-mode"`
+	ZeroRTT        bool           `yaml:"zero-rtt"`
+	Heartbeat      int            `yaml:"heartbeat"`
+	Obfs           *Obfs          `yaml:"obfs"`
 }
 type Obfs struct {
-	Type     string `yaml:"type"`
-	Password string `yaml:"password"`
-	Host     string `yaml:"host"`
+	MinPacketSize int    `yaml:"min-packet-size"`
+	MaxPacketSize int    `yaml:"max-packet-size"`
+	Type          string `yaml:"type"`
+	Password      string `yaml:"password"`
+	Host          string `yaml:"host"`
 }
 type Transport struct {
+	Method      string               `yaml:"method"`
+	Paths       []string             `yaml:"paths"`
+	Hosts       []string             `yaml:"hosts"`
 	Type        string               `yaml:"type"`
 	Path        string               `yaml:"path"`
 	Host        string               `yaml:"host"`
@@ -279,10 +337,44 @@ type Transport struct {
 	EarlyHeader string               `yaml:"early-data-header"`
 }
 type Multiplex struct {
-	Enabled        bool   `yaml:"enabled"`
-	Protocol       string `yaml:"protocol"`
-	MaxConnections int    `yaml:"max-connections"`
-	MinStreams     int    `yaml:"min-streams"`
-	MaxStreams     int    `yaml:"max-streams"`
-	Padding        bool   `yaml:"padding"`
+	OnlyTCP        bool    `yaml:"only-tcp"`
+	Statistic      bool    `yaml:"statistic"`
+	Brutal         *Brutal `yaml:"brutal"`
+	Enabled        bool    `yaml:"enabled"`
+	Protocol       string  `yaml:"protocol"`
+	MaxConnections int     `yaml:"max-connections"`
+	MinStreams     int     `yaml:"min-streams"`
+	MaxStreams     int     `yaml:"max-streams"`
+	Padding        bool    `yaml:"padding"`
+}
+
+type Brutal struct {
+	Enabled bool   `yaml:"enabled"`
+	UpBPS   uint64 `yaml:"up-bps"`
+	DownBPS uint64 `yaml:"down-bps"`
+}
+
+// SSPlugin decorates the Shadowsocks stream carrier. kcptun requires UoT;
+// for other plugins native UDP remains
+// unchanged unless UDP-over-TCP is enabled.
+type SSPlugin struct {
+	Username          string     `yaml:"username"`
+	ClientFingerprint string     `yaml:"client-fingerprint"`
+	VersionHint       string     `yaml:"version-hint"`
+	RestlsScript      string     `yaml:"restls-script"`
+	ForceTLS12        bool       `yaml:"force-tls12"`
+	ALPN              []string   `yaml:"alpn"`
+	KCP               *KC.Config `yaml:"kcp"`
+
+	Type        string               `yaml:"type"`
+	Mode        string               `yaml:"mode"`
+	Host        string               `yaml:"host"`
+	Path        string               `yaml:"path"`
+	TLS         *TLS                 `yaml:"tls"`
+	Mux         *bool                `yaml:"mux"`
+	Headers     []SubscriptionHeader `yaml:"headers"`
+	HTTPUpgrade bool                 `yaml:"http-upgrade"`
+	FastOpen    bool                 `yaml:"fast-open"`
+	Version     int                  `yaml:"version"`
+	Password    string               `yaml:"password"`
 }

@@ -1,26 +1,170 @@
 //go:build reka_minimal && go1.24
 
-// Reka build overlay: ECH is outside the public capability contract. This
-// replacement removes the unused upstream DNS/router dependency, and makes
-// accidental use fail explicitly. The original file hash is checked at build.
+// Reka's pinned ECH integration retains the component's key parser while
+// replacing its DNS/router dependency with a generation-scoped callback.
+// Configs are cloned per connection; DNS refresh and server retries cannot
+// mutate TLS state that another handshake is using.
 package tls
 
 import (
 	"context"
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"github.com/sagernet/sing-box/option"
+	aTLS "github.com/sagernet/sing/common/tls"
+	"golang.org/x/crypto/cryptobyte"
+	"net"
+	"strings"
+	"sync"
+	"time"
 )
 
-func parseECHClientConfig(context.Context, ECHCapableConfig, option.OutboundTLSOptions) (Config, error) {
-	return nil, errors.New("ECH is not supported by Reka")
+func parseECHClientConfig(ctx context.Context, base ECHCapableConfig, options option.OutboundTLSOptions) (Config, error) {
+	if options.ECH.ConfigPath != "" {
+		return nil, errors.New("ECH config paths must be explicitly attached")
+	}
+	if options.ECH.PQSignatureSchemesEnabled || options.ECH.DynamicRecordSizingDisabled {
+		return nil, errors.New("legacy ECH options are unavailable")
+	}
+	result := &ECHClientConfig{ECHCapableConfig: base, ctx: ctx, queryServerName: options.ECH.QueryServerName}
+	if len(options.ECH.Config) > 0 {
+		block, rest := pem.Decode([]byte(strings.Join(options.ECH.Config, "\n")))
+		if block == nil || block.Type != "ECH CONFIGS" || len(strings.TrimSpace(string(rest))) > 0 || len(block.Bytes) == 0 {
+			return nil, errors.New("invalid ECH configs PEM")
+		}
+		result.configs = append([]byte{}, block.Bytes...)
+	} else {
+		result.lookup, _ = ctx.Value("reka.tls.ech.lookup.v1").(func(context.Context, string) ([]byte, error))
+		if result.lookup == nil {
+			return nil, errors.New("automatic ECH requires the Reka DNS callback")
+		}
+	}
+	return result, nil
 }
-func parseECHServerConfig(context.Context, option.InboundTLSOptions, *tls.Config, *string) error {
-	return errors.New("ECH is not supported by Reka")
+
+type ECHClientConfig struct {
+	ECHCapableConfig
+	ctx             context.Context
+	queryServerName string
+	lookup          func(context.Context, string) ([]byte, error)
+	mu              sync.RWMutex
+	configs         []byte
+	retry           []byte
 }
-func (c *STDServerConfig) setECHServerConfig([]byte) error {
-	return errors.New("ECH is not supported by Reka")
+
+func (c *ECHClientConfig) ECHConfigList() []byte {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.retry) > 0 {
+		return append([]byte{}, c.retry...)
+	}
+	return append([]byte{}, c.configs...)
 }
-func UnmarshalECHKeys([]byte) ([]tls.EncryptedClientHelloKey, error) {
-	return nil, errors.New("ECH is not supported by Reka")
+func (c *ECHClientConfig) SetECHConfigList(value []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.retry = append([]byte{}, value...)
+}
+func (c *ECHClientConfig) prepared(ctx context.Context) (ECHCapableConfig, error) {
+	c.mu.Lock()
+	list := append([]byte{}, c.configs...)
+	if len(c.retry) > 0 {
+		list = append([]byte{}, c.retry...)
+		c.retry = nil
+	}
+	c.mu.Unlock()
+	if len(list) == 0 {
+		name := c.queryServerName
+		if name == "" {
+			name = c.ServerName()
+		}
+		var err error
+		if c.lookup == nil {
+			return nil, errors.New("ECH configuration is unavailable")
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		list, err = c.lookup(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(list) == 0 {
+		return nil, errors.New("empty ECH configuration")
+	}
+	clone := c.ECHCapableConfig.Clone().(ECHCapableConfig)
+	clone.SetECHConfigList(append([]byte{}, list...))
+	return clone, nil
+}
+func (c *ECHClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+	clone, err := c.prepared(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return aTLS.ClientHandshake(ctx, conn, clone)
+}
+func (c *ECHClientConfig) Client(conn net.Conn) (Conn, error) {
+	clone, err := c.prepared(c.ctx)
+	if err != nil {
+		return nil, err
+	}
+	return clone.Client(conn)
+}
+func (c *ECHClientConfig) STDConfig() (*STDConfig, error) {
+	clone, err := c.prepared(c.ctx)
+	if err != nil {
+		return nil, err
+	}
+	return clone.STDConfig()
+}
+func (c *ECHClientConfig) Clone() Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return &ECHClientConfig{ECHCapableConfig: c.ECHCapableConfig.Clone().(ECHCapableConfig), ctx: c.ctx, queryServerName: c.queryServerName, lookup: c.lookup, configs: append([]byte{}, c.configs...), retry: append([]byte{}, c.retry...)}
+}
+func parseECHServerConfig(_ context.Context, options option.InboundTLSOptions, config *tls.Config, _ *string) error {
+	if options.ECH.KeyPath != "" {
+		return errors.New("ECH key paths must be explicitly attached")
+	}
+	keys, err := parseECHKeys([]byte(strings.Join(options.ECH.Key, "\n")))
+	if err != nil {
+		return err
+	}
+	config.EncryptedClientHelloKeys = keys
+	return nil
+}
+func (c *STDServerConfig) setECHServerConfig(value []byte) error {
+	keys, err := parseECHKeys(value)
+	if err != nil {
+		return err
+	}
+	c.access.Lock()
+	defer c.access.Unlock()
+	config := c.config.Clone()
+	config.EncryptedClientHelloKeys = keys
+	c.config = config
+	return nil
+}
+func parseECHKeys(value []byte) ([]tls.EncryptedClientHelloKey, error) {
+	block, rest := pem.Decode(value)
+	if block == nil || block.Type != "ECH KEYS" || len(strings.TrimSpace(string(rest))) > 0 {
+		return nil, errors.New("invalid ECH keys PEM")
+	}
+	return UnmarshalECHKeys(block.Bytes)
+}
+func UnmarshalECHKeys(raw []byte) ([]tls.EncryptedClientHelloKey, error) {
+	var keys []tls.EncryptedClientHelloKey
+	input := cryptobyte.String(raw)
+	for !input.Empty() {
+		var key tls.EncryptedClientHelloKey
+		if !input.ReadUint16LengthPrefixed((*cryptobyte.String)(&key.PrivateKey)) || !input.ReadUint16LengthPrefixed((*cryptobyte.String)(&key.Config)) {
+			return nil, errors.New("invalid ECH key framing")
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil, errors.New("empty ECH keys")
+	}
+	return keys, nil
 }

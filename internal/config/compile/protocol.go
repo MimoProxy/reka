@@ -3,6 +3,8 @@ package compile
 import (
 	"fmt"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"golang.org/x/net/http/httpguts"
+	"math"
 	"slices"
 	"strings"
 )
@@ -30,7 +32,8 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	}
 	if ob.Protocol != nil {
 		p := *ob.Protocol
-		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
+		p.ServerPorts = slices.Clone(p.ServerPorts)
+		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
 		for _, field := range c.present(base + "/protocol") {
 			if !slices.Contains(allowed[ob.Type], field) {
 				fail("protocol/"+field, "option does not apply to protocol")
@@ -41,6 +44,32 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		}
 		if ob.Type == "vmess" && !slices.Contains([]string{"", "auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"}, p.Security) {
 			fail("protocol/security", "unsupported VMess cipher")
+		}
+		if ob.Type == "hysteria2" {
+			if p.UpMbps > math.MaxInt/125000 || p.DownMbps > math.MaxInt/125000 {
+				fail("protocol", "legacy Mbps rate overflows; use exact bytes/s")
+			}
+			if p.UpBPS != nil && p.UpMbps != 0 || p.DownBPS != nil && p.DownMbps != 0 {
+				fail("protocol", "choose bytes/s or legacy Mbps for each direction")
+			}
+			c.realm(base+"/protocol/realm", &p)
+			if len(p.ServerPorts) > 1024 {
+				fail("protocol/server-ports", "too many port ranges")
+			}
+			for _, v := range p.ServerPorts {
+				parts := strings.Split(v, ":")
+				if len(parts) != 2 {
+					fail("protocol/server-ports", "expected explicit start:end port range")
+					continue
+				}
+				ranges, err := model.PortHops(strings.Join(parts, "-"))
+				if err != nil || len(ranges) != 1 || ranges[0] != v {
+					fail("protocol/server-ports", "invalid port range")
+				}
+			}
+			if p.HopInterval < 0 || p.HopInterval > 86400 || p.HopIntervalMax < 0 || p.HopIntervalMax > 86400 || p.HopIntervalMax != 0 && p.HopIntervalMax < p.HopInterval {
+				fail("protocol/hop-interval-seconds", "invalid hop interval")
+			}
 		}
 		if ob.Type == "tuic" {
 			if !slices.Contains([]string{"", "cubic", "new_reno", "bbr"}, p.Congestion) {
@@ -70,10 +99,27 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 				if p.Obfs.Host != "" {
 					fail("protocol/obfs/host", "obfs host only applies to Snell")
 				}
-				if p.Obfs.Type != "salamander" || p.Obfs.Password == "" && !c.hasErrorAt(base+"/protocol/obfs/password") {
-					fail("protocol/obfs", "HY2 obfs requires salamander and password")
+				if !slices.Contains([]string{"salamander", "gecko"}, p.Obfs.Type) || p.Obfs.Password == "" && !c.hasErrorAt(base+"/protocol/obfs/password") {
+					fail("protocol/obfs", "HY2 obfs requires salamander or gecko and password")
+				}
+				if p.Obfs.Type == "gecko" {
+					lo, hi := p.Obfs.MinPacketSize, p.Obfs.MaxPacketSize
+					if lo == 0 {
+						lo = 512
+					}
+					if hi == 0 {
+						hi = 1200
+					}
+					if lo < 1 || lo > hi || hi > 2048 {
+						fail("protocol/obfs", "gecko packet sizes must satisfy 1 <= min <= max <= 2048")
+					}
+				} else if p.Obfs.MinPacketSize != 0 || p.Obfs.MaxPacketSize != 0 {
+					fail("protocol/obfs", "packet size options require gecko")
 				}
 			} else if ob.Type == "snell" {
+				if p.Obfs.MinPacketSize != 0 || p.Obfs.MaxPacketSize != 0 {
+					fail("protocol/obfs", "packet size options only apply to HY2 gecko")
+				}
 				if p.Obfs.Password != "" {
 					fail("protocol/obfs/password", "Snell obfs does not accept a password")
 				}
@@ -93,50 +139,72 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		copy := *ob.Transport
 		t := &copy
 		t.Headers = slices.Clone(t.Headers)
+		t.Paths = slices.Clone(t.Paths)
+		t.Hosts = slices.Clone(t.Hosts)
 		for i := range t.Headers {
 			t.Headers[i].Value = c.resolveSecret(fmt.Sprintf("%s/transport/headers/#%d/value", base, i), t.Headers[i].Value)
 		}
 		out.Transport = t
-		allowed := map[string][]string{"ws": {"type", "path", "host", "headers", "max-early-data", "early-data-header"}, "grpc": {"type", "service-name"}, "httpupgrade": {"type", "path", "host", "headers"}}
+		allowed := map[string][]string{"ws": {"type", "path", "host", "headers", "max-early-data", "early-data-header"}, "grpc": {"type", "service-name"}, "httpupgrade": {"type", "path", "host", "headers"}, "http": {"type", "paths", "method", "headers", "host"}, "h2": {"type", "hosts", "path"}}
 		for _, field := range c.present(base + "/transport") {
 			if !slices.Contains(allowed[t.Type], field) {
 				fail("transport/"+field, "option does not apply to this transport")
 			}
 		}
 		if ob.TLS != nil && len(ob.TLS.ALPN) > 0 {
-			if t.Type == "grpc" && !slices.Contains(ob.TLS.ALPN, "h2") {
-				fail("tls/alpn", "gRPC requires h2")
+			if (t.Type == "grpc" || t.Type == "h2") && !slices.Contains(ob.TLS.ALPN, "h2") {
+				fail("tls/alpn", "this transport requires h2")
 			}
-			if (t.Type == "ws" || t.Type == "httpupgrade") && (len(ob.TLS.ALPN) != 1 || ob.TLS.ALPN[0] != "http/1.1") {
+			if (t.Type == "ws" || t.Type == "httpupgrade" || t.Type == "http") && (len(ob.TLS.ALPN) != 1 || ob.TLS.ALPN[0] != "http/1.1") {
 				fail("tls/alpn", "WebSocket/HTTPUpgrade requires http/1.1")
 			}
 		}
 
-		if !slices.Contains([]string{"ws", "grpc", "httpupgrade"}, t.Type) {
+		if !slices.Contains([]string{"ws", "grpc", "httpupgrade", "http", "h2"}, t.Type) {
 			fail("transport/type", "unsupported transport")
 		}
 		if !slices.Contains([]string{"vless", "vmess", "trojan"}, ob.Type) {
 			fail("transport", "transport does not apply to protocol")
 		}
-		if ob.Flow != "" {
-			fail("flow", "Vision requires raw TCP")
+		if (t.Type == "http" || t.Type == "h2") && ob.Type != "vless" && ob.Type != "vmess" {
+			fail("transport", "HTTP and H2 apply to VLESS and VMess")
+		}
+		if t.Type == "h2" && ob.TLS == nil {
+			fail("tls", "H2 requires TLS")
+		}
+		if t.Method != "" && !httpguts.ValidHeaderFieldName(t.Method) {
+			fail("transport/method", "invalid HTTP method")
+		}
+		for _, path := range t.Paths {
+			if strings.ContainsAny(path, "\r\n\x00") {
+				fail("transport/paths", "invalid HTTP path")
+			}
+		}
+		if ob.Flow != "" && (out.Encryption == "" || out.Encryption == "none") {
+			fail("flow", "Vision without VLESS encryption requires raw TCP")
 		}
 		if t.EarlyData < 0 || t.EarlyData > 65536 {
 			fail("transport/max-early-data", "invalid early data limit")
 		}
 		for _, h := range t.Headers {
-			if strings.ContainsAny(h.Name+h.Value, "\r\n") {
+			if !httpguts.ValidHeaderFieldName(h.Name) || !httpguts.ValidHeaderFieldValue(h.Value) {
 				fail("transport/headers", "invalid header")
 			}
 		}
 	}
 	if ob.Multiplex != nil && ob.Multiplex.Enabled {
 		m := ob.Multiplex
-		if !slices.Contains([]string{"vless", "vmess", "trojan"}, ob.Type) || ob.Flow != "" {
-			fail("multiplex", "multiplex requires non-Vision VLESS, VMess or Trojan")
+		if slices.Contains([]string{"reject", "reject-drop", "pass"}, ob.Type) {
+			fail("multiplex", "this action has no transport to multiplex")
 		}
 		if !slices.Contains([]string{"", "h2mux", "smux", "yamux"}, m.Protocol) || m.MaxConnections < 0 || m.MinStreams < 0 || m.MaxStreams < 0 {
 			fail("multiplex", "invalid multiplex options")
+		}
+		if m.Brutal != nil && m.Brutal.Enabled && (m.Brutal.UpBPS < 65536 || m.Brutal.DownBPS < 65536) {
+			fail("multiplex/brutal", "Brutal requires upload and download of at least 65536 bytes/s")
+		}
+		if m.Statistic {
+			c.warnf(model.DocProfile, base+"/multiplex/statistic", "multiplex.statistic", "reference nested accounting is metadata; Reka always reports native per-flow traffic")
 		}
 	}
 }
