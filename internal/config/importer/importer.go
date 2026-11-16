@@ -273,7 +273,7 @@ func (c *converter) register(n *yaml.Node, kind, path string) bool {
 		c.diag(n, path, "import.name", "a resource needs a name", true)
 		return false
 	}
-	if _, ok := c.names[name]; ok || name == "DIRECT" || name == "REJECT" {
+	if _, ok := c.names[name]; ok || name == "DIRECT" || name == "REJECT" || name == "COMPATIBLE" || name == "PASS" || name == "REJECT-DROP" {
 		c.diag(get(n, "name"), path+"/name", "import.duplicate-name", "duplicate or reserved resource name", true)
 		return false
 	}
@@ -299,6 +299,9 @@ func (c *converter) clash(data []byte) {
 	if !c.req.NodesOnly {
 		groups = c.items(root, "proxy-groups")
 		rules = c.items(root, "rules")
+	}
+	if !c.req.NodesOnly {
+		groups = ensureGlobalGroup(root, proxies, groups)
 	}
 	c.report.Nodes.Total = len(proxies)
 	c.report.Groups.Total = len(groups)

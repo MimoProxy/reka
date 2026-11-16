@@ -290,6 +290,9 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	case ProxySpec:
 		typ = s.Type
 		out, err = b.newProtocol(tag, s)
+	case DropSpec:
+		typ = "reject-drop"
+		out = newDropOutbound(tag)
 	case DirectSpec:
 		typ = "direct"
 		out, err = direct.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.DirectOutboundOptions{})

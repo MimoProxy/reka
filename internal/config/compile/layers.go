@@ -192,7 +192,7 @@ func (c *compiler) layers(profile []byte) {
 			return ""
 		}
 		declared := localTargets[srcID][ref]
-		if !declared && (ref == "direct" || ref == "reject") {
+		if !declared && (ref == "direct" || ref == "reject" || ref == "pass" || ref == "reject-drop") {
 			return ref
 		}
 		return srcID + "/" + ref

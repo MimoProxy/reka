@@ -12,10 +12,14 @@ import (
 
 func (c *converter) target(name string) (string, bool) {
 	switch name {
-	case "DIRECT":
+	case "DIRECT", "COMPATIBLE":
 		return "direct", true
 	case "REJECT":
 		return "reject", true
+	case "PASS":
+		return "pass", true
+	case "REJECT-DROP":
+		return "reject-drop", true
 	}
 	return c.names[name], c.available[name]
 }
@@ -79,7 +83,7 @@ func (c *converter) convertGroups(input []*yaml.Node) {
 				}
 				seen[m.Value] = true
 				g.members = append(g.members, m.Value)
-				if _, exists := c.names[m.Value]; !exists && m.Value != "DIRECT" && m.Value != "REJECT" {
+				if _, exists := c.names[m.Value]; !exists && m.Value != "DIRECT" && m.Value != "REJECT" && m.Value != "PASS" && m.Value != "COMPATIBLE" && m.Value != "REJECT-DROP" {
 					r.fail("proxies", "import.group-reference", "unknown group member")
 				}
 			}

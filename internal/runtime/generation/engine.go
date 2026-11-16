@@ -204,7 +204,7 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	p.AutomaticGroupsChanged = gen.eff == nil && len(eff.AutoGroups) > 0 || gen.eff != nil && !reflect.DeepEqual(gen.eff.AutoGroups, eff.AutoGroups)
 	keepIDs := map[string]bool{}
 	for _, o := range eff.Outbounds {
-		if o.Type == model.OutboundReject {
+		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
 		}
 		keepIDs[o.ID] = true
@@ -376,7 +376,7 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		return fail(&PrepareError{Path: "/network", Err: errors.New("host must supply a freshly established VpnService fd through reconfigureVPN")})
 	}
 	for _, o := range eff.Outbounds {
-		if o.Type == model.OutboundReject {
+		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
 		}
 		if old, ok := snap.Resources[o.ID]; ok && fingerprintOf(gen, o.ID) == o.Fingerprint {
@@ -595,6 +595,8 @@ func specFor(o compile.Outbound) any {
 		}
 	}
 	switch o.Type {
+	case "reject-drop":
+		return sagernet.DropSpec{}
 	case model.OutboundHTTP:
 		return sagernet.HTTPSpec{Server: o.Server, Port: o.Port, Username: o.Username, Password: o.Password, TLS: tls()}
 	case model.OutboundSOCKS:
@@ -700,8 +702,7 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 			return nil, false
 		}
 		env.dns = g.dns
-		dec = g.router.Route(ctx, routerMetadata(md), env)
-		g.resolveObserved(&dec, routerMetadata(md), true)
+		dec = g.router.RouteWithResolver(ctx, routerMetadata(md), env, func(dec *router.Decision) { g.resolveObserved(dec, routerMetadata(md), true) })
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
 		}
@@ -838,10 +839,7 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 		}
 		env.addrs = append(env.addrs, a)
 	}
-	x := g.router.Explain(ctx, md, env)
-	if !x.Undetermined {
-		g.resolveObserved(&x.Decision, md, false)
-	}
+	x := g.router.ExplainWithResolver(ctx, md, env, func(dec *router.Decision) { g.resolveObserved(dec, md, false) })
 	out := Explanation{Generation: snap.Generation, Revision: g.revision, RuleIndex: x.RuleIndex}
 	if x.Undetermined {
 		out.Undetermined = fmt.Sprintf("rule %d (%s) needs the destination address; pass resolve or addresses", x.StoppedAt, g.router.Rules().Rule(x.StoppedAt))

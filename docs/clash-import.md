@@ -94,3 +94,11 @@ routes fail without direct fallback. An HTTP provider may declare startup
 `payload`: on its initial transport/status failure this is locked as the actual
 resource and listed in `fallback_resources`. A later failure preserves the
 committed snapshot. Invalid response bodies do not select startup fallback.
+
+`PASS` continues rule matching after resolving the current group choice;
+existing connections keep their original route. `COMPATIBLE` has direct-routing
+semantics. `REJECT-DROP` accepts the local TCP/UDP flow and discards data without
+opening a remote socket or immediately rejecting the client. A referenced
+`GLOBAL` uses the source's explicit group, or a generated select group with
+DIRECT, REJECT, source nodes and groups in reference order (DIRECT selected by
+default). A source cannot create a cyclic group graph through GLOBAL.

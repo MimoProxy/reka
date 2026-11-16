@@ -311,8 +311,9 @@ func (c *compiler) compose() *Effective {
 // fieldsByType lists, per outbound type, the fields that apply. Anything
 // else written for that type is an error.
 var fieldsByType = map[string][]string{
-	model.OutboundDirect:      {"udp"},
-	model.OutboundReject:      {},
+	model.OutboundDirect: {"udp"},
+	model.OutboundReject: {},
+	"pass":               {}, "reject-drop": {},
 	model.OutboundHTTP:        {"server", "port", "username", "password", "tls", "headers"},
 	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp", "tls"},
 	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version"},
@@ -414,7 +415,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		out := Outbound{PacketEncoding: ob.PacketEncoding, Protocol: ob.Protocol, Transport: ob.Transport, Multiplex: ob.Multiplex, ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
 		if ob.Dialer != nil {
 			value := *ob.Dialer
-			if ob.Type == model.OutboundReject {
+			if ob.Type == model.OutboundReject || ob.Type == "pass" || ob.Type == "reject-drop" {
 				c.errorf(doc, base+"/dialer", "outbound.dialer", "reject does not dial a connection")
 			}
 			if value.RoutingMark < 0 || uint64(value.RoutingMark) > uint64(^uint32(0)) {
@@ -447,7 +448,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundReject {
 			out.UDP = false
 		}
-		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject {
+		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject && ob.Type != "pass" && ob.Type != "reject-drop" {
 			if ob.Server == "" {
 				c.errorf(doc, base, "outbound.server", "server is required")
 			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
@@ -508,6 +509,32 @@ func (c *compiler) outbounds(eff *Effective) {
 		if !seen[b] {
 			eff.Outbounds = append(eff.Outbounds, Outbound{ID: b, Type: b, UDP: b == model.OutboundDirect, Builtin: true})
 			eff.Provenance["/outbounds/"+b] = Origin{Layer: LayerDefault}
+		}
+	}
+	for _, action := range []string{"pass", "reject-drop"} {
+		if seen[action] {
+			continue
+		}
+		needed := false
+		for _, g := range c.profile.Groups {
+			if slices.Contains(g.Members, action) {
+				needed = true
+			}
+		}
+		for _, r := range c.profile.Rules {
+			if r.Outbound == action {
+				needed = true
+			}
+		}
+		for _, block := range c.profile.SubRules {
+			for _, r := range block.Rules {
+				if r.Outbound == action {
+					needed = true
+				}
+			}
+		}
+		if needed {
+			eff.Outbounds = append(eff.Outbounds, Outbound{ID: action, Type: action, Builtin: true, UDP: true})
 		}
 	}
 	for i := range eff.Outbounds {

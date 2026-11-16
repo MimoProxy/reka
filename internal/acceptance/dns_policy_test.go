@@ -84,14 +84,13 @@ func TestFakeIPFlowsGenerationsAndRestart(t *testing.T) {
 		t.Fatal("restored fake route", err)
 	}
 	restored.Close()
-	if !raceEnabled {
-		udp := udpEcho(t)
-		assoc := associate(t, h.proxy())
-		destination := netip.AddrPortFrom(second, udp.Port())
-		assoc.send(destination, "fake-udp")
-		replies := assoc.recv(time.Second)
-		if replies[destination.String()] != "fake-udp" {
-			t.Fatal("fake UDP destination/reply rewrite", replies)
-		}
+	udp := udpEcho(t)
+	assoc := associate(t, h.proxy())
+	destination := netip.AddrPortFrom(second, udp.Port())
+	assoc.send(destination, "fake-udp")
+	replies := assoc.recv(time.Second)
+	if replies[destination.String()] != "fake-udp" {
+		t.Fatal("fake UDP destination/reply rewrite", replies)
 	}
+
 }

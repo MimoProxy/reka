@@ -67,16 +67,13 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 		if ep.Scheme == "udp" {
 			network = "udp"
 		}
-		dec := p.eff.Router.Explain(ctx, router.Metadata{Domain: host, Addr: addr, Port: uint16(port), Network: network}, noDNS{})
+		dec := p.eff.Router.ExplainWithResolver(ctx, router.Metadata{Domain: host, Addr: addr, Port: uint16(port), Network: network}, noDNS{}, func(dec *router.Decision) {
+			if p.policies != nil {
+				dec.Outbound, dec.Chain, _ = p.eff.Router.ResolveDynamic(dec.Target, func(g router.Group) string { return p.policies.Choose(g.ID, "DNS:"+ep.Host, g.Selected) })
+			}
+		})
 		if dec.Undetermined {
 			return ""
-		}
-		if p.policies != nil {
-			out, _, err := p.eff.Router.ResolveDynamic(dec.Target, func(g router.Group) string { return p.policies.Choose(g.ID, "DNS:"+ep.Host, g.Selected) })
-			if err != nil {
-				return ""
-			}
-			return out
 		}
 		return dec.Outbound
 	}
