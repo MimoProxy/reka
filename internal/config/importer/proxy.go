@@ -161,8 +161,8 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	if typ == "vless" {
 
-		if encryption := r.str("encryption"); encryption != "" && encryption != "none" {
-			r.fail("encryption", "import.encryption", "VLESS encryption is not implemented")
+		if encryption := r.str("encryption"); encryption != "" {
+			out["encryption"] = encryption
 		}
 		encoding := r.str("packet-encoding")
 		addr := r.boolean("packet-addr", false)

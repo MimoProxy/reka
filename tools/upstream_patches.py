@@ -44,6 +44,32 @@ func (c *VisionConn) filterTLS(buffers [][]byte) {
 	if !inputOK || !rawOK || input.Type != reflect.TypeOf(bytes.Reader{}) || rawInput.Type != reflect.TypeOf(bytes.Buffer{}) {
 		return nil, E.New("vision: unsupported TLS buffer layout")
 	}''')
+    # Encrypted VLESS exposes typed decrypted buffers for Vision's transition.
+    # Keep the existing reflected/guarded path for ordinary TLS, without
+    # introducing an unsafe dependency on Reka's encryption struct layout.
+    start = source.index('\tfor _, tlsCreator := range tlsRegistry {', source.index('func NewVisionConn'))
+    end = source.index('\treturn &VisionConn{', start)
+    source = source[:start] + '''
+ var input *bytes.Reader
+ var rawInput *bytes.Buffer
+ if provider,ok:=tlsConn.(interface{VisionBuffers()(net.Conn,*bytes.Reader,*bytes.Buffer)});ok {
+  netConn,input,rawInput=provider.VisionBuffers()
+  if netConn==nil || input==nil || rawInput==nil{return nil,E.New("vision: invalid encrypted stream buffers")}
+ } else {
+  for _,tlsCreator:=range tlsRegistry {
+   loaded,netConn,reflectType,reflectPointer=tlsCreator(tlsConn)
+   if loaded{break}
+  }
+  if !loaded{return nil,E.New("vision: not a valid supported TLS connection: ",reflect.TypeOf(tlsConn))}
+  inputField,inputOK:=reflectType.FieldByName("input")
+  rawField,rawOK:=reflectType.FieldByName("rawInput")
+  if !inputOK || !rawOK || inputField.Type!=reflect.TypeOf(bytes.Reader{}) || rawField.Type!=reflect.TypeOf(bytes.Buffer{}){return nil,E.New("vision: unsupported TLS buffer layout")}
+  input=(*bytes.Reader)(unsafe.Add(reflectPointer,inputField.Offset))
+  rawInput=(*bytes.Buffer)(unsafe.Add(reflectPointer,rawField.Offset))
+ }
+''' + source[end:]
+    source = replace(source, '(*bytes.Reader)(unsafe.Add(reflectPointer, input.Offset))', 'input')
+    source = replace(source, '(*bytes.Buffer)(unsafe.Add(reflectPointer, rawInput.Offset))', 'rawInput')
     return source
 
 
@@ -294,3 +320,33 @@ def shadowsocks2022_server(source):
 MODULES['github.com/sagernet/sing-shadowsocks'] = ('v0.2.9-0.20260929204512-65740e0f0e3e', {
 'shadowaead_2022/service.go': ('b3fbe6500639625a99f2c685253cae586c3ca2b30e484e0bb38a9c8acab1462d',shadowsocks2022_server),
 })
+
+
+def vless_encryption(source):
+    source = replace(source, 'type Outbound struct {', 'type Outbound struct {\n rekaEncryption func(context.Context,net.Conn)(net.Conn,error)')
+    source = replace(source, '\t\tserverAddr: options.ServerOptions.Build(),\n\t}', '''\t\tserverAddr: options.ServerOptions.Build(),
+ }
+ if hook,ok:=ctx.Value("reka.vless.encryption.v1").(func()func(context.Context,net.Conn)(net.Conn,error));ok{outbound.rekaEncryption=hook()}''')
+    hook = '''
+ if h.rekaEncryption!=nil {
+  conn,err=h.rekaEncryption(ctx,conn)
+  if err!=nil{return nil,err}
+ }
+'''
+    source = replace(source, '\tswitch N.NetworkName(network) {\n\tcase N.NetworkTCP:', hook+'\tswitch N.NetworkName(network) {\n\tcase N.NetworkTCP:')
+    source = replace(source, '\tif h.xudp {\n\t\treturn h.client.DialEarlyXUDPPacketConn(conn, destination)', hook+'\tif h.xudp {\n\t\treturn h.client.DialEarlyXUDPPacketConn(conn, destination)')
+    return source
+
+MODULES['github.com/sagernet/sing-box'][1]['protocol/vless/outbound.go'] = ('3dfaa4e1eb7df0cffd7c23b473caf4809f0b6ede516ef077c8dd1acdd1bc9561',vless_encryption)
+
+
+def vless_test_decryption(source):
+    return replace(source, '\terr := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)', '''
+ if decrypt,ok:=h.ctx.Value("reka.vless.decrypt.v1").(func(context.Context,net.Conn)(net.Conn,error));ok {
+  encrypted,err:=decrypt(ctx,conn)
+  if err!=nil {N.CloseOnHandshakeFailure(conn,onClose,err);return}
+  conn=encrypted
+ }
+ err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)''')
+
+MODULES['github.com/sagernet/sing-box'][1]['protocol/vless/inbound.go'] = ('5d783df51e9e88cd94c30b4b49402ead55e2a162bc5d72d99d4e3b226fd6d499',vless_test_decryption)

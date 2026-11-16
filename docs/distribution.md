@@ -100,3 +100,12 @@ the cipher buffers. The test-node server applies the same close/read/write
 ownership discipline. A deterministic fast-response test holds the first
 write's return until the response has been read; repeated two-hop TCP/UDP and
 parent-rotation tests also run under the ordinary race detector.
+
+VLESS encryption adapts a standalone GPL component from the pinned mihomo
+reference; [origin, exact source hashes and local changes](../internal/compat/vlessenc/ORIGIN.md)
+ship with the source. Standard Go ML-KEM and the existing pinned BLAKE3 library
+are checked in both directions against the unmodified reference transport.
+Source-hashed VLESS hooks apply encryption after TLS/stream transports; a
+test-node inbound hook provides the symmetric peer. Vision obtains this
+component's decrypted buffers through a typed interface instead of reflecting
+its layout. Ordinary TLS still uses the guarded upstream buffer path.

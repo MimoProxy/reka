@@ -155,8 +155,8 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 				fail("transport/paths", "invalid HTTP path")
 			}
 		}
-		if ob.Flow != "" {
-			fail("flow", "Vision requires raw TCP")
+		if ob.Flow != "" && (out.Encryption == "" || out.Encryption == "none") {
+			fail("flow", "Vision without VLESS encryption requires raw TCP")
 		}
 		if t.EarlyData < 0 || t.EarlyData > 65536 {
 			fail("transport/max-early-data", "invalid early data limit")

@@ -22,6 +22,7 @@ import (
 )
 
 type ProxySpec struct {
+	Encryption                                     string
 	Detour                                         *DetourSpec
 	Type, Server, UUID, Password, Username, Method string
 	Port                                           uint16
@@ -72,10 +73,19 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		values["version"] = "5"
 	}
 	ctx, configured := configureTLSContext(configureECHContext(detourContext(b.ctx, s.Detour), s.TLS), s.TLS)
+	ctx, encryptionConfigured, err := configureEncryptionContext(ctx, s.Encryption)
+	if err != nil {
+		return nil, err
+	}
 	if s.Detour != nil {
 		values["detour"] = "reka-detour"
 	}
 	defer func() {
+		if returnErr == nil && encryptionConfigured != nil && !encryptionConfigured.Load() {
+			common.Close(result)
+			result = nil
+			returnErr = fmt.Errorf("required VLESS encryption overlay is unavailable")
+		}
 		if returnErr == nil && configured != nil && !configured.Load() {
 			common.Close(result)
 			result = nil
@@ -86,7 +96,6 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		ctx = service.ExtendContext(ctx)
 		service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: b.protect, explicitProtect: true})
 	}
-	var err error
 	ctx, err = streamContext(ctx, b.componentLogger("outbound", s.Type, tag), values, s.Server, s.Port)
 	if err != nil {
 		return nil, err

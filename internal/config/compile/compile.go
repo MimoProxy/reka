@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	VE "github.com/MimoProxy/reka/internal/compat/vlessenc"
 	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/platform"
@@ -66,6 +67,7 @@ type Origin struct {
 // changes whenever anything that affects the instance changes, including
 // a resolved secret; equal fingerprints mean the instance can be reused.
 type Outbound struct {
+	Encryption        string                     `json:"-"`
 	UDPOverTCP        bool                       `json:"udp-over-tcp,omitempty"`
 	UDPOverTCPVersion int                        `json:"udp-over-tcp-version,omitempty"`
 	Headers           []model.SubscriptionHeader `json:"-"`
@@ -320,7 +322,7 @@ var fieldsByType = map[string][]string{
 	model.OutboundHTTP:        {"server", "port", "username", "password", "tls", "headers"},
 	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp", "tls"},
 	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version"},
-	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "packet-encoding", "tls", "udp", "transport", "multiplex"},
+	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "encryption", "packet-encoding", "tls", "udp", "transport", "multiplex"},
 	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
 	"trojan":                  {"server", "port", "password", "tls", "udp", "transport", "multiplex"},
 	"hysteria2":               {"server", "port", "password", "tls", "udp", "protocol"},
@@ -465,6 +467,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		out.Username = c.resolveSecret(base+"/username", ob.Username)
 		out.Password = c.resolveSecret(base+"/password", ob.Password)
 		out.UUID = c.resolveSecret(base+"/uuid", ob.UUID)
+		out.Encryption = c.resolveSecret(base+"/encryption", ob.Encryption)
 		switch ob.Type {
 		case model.OutboundShadowsocks:
 			if !slices.Contains(ShadowsocksMethods, ob.Method) {
@@ -483,6 +486,9 @@ func (c *compiler) outbounds(eff *Effective) {
 				c.errorf(doc, base, "outbound.auth", "set both username and password, or neither")
 			}
 		case model.OutboundVLESS:
+			if _, err := VE.NewClient(out.Encryption); err != nil {
+				c.errorf(doc, base+"/encryption", "outbound.encryption", "invalid VLESS encryption configuration")
+			}
 			if !uuidRE.MatchString(out.UUID) && !c.hasErrorAt(base+"/uuid") {
 				c.errorf(doc, base+"/uuid", "outbound.uuid", "uuid is required and must be a UUID")
 			}
@@ -498,8 +504,8 @@ func (c *compiler) outbounds(eff *Effective) {
 			if out.PacketEncoding == "packet" {
 				out.PacketEncoding = "packetaddr"
 			}
-			if ob.Flow != "" && ob.TLS == nil {
-				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs tls")
+			if ob.Flow != "" && ob.TLS == nil && (out.Encryption == "" || out.Encryption == "none") {
+				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs TLS or VLESS encryption")
 			}
 		}
 		c.protocol(base, ob, &out)
@@ -555,7 +561,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		if identity.TLS != nil {
 			tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey
 		}
-		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, string(params), string(transport), string(headers), tlsSecrets)
+		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(params), string(transport), string(headers), tlsSecrets)
 	}
 }
 

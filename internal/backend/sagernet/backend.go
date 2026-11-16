@@ -26,7 +26,6 @@ import (
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/socks"
-	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/common/json/badoption"
@@ -255,13 +254,14 @@ type SOCKSSpec struct {
 
 // VLESSSpec is a VLESS client. Flow is "" or "xtls-rprx-vision".
 type VLESSSpec struct {
-	Detour  *DetourSpec
-	Options json.RawMessage
-	Server  string
-	Port    uint16
-	UUID    string
-	Flow    string
-	TLS     *TLSSpec
+	Encryption string
+	Detour     *DetourSpec
+	Options    json.RawMessage
+	Server     string
+	Port       uint16
+	UUID       string
+	Flow       string
+	TLS        *TLSSpec
 }
 
 // TLSSpec is client TLS. Fingerprint enables uTLS (for example "chrome").
@@ -330,6 +330,21 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		})
 	case VLESSSpec:
 		dependency = s.Detour
+		typ = "vless"
+		if s.TLS == nil || s.TLS.Reality == nil {
+			values := map[string]any{}
+			if len(s.Options) > 0 {
+				if err = json.Unmarshal(s.Options, &values); err != nil {
+					break
+				}
+			}
+			if s.Flow != "" {
+				values["flow"] = s.Flow
+			}
+			s.Options, _ = json.Marshal(values)
+			out, err = b.newProtocol(tag, ProxySpec{Type: typ, Server: s.Server, Port: s.Port, UUID: s.UUID, Encryption: s.Encryption, TLS: s.TLS, Options: s.Options, Detour: s.Detour})
+			break
+		}
 		ctx := detourContext(b.ctx, s.Detour)
 		if s.Detour != nil {
 			var values map[string]any
@@ -340,24 +355,8 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 			values["detour"] = "reka-detour"
 			s.Options, _ = json.Marshal(values)
 		}
-		typ = "vless"
-		if s.TLS != nil && s.TLS.Reality != nil {
-			// Reka's own REALITY client; see vless.go.
-			out, err = newVLESSRealityOutbound(ctx, b.componentLogger("outbound", typ, tag), tag, s)
-			break
-		}
-		out, err = vless.NewOutbound(ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.VLESSOutboundOptions{
-			ServerOptions: option.ServerOptions{Server: s.Server, ServerPort: s.Port},
-			DialerOptions: func() option.DialerOptions {
-				if s.Detour != nil {
-					return option.DialerOptions{Detour: "reka-detour"}
-				}
-				return option.DialerOptions{}
-			}(),
-			UUID:                        s.UUID,
-			Flow:                        s.Flow,
-			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: s.TLS.build()},
-		})
+		// Reka's own REALITY client; see vless.go.
+		out, err = newVLESSRealityOutbound(ctx, b.componentLogger("outbound", typ, tag), tag, s)
 	default:
 		return nil, fmt.Errorf("reka: unsupported outbound spec %T", spec)
 	}

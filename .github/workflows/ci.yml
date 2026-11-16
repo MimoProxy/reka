@@ -10,6 +10,22 @@ env:
   LDFLAGS: -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
 
 jobs:
+  reference:
+    name: test (pinned compatibility reference)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/mihomodiff/go.mod
+          cache-dependency-path: tools/mihomodiff/go.sum
+      - name: Rule and observed policy differential
+        working-directory: tools/mihomodiff
+        run: go run .
+      - name: Bidirectional encrypted VLESS transport
+        working-directory: tools/mihomodiff
+        run: go test -race ./...
+
   # Jobs named "test" run the tests on that platform; jobs named "build"
   # only compile.
   test:

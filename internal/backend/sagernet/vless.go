@@ -30,6 +30,7 @@ import (
 //
 // Non-Vision streams may use a V2Ray transport and client-owned multiplex.
 type vlessRealityOutbound struct {
+	encryption     func(context.Context, net.Conn) (net.Conn, error)
 	httpObfs       *httpObfsOptions
 	packetEncoding string
 	outbound.Adapter
@@ -100,6 +101,11 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 		reality:        reality,
 		client:         client,
 	}
+	if encrypted, err := newEncryptionClient(s.Encryption); err != nil {
+		return nil, err
+	} else if encrypted != nil {
+		h.encryption = encryptionHandshake(encrypted)
+	}
 
 	if extra.Transport != nil && extra.Transport.Type == "http" {
 		h.h2 = &extra.Transport.HTTPOptions
@@ -120,6 +126,13 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 }
 
 func (h *vlessRealityOutbound) connect(ctx context.Context) (net.Conn, error) {
+	c, err := h.connectTransport(ctx)
+	if err == nil && h.encryption != nil {
+		return h.encryption(ctx, c)
+	}
+	return c, err
+}
+func (h *vlessRealityOutbound) connectTransport(ctx context.Context) (net.Conn, error) {
 	if h.transport != nil {
 		return h.transport.DialContext(ctx)
 	}

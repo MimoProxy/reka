@@ -232,3 +232,14 @@ error; it does not silently send clear SNI. TLS/uTLS and Hysteria2/TUIC QUIC
 are exercised by real TCP/UDP tests. REALITY uses its own handshake and cannot
 be combined with ECH. The matching Clash field is `ech-opts` with `enable`,
 `config` and `query-server-name`.
+
+VLESS `encryption` accepts `none` or the pinned reference's
+`mlkem768x25519plus.MODE.RTT.KEY...` form. Modes are `native`, `xorpub`,
+`random`; RTT is `1rtt` or `0rtt`; relay keys are X25519 or ML-KEM-768 public
+keys. It accepts inline configuration or a secret reference, is masked in
+source reads, and participates in transport replacement. At most 32 relay
+keys and 32 padding phases are allowed; total padding remains at most 65553
+bytes. Handshake cancellation interrupts padding waits. A wrong key fails the
+connection. Vision can use this encryption layer with or without outer TLS,
+including WS, gRPC, HTTPUpgrade and H2 (H2 still requires TLS). Its transition
+uses typed decrypted-buffer references while retaining the underlying carrier.

@@ -45,6 +45,7 @@ const (
 // Outbound is one proxy node or built-in action. Which fields apply depends
 // on Type; a field that does not apply is an error, not ignored.
 type Outbound struct {
+	Encryption        string               `yaml:"encryption"`
 	UDPOverTCP        bool                 `yaml:"udp-over-tcp"`
 	UDPOverTCPVersion int                  `yaml:"udp-over-tcp-version"`
 	Headers           []SubscriptionHeader `yaml:"headers"`

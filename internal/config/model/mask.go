@@ -18,7 +18,7 @@ const Mask = "********"
 const SecretPrefix = "secret://"
 
 // sensitiveFields are outbound fields that hold credentials.
-var sensitiveFields = map[string]bool{"password": true, "uuid": true, "username": true}
+var sensitiveFields = map[string]bool{"password": true, "uuid": true, "username": true, "encryption": true}
 
 // IsSensitive reports whether path names a credential field.
 func IsSensitive(path string) bool {
@@ -126,7 +126,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 		}
 		for j := 0; j+1 < len(ob.Content); j += 2 {
 			k, v := ob.Content[j], unalias(ob.Content[j+1])
-			if sensitiveFields[k.Value] && v.Kind == yaml.ScalarNode && !strings.HasPrefix(v.Value, SecretPrefix) {
+			if sensitiveFields[k.Value] && v.Kind == yaml.ScalarNode && !strings.HasPrefix(v.Value, SecretPrefix) && (k.Value != "encryption" || v.Value != "" && v.Value != "none") {
 				fn(JoinPath(prefix, k.Value), v)
 			}
 		}

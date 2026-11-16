@@ -125,7 +125,7 @@ func TestImportUnsupportedIsExplicitAndAtomic(t *testing.T) {
 		{"type", strings.Replace(sample, "type: socks5", "type: unsupported-protocol", 1), "import.protocol"},
 		{"pinning", strings.Replace(sample, "type: socks5", "type: socks5, tls: true, fingerprint: pinned", 1), "import.tls.certificate-pin"},
 		{"transport", strings.Replace(sample, "type: vless", "type: vless, network: quic", 1), "import.transport"},
-		{"VLESS encryption", strings.Replace(sample, "encryption: none", "encryption: encrypted", 1), "import.encryption"},
+		{"malformed VLESS encryption", strings.Replace(sample, "encryption: none", "encryption: encrypted", 1), "import.outbound.encryption"},
 		{"REALITY without TLS", strings.Replace(sample, "tls: true", "tls: false", 1), "import.tls"},
 		{"group", strings.Replace(sample, "type: select", "type: relay", 1), "import.group-type"},
 		{"filter", strings.Replace(sample, "type: select", "type: select, made-up: HK", 1), "import.unsupported-field"},

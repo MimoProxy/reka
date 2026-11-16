@@ -635,7 +635,8 @@ func specFor(o compile.Outbound) any {
 	}
 	if usesUpstreamOutbound(o) {
 		return sagernet.ProxySpec{
-			Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, Username: o.Username, Method: o.Method,
+			Encryption: o.Encryption,
+			Type:       o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, Username: o.Username, Method: o.Method,
 			TLS: tls(), Options: protocolOptions(o),
 		}
 	}
@@ -649,7 +650,7 @@ func specFor(o compile.Outbound) any {
 	case model.OutboundShadowsocks:
 		return sagernet.ShadowsocksSpec{Server: o.Server, Port: o.Port, Method: o.Method, Password: o.Password}
 	case model.OutboundVLESS:
-		return sagernet.VLESSSpec{Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls(), Options: protocolOptions(o)}
+		return sagernet.VLESSSpec{Encryption: o.Encryption, Server: o.Server, Port: o.Port, UUID: o.UUID, Flow: o.Flow, TLS: tls(), Options: protocolOptions(o)}
 	}
 	return sagernet.DirectSpec{}
 }
