@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/router"
@@ -11,7 +12,7 @@ import (
 )
 
 func GeodataFormat(kind string, data []byte) string {
-	if kind == "geoip" && bytes.Contains(data[max(0, len(data)-128*1024):], []byte("\xab\xcd\xefMaxMind.com")) {
+	if (kind == "geoip" || kind == "asn") && bytes.Contains(data[max(0, len(data)-128*1024):], []byte("\xab\xcd\xefMaxMind.com")) {
 		return "mmdb"
 	}
 	return "dat"
@@ -20,9 +21,23 @@ func GeodataFormat(kind string, data []byte) string {
 // Decode locked country MMDB assets into the same immutable IP index as DAT.
 // Both GeoIP2 country records and sing-geoip's scalar country records work.
 func decodeMMDB(code string, data []byte) ([]router.RuleSpec, error) {
+	return decodeNetworkDB("geoip", code, data)
+}
+func decodeASN(code string, data []byte) ([]router.RuleSpec, error) {
+	return decodeNetworkDB("asn", code, data)
+}
+func decodeNetworkDB(kind, code string, data []byte) ([]router.RuleSpec, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if code == "" || strings.Contains(code, "@") {
 		return nil, fmt.Errorf("MMDB requires one country code")
+	}
+	var wantedASN uint64
+	if kind == "asn" {
+		var e error
+		wantedASN, e = strconv.ParseUint(strings.TrimPrefix(code, "AS"), 10, 32)
+		if e != nil || wantedASN == 0 {
+			return nil, fmt.Errorf("invalid ASN; use 1–4294967295")
+		}
 	}
 	db, err := maxminddb.FromBytes(data)
 	if err != nil {
@@ -37,7 +52,7 @@ func decodeMMDB(code string, data []byte) ([]router.RuleSpec, error) {
 	count := 0
 	for networks.Next() {
 		count++
-		if count > MaxEntries {
+		if count > 8*MaxEntries {
 			return nil, fmt.Errorf("MMDB exceeds network budget")
 		}
 		var value any
@@ -59,7 +74,24 @@ func decodeMMDB(code string, data []byte) ([]router.RuleSpec, error) {
 				}
 			}
 		}
-		if !strings.EqualFold(country, code) {
+		matches := strings.EqualFold(country, code)
+		if kind == "asn" {
+			record, ok := value.(map[string]any)
+			matches = false
+			if ok {
+				switch n := record["autonomous_system_number"].(type) {
+				case uint64:
+					matches = n == wantedASN
+				case uint32:
+					matches = uint64(n) == wantedASN
+				case uint:
+					matches = uint64(n) == wantedASN
+				case int:
+					matches = n > 0 && uint64(n) == wantedASN
+				}
+			}
+		}
+		if !matches {
 			continue
 		}
 		ip, ok := netip.AddrFromSlice(network.IP)
@@ -76,13 +108,16 @@ func decodeMMDB(code string, data []byte) ([]router.RuleSpec, error) {
 		if bits < 0 || bits > ip.BitLen() {
 			return nil, fmt.Errorf("invalid MMDB prefix")
 		}
+		if len(prefixes) >= MaxEntries {
+			return nil, fmt.Errorf("matched MMDB prefixes exceed budget")
+		}
 		prefixes = append(prefixes, netip.PrefixFrom(ip, bits).Masked().String())
 	}
 	if err = networks.Err(); err != nil {
 		return nil, err
 	}
 	if len(prefixes) == 0 {
-		return nil, fmt.Errorf("country code not present in MMDB")
+		return nil, fmt.Errorf("selector not present in MMDB")
 	}
 	return checked([]router.RuleSpec{{Kind: router.KindIPCIDR, Values: prefixes}})
 }

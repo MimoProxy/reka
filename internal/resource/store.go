@@ -12,7 +12,7 @@ import (
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
-const MaxSize = 16 << 20
+const MaxSize = 128 << 20
 
 var hashRE = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var ErrCorrupt = errors.New("resource: missing, oversized or corrupt blob")

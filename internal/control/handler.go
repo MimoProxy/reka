@@ -456,6 +456,7 @@ func capabilities(svc *service.Service) Capabilities {
 	for _, k := range router.Kinds() {
 		conds = append(conds, k.String())
 	}
+	conds = append(conds, "geosite", "ip-asn")
 	modes := []string{"off"}
 	var stacks []string
 	switch goruntime.GOOS {

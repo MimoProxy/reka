@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
@@ -29,6 +30,32 @@ type ruleCompiler struct {
 }
 
 func (r *ruleCompiler) condition(m model.Match, depth int) (router.RuleSpec, error) {
+	if m.Kind == "geosite" || m.Kind == "ip-asn" || m.Kind == "geoip" && !(len(m.Values) == 1 && strings.EqualFold(m.Values[0], "LAN")) {
+		var children []router.RuleSpec
+		for _, value := range m.Values {
+			if m.Kind == "geoip" && strings.EqualFold(value, "LAN") {
+				children = append(children, router.RuleSpec{Kind: router.KindGeoIP, Values: []string{"LAN"}, NoResolve: m.NoResolve})
+				continue
+			}
+			kind := m.Kind
+			if kind == "ip-asn" {
+				kind = "asn"
+				value = strings.TrimPrefix(strings.ToUpper(value), "AS")
+			}
+			spec, err := r.resolve(router.RuleSpec{Kind: router.KindRuleSet, Values: []string{kind + ":" + strings.ToLower(value)}, NoResolve: m.NoResolve}, depth+1)
+			if err != nil {
+				return spec, err
+			}
+			children = append(children, spec)
+		}
+		if len(children) == 0 {
+			return router.RuleSpec{}, errors.New("geodata condition requires values")
+		}
+		if len(children) == 1 {
+			return children[0], nil
+		}
+		return router.RuleSpec{Kind: router.KindOr, Children: children}, nil
+	}
 	k, ok := router.ParseKind(m.Kind)
 	if !ok {
 		return router.RuleSpec{}, fmt.Errorf("unsupported condition %q", m.Kind)
@@ -79,6 +106,19 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 	}
 	def, ok := r.defs[id]
 	if !ok {
+		kind, code, found := strings.Cut(id, ":")
+		if found && (kind == "geoip" || kind == "geosite" || kind == "asn") {
+			for _, db := range r.c.profile.Geodata {
+				if db.ID == kind {
+					def = model.RuleSet{ID: id, Behavior: kind, Format: db.Format, Hash: db.Hash, Code: code}
+					r.defs[id] = def
+					ok = true
+					break
+				}
+			}
+		}
+	}
+	if !ok {
 		return compiledResource{}, fmt.Errorf("unknown rule-set %q", id)
 	}
 	r.visiting[id] = true
@@ -99,8 +139,8 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 				return compiledResource{}, errors.New("rule resource hash mismatch")
 			}
 			r.bytes += len(data)
-			if r.bytes > rulesdata.MaxExpanded {
-				return compiledResource{}, errors.New("total rule resource bytes exceed 64 MiB")
+			if r.bytes > 384<<20 {
+				return compiledResource{}, errors.New("total rule resource bytes exceed 384 MiB")
 			}
 			r.blobs[def.Hash] = data
 		}
@@ -160,18 +200,60 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 	if err != nil {
 		return compiledResource{}, err
 	}
+	fingerprintDefinition := def
+	fingerprintDefinition.Download = nil
 	b, _ := json.Marshal(struct {
 		Definition model.RuleSet
 		Specs      []router.RuleSpec
-	}{def, specs})
+	}{fingerprintDefinition, specs})
 	sum := sha256.Sum256(b)
 	v := compiledResource{set, hex.EncodeToString(sum[:])}
 	r.done[id] = v
 	return v, nil
 }
 func (c *compiler) prepareRuleResources() *ruleCompiler {
+	if c.ruleResources != nil {
+		return c.ruleResources
+	}
 	r := &ruleCompiler{c: c, defs: map[string]model.RuleSet{}, done: map[string]compiledResource{}, visiting: map[string]bool{}, blobs: map[string][]byte{}}
+	c.ruleResources = r
+	seenDB := map[string]bool{}
+	for _, db := range c.profile.Geodata {
+		path := model.JoinPath("/geodata", db.ID)
+		if seenDB[db.ID] {
+			c.errorf(model.DocProfile, path, "geodata.duplicate", "duplicate database kind")
+		}
+		seenDB[db.ID] = true
+		if err := validateDownload(db.Download); err != nil {
+			c.errorf(model.DocProfile, path, "resource.download", "%s", err)
+		}
+		if !resource.ValidHash(db.Hash) || c.opts.ReadResource == nil {
+			c.errorf(model.DocProfile, path, "geodata.resource", "locked database required")
+			continue
+		}
+		data, err := c.opts.ReadResource(db.Hash)
+		if err == nil && resource.Hash(data) != db.Hash {
+			err = errors.New("database hash mismatch")
+		}
+		if err == nil {
+			err = rulesdata.ValidateDatabase(db.ID, db.Format, data)
+		}
+		if err != nil {
+			c.errorf(model.DocProfile, path, "geodata.resource", "%s", err)
+			continue
+		}
+		if r.blobs[db.Hash] == nil {
+			r.blobs[db.Hash] = data
+			r.bytes += len(data)
+		}
+	}
+	if r.bytes > 384<<20 {
+		c.errorf(model.DocProfile, "/geodata", "geodata.limit", "total resources exceed 384 MiB")
+	}
 	for i, def := range c.profile.RuleSets {
+		if err := validateDownload(def.Download); err != nil {
+			c.errorf(model.DocProfile, model.JoinPath("/rule-sets", def.ID), "resource.download", "%s", err)
+		}
 		path := model.JoinPath("/rule-sets", seg(def.ID, i))
 		if !idRE.MatchString(def.ID) && !c.scopedIDs[def.ID] {
 			c.errorf(model.DocProfile, path, "rule-set.id", "invalid rule-set ID")
@@ -392,4 +474,18 @@ func (c *compiler) validateSubRules(rc *ruleCompiler, eff *Effective) {
 	for _, b := range c.profile.SubRules {
 		check(b.Rules, model.JoinPath("/sub-rules", b.ID, "rules"))
 	}
+}
+
+func validateDownload(d *model.ResourceDownload) error {
+	if d == nil {
+		return nil
+	}
+	u, err := url.Parse(d.URL)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
+		return errors.New("download URL must be HTTP(S) without embedded credentials")
+	}
+	if d.Interval < 300 || d.Interval > 604800 {
+		return errors.New("resource update interval must be 300–604800 seconds")
+	}
+	return nil
 }

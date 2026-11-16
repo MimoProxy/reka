@@ -10,16 +10,23 @@ import (
 	"unicode/utf8"
 
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/router"
 	"go.yaml.in/yaml/v3"
 )
 
-const MaxExpanded = 64 << 20
+const MaxExpanded = 128 << 20
 const MaxEntries = 1_000_000
 
 func Decode(behavior, format, code string, data []byte) ([]router.RuleSpec, error) {
-	if len(data) == 0 || len(data) > model.MaxDocumentSize {
+	if len(data) == 0 || len(data) > resource.MaxSize {
 		return nil, errors.New("resource size outside limit")
+	}
+	if behavior == "asn" {
+		if format != "mmdb" {
+			return nil, errors.New("ASN requires MMDB")
+		}
+		return decodeASN(code, data)
 	}
 	if behavior == "geoip" || behavior == "geosite" {
 		if behavior == "geoip" && format == "mmdb" {
@@ -136,7 +143,7 @@ func classicalCondition(r router.RuleSpec) bool {
 	if r.Kind == router.KindMatch {
 		return false
 	}
-	if r.Kind == router.KindRuleSet && !strings.HasPrefix(r.Values[0], "geoip:") && !strings.HasPrefix(r.Values[0], "geosite:") {
+	if r.Kind == router.KindRuleSet && !strings.HasPrefix(r.Values[0], "geoip:") && !strings.HasPrefix(r.Values[0], "geosite:") && !strings.HasPrefix(r.Values[0], "asn:") {
 		return false
 	}
 	for _, ch := range r.Children {

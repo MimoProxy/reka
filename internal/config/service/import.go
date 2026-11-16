@@ -59,7 +59,7 @@ func (s *Service) convertImport(req importer.Request) (importer.Result, error) {
 	if len(req.ProviderResources) == 0 && len(req.GeodataResources) == 0 {
 		return importer.Import(req), nil
 	}
-	if len(req.ProviderResources) > 1024 || len(req.GeodataResources) > 2 {
+	if len(req.ProviderResources) > 1024 || len(req.GeodataResources) > 3 {
 		return importer.Result{}, fmt.Errorf("too many import resources")
 	}
 	providers, err := importer.Providers(req)
@@ -88,8 +88,8 @@ func (s *Service) convertImport(req importer.Request) (importer.Result, error) {
 			return nil, fmt.Errorf("resource is missing or corrupt")
 		}
 		total += len(data)
-		if total > 32<<20 {
-			return nil, fmt.Errorf("import resource bundle exceeds 32 MiB")
+		if total > 384<<20 {
+			return nil, fmt.Errorf("import resource bundle exceeds 384 MiB")
 		}
 		seen[hash] = data
 		return data, nil
@@ -116,8 +116,8 @@ func (s *Service) convertImport(req importer.Request) (importer.Result, error) {
 		payloads[id] = data
 	}
 	for key, hash := range req.GeodataResources {
-		if key != "geoip" && key != "geosite" {
-			return importer.Result{}, fmt.Errorf("geodata key must be geoip or geosite")
+		if key != "geoip" && key != "geosite" && key != "asn" {
+			return importer.Result{}, fmt.Errorf("geodata key must be geoip, geosite or asn")
 		}
 		data, err := read(hash)
 		if err != nil {

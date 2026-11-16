@@ -9,17 +9,18 @@ const SchemaVersion = 1
 
 // Profile is the user's main configuration document.
 type Profile struct {
-	Process       *Process   `yaml:"process"`
-	Routing       *Routing   `yaml:"routing"`
-	Sniff         *Sniff     `yaml:"sniff"`
-	DNS           *RD.Config `yaml:"dns"`
-	SchemaVersion int        `yaml:"schema-version"`
-	Imports       []Import   `yaml:"imports"`
-	Outbounds     []Outbound `yaml:"outbounds"`
-	Groups        []Group    `yaml:"groups"`
-	Rules         []Rule     `yaml:"rules"`
-	RuleSets      []RuleSet  `yaml:"rule-sets"`
-	SubRules      []SubRules `yaml:"sub-rules"`
+	Geodata       []GeoDatabase `yaml:"geodata"`
+	Process       *Process      `yaml:"process"`
+	Routing       *Routing      `yaml:"routing"`
+	Sniff         *Sniff        `yaml:"sniff"`
+	DNS           *RD.Config    `yaml:"dns"`
+	SchemaVersion int           `yaml:"schema-version"`
+	Imports       []Import      `yaml:"imports"`
+	Outbounds     []Outbound    `yaml:"outbounds"`
+	Groups        []Group       `yaml:"groups"`
+	Rules         []Rule        `yaml:"rules"`
+	RuleSets      []RuleSet     `yaml:"rule-sets"`
+	SubRules      []SubRules    `yaml:"sub-rules"`
 	// Listeners and Log may also be set in the profile; local settings
 	// override them on each machine.
 	Listeners []Listener `yaml:"listeners"`
@@ -278,13 +279,14 @@ type Control struct {
 
 // RuleSet pins external bytes or carries explicit inline condition entries.
 type RuleSet struct {
-	ID         string          `yaml:"id"`
-	Behavior   string          `yaml:"behavior"`
-	Format     string          `yaml:"format"`
-	Hash       string          `yaml:"hash"`
-	Code       string          `yaml:"code"`
-	Entries    []Match         `yaml:"entries"`
-	References []RuleReference `yaml:"references"`
+	Download   *ResourceDownload `yaml:"download"`
+	ID         string            `yaml:"id"`
+	Behavior   string            `yaml:"behavior"`
+	Format     string            `yaml:"format"`
+	Hash       string            `yaml:"hash"`
+	Code       string            `yaml:"code"`
+	Entries    []Match           `yaml:"entries"`
+	References []RuleReference   `yaml:"references"`
 }
 type SubRules struct {
 	ID    string `yaml:"id"`
@@ -392,4 +394,19 @@ type SSPlugin struct {
 	FastOpen    bool                 `yaml:"fast-open"`
 	Version     int                  `yaml:"version"`
 	Password    string               `yaml:"password"`
+}
+
+// ResourceDownload is client-managed refresh metadata; hashes remain authoritative.
+type ResourceDownload struct {
+	URL       string `yaml:"url"`
+	Interval  int    `yaml:"interval"`
+	Automatic bool   `yaml:"automatic"`
+}
+
+// GeoDatabase pins a complete database, independently of the rules selecting it.
+type GeoDatabase struct {
+	ID       string            `yaml:"id"`
+	Format   string            `yaml:"format"`
+	Hash     string            `yaml:"hash"`
+	Download *ResourceDownload `yaml:"download"`
 }

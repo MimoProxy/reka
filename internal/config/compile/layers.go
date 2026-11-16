@@ -117,7 +117,7 @@ func (c *compiler) layers(profile []byte) {
 		if src.Lock != nil {
 			seen := map[string]bool{}
 			rootFound := false
-			if !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > 19 {
+			if !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > 20 {
 				addDiag(model.DocSources, path+"/lock", "source.lock", "invalid resource lock", spos)
 			}
 			for _, lock := range src.Lock.Resources {
