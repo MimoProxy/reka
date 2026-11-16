@@ -51,6 +51,7 @@ struct ContentView: View {
                 Section { ForEach([Page.connections, .revisions, .logs, .about]) { row($0) } }
             }
             .listStyle(.sidebar)
+            .listItemTint(.monochrome)
             .environment(\.sidebarRowSize, .large)
             .toolbar(removing: .sidebarToggle)
             .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 240)
