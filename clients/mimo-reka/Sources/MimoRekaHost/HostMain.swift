@@ -171,9 +171,9 @@ final class RuntimeHost {
             defer { close(input) }
             var resource = stat()
             guard fstat(input, &resource) == 0, resource.st_uid == owner, (resource.st_mode & S_IFMT) == S_IFREG,
-                  resource.st_mode & 0o077 == 0, resource.st_size >= 0, resource.st_size <= 64 * 1024 * 1024 else { throw HostFailure.invalid("invalid immutable resource ownership or size") }
+                  resource.st_mode & 0o077 == 0, resource.st_size >= 0, resource.st_size <= 128 * 1024 * 1024 else { throw HostFailure.invalid("invalid immutable resource ownership or size") }
             total += resource.st_size
-            guard total <= 128 * 1024 * 1024 else { throw HostFailure.invalid("immutable resources exceed migration bound") }
+            guard total <= 512 * 1024 * 1024 else { throw HostFailure.invalid("immutable resources exceed migration bound") }
             let inputHandle = FileHandle(fileDescriptor: input, closeOnDealloc: false)
             let bytes = try inputHandle.readToEnd() ?? Data()
             guard SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == name else { throw HostFailure.invalid("immutable resource digest mismatch") }

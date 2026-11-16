@@ -40,7 +40,7 @@ struct RulesDNSView: View {
                         Button("插入来源规则块") { editing = RuleEditRequest(record: nil, sourceMarker: true) }
                             .disabled(store.sources.isEmpty)
                         if supports("GetRules") { Button("查看实际生效规则") { showingEffective = true } }
-                        if supports("StageResource") { Button("管理规则集资源…") { showingResources = true } }
+                        if supports("StageResource") { Button("规则集与数据库…") { showingResources = true } }
                         Divider()
                         Button("高级 YAML 编辑") { store.editingLayer = .profile }
                         Button("查看用户覆盖") { store.editingLayer = .overlay }
@@ -69,7 +69,13 @@ struct RulesDNSView: View {
                 DiagnosticsSheet(store: store, initialSection: diagnostics ?? "route")
             }
             .sheet(isPresented: $showingEffective) { EffectiveRulesSheet(store: store) }
-            .sheet(isPresented: $showingResources) { RuleResourcesSheet(store: store) }
+            .sheet(isPresented: $showingResources) {
+                VStack(spacing: 0) {
+                    ManagedResourcesView(store: store, search: "")
+                    Divider()
+                    HStack { Spacer(); Button("完成") { showingResources = false }.keyboardShortcut(.cancelAction) }.padding(16)
+                }.frame(width: 900, height: 720)
+            }
             .confirmationDialog("删除这条规则？", isPresented: $confirmingDelete, presenting: deletingRule) { rule in
                 Button("删除规则", role: .destructive) {
                     Task { await store.removeRule(rule, baseRevision: deletionRevision, save: true) }
@@ -79,7 +85,7 @@ struct RulesDNSView: View {
                 Text("\(matchTitle(rule)) → \(targetTitle(rule))。删除后，新连接将继续匹配后面的规则。")
             }
             .task(id: store.isOnline) {
-                if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "rule" {
+                if store.isOnline, ["rule", "rule-asn"].contains(ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] ?? "") {
                     editing = RuleEditRequest(record: nil)
                 }
                 if store.isOnline {

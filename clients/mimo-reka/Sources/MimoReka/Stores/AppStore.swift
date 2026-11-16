@@ -9,6 +9,7 @@ final class AppStore {
     var kernelVersion = "Reka"
     var startupPhase = "未启动"
     var operations = LiveOperationsState()
+    var resourceUpdates = ManagedResourceState()
     var profiles: [ClientProfile]
     var activeProfileID: UUID
     var isBusy = false
@@ -332,8 +333,11 @@ final class AppStore {
             }
             if mode != "off", !self.kernel.isPrivileged {
                 let reveal = try await self.client.call("GetConfiguration", params: ["reveal": .bool(true)])
+                self.resourceUpdates.downloader?.cancel()
                 self.operations.reset()
-                try await self.kernel.promote(configuration: reveal)
+                let manifest = try await self.client.call("ExportManifest", params: ["base_revision": reveal["revision"]])
+                let hashes = Set((manifest["resources"].arrayValue ?? []).compactMap { $0["hash"].stringValue })
+                try await self.kernel.promote(configuration: reveal, resourceHashes: hashes)
                 // Promotion changes the control socket immediately. Keep stop
                 // and recovery usable even if catalog persistence later fails.
                 self.rebuildController()
@@ -443,11 +447,13 @@ final class AppStore {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled, let self else { return }
                 await self.refresh(silent: true)
+                await self.refreshResourcesIfDue()
             }
         }
     }
 
     private func stopCurrentRuntime() async throws {
+        resourceUpdates.downloader?.cancel()
         if kernel.isRunning {
             let config = try await client.call("GetConfiguration")
             if let mode = config["effective"]["network"]["mode"].stringValue, mode != "off" {

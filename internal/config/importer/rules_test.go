@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -85,5 +86,27 @@ rules: ['AND,((RULE-SET,sites),(NETWORK,TCP)),REJECT', 'GEOIP,CN,DIRECT,no-resol
 	}
 	if bad := ImportBundle(req, payloads, map[string][]byte{"geoip": []byte{0xff}, "geosite": geo["geosite"]}); bad.Report.CanApply {
 		t.Fatal("corrupt geo accepted")
+	}
+}
+
+func TestImportedASNUsesExplicitDatabase(t *testing.T) {
+	req := request("rules: ['IP-ASN,13335,REJECT,no-resolve','MATCH,DIRECT']")
+	data, err := os.ReadFile("../../../testdata/rules/asn.mmdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := ImportBundle(req, nil, nil); result.Report.CanApply {
+		t.Fatal("missing ASN database accepted")
+	}
+	result := ImportBundle(req, nil, map[string][]byte{"asn": data})
+	if !result.Report.CanApply {
+		t.Fatal(result.Report)
+	}
+	eff, ds := compile.Compile([]byte("schema-version: 1\nrules: [{source: airport}]"), nil, compile.Options{Sources: []byte(result.Preview(true).Sources), ReadResource: func(h string) ([]byte, error) { return data, nil }})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if got := eff.Router.Route(context.Background(), router.Metadata{Addr: netip.MustParseAddr("192.0.2.42")}, nil); got.Outbound != "reject" {
+		t.Fatal(got)
 	}
 }

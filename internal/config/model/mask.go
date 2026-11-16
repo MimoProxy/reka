@@ -163,6 +163,17 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	if groups, err := child(root, "groups", false, 0); err == nil {
 		groupSecrets(groups, "/groups")
 	}
+	for _, collection := range []string{"rule-sets", "geodata"} {
+		if values, e := child(root, collection, false, 0); e == nil && unalias(values).Kind == yaml.SequenceNode {
+			for i, item := range unalias(values).Content {
+				if download, e := child(item, "download", false, 0); e == nil {
+					if u, e := child(download, "url", false, 0); e == nil {
+						urlValue(u, JoinPath("/"+collection, ElementSegment(item, i), "download", "url"), false)
+					}
+				}
+			}
+		}
+	}
 	obs, _ := child(root, "outbounds", false, 0)
 	list(obs, "/outbounds")
 	if sources, err := child(root, "sources", false, 0); err == nil && unalias(sources).Kind == yaml.SequenceNode {

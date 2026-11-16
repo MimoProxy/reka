@@ -14,8 +14,8 @@ struct NativeBackup: Codable {
 }
 
 enum BackupService {
-    static let maximumResourceBytes = 64 * 1024 * 1024
-    static let maximumFileBytes = 192 * 1024 * 1024
+    static let maximumResourceBytes = 512 * 1024 * 1024
+    static let maximumFileBytes = 768 * 1024 * 1024
     static func export(client: RekaControlClient, name: String, sourceNames: [String: String], progress: @Sendable (String) async -> Void = { _ in }) async throws -> NativeBackup {
         let manifest = try await client.call("ExportManifest", params: ["reveal": .bool(true)])
         guard manifest["schema_version"].intValue == 1, let revision = manifest["revision"].intValue, manifest["masked"].intValue == 0 else { throw ClientError.message("内核没有返回可恢复的备份清单。") }
@@ -29,9 +29,9 @@ enum BackupService {
         var resources: [String: Data] = [:], total = 0
         for (index, descriptor) in descriptors.enumerated() {
             guard let hash = descriptor["hash"].stringValue, validHash(hash), let size = descriptor["size"].intValue,
-                  (0...16 * 1024 * 1024).contains(size), resources[hash] == nil else { throw ClientError.message("备份资源清单无效。") }
+                  (0...ResourceLimits.fileBytes).contains(size), resources[hash] == nil else { throw ClientError.message("备份资源清单无效。") }
             total += size
-            guard total <= maximumResourceBytes else { throw ClientError.message("备份资源合计不能超过 64 MiB。") }
+            guard total <= maximumResourceBytes else { throw ClientError.message("备份资源合计不能超过 512 MiB。") }
             await progress("读取资源 \(index + 1)/\(descriptors.count)")
             var data = Data()
             repeat {
@@ -74,7 +74,7 @@ enum BackupService {
         }
         for (hash, bytes) in value.resources {
             size += bytes.count
-            guard validHash(hash), bytes.count <= 16 * 1024 * 1024, size <= maximumResourceBytes, digest(bytes) == hash else { throw ClientError.message("备份资源损坏或超过大小限制。") }
+            guard validHash(hash), bytes.count <= ResourceLimits.fileBytes, size <= maximumResourceBytes, digest(bytes) == hash else { throw ClientError.message("备份资源损坏或超过大小限制。") }
         }
         return value
     }

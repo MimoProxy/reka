@@ -182,3 +182,21 @@ func TestLegacyPluginCredentialMaskingAndRetention(t *testing.T) {
 		}
 	}
 }
+
+func TestResourceDownloadURLsMaskAndRestore(t *testing.T) {
+	original := "schema-version: 1\ngeodata: [{id: geosite, format: dat, hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, download: {url: 'https://cdn.test/site?token=private-resource-token', interval: 86400, automatic: true}}]\n"
+	base, ds := LoadDoc(DocProfile, []byte(original))
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	masked, _ := LoadDoc(DocProfile, []byte(original))
+	if masked.MaskSecrets() == 0 || strings.Contains(string(masked.Bytes()), "private-resource-token") {
+		t.Fatal("resource URL credential leaked")
+	}
+	if err := masked.UnmaskSecrets(base); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(masked.Bytes()), "private-resource-token") {
+		t.Fatal("masked download URL not restored")
+	}
+}

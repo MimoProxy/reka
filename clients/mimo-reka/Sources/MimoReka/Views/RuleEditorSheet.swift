@@ -14,6 +14,7 @@ struct RuleEditorSheet: View {
         self.record = record
         var initial = RuleDraft(definition: record?.definition ?? [:], sourceMarker: sourceMarker)
         if initial.isSourceMarker && initial.sourceMarker.isEmpty { initial.sourceMarker = store.sources.first?.id ?? "" }
+        if record == nil, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "rule-asn" { initial.condition = "ip-asn"; initial.valuesText = "13335" }
         draft = initial
         baseRevision = store.revision
     }
@@ -122,6 +123,10 @@ struct RuleEditorSheet: View {
                     TextEditor(text: $draft.valuesText).trackEditor().frame(minHeight: 80, maxHeight: 140)
                         .accessibilityLabel("规则匹配值")
                     Text("例如：\(RuleDraft.example(draft.condition))").font(.caption).foregroundStyle(.tertiary)
+                    if ["geoip", "geosite", "ip-asn"].contains(draft.condition) {
+                        Text("GeoIP 的 LAN 无需数据库；其他国家、站点分类与 ASN 请先在侧栏“规则集与数据库”下载对应数据库。保存时会检查分类是否存在。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if draft.supportsNoResolve { Toggle("不额外解析域名（no-resolve）", isOn: $draft.noResolve) }
                 }
             }

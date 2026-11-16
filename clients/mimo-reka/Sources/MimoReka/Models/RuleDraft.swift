@@ -47,7 +47,7 @@ struct RuleDraft: Equatable {
         !Self.simpleConditions.contains(originalCondition) || ["and", "or", "not"].contains(originalCondition)
     }
     var preservesComplexMatch: Bool { hasComplexMatch && !replaceComplexMatch }
-    var supportsNoResolve: Bool { ["ip-cidr", "geoip", "rule-set"].contains(condition) }
+    var supportsNoResolve: Bool { ["ip-cidr", "geoip", "ip-asn", "rule-set"].contains(condition) }
 
     func definition() throws -> [String: JSONValue] {
         var result = originalDefinition
@@ -96,7 +96,7 @@ struct RuleDraft: Equatable {
         return result
     }
 
-    static let simpleConditions = ["domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern", "ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "process-name-wildcard", "process-path", "process-path-regex", "process-path-wildcard", "uid", "in-name", "in-type", "in-port", "in-user", "rule-set", "geoip", "all"]
+    static let simpleConditions = ["domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern", "ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "process-name-wildcard", "process-path", "process-path-regex", "process-path-wildcard", "uid", "in-name", "in-type", "in-port", "in-user", "rule-set", "geoip", "geosite", "ip-asn", "all"]
     static func title(_ condition: String) -> String {
         switch condition {
         case "domain": "完整域名"
@@ -121,7 +121,9 @@ struct RuleDraft: Equatable {
         case "in-port": "入口监听端口"
         case "in-user": "入口认证用户"
         case "rule-set": "规则集"
-        case "geoip": "本地网络分类"
+        case "geoip": "GeoIP · 国家或 LAN"
+        case "geosite": "GeoSite · 站点分类"
+        case "ip-asn": "ASN · 自治系统"
         case "all": "全部流量（MATCH）"
         default: condition
         }
@@ -147,7 +149,9 @@ struct RuleDraft: Equatable {
         case "in-port": "17891\n18000-18100"
         case "in-user": "Alice"
         case "rule-set": "规则集 ID"
-        case "geoip": "LAN"
+        case "geoip": "CN\nLAN"
+        case "geosite": "cn\ncategory-ads-all"
+        case "ip-asn": "13335\nAS15169"
         default: ""
         }
     }

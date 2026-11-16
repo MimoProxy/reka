@@ -137,7 +137,7 @@ func TestSubscriptionChangingIntervalAndBundleBudget(t *testing.T) {
 		t.Fatal("new interval ignored", err, count.Load())
 	}
 	limit := f.Batch(nil, true)
-	limit.Bytes = 32 << 20
+	limit.Bytes = 384 << 20
 	if _, err := limit.Inline("extra", "proxy", "extra", []byte("x")); Code(err) != "bundle_too_large" {
 		t.Fatal("bundle limit", err)
 	}

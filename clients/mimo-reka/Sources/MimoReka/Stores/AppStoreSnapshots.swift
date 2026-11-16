@@ -2,6 +2,7 @@ import Foundation
 
 extension AppStore {
     func loadSnapshot(force: Bool = false) async throws {
+        resourceUpdates.load(profile: activeProfileID, home: homeURL)
         var status = try await client.call("GetStatus")
         let startError = status["start_error"].stringValue ?? ""
         let reportedRevision = status["revision"].intValue ?? 0

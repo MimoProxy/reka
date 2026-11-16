@@ -27,7 +27,7 @@ func ImportBundle(req Request, payloads, geodata map[string][]byte) Result {
 	refs := map[string]bool{}
 	var collect func(router.RuleSpec)
 	collect = func(r router.RuleSpec) {
-		if r.Kind == router.KindRuleSet && len(r.Values) == 1 && (strings.HasPrefix(r.Values[0], "geoip:") || strings.HasPrefix(r.Values[0], "geosite:")) {
+		if r.Kind == router.KindRuleSet && len(r.Values) == 1 && (strings.HasPrefix(r.Values[0], "geoip:") || strings.HasPrefix(r.Values[0], "geosite:") || strings.HasPrefix(r.Values[0], "asn:")) {
 			refs[r.Values[0]] = true
 		}
 		for _, ch := range r.Children {

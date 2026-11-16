@@ -47,7 +47,7 @@ final class KernelProcess {
 
     /// Explicitly promotes the current four documents into a private root
     /// runtime. The old user state remains an untouched rollback archive.
-    func promote(configuration: JSONValue) async throws {
+    func promote(configuration: JSONValue, resourceHashes: Set<String>? = nil) async throws {
         guard !isPrivileged else { return }
         guard configuration["effective"]["network"]["mode"].stringValue == "off" else { throw RekaControlError.transport("请先关闭当前网络接管，再授权网络模式。") }
         var documents: [String: String] = [:]
@@ -60,7 +60,7 @@ final class KernelProcess {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let staging = directory.appendingPathComponent("bootstrap.json")
-        let resources = try stageResources(into: directory)
+        let resources = try stageResources(into: directory, allowed: resourceHashes)
         let bundle: [String: Any] = ["documents": documents, "resources": resources]
         try JSONSerialization.data(withJSONObject: bundle, options: [.sortedKeys]).write(to: staging, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
@@ -218,10 +218,12 @@ final class KernelProcess {
     private func appendLog(_ text: String) { logText.append(text); if logText.utf8.count > 131_072 { logText = String(logText.suffix(96_000)) } }
     /// Copy only authenticated immutable resource blobs, never arbitrary files
     /// referenced by foreign configurations. Root verifies every digest again.
-    private func stageResources(into directory: URL) throws -> [String] {
+    private func stageResources(into directory: URL, allowed: Set<String>?) throws -> [String] {
         let manager = FileManager.default
         let source = stateRoot.appendingPathComponent("resources/sha256", isDirectory: true)
-        guard manager.fileExists(atPath: source.path) else { return [] }
+        guard manager.fileExists(atPath: source.path) else {
+            guard allowed?.isEmpty != false else { throw RekaControlError.transport("缺少配置引用的资源，无法授权迁移。") }; return []
+        }
         let destination = directory.appendingPathComponent("sha256", isDirectory: true)
         try manager.createDirectory(at: destination, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         var names: [String] = [], total = 0
@@ -231,7 +233,7 @@ final class KernelProcess {
             let attributes = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard attributes.isRegularFile == true, attributes.isSymbolicLink != true else { throw RekaControlError.transport("资源缓存包含非普通文件，无法安全迁移。") }
             total += attributes.fileSize ?? 0
-            guard total <= 128 * 1024 * 1024 else { throw RekaControlError.transport("迁移资源超过 128 MiB，请使用新的精简配置后授权。") }
+            guard total <= 512 * 1024 * 1024 else { throw RekaControlError.transport("迁移资源超过 512 MiB，请使用新的精简配置后授权。") }
             let data = try Data(contentsOf: file)
             let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             guard digest == name else { throw RekaControlError.transport("资源缓存校验失败，未修改当前运行配置。") }
@@ -240,6 +242,7 @@ final class KernelProcess {
             try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
             names.append(name)
         }
+        if let allowed, Set(names) != allowed { throw RekaControlError.transport("配置引用的资源不完整，无法授权迁移。") }
         return names.sorted()
     }
     private func coreExecutable() throws -> URL {

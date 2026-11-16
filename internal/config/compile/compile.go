@@ -192,15 +192,16 @@ func (e *Effective) Outbound(id string) (Outbound, bool) {
 }
 
 type compiler struct {
-	origins      map[string]Origin
-	scopedIDs    map[string]bool
-	sourceHashes map[string]string
-	opts         Options
-	diags        model.Diagnostics
-	ppos         model.Positions
-	lpos         model.Positions
-	profile      *model.Profile
-	local        *model.LocalSettings
+	ruleResources *ruleCompiler
+	origins       map[string]Origin
+	scopedIDs     map[string]bool
+	sourceHashes  map[string]string
+	opts          Options
+	diags         model.Diagnostics
+	ppos          model.Positions
+	lpos          model.Positions
+	profile       *model.Profile
+	local         *model.LocalSettings
 }
 
 func (c *compiler) add(sev model.Severity, doc, path, code, format string, args ...any) {

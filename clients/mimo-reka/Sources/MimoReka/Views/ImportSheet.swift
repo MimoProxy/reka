@@ -129,7 +129,7 @@ struct ImportSheet: View {
                             HStack {
                                 Picker("资源类型", selection: $item.kind) {
                                     Text("规则提供者").tag("rule-providers"); Text("节点提供者").tag("proxy-providers")
-                                    Text("GeoIP").tag("geoip"); Text("GeoSite").tag("geosite")
+                                    Text("GeoIP").tag("geoip"); Text("GeoSite").tag("geosite"); Text("ASN").tag("asn")
                                 }.labelsHidden().frame(width: 140)
                                 if !item.isGeodata { TextField("配置中的提供者名称", text: $item.name).textFieldStyle(.roundedBorder) }
                                 Text(item.filename).font(.caption).lineLimit(1).help("SHA-256: " + item.hash)
@@ -139,7 +139,7 @@ struct ImportSheet: View {
                     }
                 }.frame(maxHeight: attachments.isEmpty ? 0 : 100)
                 Button("添加资源文件…", systemImage: "paperclip") { choosingResource = true; showFilePicker = true }
-                Text("单个文件最多 16 MiB，合计最多 32 MiB。提供者名称必须与配置一致。")
+                Text("单个资源最多 128 MiB，合计最多 384 MiB。提供者名称必须与配置一致。")
                     .font(.caption2).foregroundStyle(.secondary)
             }.padding(.top, 8)
         }
@@ -148,9 +148,9 @@ struct ImportSheet: View {
     private func loadResource(_ file: URL) throws {
         let scoped = file.startAccessingSecurityScopedResource()
         defer { if scoped { file.stopAccessingSecurityScopedResource() } }
-        guard (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 16 * 1024 * 1024 else { throw ClientError.message("单个资源不能超过 16 MiB。") }
+        guard (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= ResourceLimits.fileBytes else { throw ClientError.message("单个资源不能超过 128 MiB。") }
         let bytes = try Data(contentsOf: file)
-        guard attachments.reduce(bytes.count, { $0 + $1.data.count }) <= 32 * 1024 * 1024 else { throw ClientError.message("资源合计不能超过 32 MiB。") }
+        guard attachments.reduce(bytes.count, { $0 + $1.data.count }) <= ResourceLimits.totalBytes else { throw ClientError.message("资源合计不能超过 384 MiB。") }
         attachments.append(ResourceAttachment(name: file.deletingPathExtension().lastPathComponent, filename: file.lastPathComponent, data: bytes))
     }
 

@@ -3,6 +3,7 @@ import AppKit
 
 enum Page: String, CaseIterable, Identifiable {
     case overview = "仪表盘", groups = "代理", rules = "规则与 DNS", profiles = "配置列表"
+    case resources = "规则集与数据库"
     case sources = "来源与订阅", connections = "连接", revisions = "配置历史", logs = "日志", about = "关于"
     var id: Self { self }
     var title: String { rawValue }
@@ -12,6 +13,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .groups: "arrow.triangle.branch"
         case .rules: "list.bullet.rectangle"
         case .profiles: "doc.text"
+        case .resources: "shippingbox"
         case .sources: "tray.and.arrow.down"
         case .connections: "network"
         case .revisions: "clock.arrow.circlepath"
@@ -26,6 +28,7 @@ enum Page: String, CaseIterable, Identifiable {
         case "groups", "proxies": .groups
         case "rules", "dns": .rules
         case "profiles": .profiles
+        case "resources", "geodata": .resources
         case "sources", "subscriptions": .sources
         case "connections": .connections
         case "revisions": .revisions
@@ -47,7 +50,7 @@ struct ContentView: View {
         NavigationSplitView {
             List(selection: $page) {
                 Section { row(.overview) }
-                Section { ForEach([Page.groups, .rules, .profiles, .sources]) { row($0) } }
+                Section { ForEach([Page.groups, .rules, .resources, .profiles, .sources]) { row($0) } }
                 Section { ForEach([Page.connections, .revisions, .logs, .about]) { row($0) } }
             }
             .listStyle(.sidebar)
@@ -114,6 +117,7 @@ struct ContentView: View {
         case .overview: DashboardView(store: store, navigate: { page = $0 })
         case .groups: ProxyBrowserView(store: store, search: search)
         case .profiles: ProfilesView(store: store, search: search)
+        case .resources: ManagedResourcesView(store: store, search: search)
         case .sources: SourcesView(store: store, search: search)
         case .rules: RulesDNSView(store: store, search: search)
         case .connections: ConnectionsView(store: store, search: search)

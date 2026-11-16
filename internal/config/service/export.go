@@ -11,7 +11,7 @@ import (
 )
 
 const maxExportResources = 1024
-const maxExportBytes = 128 << 20
+const maxExportBytes = 512 << 20
 
 // ExportManifest snapshots documents and immutable referenced blobs under one
 // revision. A caller must retry the backup if a later ReadResource conflicts.
@@ -34,7 +34,7 @@ func (s *Service) ExportManifest(req api.ExportManifestRequest) (api.ExportManif
 		}
 		total += len(data)
 		if total > maxExportBytes {
-			return result, errf(CodeBlocked, "export resources exceed 128 MiB")
+			return result, errf(CodeBlocked, "export resources exceed 512 MiB")
 		}
 		result.Resources = append(result.Resources, api.ExportResource{Hash: hash, Size: len(data)})
 	}
@@ -137,6 +137,11 @@ func exportReferences(profile, sources, overlay []byte) ([]string, error) {
 	o, _, od := model.ParseOverlay(overlay)
 	if pd.HasErrors() || sd.HasErrors() || od.HasErrors() {
 		return nil, errf(CodeInvalid, "cannot determine resource references from invalid documents")
+	}
+	for _, db := range p.Geodata {
+		if err := add(db.Hash); err != nil {
+			return nil, err
+		}
 	}
 	for _, rs := range p.RuleSets {
 		if err := add(rs.Hash); err != nil {

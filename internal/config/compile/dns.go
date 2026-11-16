@@ -65,6 +65,9 @@ func (c *compiler) dns(eff *Effective) {
 					value = def.ID
 				}
 			}
+			if value == "" {
+				value = pattern
+			}
 			kind = router.KindRuleSet
 		}
 		spec := router.RuleSpec{Kind: kind, Values: []string{value}, Target: "yes"}

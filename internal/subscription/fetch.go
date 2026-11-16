@@ -133,6 +133,10 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 	if !ValidURL(raw) {
 		return nil, failure("invalid_url")
 	}
+	limit := resource.MaxSize
+	if kind == "subscription" || kind == "proxy" {
+		limit = model.MaxDocumentSize
+	}
 	now := time.Now().UTC()
 	if b.f.Now != nil {
 		now = b.f.Now()
@@ -188,14 +192,14 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			}
 			data = cached
 		case http.StatusOK:
-			if response.ContentLength > resource.MaxSize {
+			if response.ContentLength > int64(limit) {
 				return nil, failure("body_too_large")
 			}
-			data, err = io.ReadAll(io.LimitReader(response.Body, resource.MaxSize+1))
+			data, err = io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 			if err != nil {
 				return nil, failure("body_read_failed")
 			}
-			if len(data) > resource.MaxSize {
+			if len(data) > limit {
 				return nil, failure("body_too_large")
 			}
 			if len(data) == 0 {
@@ -224,7 +228,7 @@ func (b *Batch) Inline(id, kind, name string, data []byte) ([]byte, error) {
 }
 func (b *Batch) record(id, kind, name string, data []byte, entry Entry) ([]byte, error) {
 	b.Bytes += len(data)
-	if b.Bytes > 32<<20 {
+	if b.Bytes > 384<<20 {
 		return nil, failure("bundle_too_large")
 	}
 	hash, err := b.f.Blobs.Put(data)
