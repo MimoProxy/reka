@@ -1,6 +1,6 @@
 # Mimo Reka for macOS
 
-沿用 Mimo 的界面与交互，以 Reka 1.0.0 为唯一代理内核的独立 macOS 客户端。最低 macOS 14。
+沿用 Mimo 的界面与交互，以 Reka 为唯一代理内核的独立 macOS 客户端。最低 macOS 14。
 
 ## 构建与打包
 
@@ -11,7 +11,20 @@
 ./clients/mimo-reka/script/build_and_run.sh --package
 ```
 
-产物：`clients/mimo-reka/dist/Mimo Reka.app` 和同目录 ZIP。构建优先使用 Xcode 工具链，不修改全局 `xcode-select`。Yams 源码随项目附带，构建不需要下载依赖；使用正式发行的 Reka 本机架构二进制。试用包使用本地 ad-hoc 签名，未公证。
+产物：`clients/mimo-reka/dist/Mimo Reka.app` 和同目录 ZIP。构建优先使用 Xcode 工具链，不修改全局 `xcode-select`。Yams 源码随项目附带，构建不需要下载依赖；从当前工作区源码以锁定依赖、正式构建参数生成本机架构内核，记录内核提交、源码 SHA-256 和许可证；可用 REKA_KERNEL_PATH 显式指定已验证内核。试用包使用本地 ad-hoc 签名，未公证。
+
+## 本轮新增
+
+- 独立节点/策略 HTTP 延迟测试，自定义地址与超时，不改变选择。
+- 本次内核运行累计流量和采样速率；重启按 epoch 重新采样。
+- 规则、全局、直连路由模式；全局出口明确选择，修改先预览。
+- HTTP/TLS/QUIC 有界嗅探，连接详情显示嗅探域名、协议及可用的进程信息。
+- 进程路径、通配符、UID、入口条件；路由解释与实际生效规则分页。
+- DNS 分范围查询、清缓存与空闲连接重置，保留 Fake IP 映射；并发上游数和过期缓存设置。
+- VLESS XHTTP、XMUX、独立下载端点、TLS/REALITY/ECH；监听认证用户。
+- 结构化日志筛选，以及规则集/provider/GeoIP/GeoSite 文件上传、校验与引用。
+
+所有会话以 `-defer-network` 待机启动，校验配置与持久化选组后保持接管关闭，由用户主动启用网络模式。上次未确认的网络提交不会在新会话自动执行，未知操作留档待核对。原本已关闭接管的错误配置仍提供控制接口供 GUI 修复。
 
 ## 独立运行
 
@@ -29,7 +42,7 @@
 
 节点导入默认严格转换来源中的节点、策略与规则，也可以主动选择仅导入节点；无法转换的内容会阻止激活。原文中的 DNS 需要明确配置使用，不会静默替换本机解析策略。完整导入的来源规则优先匹配，应在其实际引用的策略组中选择节点。订阅刷新和选组均由 Reka 的版本化事务完成，失败保留旧版本。
 
-仪表盘显示活动连接的上传与下载字节，进程内存使用 RSS；不将这些数据解释为累计流量、速率或真实物理内存。首版不展示独立测速、历史流量、MITM、模块和 Tailscale 控件。
+仪表盘显示活动连接的上传与下载字节，进程内存使用 RSS；不将这些数据解释为累计流量、速率或真实物理内存。累计流量仅限本次内核运行，不提供跨会话历史流量；不展示 MITM、模块和 Tailscale 控件。
 
 管理员授权会将四层配置与锁定的订阅资源复制到独立的 root 私有运行目录。已有 `secret://` 登录钥匙串引用不能直接迁移，应用会在停止原会话前明确拒绝。普通内联凭据配置可正常迁移；旧用户态版本仍保留为归档。网络授权配置后续启动需要重新授权。当前增强模式仅接管 IPv4，IPv6 不接管。
 
@@ -38,7 +51,7 @@
 ```sh
 MIMO_REKA_BIN_DIR="$(DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift build --package-path clients/mimo-reka --show-bin-path)"
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-MIMO_REKA_KERNEL_BINARY="$PWD/bin/releases/1.0.0/reka-1.0.0-darwin-arm64/reka" \
+MIMO_REKA_KERNEL_BINARY="$PWD/clients/mimo-reka/.build/core/reka" \
 MIMO_REKA_HOST_BINARY="$MIMO_REKA_BIN_DIR/MimoRekaHost" \
 MIMO_REKA_LISTEN_PORT=0 \
 xcrun swift test --package-path clients/mimo-reka

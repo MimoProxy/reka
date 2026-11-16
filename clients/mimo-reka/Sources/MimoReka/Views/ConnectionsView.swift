@@ -8,7 +8,7 @@ struct ConnectionsView: View {
     @State private var closeAll = false
 
     private var rows: [ConnectionRow] {
-        store.connections.filter { search.isEmpty || [$0.destination, $0.source, $0.outbound, $0.rule].contains { $0.localizedCaseInsensitiveContains(search) } }
+        store.connections.filter { search.isEmpty || [$0.destination, $0.source, $0.outbound, $0.rule, $0.sniffedDomain, $0.protocolName, $0.processPath].contains { $0.localizedCaseInsensitiveContains(search) } }
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -22,7 +22,7 @@ struct ConnectionsView: View {
             }
             Table(rows, selection: $selection) {
                 TableColumn("目标", value: \.destination).width(min: 160, ideal: 250)
-                TableColumn("协议", value: \.network).width(55)
+                TableColumn("协议") { row in Text(row.protocolName.isEmpty ? row.network : row.network + "/" + row.protocolName) }.width(80)
                 TableColumn("出口") { row in Text(store.displayName(row.outbound)) }.width(min: 90, ideal: 130)
                 TableColumn("上传") { row in Text(DisplayFormat.bytes(row.uploaded)).monospacedDigit() }.width(75)
                 TableColumn("下载") { row in Text(DisplayFormat.bytes(row.downloaded)).monospacedDigit() }.width(75)
@@ -40,6 +40,18 @@ struct ConnectionsView: View {
                     VStack(alignment: .trailing, spacing: 6) {
                         Text("出口链").font(.caption).foregroundStyle(.tertiary)
                         Text(selected.chain.map(store.displayName).joined(separator: " → ")).font(.callout).textSelection(.enabled)
+                    }
+                }.panel()
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("嗅探域名").font(.caption).foregroundStyle(.tertiary)
+                        Text(selected.sniffedDomain.isEmpty ? "未识别" : selected.sniffedDomain).font(.callout).textSelection(.enabled)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Text("进程归属").font(.caption).foregroundStyle(.tertiary)
+                        Text(selected.processPath.isEmpty ? "未获取" : selected.processPath).font(.callout).textSelection(.enabled).lineLimit(2)
+                        if let uid = selected.processUID { Text("UID \(uid)").font(.caption).foregroundStyle(.secondary) }
                     }
                 }.panel()
             }

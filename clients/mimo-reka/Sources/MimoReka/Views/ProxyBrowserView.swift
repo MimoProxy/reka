@@ -27,6 +27,10 @@ struct ProxyBrowserView: View {
                 if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "policy" {
                     editingPolicy = PolicyEditorRequest(groupID: current?.id)
                 }
+                if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "node",
+                   let node = store.outbounds.first(where: { !["direct", "reject"].contains($0.id) }) {
+                    editingNode = PolicyNodeEditRequest(nodeID: node.id)
+                }
             }
     }
 
@@ -64,14 +68,30 @@ struct ProxyBrowserView: View {
     @ViewBuilder private var memberList: some View {
         if let current {
             VStack(alignment: .leading, spacing: 16) {
+                DisclosureGroup("延迟测试设置") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("HTTP(S) 测试地址", text: Binding(get: { store.operations.probeURL }, set: { store.operations.probeURL = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                        Picker("超时", selection: Binding(get: { store.operations.probeTimeoutMS }, set: { store.operations.probeTimeoutMS = $0 })) {
+                            Text("3 秒").tag(3000); Text("5 秒").tag(5000); Text("10 秒").tag(10000); Text("30 秒").tag(30000)
+                        }.frame(maxWidth: 220)
+                        Text("测量 HTTP 请求延迟，不改变策略选择。").font(.caption).foregroundStyle(.secondary)
+                    }.padding(.top, 8)
+                }.disabled(!store.supportsMethod("ProbeOutbound"))
                 HStack {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(current.name).font(.title2.weight(.semibold))
                         Text("\(current.type) · \(current.members.count) 个选项").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button { Task { await store.probeOutbound(current.id) } } label: {
+                        Label("测试策略", systemImage: "speedometer")
+                    }.disabled(!store.isOnline || !store.supportsMethod("ProbeOutbound") || store.operations.probing.contains(current.id))
                     Button { editingPolicy = PolicyEditorRequest(groupID: current.id) } label: { Label("编辑", systemImage: "slider.horizontal.3") }
                         .buttonStyle(.borderless).help("可视化编辑策略组").disabled(!store.isOnline || store.isBusy)
+                }
+                if store.operations.probes[current.id] != nil || store.operations.probing.contains(current.id) {
+                    probeResult(current.id)
                 }
                 if current.type != "select" {
                     Label("由内核根据健康检查自动选择", systemImage: "waveform.path")
@@ -93,7 +113,8 @@ struct ProxyBrowserView: View {
     private func memberCard(_ id: String, group: PolicyGroup) -> some View {
         let selected = group.selected == id
         let outbound = store.outbounds.first { $0.id == id }
-        return Button {
+        return VStack(alignment: .leading, spacing: 7) {
+            Button {
             if group.type == "select" { Task { await store.select(group: group, member: id) } }
         } label: {
             VStack(alignment: .leading, spacing: 10) {
@@ -121,5 +142,29 @@ struct ProxyBrowserView: View {
                     Button("编辑策略组…") { editingPolicy = PolicyEditorRequest(groupID: id) }
                 }
             }
+            HStack(spacing: 6) {
+                probeResult(id)
+                Spacer(minLength: 0)
+                Button("测试", systemImage: "speedometer") { Task { await store.probeOutbound(id) } }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("测试 HTTP 请求延迟")
+                    .disabled(!store.isOnline || !store.supportsMethod("ProbeOutbound") || store.operations.probing.contains(id))
+            }.padding(.horizontal, 6)
+        }
+    }
+
+    @ViewBuilder private func probeResult(_ id: String) -> some View {
+        if store.operations.probing.contains(id) {
+            HStack(spacing: 5) { ProgressView().controlSize(.mini); Text("测试中…").font(.caption).foregroundStyle(.secondary) }
+        } else if let result = store.operations.probes[id] {
+            if let error = result.error {
+                Text("测试失败").font(.caption).foregroundStyle(.red).help(error)
+            } else if let delay = result.delayMS {
+                Text("\(delay) ms").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .help("HTTP 请求延迟 · \(result.checkedAt.formatted())" + (result.resolvedOutbound.map { " · " + store.displayName($0) } ?? ""))
+            }
+        } else {
+            Text("未测试").font(.caption).foregroundStyle(.tertiary)
+        }
     }
 }

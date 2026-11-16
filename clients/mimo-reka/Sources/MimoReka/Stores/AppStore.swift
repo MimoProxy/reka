@@ -6,6 +6,9 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class AppStore {
     var kernel: KernelProcess
+    var kernelVersion = "Reka"
+    var startupPhase = "未启动"
+    var operations = LiveOperationsState()
     var profiles: [ClientProfile]
     var activeProfileID: UUID
     var isBusy = false
@@ -119,12 +122,12 @@ final class AppStore {
         }
     }
 
-    func previewImport(data: String, format: String, nodesOnly: Bool, sourceName: String) async {
+    func previewImport(data: String, format: String, nodesOnly: Bool, sourceName: String, providerResources: [String: String] = [:], geodataResources: [String: String] = [:]) async {
         await perform {
             self.preparedChange = nil; self.importPreview = nil; self.pendingSourceName = nil
             let sourceID = "s-" + UUID().uuidString.lowercased()
             let result = try await self.configurationService.previewImport(data: data, format: format, nodesOnly: nodesOnly,
-                                                                           sourceID: sourceID, name: sourceName)
+                                                                           sourceID: sourceID, name: sourceName, providerResources: providerResources, geodataResources: geodataResources)
             self.preparedChange = result
             self.importPreview = result.report
             if format != "native" { self.pendingSourceName = (sourceID, sourceName) }
@@ -309,6 +312,7 @@ final class AppStore {
             }
             if mode != "off", !self.kernel.isPrivileged {
                 let reveal = try await self.client.call("GetConfiguration", params: ["reveal": .bool(true)])
+                self.operations.reset()
                 try await self.kernel.promote(configuration: reveal)
                 // Promotion changes the control socket immediately. Keep stop
                 // and recovery usable even if catalog persistence later fails.
@@ -393,12 +397,24 @@ final class AppStore {
     }
 
     private func startCurrentRuntime() async throws {
+        operations.reset()
+        startupPhase = "正在启动待机内核"
         try await kernel.start()
         rebuildController()
-        try await configurationService.recoverPending()
+        let deferred = try await configurationService.recoverPendingForStartup()
+        if deferred { notice = "上次未确认的网络变更已留档，请在就绪后重新选择网络模式。" }
+        startupPhase = "校验配置与恢复选组"
         capabilities = try await client.call("GetCapabilities")
+        let hello = try await client.call("Hello", params: ["versions": .array([.number(1)])])
+        kernelVersion = hello["server"].stringValue?.replacingOccurrences(of: "reka/", with: "Reka ") ?? "Reka"
         startedAt = Date()
         try await loadSnapshot(force: true)
+        let readiness = try await client.call("GetStatus")
+        guard networkMode == "off" else {
+            await kernel.stop()
+            throw ClientError.message("待机校验未通过，已停止独立内核。")
+        }
+        startupPhase = (readiness["start_error"].stringValue ?? "").isEmpty ? "就绪 · 网络接管关闭" : "配置待修复 · 网络接管关闭"
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -422,11 +438,14 @@ final class AppStore {
             guard !kernel.isRunning else { throw ClientError.message("内核仍在恢复系统设置，请稍后再试。") }
         }
         pollTask?.cancel(); pollTask = nil
+        operations.reset()
+        startupPhase = "已停止"
         isOnline = false; networkMode = "off"; networkState = "未接管系统网络"
         connections = []; connectionCount = 0; uploaded = 0; downloaded = 0; uptime = nil; coreMemoryBytes = nil
     }
 
     private func configureProfile(_ id: UUID) {
+        operations.reset()
         activeProfileID = id
         let directory = Self.profileDirectory(root: homeURL, id: id)
         kernel = KernelProcess(stateRoot: directory, privileged: profiles.first { $0.id == id }?.privileged ?? false)

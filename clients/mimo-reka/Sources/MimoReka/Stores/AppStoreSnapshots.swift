@@ -92,7 +92,9 @@ extension AppStore {
             return ConnectionRow(id: id, destination: $0["destination"].stringValue ?? "", network: $0["network"].stringValue ?? "",
                 outbound: $0["outbound"].stringValue ?? "", source: $0["source"].stringValue ?? "", uploaded: $0["upload"].intValue ?? 0,
                 downloaded: $0["download"].intValue ?? 0, rule: $0["rule"].stringValue ?? $0["rule_id"].stringValue ?? "",
-                chain: ($0["chain"].arrayValue ?? []).compactMap(\.stringValue))
+                chain: ($0["chain"].arrayValue ?? []).compactMap(\.stringValue),
+                sniffedDomain: $0["sniffed_domain"].stringValue ?? "", protocolName: $0["protocol"].stringValue ?? "",
+                processPath: $0["process_path"].stringValue ?? "", processUID: $0["process_uid"].intValue)
         }
         uploaded = connections.reduce(0) { $0 + $1.uploaded }
         downloaded = connections.reduce(0) { $0 + $1.downloaded }
@@ -123,6 +125,7 @@ extension AppStore {
         coreMemoryBytes = kernel.corePID.flatMap(ProcessResourceSampler.residentBytes)
         uptime = startedAt.map { Date().timeIntervalSince($0) }
         isOnline = true
+        await refreshLiveOperations()
     }
 
     /// A subscription owns its source, while the app owns the generated proxy

@@ -69,8 +69,38 @@ actor ConfigurationService {
         try finish(result)
     }
 
+    /// A network-on operation from a previous GUI session must never bypass
+    /// standby startup. Resolve a recorded result, but retain unknown intent
+    /// as an archive for review rather than executing it during launch.
+    func recoverPendingForStartup() async throws -> Bool {
+        guard let request = pendingRequest else { return false }
+        let touchesNetwork = request["local"] != nil || (request["local_patch"]?.arrayValue ?? []).contains {
+            let path = $0["path"].stringValue ?? ""
+            return path == "/network" || path.hasPrefix("/network/") || path.isEmpty || path == "/"
+        }
+        guard touchesNetwork else { try await recoverPending(); return false }
+        do {
+            let result = try await client.call("GetOperation", params: ["operation_id": request["operation_id"] ?? .null])
+            if result["state"].stringValue == "committed" { try finish(result); return false }
+            guard ["failed", "rejected"].contains(result["state"].stringValue ?? "") else { throw ConfigurationError.message("上次网络操作尚未确认，请稍后重试启动。") }
+            return try archivePendingNetworkIntent()
+        } catch RekaControlError.server(let code, _) where code == "not_found" {
+            return try archivePendingNetworkIntent()
+        }
+    }
+
+    private func archivePendingNetworkIntent() throws -> Bool {
+        if let pendingURL, FileManager.default.fileExists(atPath: pendingURL.path) {
+            let archive = pendingURL.deletingLastPathComponent().appendingPathComponent("deferred-network-operation-\(UUID().uuidString).json")
+            try FileManager.default.moveItem(at: pendingURL, to: archive)
+        }
+        pendingRequest = nil
+        return true
+    }
+
     func previewImport(data: String, format: String, nodesOnly: Bool,
-                       sourceID: String, name: String) async throws -> PreparedChange {
+                       sourceID: String, name: String, providerResources: [String: String] = [:],
+                       geodataResources: [String: String] = [:]) async throws -> PreparedChange {
         let text = data.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.utf8.count <= 12 * 1024 * 1024 else {
             throw ConfigurationError.message("请输入有效配置，内容不能超过 12 MiB。")
@@ -86,7 +116,9 @@ actor ConfigurationService {
            existing["subscription"].objectValue != nil {
             throw ConfigurationError.message("此来源已关联自动订阅，请使用刷新订阅；本地文件可另存为新来源。")
         }
-        let request = Self.importRequest(data: text, format: format, nodesOnly: nodesOnly, sourceID: sourceID)
+        var request = Self.importRequest(data: text, format: format, nodesOnly: nodesOnly, sourceID: sourceID)
+        if !providerResources.isEmpty { request = Self.attachResources(request, providers: providerResources, geodata: geodataResources) }
+        else if !geodataResources.isEmpty { request = Self.attachResources(request, providers: [:], geodata: geodataResources) }
         let preview = try await client.call("ImportSource", params: ["import": request, "reveal": .bool(false)])
         let report = preview["report"]
         guard report["can_apply"].boolValue == true else {
@@ -219,12 +251,17 @@ actor ConfigurationService {
         let profile = try YAMLDocument.object(config["profile"].stringValue ?? "")
         var patch: [JSONValue] = []
         let imports = profile["imports"]?.arrayValue ?? []
-        let importValue: JSONValue = .object(["source": .string(sourceID), "outbounds": .bool(true), "groups": .bool(!nodesOnly)])
+        var importFields: [String: JSONValue] = ["source": .string(sourceID), "outbounds": .bool(true), "groups": .bool(!nodesOnly)]
+        if !nodesOnly, !(source["rule-sets"].arrayValue ?? []).isEmpty { importFields["rule-sets"] = .bool(true) }
+        if !nodesOnly, !(source["sub-rules"].arrayValue ?? []).isEmpty { importFields["sub-rules"] = .bool(true) }
+        let importValue = JSONValue.object(importFields)
         if let index = imports.firstIndex(where: { $0["source"].stringValue == sourceID }) {
             // An existing import may include explicit rule/sub-rule flags.
             var replacement = imports[index].objectValue ?? [:]
             replacement["outbounds"] = .bool(true)
             replacement["groups"] = .bool(!nodesOnly)
+            if let flag = importFields["rule-sets"] { replacement["rule-sets"] = flag }
+            if let flag = importFields["sub-rules"] { replacement["sub-rules"] = flag }
             if .object(replacement) != imports[index] {
                 patch.append(operation("set", "/imports/#\(index)", .object(replacement)))
             }
@@ -339,6 +376,8 @@ actor ConfigurationService {
 
     private static func describePlan(_ plan: JSONValue) -> String {
         var lines = ["变更后的规则数：\(plan["rules"].intValue ?? 0)"]
+        if plan["routing_changed"].boolValue == true { lines.append("路由模式将更新，已保存的规则继续保留。") }
+        if plan["sniff_changed"].boolValue == true { lines.append("协议嗅探设置将更新。") }
         if plan["network_changed"].boolValue == true { lines.append("系统网络接管设置将更新。") }
         if plan["dns_changed"].boolValue == true { lines.append("DNS 配置将更新。") }
         if plan["interrupts"].boolValue == true { lines.append("此变更可能中断现有网络接管连接。") }

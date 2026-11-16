@@ -33,6 +33,9 @@ struct NodeEditorSheet: View {
         }
     }
 
+    private var expandedConfigurationSupported: Bool { store.capabilities["sniff_protocols"].arrayValue != nil }
+    private var fingerprints: [String] { (store.capabilities["tls_fingerprints"].arrayValue ?? []).compactMap(\.stringValue) }
+    private var nativeFields: NativeFormFields { NativeFormFields(fields: $fields) }
     private var type: String { fields["type"]?.stringValue ?? "socks" }
     private var hasEndpoint: Bool { !["direct", "reject"].contains(type) }
     private var passwordType: Bool { ["http", "socks", "shadowsocks", "trojan", "hysteria2", "tuic", "snell"].contains(type) }
@@ -149,6 +152,9 @@ struct NodeEditorSheet: View {
                     Spacer()
                 }
             }
+            if type == "vless", expandedConfigurationSupported {
+                FieldRow(title: "VLESS 加密") { TextField("可选，留空使用 none", text: string("encryption")).trackField() }
+            }
             if type == "snell" {
                 FieldRow(title: "协议版本") {
                     Picker("版本", selection: nestedNumber("protocol", "version", fallback: 5)) { Text("5").tag(5); Text("6").tag(6) }.labelsHidden().frame(width: 160)
@@ -172,7 +178,10 @@ struct NodeEditorSheet: View {
             Toggle("TLS", isOn: Binding(get: { tls != nil }, set: { enabled in
                 if enabled { fields["tls"] = .object([:]) } else { fields.removeValue(forKey: "tls") }
             })).font(.headline)
-            if tls != nil {
+            if tls != nil, expandedConfigurationSupported {
+                NativeTLSOptionsEditor(value: nativeFields.object(["tls"]), fingerprints: fingerprints,
+                    allowsReality: type == "vless", allowsCarrier: ["vless", "vmess", "trojan"].contains(type))
+            } else if tls != nil {
                 FieldRow(title: "服务器名称") { TextField("SNI，可选", text: nestedString("tls", "server-name")).trackField() }
                 FieldRow(title: "指纹") {
                     Picker("指纹", selection: nestedString("tls", "fingerprint")) {
@@ -198,7 +207,7 @@ struct NodeEditorSheet: View {
                 else {
                     var transport = fields["transport"]?.objectValue ?? [:]
                     if transport["type"]?.stringValue != value {
-                        for key in ["path", "paths", "host", "hosts", "service-name"] { transport.removeValue(forKey: key) }
+                        for key in ["path", "paths", "host", "hosts", "service-name", "xhttp"] { transport.removeValue(forKey: key) }
                     }
                     transport["type"] = .string(value); fields["transport"] = .object(transport)
                     if value == "h2", fields["tls"] == nil { fields["tls"] = .object([:]) }
@@ -206,6 +215,7 @@ struct NodeEditorSheet: View {
             })) {
                 Text("TCP").tag(""); Text("WebSocket").tag("ws"); Text("gRPC").tag("grpc"); Text("HTTP Upgrade").tag("httpupgrade")
                 if type != "trojan" { Text("HTTP").tag("http"); Text("HTTP/2").tag("h2") }
+                if type == "vless", expandedConfigurationSupported || fields["transport"]?["type"].stringValue == "xhttp" { Text("XHTTP").tag("xhttp") }
             }.frame(maxWidth: 330)
             let kind = fields["transport"]?["type"].stringValue ?? ""
             if kind == "grpc" {
@@ -219,6 +229,10 @@ struct NodeEditorSheet: View {
             } else if !kind.isEmpty {
                 FieldRow(title: "路径") { TextField("/", text: nestedString("transport", "path")).trackField() }
                 FieldRow(title: "Host") { TextField("可选", text: nestedString("transport", "host")).trackField() }
+            }
+            if kind == "xhttp" {
+                XHTTPOptionsEditor(transport: nativeFields.object(["transport"]), fingerprints: fingerprints)
+                    .disabled(!expandedConfigurationSupported)
             }
         }.panel()
     }

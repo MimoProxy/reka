@@ -74,7 +74,7 @@ final class RuntimeHost {
     private func startNormal(_ arguments: [String]) throws {
         guard geteuid() != 0, [3, 5].contains(arguments.count) else { throw HostFailure.invalid("normal host requires an unprivileged user and explicit profile paths") }
         child.executableURL = URL(fileURLWithPath: arguments[0])
-        var flags = ["-state-root", arguments[1], "-control", "unix://" + arguments[2], "-edit-dir", "-"]
+        var flags = ["-state-root", arguments[1], "-control", "unix://" + arguments[2], "-edit-dir", "-", "-defer-network"]
         if arguments.count == 5 { flags += ["-profile", arguments[3], "-local", arguments[4]] }
         child.arguments = flags
         child.standardInput = FileHandle.nullDevice
@@ -123,7 +123,7 @@ final class RuntimeHost {
         if socketReachable(hostSocket) { throw HostFailure.invalid("this profile already has a running privileged session") }
         _ = unlink(hostSocket)
 
-        var flags = ["-state-root", state, "-control", "unix://" + coreSocket, "-owner", String(uid), "-edit-dir", "-"]
+        var flags = ["-state-root", state, "-control", "unix://" + coreSocket, "-owner", String(uid), "-edit-dir", "-", "-defer-network"]
         if arguments.count == 6 { bootstrapDocuments = try bootstrap(arguments[5], owner: uid, state: state) }
         if !FileManager.default.fileExists(atPath: state + "/active.json") {
             guard let documents = bootstrapDocuments else { throw HostFailure.invalid("the privileged profile has not been initialized") }

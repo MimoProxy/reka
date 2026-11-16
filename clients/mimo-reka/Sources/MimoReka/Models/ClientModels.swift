@@ -65,6 +65,10 @@ struct ConnectionRow: Identifiable, Equatable {
     let downloaded: Int
     var rule = ""
     var chain: [String] = []
+    var sniffedDomain = ""
+    var protocolName = ""
+    var processPath = ""
+    var processUID: Int?
 }
 
 struct SourceRow: Identifiable, Equatable {

@@ -10,19 +10,25 @@ struct DashboardView: View {
             VStack(spacing: 16) {
                 HStack(spacing: 8) {
                     StatusLamp(lit: store.isOnline)
-                    Text(store.isOnline ? "Reka 运行中" : "内核未运行")
+                    Text(store.networkState == "配置未运行" ? "配置待修复" : store.isOnline ? "Reka 运行中" : store.isBusy ? store.startupPhase : "内核未运行")
                         .font(.callout.weight(.medium)).foregroundStyle(.secondary)
                     Spacer()
+                    RoutingModeControl(store: store).controlSize(.small)
                     Button { navigate(.connections) } label: {
                         Label("\(store.connectionCount) 个连接", systemImage: "link")
                     }.buttonStyle(.plain).foregroundStyle(.secondary)
                 }.padding(.horizontal, 4)
 
                 HStack(spacing: 16) {
-                    ActiveTrafficCard(title: "活动连接上传", symbol: "arrow.up", amount: store.uploaded, color: .primary)
-                    ActiveTrafficCard(title: "活动连接下载", symbol: "arrow.down", amount: store.downloaded, color: Theme.accent)
+                    TrafficCard(title: "本次运行累计上传", symbol: "arrow.up", amount: store.operations.traffic?.upload, rate: store.operations.uploadRate, color: .primary)
+                    TrafficCard(title: "本次运行累计下载", symbol: "arrow.down", amount: store.operations.traffic?.download, rate: store.operations.downloadRate, color: Theme.accent)
                 }
 
+                if let error = store.operations.trafficError {
+                    Text("流量采样暂不可用：\(error)").font(.caption).foregroundStyle(.secondary)
+                } else if !store.supportsMethod("GetTraffic") {
+                    Text("当前内核不提供累计流量，请更新内核。").font(.caption).foregroundStyle(.secondary)
+                }
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 16) {
                     networkPanel
                     configurationPanel
@@ -31,7 +37,7 @@ struct DashboardView: View {
                 }
                 HStack(spacing: 8) {
                     Image(systemName: "cpu")
-                    Text("Reka 1.0.0")
+                    Text(store.kernelVersion)
                     if let memory = store.coreMemoryBytes { Text("内核 \(DisplayFormat.bytes(memory))") }
                     if let memory = store.appMemoryBytes { Text("应用 \(DisplayFormat.bytes(memory))") }
                     Spacer()
@@ -130,16 +136,21 @@ struct DashboardView: View {
     }
 }
 
-private struct ActiveTrafficCard: View {
+private struct TrafficCard: View {
     var title: String
     var symbol: String
-    var amount: Int
+    var amount: Double?
+    var rate: Double?
     var color: Color
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(title, systemImage: symbol).font(.callout.weight(.medium)).foregroundStyle(.secondary)
-            Text(DisplayFormat.bytes(amount)).font(.system(size: 32, weight: .medium)).monospacedDigit().foregroundStyle(color)
-            Text("当前仍在连接中的数据量").font(.caption).foregroundStyle(.tertiary)
+            Text(amount.map(LiveOperationsState.displayAmount) ?? "—").font(.system(size: 32, weight: .medium)).monospacedDigit().foregroundStyle(color)
+            HStack {
+                Text(rate.map { LiveOperationsState.displayAmount($0) + "/s" } ?? "等待速率采样")
+                Spacer()
+                Text("含已关闭连接")
+            }.font(.caption).foregroundStyle(.secondary).monospacedDigit()
         }.frame(maxWidth: .infinity, alignment: .leading).padding(20).surface()
     }
 }

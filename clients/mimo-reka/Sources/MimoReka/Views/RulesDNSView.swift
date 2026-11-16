@@ -8,6 +8,10 @@ struct RulesDNSView: View {
     @State private var section = "rules"
     @State private var editing: RuleEditRequest?
     @State private var showingPlan = false
+    @State private var diagnostics: String?
+    @State private var showingEffective = false
+    @State private var showingResources = false
+    private func supports(_ method: String) -> Bool { (store.capabilities["methods"].arrayValue ?? []).contains(.string(method)) }
 
     private struct RuleEditRequest: Identifiable {
         let id = UUID()
@@ -27,17 +31,21 @@ struct RulesDNSView: View {
                     .pickerStyle(.segmented).frame(width: 230)
                 Spacer()
                 if section == "rules" {
+                    Button("路由测试", systemImage: "arrow.triangle.branch") { diagnostics = "route" }.disabled(!store.isOnline)
                     Button("新增规则", systemImage: "plus") { editing = RuleEditRequest(record: nil) }
                         .disabled(!store.isOnline || store.isBusy)
                     Menu {
                         Button("插入来源规则块") { editing = RuleEditRequest(record: nil, sourceMarker: true) }
                             .disabled(store.sources.isEmpty)
+                        if supports("GetRules") { Button("查看实际生效规则") { showingEffective = true } }
+                        if supports("StageResource") { Button("管理规则集资源…") { showingResources = true } }
                         Divider()
                         Button("高级 YAML 编辑") { store.editingLayer = .profile }
                         Button("查看用户覆盖") { store.editingLayer = .overlay }
                     } label: { Image(systemName: "ellipsis.circle") }
                     .menuStyle(.borderlessButton).fixedSize().disabled(!store.isOnline || store.isBusy)
                 } else {
+                    if supports("QueryDNS") { Button("DNS 诊断", systemImage: "stethoscope") { diagnostics = "dns" }.disabled(!store.isOnline) }
                     Button("编辑 DNS", systemImage: "slider.horizontal.3") { openVisual("dns") }
                         .disabled(!store.isOnline || store.isBusy)
                 }
@@ -55,10 +63,24 @@ struct RulesDNSView: View {
             .sheet(item: $editing, onDismiss: { store.preparedChange = nil }) { request in
                 RuleEditorSheet(store: store, record: request.record, sourceMarker: request.sourceMarker)
             }
+            .sheet(isPresented: Binding(get: { diagnostics != nil }, set: { if !$0 { diagnostics = nil } })) {
+                DiagnosticsSheet(store: store, initialSection: diagnostics ?? "route")
+            }
+            .sheet(isPresented: $showingEffective) { EffectiveRulesSheet(store: store) }
+            .sheet(isPresented: $showingResources) { RuleResourcesSheet(store: store) }
             .sheet(isPresented: $showingPlan, onDismiss: { store.preparedChange = nil }) { RuleChangeSheet(store: store) }
             .task(id: store.isOnline) {
                 if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "rule" {
                     editing = RuleEditRequest(record: nil)
+                }
+                if store.isOnline {
+                    switch ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] {
+                    case "route-diagnostic": diagnostics = "route"
+                    case "dns-diagnostic": diagnostics = "dns"
+                    case "effective-rules": showingEffective = true
+                    case "resources": showingResources = true
+                    default: break
+                    }
                 }
             }
     }

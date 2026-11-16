@@ -16,6 +16,8 @@ struct ImportReferenceDraft: Identifiable, Equatable {
     var fields: [String: JSONValue]
     var enabled: Bool
     var outbounds: Bool { get { fields["outbounds"]?.boolValue ?? true } set { fields["outbounds"] = .bool(newValue) } }
+    var ruleSets: Bool { get { fields["rule-sets"]?.boolValue ?? false } set { fields["rule-sets"] = .bool(newValue) } }
+    var subRules: Bool { get { fields["sub-rules"]?.boolValue ?? false } set { fields["sub-rules"] = .bool(newValue) } }
     var groups: Bool { get { fields["groups"]?.boolValue ?? false } set { fields["groups"] = .bool(newValue) } }
 }
 
@@ -28,6 +30,8 @@ struct VisualConfigurationDraft: Equatable {
     var logLevel: String
     var dnsEnabled: Bool
     var dns: [String: JSONValue]
+    let sniffLayer: ConfigurationLayer
+    var sniff: [String: JSONValue]
 
     init(documents: [ConfigurationLayer: String], sourceNames: [String: String]) throws {
         profile = try YAMLDocument.object(documents[.profile] ?? "")
@@ -36,6 +40,8 @@ struct VisualConfigurationDraft: Equatable {
         logLevel = local["log"]?["level"].stringValue ?? "info"
         dnsEnabled = profile["dns"]?.objectValue != nil
         dns = profile["dns"]?.objectValue ?? [:]
+        sniffLayer = local["sniff"] != nil ? .local : .profile
+        sniff = (local["sniff"] ?? profile["sniff"])?.objectValue ?? [:]
         let current = profile["imports"]?.arrayValue ?? []
         imports = current.compactMap { value in
             guard let id = value["source"].stringValue else { return nil }
@@ -64,6 +70,11 @@ struct VisualConfigurationDraft: Equatable {
             if .object(dns) != profile["dns"] { profilePatch.append(Self.set("/dns", .object(dns))) }
         } else if profile["dns"] != nil {
             profilePatch.append(.object(["op": .string("remove"), "path": .string("/dns")]))
+        }
+        let originalSniff = (sniffLayer == .local ? local : profile)["sniff"]?.objectValue ?? [:]
+        if sniff != originalSniff {
+            let edit = Self.set("/sniff", .object(sniff))
+            if sniffLayer == .local { localPatch.append(edit) } else { profilePatch.append(edit) }
         }
         var result: [String: JSONValue] = ["base_revision": .number(Double(baseRevision))]
         if !profilePatch.isEmpty { result["patch"] = .array(profilePatch) }

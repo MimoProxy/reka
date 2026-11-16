@@ -10,7 +10,11 @@ APP_BUNDLE="$APP_DIR/dist/Mimo Reka.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 KERNEL_ARCH="$(uname -m)"
 if [[ "$KERNEL_ARCH" == x86_64 ]]; then KERNEL_ARCH=amd64; fi
-KERNEL="${REKA_KERNEL_PATH:-$REPO_DIR/bin/releases/1.0.0/reka-1.0.0-darwin-$KERNEL_ARCH/reka}"
+if [[ -n "${REKA_KERNEL_PATH:-}" ]]; then
+  KERNEL="$REKA_KERNEL_PATH"
+else
+  KERNEL="$(python3 "$APP_DIR/script/build_embedded_core.py")"
+fi
 VERSION="${MIMO_REKA_VERSION:-0.1.12}"
 BUILD_NUMBER="${MIMO_REKA_BUILD:-12}"
 
@@ -33,7 +37,7 @@ if pgrep -x MimoReka >/dev/null 2>&1; then
 fi
 
 if [[ ! -x "$KERNEL" ]]; then
-  echo "Reka 1.0 release binary is missing. Set REKA_KERNEL_PATH to a verified native binary." >&2
+  echo "Reka embedded binary is missing. Set REKA_KERNEL_PATH to a verified native binary." >&2
   exit 1
 fi
 xcrun swift build --disable-sandbox --package-path "$APP_DIR" --cache-path "$APP_DIR/.build/cache" -Xswiftc -module-cache-path -Xswiftc "$APP_DIR/.build/module-cache"
@@ -43,11 +47,12 @@ cp "$BUILD_DIR/MimoReka" "$APP_CONTENTS/MacOS/MimoReka"
 cp "$BUILD_DIR/MimoRekaHost" "$APP_CONTENTS/MacOS/MimoRekaHost"
 cp "$KERNEL" "$APP_CONTENTS/Resources/reka"
 cp "$APP_DIR/Resources/AppIcon.icns" "$APP_CONTENTS/Resources/AppIcon.icns"
+rm -f "$APP_CONTENTS/Resources/reka-release-build.json"
 cp "$REPO_DIR/LICENSE" "$APP_CONTENTS/Resources/ThirdParty/Reka-LICENSE"
 cp "$APP_DIR/Vendor/Yams/LICENSE" "$APP_CONTENTS/Resources/ThirdParty/Yams-LICENSE"
 cp "$APP_DIR/README.md" "$APP_CONTENTS/Resources/README.md"
 if [[ -f "$(dirname "$KERNEL")/BUILD.json" ]]; then cp "$(dirname "$KERNEL")/BUILD.json" "$APP_CONTENTS/Resources/reka-release-build.json"; fi
-if [[ -d "$(dirname "$KERNEL")/licenses" ]]; then cp -R "$(dirname "$KERNEL")/licenses" "$APP_CONTENTS/Resources/ThirdParty/RekaDependencies"; fi
+if [[ -d "$(dirname "$KERNEL")/licenses" ]]; then rm -rf "$APP_CONTENTS/Resources/ThirdParty/RekaDependencies"; cp -R "$(dirname "$KERNEL")/licenses" "$APP_CONTENTS/Resources/ThirdParty/RekaDependencies"; fi
 chmod +x "$APP_CONTENTS/MacOS/MimoReka" "$APP_CONTENTS/MacOS/MimoRekaHost" "$APP_CONTENTS/Resources/reka"
 cat > "$APP_CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

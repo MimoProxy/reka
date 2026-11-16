@@ -31,6 +31,7 @@ struct VisualConfigurationSheet: View {
                     category("general", "基本", "doc.text")
                     category("listeners", "监听与日志", "network")
                     category("dns", "DNS", "globe")
+                    if expandedConfigurationSupported { category("sniff", "协议嗅探", "waveform.path") }
                     category("imports", "来源引用", "tray.full")
                     category("nodes", "节点", "server.rack")
                     category("advanced", "高级", "curlybraces")
@@ -43,6 +44,7 @@ struct VisualConfigurationSheet: View {
                             switch section {
                             case "listeners": listenerContent
                             case "dns": dnsContent
+                            case "sniff": sniffContent
                             case "imports": importContent
                             case "nodes": nodeContent
                             case "advanced": advancedContent
@@ -135,6 +137,13 @@ struct VisualConfigurationSheet: View {
                 Spacer()
             }
             FieldRow(title: "监听地址") { TextField("127.0.0.1:17891", text: listenerBinding(id, \.listen)).trackField(monospaced: true) }
+            if expandedConfigurationSupported {
+                DisclosureGroup("连接认证") {
+                    NativePairList(value: listenerUsers(id), nameKey: "username", valueKey: "password", nameTitle: "用户名", valueTitle: "密码", secret: true)
+                    Text("未添加用户时允许匿名连接。修改用户名后需重新填写密码；星号遮罩保持不变可保留原密码。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
         }.panel()
     }
 
@@ -177,6 +186,12 @@ struct VisualConfigurationSheet: View {
                     }
                     FieldRow(title: "缓存条数") { TextField("4096（默认）", text: dnsNumber("cache-size")).trackField() }
                     FieldRow(title: "Fake IP TTL") { TextField("60（默认）", text: dnsNumber("fake-ip-ttl")).trackField() }
+                    if expandedConfigurationSupported {
+                        FieldRow(title: "并发上游数") { TextField("4（默认），1–16", text: dnsNumber("max-concurrent-upstreams")).trackField() }
+                        FieldRow(title: "过期缓存秒数") { TextField("0（关闭），最多 86400", text: dnsNumber("cache-stale-ttl")).trackField() }
+                        Text("过期缓存可短暂返回 TTL 为 0 的旧答案，并后台刷新。Fake IP 映射不受此设置影响。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Toggle("返回 IPv6 解析结果", isOn: dnsBool("ipv6"))
                     Toggle("解析遵循路由规则", isOn: dnsBool("respect-rules"))
                     Toggle("读取系统 hosts", isOn: dnsBool("use-system-hosts"))
@@ -196,6 +211,8 @@ struct VisualConfigurationSheet: View {
                     HStack(spacing: 18) {
                         Toggle("节点", isOn: importBinding(item.id, \.outbounds))
                         Toggle("策略组", isOn: importBinding(item.id, \.groups))
+                        Toggle("规则集", isOn: importBinding(item.id, \.ruleSets))
+                        Toggle("子规则", isOn: importBinding(item.id, \.subRules))
                     }.toggleStyle(.checkbox).disabled(!item.enabled)
                 }.panel()
             }
@@ -240,6 +257,45 @@ struct VisualConfigurationSheet: View {
                 }
             }
         }.panel()
+    }
+
+    private var expandedConfigurationSupported: Bool { store.capabilities["sniff_protocols"].arrayValue != nil }
+    private var sniffFields: NativeFormFields { NativeFormFields(fields: Binding(get: { draft?.sniff ?? [:] }, set: { draft?.sniff = $0 })) }
+    private var sniffContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Toggle("启用协议嗅探", isOn: sniffFields.bool(["enabled"])).font(.headline)
+            Text("通过 HTTP Host 或 TLS / QUIC 的 SNI 补充路由域名，不解密内容。ECH 的加密域名无法识别。")
+                .font(.callout).foregroundStyle(.secondary)
+            if sniffFields.value(["enabled"]).boolValue == true {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("识别协议（至少一项）").font(.headline)
+                    ForEach((store.capabilities["sniff_protocols"].arrayValue ?? []).compactMap(\.stringValue), id: \.self) { protocolName in
+                        Toggle(protocolName.uppercased(), isOn: sniffProtocol(protocolName)).toggleStyle(.checkbox)
+                    }
+                    FieldRow(title: "超时（毫秒）") { TextField("300（默认），10–2000", text: sniffFields.number(["timeout-ms"])).trackField() }
+                    FieldRow(title: "最多字节数") { TextField("65536（默认），512–262144", text: sniffFields.number(["max-bytes"])).trackField() }
+                    FieldRow(title: "最多 UDP 包数") { TextField("8（默认），1–32", text: sniffFields.number(["max-packets"])).trackField() }
+                    Toggle("使用识别域名连接目标", isOn: sniffFields.bool(["override-destination"]))
+                    Text("关闭目标重写时只影响路由判断，仍连接原地址。") .font(.caption).foregroundStyle(.secondary)
+                }.panel()
+            }
+            Text(draft?.sniffLayer == .local ? "保存到本机嗅探覆盖。" : "保存到当前主配置。") .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private func sniffProtocol(_ name: String) -> Binding<Bool> {
+        let defaults = ["http", "tls", "quic"]
+        return Binding(get: { (draft?.sniff["protocols"]?.arrayValue?.compactMap(\.stringValue) ?? defaults).contains(name) }, set: { enabled in
+            var selected = draft?.sniff["protocols"]?.arrayValue?.compactMap(\.stringValue) ?? defaults
+            if enabled && !selected.contains(name) { selected.append(name) }
+            if !enabled { selected.removeAll { $0 == name } }
+            // The native empty list means all protocols, so retain one choice.
+            if !selected.isEmpty { draft?.sniff["protocols"] = .array(selected.map(JSONValue.string)) }
+        })
+    }
+    private func listenerUsers(_ id: UUID) -> Binding<[JSONValue]> {
+        Binding(get: { draft?.listeners.first { $0.id == id }?.fields["users"]?.arrayValue ?? [] }, set: { users in
+            if let index = draft?.listeners.firstIndex(where: { $0.id == id }) { draft?.listeners[index].fields["users"] = .array(users) }
+        })
     }
 
     private var dnsSources: [SourceRow] {

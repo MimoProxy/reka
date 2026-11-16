@@ -96,7 +96,7 @@ struct RuleDraft: Equatable {
         return result
     }
 
-    static let simpleConditions = ["domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern", "ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "rule-set", "geoip", "all"]
+    static let simpleConditions = ["domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern", "ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "process-name-wildcard", "process-path", "process-path-regex", "process-path-wildcard", "uid", "in-name", "in-type", "in-port", "in-user", "rule-set", "geoip", "all"]
     static func title(_ condition: String) -> String {
         switch condition {
         case "domain": "完整域名"
@@ -111,6 +111,15 @@ struct RuleDraft: Equatable {
         case "network": "网络协议"
         case "process-name": "进程名称"
         case "process-name-regex": "进程正则"
+        case "process-name-wildcard": "进程名通配符"
+        case "process-path": "进程完整路径"
+        case "process-path-regex": "进程路径正则"
+        case "process-path-wildcard": "进程路径通配符"
+        case "uid": "进程用户 UID"
+        case "in-name": "入口名称"
+        case "in-type": "入口协议"
+        case "in-port": "入口监听端口"
+        case "in-user": "入口认证用户"
         case "rule-set": "规则集"
         case "geoip": "本地网络分类"
         case "all": "全部流量（MATCH）"
@@ -128,6 +137,15 @@ struct RuleDraft: Equatable {
         case "network": "tcp\nudp"
         case "process-name": "Safari"
         case "process-name-regex": "(?i)safari"
+        case "process-name-wildcard": "Safari*"
+        case "process-path": "/Applications/Safari.app/Contents/MacOS/Safari"
+        case "process-path-regex": "/Applications/.*\\.app/Contents/MacOS/.*"
+        case "process-path-wildcard": "/Applications/*.app/Contents/MacOS/*"
+        case "uid": "501"
+        case "in-name": "mixed"
+        case "in-type": "HTTP\nSOCKS5\nTUN"
+        case "in-port": "17891\n18000-18100"
+        case "in-user": "Alice"
         case "rule-set": "规则集 ID"
         case "geoip": "LAN"
         default: ""

@@ -19,7 +19,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = Path(__file__).resolve().parents[3]
-CORE = Path(os.environ.get('MIMO_REKA_KERNEL_BINARY', REPO / 'bin/releases/1.0.0/reka-1.0.0-darwin-arm64/reka'))
+CORE = Path(os.environ.get('MIMO_REKA_KERNEL_BINARY', REPO / 'clients/mimo-reka/.build/core/reka'))
 
 
 def rpc(path, method, params=None):
@@ -80,7 +80,7 @@ def main():
         normal = root/'normal'
         normal.mkdir(mode=0o700)
         (normal/'profile.yaml').write_text('schema-version: 1\nrules:\n - {id: final, match: {all: true}, outbound: direct}\n')
-        (normal/'local.yaml').write_text('listeners:\n - {id: mixed, type: mixed, listen: "127.0.0.1:%d"}\nnetwork: {mode: off}\n' % port)
+        (normal/'local.yaml').write_text('listeners:\n - {id: mixed, type: mixed, listen: "127.0.0.1:%d"}\nnetwork: {mode: system-proxy, proxy-listener: mixed, service: Nonexistent-standby-test}\n' % port)
         child = subprocess.Popen([str(binary), '--supervise', str(CORE), str(normal), str(normal/'control.sock'), str(normal/'profile.yaml'), str(normal/'local.yaml')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         processes.append(child)
         wait(lambda: (normal/'control.sock').exists())
@@ -97,6 +97,9 @@ def main():
         server = ThreadingHTTPServer(('127.0.0.1', 0), Subscription)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         current = rpc(normal/'control.sock', 'GetConfiguration')
+        assert current['effective']['network']['mode']=='off'
+        assert rpc(normal/'control.sock','GetStatus')['runtime']['network']['mode']=='off'
+        print('Persisted takeover intent is deferred before activation: PASS')
         configured = rpc(normal/'control.sock', 'ConfigureSubscription', {'source_id':'locked', 'base_revision':current['revision'], 'subscription':{'url':'http://127.0.0.1:%d/sub' % server.server_port, 'format':'clash', 'interval':3600, 'nodes_only':True}})
         assert configured['state']=='committed', configured
         fetched = rpc(normal/'control.sock', 'RefreshSubscription', {'source_id':'locked', 'wait':True})
