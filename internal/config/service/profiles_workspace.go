@@ -45,6 +45,9 @@ type ProfileWorkspace struct {
 }
 
 func OpenProfileWorkspace(root, initialID string, nested, resume bool) (*ProfileWorkspace, error) {
+	if !profileWorkspaceSupported() {
+		return nil, errf(CodeBlocked, "atomic profile workspaces require Unix directory ownership; Windows support is not enabled")
+	}
 	if !profileIDPattern.MatchString(initialID) {
 		return nil, errf(CodeBadRequest, "invalid initial profile ID")
 	}

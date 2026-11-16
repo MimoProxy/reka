@@ -14,3 +14,5 @@ func profileDirectoryOwner(info os.FileInfo) error {
 	}
 	return nil
 }
+
+func profileWorkspaceSupported() bool { return true }
