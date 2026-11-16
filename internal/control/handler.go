@@ -109,6 +109,7 @@ func decode[T any](raw json.RawMessage) (T, error) {
 
 // Methods lists the API methods of this version.
 var Methods = []string{
+	"GetProcessTraffic", "ExportManifest", "ReadResource",
 	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
 	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
@@ -119,6 +120,29 @@ var Methods = []string{
 func (s *Session) dispatch(req Request) (any, error) {
 	svc := s.h.svc
 	switch req.Method {
+	case "GetProcessTraffic":
+		p, err := decode[struct {
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		value := svc.Engine().ProcessTraffic(p.Offset, p.Limit)
+		value.Epoch = svc.Events().Epoch()
+		return value, nil
+	case "ExportManifest":
+		p, err := decode[api.ExportManifestRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ExportManifest(p)
+	case "ReadResource":
+		p, err := decode[api.ReadResourceRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ReadResource(p)
 	case "GetLogs":
 		p, err := decode[struct {
 			Limit int `json:"limit"`
@@ -407,6 +431,7 @@ func (s *Session) subscribe(types []string, epoch string, after uint64) {
 
 // Capabilities describes what this build supports.
 type Capabilities struct {
+	ProcessModes        []string           `json:"process_modes,omitempty"`
 	SniffProtocols      []string           `json:"sniff_protocols,omitempty"`
 	NetworkModes        []string           `json:"network_modes"`
 	TUNStacks           []string           `json:"tun_stacks,omitempty"`
@@ -441,7 +466,7 @@ func capabilities(svc *service.Service) Capabilities {
 		modes = append(modes, "tun")
 		stacks = svc.Engine().TUNStacks()
 	}
-	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"},
+	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"}, ProcessModes: []string{"off", "rule", "always"},
 		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
 		SourceFormats:       []string{"native", "clash", "links"},
 		ImportSupport:       importer.SupportMatrix(),

@@ -16,6 +16,7 @@ struct MimoRekaApp: App {
                         store.visualSection = ProcessInfo.processInfo.environment["MIMO_REKA_VISUAL_SECTION"] ?? "general"
                         store.showVisualConfiguration = true
                     }
+                    if ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "backup", store.isOnline { store.showBackup = true }
                     AppProof.scheduleIfRequested()
                 }
         }

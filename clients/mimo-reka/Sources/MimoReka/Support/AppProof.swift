@@ -9,7 +9,8 @@ enum AppProof {
         guard !scheduled, let path = ProcessInfo.processInfo.environment["MIMO_REKA_PROOF_PATH"] else { return }
         scheduled = true
         Task {
-            try? await Task.sleep(for: .seconds(2))
+            let delay = min(20, max(2, Int(ProcessInfo.processInfo.environment["MIMO_REKA_PROOF_DELAY"] ?? "2") ?? 2))
+            try? await Task.sleep(for: .seconds(delay))
             guard let main = NSApp.windows.first(where: { $0.attachedSheet != nil })
                 ?? NSApp.windows.first(where: { $0.canBecomeMain && !$0.isSheet }) else { return }
             if ProcessInfo.processInfo.environment["MIMO_REKA_MIN_WINDOW"] == "1" {

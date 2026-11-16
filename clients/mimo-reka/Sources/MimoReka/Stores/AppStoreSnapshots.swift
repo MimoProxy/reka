@@ -94,7 +94,7 @@ extension AppStore {
                 downloaded: $0["download"].intValue ?? 0, rule: $0["rule"].stringValue ?? $0["rule_id"].stringValue ?? "",
                 chain: ($0["chain"].arrayValue ?? []).compactMap(\.stringValue),
                 sniffedDomain: $0["sniffed_domain"].stringValue ?? "", protocolName: $0["protocol"].stringValue ?? "",
-                processPath: $0["process_path"].stringValue ?? "", processUID: $0["process_uid"].intValue)
+                processPath: $0["process_path"].stringValue ?? "", processUID: $0["process_uid"].intValue, processPID: $0["process_pid"].intValue)
         }
         uploaded = connections.reduce(0) { $0 + $1.uploaded }
         downloaded = connections.reduce(0) { $0 + $1.downloaded }
@@ -109,7 +109,8 @@ extension AppStore {
                 nodeCount: source["outbounds"].arrayValue?.count ?? 0, groupCount: source["groups"].arrayValue?.count ?? 0,
                 hasSubscription: subscription.objectValue != nil, paused: subscription["paused"].boolValue ?? false,
                 subscriptionState: observed?["state"].stringValue, lastSuccess: Self.parseDate(observed?["last_success"].stringValue),
-                nextAttempt: Self.parseDate(observed?["next_attempt"].stringValue), errorCode: observed?["error_code"].stringValue)
+                nextAttempt: Self.parseDate(observed?["next_attempt"].stringValue), errorCode: observed?["error_code"].stringValue,
+                planUsage: SubscriptionPlanUsage(value: observed?["usage"] ?? .null), usageStale: observed?["stale"].boolValue ?? false)
         }
         sourceSummary = sources.isEmpty ? "尚未导入来源；当前配置使用本地出站。" : "\(sources.count) 个来源 · \(sources.reduce(0) { $0 + $1.nodeCount }) 个节点 · \(sources.filter(\.hasSubscription).count) 个自动订阅"
         if configurationChanged {

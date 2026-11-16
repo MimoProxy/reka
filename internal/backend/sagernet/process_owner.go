@@ -8,6 +8,7 @@ import (
 // ProcessInfo preserves the owning executable and optional OS UID. UIDKnown
 // distinguishes a real root UID from unavailable ownership information.
 type ProcessInfo struct {
+	PID      uint32
 	Path     string
 	UID      uint32
 	UIDKnown bool
@@ -26,9 +27,9 @@ func (b *Backend) FindProcessInfo(ctx context.Context, md Metadata) (ProcessInfo
 	}
 	info, err := b.searcher.FindProcessInfo(ctx, md.Network, md.Source, md.Local)
 	if err != nil || info == nil {
-		return ProcessInfo{}, false
+		return fallbackProcessInfo(ctx, md)
 	}
-	result := ProcessInfo{Path: info.ProcessPath}
+	result := ProcessInfo{Path: info.ProcessPath, PID: info.ProcessID}
 	if info.UserId >= 0 && runtime.GOOS != "windows" {
 		result.UID, result.UIDKnown = uint32(info.UserId), true
 	}

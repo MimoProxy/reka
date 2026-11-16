@@ -9,6 +9,7 @@ const SchemaVersion = 1
 
 // Profile is the user's main configuration document.
 type Profile struct {
+	Process       *Process   `yaml:"process"`
 	Routing       *Routing   `yaml:"routing"`
 	Sniff         *Sniff     `yaml:"sniff"`
 	DNS           *RD.Config `yaml:"dns"`
@@ -28,6 +29,7 @@ type Profile struct {
 // LocalSettings are per-machine settings kept apart from the profile, so
 // switching profiles never changes ports or the control endpoint.
 type LocalSettings struct {
+	Process       *Process          `yaml:"process"`
 	Routing       *Routing          `yaml:"routing"`
 	Sniff         *Sniff            `yaml:"sniff"`
 	Network       *platform.Network `yaml:"network"`

@@ -82,6 +82,7 @@ struct ProfilesView: View {
                     if active {
                         Button("可视化编辑") { openEditor(.profile) }
                         Button("导出主配置") { store.exportConfiguration() }
+                        if store.supportsMethod("ExportManifest") { Button("完整备份与恢复…") { store.showBackup = true } }
                     } else {
                         Button("使用此配置") { switching = profile }
                     }

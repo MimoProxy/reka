@@ -63,12 +63,50 @@ struct SourcesView: View {
                     Button("刷新", systemImage: "arrow.clockwise") { Task { await store.refreshSubscription(source) } }
                         .controlSize(.small)
                 }.disabled(!store.isOnline || store.isBusy)
+                usagePanel(source)
                 if let error = source.errorCode, !error.isEmpty {
                     Label("刷新失败：\(error)。继续使用上次成功的内容。", systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                 }
             }
         }.panel()
+    }
+
+    private func usagePanel(_ source: SourceRow) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("订阅套餐").font(.callout.weight(.medium))
+                Spacer()
+                if source.planUsage != nil, source.usageStale { Text("上次成功的数据").font(.caption).foregroundStyle(.orange) }
+            }
+            if let usage = source.planUsage {
+                HStack {
+                    Text(usage.used.map { "已用 " + SubscriptionPlanUsage.bytes($0) } ?? "已用流量未提供")
+                    Spacer()
+                    if let total = usage.total {
+                        Text(total == 0 ? "服务方未设置限额" : "总量 " + SubscriptionPlanUsage.bytes(total))
+                    } else { Text("总量未提供") }
+                }.font(.callout).foregroundStyle(.secondary)
+                if let progress = usage.fractionUsed { ProgressView(value: progress).progressViewStyle(.linear) }
+                HStack {
+                    if let remaining = usage.remaining { Text("剩余 " + SubscriptionPlanUsage.bytes(remaining)) }
+                    Spacer()
+                    if let expiry = usage.expiresAt {
+                        Text((expiry < Date() ? "已于 " : "到期 ") + expiry.formatted(date: .abbreviated, time: .shortened))
+                            .foregroundStyle(expiry < Date() ? Color.orange : Color.secondary)
+                    } else { Text(usage.expireUnix == 0 ? "服务方未设置到期时间" : "到期时间未提供") }
+                }.font(.caption).foregroundStyle(.secondary)
+                if !usage.invalidFields.isEmpty {
+                    Text("部分套餐声明无效，已按未知值处理。") .font(.caption).foregroundStyle(.orange)
+                }
+                if let observed = usage.observedAt {
+                    Text("服务方声明 · " + observed.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            } else {
+                Text("服务方未提供套餐用量和到期时间。") .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(14).background(Theme.track, in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func status(_ source: SourceRow) -> String {

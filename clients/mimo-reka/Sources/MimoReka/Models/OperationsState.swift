@@ -71,6 +71,12 @@ final class LiveOperationsState {
     var probeTimeoutMS = 5000
     var refreshSession: UUID?
     var session = UUID()
+    var processRows: [ProcessTrafficRow] = []
+    var processOffset = 0
+    var processTotal = 0
+    var processEpoch = ""
+    var processError: String?
+    var processRequest: UUID?
 
     func acceptTraffic(_ next: TrafficSample) {
         let rates = next.rates(since: traffic)
@@ -81,6 +87,7 @@ final class LiveOperationsState {
         session = UUID(); refreshSession = nil
         traffic = nil; uploadRate = nil; downloadRate = nil; trafficError = nil
         logs = []; logsError = nil; probes = [:]; probing = []
+        processRows = []; processOffset = 0; processTotal = 0; processEpoch = ""; processError = nil; processRequest = nil
     }
     static func displayAmount(_ amount: Double) -> String {
         DisplayFormat.bytes(Int(min(Double(Int.max / 2), max(0, amount))))

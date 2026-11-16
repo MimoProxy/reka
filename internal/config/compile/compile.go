@@ -135,6 +135,7 @@ type GroupMetadata struct {
 
 // Effective is the immutable configuration used by the runtime.
 type Effective struct {
+	Process          model.Process             `json:"process"`
 	Routing          model.Routing             `json:"routing"`
 	ActiveRouter     *router.Router            `json:"-"`
 	Sniff            model.Sniff               `json:"sniff"`
@@ -296,6 +297,7 @@ func (c *compiler) compose() *Effective {
 	c.rules(eff)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
+	c.process(eff)
 	c.sniff(eff)
 	c.network(eff)
 	c.routing(eff)

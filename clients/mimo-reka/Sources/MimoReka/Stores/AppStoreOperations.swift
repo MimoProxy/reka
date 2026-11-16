@@ -27,6 +27,7 @@ extension AppStore {
                 if session == operations.session { operations.trafficError = error.localizedDescription }
             }
         }
+        await refreshProcessTraffic()
         if supportsMethod("GetLogs") {
             do {
                 let value = try await control.call("GetLogs", params: ["limit": .number(256)])

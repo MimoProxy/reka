@@ -16,6 +16,7 @@ final class AppStore {
     var errorMessage: String?
     var notice: String?
     var showImport = false
+    var showBackup = false
     var showVisualConfiguration = false
     var visualSection = "general"
     var editingLayer: ConfigurationLayer?

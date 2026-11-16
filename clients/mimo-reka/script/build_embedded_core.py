@@ -22,7 +22,7 @@ def main():
     arch = {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
     paths = ['cmd', 'internal', 'go.mod', 'go.sum', 'tools/build-overlay.py', 'tools/upstream_patches.py']
     commit = run(['git', 'log', '-1', '--format=%H', '--', *paths])
-    files = run(['git', 'ls-files', '--', *paths]).splitlines()
+    files = run(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '--', *paths]).splitlines()
     hashes = {p: hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in files if (ROOT/p).is_file()}
     source_hash = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
     version = '1.0.0+' + commit[:7]

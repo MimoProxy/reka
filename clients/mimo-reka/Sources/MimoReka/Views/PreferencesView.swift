@@ -116,6 +116,16 @@ struct PreferencesView: View {
                         .disabled(!store.isOnline || store.isBusy)
                 }
             }.panel()
+            if store.supportsMethod("ExportManifest"), store.supportsMethod("ReadResource") {
+                VStack(alignment: .leading, spacing: 12) {
+                    PanelHeader(title: "完整备份与恢复")
+                    Text("包含四层配置、选组和资源。备份文件包含凭据；恢复时网络接管保持关闭。") .font(.caption).foregroundStyle(.secondary)
+                    Button("备份与恢复…", systemImage: "externaldrive") {
+                        store.showBackup = true
+                        if let main = NSApp.windows.first(where: { $0.canBecomeMain && !$0.isSheet && $0.title == "Mimo Reka" }) { main.makeKeyAndOrderFront(nil) }
+                    }.disabled(!store.isOnline || store.isBusy)
+                }.panel()
+            }
             VStack(alignment: .leading, spacing: 12) {
                 PanelHeader(title: "编辑配置")
                 ForEach(ConfigurationLayer.allCases) { layer in
@@ -135,7 +145,7 @@ struct PreferencesView: View {
         VStack(alignment: .leading, spacing: 14) {
             PanelHeader(title: "Mimo Reka")
             LabeledContent("客户端", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "试用版")
-            LabeledContent("内核", value: "Reka 1.0.0")
+            LabeledContent("内核", value: store.kernelVersion)
             Text("独立的单 Reka 内核 macOS 客户端。")
                 .font(.callout).foregroundStyle(.secondary)
         }.panel()

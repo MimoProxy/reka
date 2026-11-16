@@ -12,6 +12,7 @@ import (
 // UID from an explicitly queried value; UID zero follows the reference's
 // unknown-owner behavior and does not match UID rules.
 type ProcessInfo struct {
+	PID      uint32
 	Path     string
 	UID      uint32
 	UIDKnown bool

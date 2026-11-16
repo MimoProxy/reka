@@ -191,6 +191,7 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	snap, gen := e.current()
 	p := Plan{Rules: len(eff.Rules)}
 	p.RoutingChanged = gen.eff == nil && eff.Routing.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Routing, eff.Routing)
+	p.ProcessChanged = gen.eff == nil && eff.Process.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Process, eff.Process)
 	p.SniffChanged = gen.eff == nil && eff.Sniff.Enabled || gen.eff != nil && !reflect.DeepEqual(gen.eff.Sniff, eff.Sniff)
 	oldNetwork := platform.Network{Mode: "off"}
 	if gen.eff != nil {
@@ -709,13 +710,14 @@ type lookupEnv struct {
 	e   *Engine
 	md  sagernet.Metadata
 
-	resolved bool
-	addrs    []netip.Addr
-	err      error
-	procDone bool
-	proc     string
-	procOK   bool
-	owner    router.ProcessInfo
+	resolved   bool
+	addrs      []netip.Addr
+	err        error
+	processOff bool
+	procDone   bool
+	proc       string
+	procOK     bool
+	owner      router.ProcessInfo
 }
 
 func (l *lookupEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, error) {
@@ -738,10 +740,13 @@ func (l *lookupEnv) Process(ctx context.Context) (string, bool) {
 }
 
 func (l *lookupEnv) ProcessInfo(ctx context.Context) (router.ProcessInfo, bool) {
+	if l.processOff {
+		return router.ProcessInfo{}, false
+	}
 	if !l.procDone {
 		l.procDone = true
 		info, ok := l.e.backend.FindProcessInfo(ctx, l.md)
-		l.owner = router.ProcessInfo{Path: info.Path, UID: info.UID, UIDKnown: info.UIDKnown}
+		l.owner = router.ProcessInfo{PID: info.PID, Path: info.Path, UID: info.UID, UIDKnown: info.UIDKnown}
 		l.proc, l.procOK = info.Path, ok
 	}
 	return l.owner, l.procOK
@@ -819,6 +824,10 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			return nil, false
 		}
 		env.dns = g.dns
+		env.processOff = g.eff.Process.Mode == "off"
+		if g.eff.Process.Mode == "always" {
+			env.ProcessInfo(ctx)
+		}
 		routeMD := routerMetadata(md)
 		if routeMD.InboundPort == 0 && md.InboundType != "tun" {
 			for _, listener := range g.eff.Listeners {
@@ -849,7 +858,8 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		slog.Error("route", "err", err)
 	}
 	info := &FlowInfo{Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol}
-	if env.procDone && env.procOK {
+	if !env.processOff && env.procDone && env.procOK {
+		info.ProcessPID = env.owner.PID
 		info.ProcessPath = env.owner.Path
 		if env.owner.UIDKnown {
 			uid := env.owner.UID
@@ -878,6 +888,9 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		}
 	}
 	result := sagernet.Route{Outbound: out, Release: release, Info: info}
+	if !env.processOff && env.procDone && env.procOK {
+		result.Owner = sagernet.ProcessInfo{PID: env.owner.PID, Path: env.owner.Path, UID: env.owner.UID, UIDKnown: env.owner.UIDKnown}
+	}
 	if md.Network == "udp" && md.Destination.Domain != "" && g.packetAddr[dec.Outbound] {
 		addresses, err := env.Resolve(ctx, md.Destination.Domain)
 		if err != nil || len(addresses) == 0 {

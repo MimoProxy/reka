@@ -116,16 +116,17 @@ type RestoreRequest struct {
 }
 
 type SubscriptionStatus struct {
-	FallbackResources []string  `json:"fallback_resources,omitempty"`
-	SourceID          string    `json:"source_id"`
-	State             string    `json:"state"`
-	Stale             bool      `json:"stale"`
-	LastAttempt       time.Time `json:"last_attempt,omitempty"`
-	LastSuccess       time.Time `json:"last_success,omitempty"`
-	NextAttempt       time.Time `json:"next_attempt,omitempty"`
-	ErrorCode         string    `json:"error_code,omitempty"`
-	Revision          uint64    `json:"revision,omitempty"`
-	RootHash          string    `json:"root_hash,omitempty"`
+	Usage             *SubscriptionUsage `json:"usage,omitempty"`
+	FallbackResources []string           `json:"fallback_resources,omitempty"`
+	SourceID          string             `json:"source_id"`
+	State             string             `json:"state"`
+	Stale             bool               `json:"stale"`
+	LastAttempt       time.Time          `json:"last_attempt,omitempty"`
+	LastSuccess       time.Time          `json:"last_success,omitempty"`
+	NextAttempt       time.Time          `json:"next_attempt,omitempty"`
+	ErrorCode         string             `json:"error_code,omitempty"`
+	Revision          uint64             `json:"revision,omitempty"`
+	RootHash          string             `json:"root_hash,omitempty"`
 }
 
 // Event is one entry of the event stream. Seq increases by one per event
@@ -172,6 +173,7 @@ type GroupChange struct {
 // Plan describes what activating a configuration changes. Nothing in it
 // has happened yet.
 type Plan struct {
+	ProcessChanged         bool             `json:"process_changed"`
 	RoutingChanged         bool             `json:"routing_changed"`
 	SniffChanged           bool             `json:"sniff_changed"`
 	NetworkChanged         bool             `json:"network_changed"`
@@ -196,6 +198,7 @@ type Plan struct {
 
 // FlowInfo is attached to every routed connection.
 type FlowInfo struct {
+	ProcessPID    uint32   `json:"process_pid,omitempty"`
 	ProcessPath   string   `json:"process_path,omitempty"`
 	ProcessUID    *uint32  `json:"process_uid,omitempty"`
 	SniffedDomain string   `json:"sniffed_domain,omitempty"`

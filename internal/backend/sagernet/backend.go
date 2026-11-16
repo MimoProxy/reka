@@ -62,6 +62,7 @@ const defaultHalfCloseTimeout = 2 * time.Second
 // from it are independent instances: each has its own lifecycle scope and can
 // be closed without touching the others.
 type Backend struct {
+	processTraffic    processTrafficTable
 	trafficUpload     atomic.Uint64
 	trafficDownload   atomic.Uint64
 	processInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)

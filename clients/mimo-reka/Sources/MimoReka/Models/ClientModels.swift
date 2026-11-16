@@ -69,6 +69,7 @@ struct ConnectionRow: Identifiable, Equatable {
     var protocolName = ""
     var processPath = ""
     var processUID: Int?
+    var processPID: Int?
 }
 
 struct SourceRow: Identifiable, Equatable {
@@ -82,6 +83,8 @@ struct SourceRow: Identifiable, Equatable {
     var lastSuccess: Date?
     var nextAttempt: Date?
     var errorCode: String?
+    var planUsage: SubscriptionPlanUsage?
+    var usageStale = false
 }
 
 struct RevisionRow: Identifiable, Equatable {

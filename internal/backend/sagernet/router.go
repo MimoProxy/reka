@@ -48,6 +48,7 @@ type Metadata struct {
 
 // Route is the routing decision for one connection.
 type Route struct {
+	Owner ProcessInfo
 	// Context attaches generation-owned dependencies without replacing the
 	// caller's cancellation or deadline.
 	Context     func(context.Context) context.Context

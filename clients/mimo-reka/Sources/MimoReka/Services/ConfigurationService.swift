@@ -377,6 +377,7 @@ actor ConfigurationService {
     private static func describePlan(_ plan: JSONValue) -> String {
         var lines = ["变更后的规则数：\(plan["rules"].intValue ?? 0)"]
         if plan["routing_changed"].boolValue == true { lines.append("路由模式将更新，已保存的规则继续保留。") }
+        if plan["process_changed"].boolValue == true { lines.append("新连接的进程采集策略将更新，已有统计继续保留。") }
         if plan["sniff_changed"].boolValue == true { lines.append("协议嗅探设置将更新。") }
         if plan["network_changed"].boolValue == true { lines.append("系统网络接管设置将更新。") }
         if plan["dns_changed"].boolValue == true { lines.append("DNS 配置将更新。") }
