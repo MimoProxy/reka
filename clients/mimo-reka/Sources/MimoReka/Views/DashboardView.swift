@@ -71,8 +71,10 @@ struct DashboardView: View {
             information("策略组", "\(store.groups.count)")
             information("活动连接", "\(store.connectionCount)")
             Divider()
-            Button("编辑配置", systemImage: "slider.horizontal.3") { navigate(.rules) }
-                .controlSize(.small)
+            Button("编辑配置", systemImage: "slider.horizontal.3") {
+                store.visualSection = "general"
+                store.showVisualConfiguration = true
+            }.controlSize(.small).disabled(!store.isOnline || store.isBusy)
         }.frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading).panel()
     }
 

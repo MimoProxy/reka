@@ -132,7 +132,7 @@ extension AppStore {
         let profile = try YAMLDocument.object(input["profile"].stringValue ?? "")
         guard let wrapper = profile["groups"]?.arrayValue?.first(where: { $0["id"].stringValue == "proxy" }),
               wrapper["type"].stringValue == "select",
-              ["默认策略", "代理策略"].contains(wrapper["name"].stringValue ?? "") else { return input }
+              wrapper["include-all"].boolValue != false else { return input }
         let referenced = Set((profile["imports"]?.arrayValue ?? []).compactMap { $0["source"].stringValue })
         let previousHashes = snapshot["effective"]["source_hashes"].objectValue ?? [:]
         let currentHashes = input["effective"]["source_hashes"].objectValue ?? [:]

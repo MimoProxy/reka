@@ -6,6 +6,19 @@ struct RulesDNSView: View {
     let store: AppStore
     var search: String
     @State private var section = "rules"
+    @State private var editing: RuleEditRequest?
+    @State private var showingPlan = false
+
+    private struct RuleEditRequest: Identifiable {
+        let id = UUID()
+        let record: RuleRecord?
+        var sourceMarker = false
+    }
+    private var filteredRules: [RuleRecord] {
+        store.ruleRecords.filter {
+            search.isEmpty || "\(matchTitle($0)) \(targetTitle($0)) \($0.origin)".localizedCaseInsensitiveContains(search)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -13,44 +26,138 @@ struct RulesDNSView: View {
                 Picker("分类", selection: $section) { Text("路由规则").tag("rules"); Text("DNS").tag("dns") }
                     .pickerStyle(.segmented).frame(width: 230)
                 Spacer()
-                Button("编辑\(section == "rules" ? "规则" : "DNS")", systemImage: "slider.horizontal.3") { store.editingLayer = .profile }
-                    .disabled(!store.isOnline || store.isBusy)
+                if section == "rules" {
+                    Button("新增规则", systemImage: "plus") { editing = RuleEditRequest(record: nil) }
+                        .disabled(!store.isOnline || store.isBusy)
+                    Menu {
+                        Button("插入来源规则块") { editing = RuleEditRequest(record: nil, sourceMarker: true) }
+                            .disabled(store.sources.isEmpty)
+                        Divider()
+                        Button("高级 YAML 编辑") { store.editingLayer = .profile }
+                        Button("查看用户覆盖") { store.editingLayer = .overlay }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton).fixedSize().disabled(!store.isOnline || store.isBusy)
+                } else {
+                    Button("编辑 DNS", systemImage: "slider.horizontal.3") { openVisual("dns") }
+                        .disabled(!store.isOnline || store.isBusy)
+                }
             }
             if section == "rules" {
                 HStack {
-                    Text("主配置与来源规则").font(.caption).foregroundStyle(.secondary)
+                    Text("从上到下匹配，第一条命中规则生效。")
                     Spacer()
-                    if hasRuleOverrides {
-                        Button("查看规则覆盖", systemImage: "square.stack") { store.editingLayer = .overlay }
-                            .font(.caption).buttonStyle(.borderless)
-                    }
-                }
-            }
-            if section == "rules" { rulesContent } else { dnsContent }
+                    Text("\(store.ruleRecords.count) 项")
+                }.font(.caption).foregroundStyle(.secondary)
+                rulesContent
+            } else { dnsContent }
         }.padding(.horizontal, 20).padding(.top, Theme.pageTopInset).padding(.bottom, 20)
-            .onAppear {
-                if ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_PAGE"] == "dns" { section = "dns" }
+            .onAppear { if ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_PAGE"] == "dns" { section = "dns" } }
+            .sheet(item: $editing, onDismiss: { store.preparedChange = nil }) { request in
+                RuleEditorSheet(store: store, record: request.record, sourceMarker: request.sourceMarker)
+            }
+            .sheet(isPresented: $showingPlan, onDismiss: { store.preparedChange = nil }) { RuleChangeSheet(store: store) }
+            .task(id: store.isOnline) {
+                if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "rule" {
+                    editing = RuleEditRequest(record: nil)
+                }
             }
     }
 
     private var rulesContent: some View {
-        let rows = displayedRules.filter { search.isEmpty || "\($0.match) \($0.target) \($0.origin)".localizedCaseInsensitiveContains(search) }
-        return ScrollView {
+        ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(rows) { rule in
-                    HStack(alignment: .top, spacing: 14) {
-                        Text("\(rule.number)").font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 28, alignment: .trailing)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(rule.match).font(.callout).textSelection(.enabled)
-                            if !rule.origin.isEmpty { Text(rule.origin).font(.caption).foregroundStyle(.tertiary) }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                        Text(store.displayName(rule.target)).font(.callout).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: 160, alignment: .trailing)
-                    }.padding(.horizontal, 16).padding(.vertical, 14)
-                    if rule.id != rows.last?.id { Divider().padding(.leading, 58) }
+                ForEach(filteredRules) { rule in
+                    ruleRow(rule)
+                    if rule.id != filteredRules.last?.id { Divider().padding(.leading, 58) }
                 }
-                if rows.isEmpty { EmptyState(title: search.isEmpty ? "暂无路由规则" : "没有匹配的规则", symbol: "list.bullet.rectangle") }
+                if filteredRules.isEmpty {
+                    EmptyState(title: search.isEmpty ? "暂无路由规则" : "没有匹配的规则", symbol: "list.bullet.rectangle",
+                               detail: search.isEmpty ? "新增一条规则，选择匹配条件与出口。" : nil)
+                }
             }.surface()
         }
+    }
+
+    private func ruleRow(_ rule: RuleRecord) -> some View {
+        HStack(spacing: 12) {
+            Text("\(rule.number)").font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                .frame(width: 28, alignment: .trailing)
+            if rule.sourceMarker { Image(systemName: "tray.full").foregroundStyle(.secondary).frame(width: 20) }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(matchTitle(rule)).font(.callout.weight(rule.sourceMarker ? .medium : .regular))
+                    .textSelection(.enabled).lineLimit(3)
+                HStack(spacing: 8) {
+                    Text(rule.origin)
+                    if rule.sourceID != nil && rule.profileIndex == nil { Text("编辑保留为覆盖") }
+                }.font(.caption).foregroundStyle(.tertiary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if !rule.sourceMarker {
+                Text(targetTitle(rule)).font(.callout).foregroundStyle(.secondary)
+                    .lineLimit(2).frame(maxWidth: 140, alignment: .trailing)
+            }
+            HStack(spacing: 8) {
+                if rule.movable {
+                    Button { move(rule, direction: -1) } label: { Image(systemName: "chevron.up") }
+                        .disabled(!canMove(rule, direction: -1)).help("上移规则")
+                    Button { move(rule, direction: 1) } label: { Image(systemName: "chevron.down") }
+                        .disabled(!canMove(rule, direction: 1)).help("下移规则")
+                }
+                Button { edit(rule) } label: { Image(systemName: "pencil") }
+                    .disabled(!rule.editable).help("编辑规则")
+                Button(role: .destructive) { remove(rule) } label: { Image(systemName: "trash") }
+                    .disabled(!rule.editable).help(rule.sourceID == nil ? "删除规则" : "用覆盖移除此规则")
+            }.buttonStyle(.borderless).controlSize(.small).disabled(!store.isOnline || store.isBusy)
+        }.padding(.horizontal, 14).padding(.vertical, 14)
+            .contextMenu {
+                Button("编辑规则") { edit(rule) }.disabled(!rule.editable || !store.isOnline || store.isBusy)
+                if rule.movable {
+                    Button("上移") { move(rule, direction: -1) }.disabled(!canMove(rule, direction: -1))
+                    Button("下移") { move(rule, direction: 1) }.disabled(!canMove(rule, direction: 1))
+                }
+                Divider()
+                Button("删除…", role: .destructive) { remove(rule) }.disabled(!rule.editable || !store.isOnline || store.isBusy)
+            }
+    }
+
+    private func canMove(_ rule: RuleRecord, direction: Int) -> Bool {
+        guard search.isEmpty, rule.movable, let index = rule.profileIndex, store.isOnline, !store.isBusy else { return false }
+        let count = ((try? YAMLDocument.array(store.documents[.profile] ?? "", key: "rules")) ?? []).count
+        return (0..<count).contains(index + direction)
+    }
+    private func edit(_ rule: RuleRecord) { editing = RuleEditRequest(record: rule, sourceMarker: rule.sourceMarker) }
+    private func remove(_ rule: RuleRecord) {
+        let base = store.revision
+        store.preparedChange = nil
+        Task {
+            await store.removeRule(rule, baseRevision: base)
+            if store.preparedChange != nil { showingPlan = true }
+        }
+    }
+    private func move(_ rule: RuleRecord, direction: Int) {
+        let base = store.revision
+        store.preparedChange = nil
+        Task {
+            await store.moveRule(rule, direction: direction, baseRevision: base)
+            if store.preparedChange != nil { showingPlan = true }
+        }
+    }
+    private func openVisual(_ section: String) { store.visualSection = section; store.showVisualConfiguration = true }
+    private func matchTitle(_ rule: RuleRecord) -> String {
+        if rule.sourceMarker {
+            let id = rule.definition["source"]?.stringValue ?? ""
+            return "来源规则 · " + (store.sources.first { $0.id == id }?.name ?? id)
+        }
+        let match = rule.definition["match"]?.objectValue ?? [:]
+        if match["all"]?.boolValue == true { return "MATCH · 全部流量" }
+        return match.keys.sorted().filter { $0 != "no-resolve" }.map { key in
+            let value = match[key] ?? .null
+            let text = value.stringValue ?? value.arrayValue?.map { $0.stringValue ?? $0.prettyPrinted }.joined(separator: ", ") ?? value.prettyPrinted
+            return "\(RuleDraft.title(key)) · \(text)"
+        }.joined(separator: " · ")
+    }
+    private func targetTitle(_ rule: RuleRecord) -> String {
+        if let call = rule.definition["call"]?.stringValue { return "子规则 · " + call }
+        return store.displayName(rule.definition["outbound"]?.stringValue ?? "direct")
     }
 
     private var dnsContent: some View {
@@ -72,58 +179,48 @@ struct RulesDNSView: View {
                         Text(yaml(resolved)).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    Button("可视化编辑 DNS", systemImage: "slider.horizontal.3") { openVisual("dns") }
+                        .disabled(!store.isOnline || store.isBusy)
                 }.panel()
                 VStack(alignment: .leading, spacing: 12) {
                     PanelHeader(title: "本机网络")
                     LabeledContent("运行状态", value: store.networkState)
                     LabeledContent("网络服务", value: store.networkService)
-                    Button("编辑本机设置") { store.editingLayer = .local }
-                        .disabled(!store.isOnline || store.isBusy)
+                    Button("可视化编辑本机设置") { openVisual("network") }.disabled(!store.isOnline || store.isBusy)
                 }.panel()
             }
         }
-    }
-
-    private struct Rule: Identifiable {
-        let id: String
-        let number: Int
-        let match: String
-        let target: String
-        let origin: String
-    }
-    private var hasRuleOverrides: Bool {
-        (document(.overlay)["patches"] as? [[String: Any]] ?? []).contains { ($0["path"] as? String ?? "").hasPrefix("/rules") }
-    }
-    private var displayedRules: [Rule] {
-        let profileRules = document(.profile)["rules"] as? [[String: Any]] ?? []
-        let sources = document(.sources)["sources"] as? [[String: Any]] ?? []
-        var result: [Rule] = []
-        var occurrences: [String: Int] = [:]
-        func append(_ rule: [String: Any], source: String = "") {
-            let match = rule["match"] as? [String: Any] ?? [:]
-            let display = match["all"] as? Bool == true ? "MATCH" : match.keys.sorted().map { key in "\(key): \(yaml(match[key] ?? ""))" }.joined(separator: " · ")
-            let target = rule["outbound"] as? String ?? "direct"
-            let sourceOutbounds = sources.first { $0["id"] as? String == source }?["outbounds"] as? [[String: Any]] ?? []
-            let sourceDefinesTarget = sourceOutbounds.contains { $0["id"] as? String == target }
-            let builtin = ["direct", "reject"].contains(target) && !sourceDefinesTarget
-            let scoped = source.isEmpty || builtin ? target : source + "/" + target
-            let identity = source + ":" + (rule["id"] as? String ?? display + ":" + target)
-            let count = occurrences[identity, default: 0]
-            occurrences[identity] = count + 1
-            result.append(Rule(id: identity + ":\(count)", number: result.count + 1, match: display, target: scoped,
-                               origin: source.isEmpty ? "主配置" : store.sources.first { $0.id == source }?.name ?? source))
-        }
-        for rule in profileRules {
-            if let source = rule["source"] as? String {
-                for item in sources.first(where: { $0["id"] as? String == source })?["rules"] as? [[String: Any]] ?? [] { append(item, source: source) }
-            } else { append(rule) }
-        }
-        return result
     }
     private func document(_ layer: ConfigurationLayer) -> [String: Any] {
         (try? Yams.load(yaml: store.documents[layer] ?? "")) as? [String: Any] ?? [:]
     }
     private func yaml(_ value: Any) -> String {
         ((try? Yams.dump(object: value, sortKeys: true)) ?? String(describing: value)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+@MainActor
+private struct RuleChangeSheet: View {
+    @Bindable var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SheetHeader(symbol: "list.bullet.rectangle", title: store.preparedChange?.summary ?? "规则变更")
+            if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(minHeight: 150, maxHeight: 230) }
+            Text("规则按顺序匹配。调整顺序或删除规则会改变后续新连接的路由。")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            HStack {
+                if store.isBusy { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("应用变更") {
+                    Task { await store.applyPrepared(); if store.errorMessage == nil { dismiss() } }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(store.preparedChange == nil)
+            }
+        }.padding(24).frame(width: 590).disabled(store.isBusy).interactiveDismissDisabled(store.isBusy)
+            .alert("规则未应用", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
+                Button("好", role: .cancel) { store.errorMessage = nil }
+            } message: { Text(store.errorMessage ?? "") }
     }
 }

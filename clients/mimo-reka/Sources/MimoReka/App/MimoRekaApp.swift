@@ -12,6 +12,10 @@ struct MimoRekaApp: App {
                 .task {
                     delegate.store = store
                     if !store.kernel.isRunning { await store.start() }
+                    if ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "configuration", store.isOnline {
+                        store.visualSection = ProcessInfo.processInfo.environment["MIMO_REKA_VISUAL_SECTION"] ?? "general"
+                        store.showVisualConfiguration = true
+                    }
                     AppProof.scheduleIfRequested()
                 }
         }

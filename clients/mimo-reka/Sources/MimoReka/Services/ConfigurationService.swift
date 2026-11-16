@@ -232,7 +232,7 @@ actor ConfigurationService {
 
         let nodes = (source["outbounds"].arrayValue ?? []).compactMap { $0["id"].stringValue }.map { sourceID + "/" + $0 }
         let importedGroups = nodesOnly ? [] : (source["groups"].arrayValue ?? []).compactMap { $0["id"].stringValue }.map { sourceID + "/" + $0 }
-        let additions = importedGroups + nodes
+        var additions = importedGroups + nodes
         guard !additions.isEmpty else { throw ConfigurationError.message("此来源没有可用节点或策略组。") }
         let groups = profile["groups"]?.arrayValue ?? []
         if let wrapper = groups.first(where: { $0["id"].stringValue == "proxy" }) {
@@ -240,17 +240,20 @@ actor ConfigurationService {
                 throw ConfigurationError.message("主配置中的 proxy 组不是手动选择组，请先在原生配置中调整后导入。")
             }
             let previous = (wrapper["members"].arrayValue ?? []).compactMap(\.stringValue)
+            if wrapper["include-all"].boolValue == false, imports.contains(where: { $0["source"].stringValue == sourceID }) {
+                additions = additions.filter(previous.contains)
+            }
             let retained = previous.filter { !$0.hasPrefix(sourceID + "/") || additions.contains($0) }
             var members: [String] = []
             for member in retained + additions where !members.contains(member) { members.append(member) }
-            if !members.contains("direct") { members.append("direct") }
+            if wrapper["include-all"].boolValue != false, !members.contains("direct") { members.append("direct") }
             if members != previous {
                 patch.append(operation("set", "/groups/proxy/members", .array(members.map(JSONValue.string))))
             }
             let previousSelection = wrapper["selected"].stringValue ?? previous.first ?? "direct"
             // The initial all-direct starter adopts its first imported node.
             // Every existing nonempty policy retains its selection, including DIRECT.
-            if previous.allSatisfy({ $0 == "direct" || $0 == "reject" }) && previousSelection == "direct" {
+            if wrapper["include-all"].boolValue != false, previous.allSatisfy({ $0 == "direct" || $0 == "reject" }) && previousSelection == "direct" {
                 patch.append(operation("set", "/groups/proxy/selected", .string(additions[0])))
             }
         } else {

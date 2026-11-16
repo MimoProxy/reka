@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import MimoReka
 
@@ -21,7 +22,7 @@ final class ConfigurationServiceTests: XCTestCase, @unchecked Sendable {
 
     func testMultipleSourcesPreserveSelectionsCommentsAndOverlay() async throws {
         let fixture = try await ConfigurationKernelFixture()
-        defer { fixture.stop() }
+        addTeardownBlock { await fixture.stop() }
         let service = ConfigurationService(client: fixture.client, pendingURL: fixture.root.appendingPathComponent("client-pending.json"))
         let alpha = """
         proxies:
@@ -90,7 +91,7 @@ final class ConfigurationServiceTests: XCTestCase, @unchecked Sendable {
 
     func testStalePlanAndDurableUncertainCommitRecovery() async throws {
         let fixture = try await ConfigurationKernelFixture()
-        defer { fixture.stop() }
+        addTeardownBlock { await fixture.stop() }
         let pending = fixture.root.appendingPathComponent("pending.json")
         let service = ConfigurationService(client: fixture.client, pendingURL: pending)
         let stale = try await service.prepare(["local_patch": .array([.object([
@@ -125,9 +126,9 @@ final class ConfigurationServiceTests: XCTestCase, @unchecked Sendable {
 
     func testCoreSubscriptionRefreshActivatesSourceAndRetainsLastGoodSnapshot() async throws {
         let fixture = try await ConfigurationKernelFixture()
-        defer { fixture.stop() }
+        addTeardownBlock { await fixture.stop() }
         let http = try SubscriptionHTTPFixture(root: fixture.root)
-        defer { http.stop() }
+        addTeardownBlock { await http.stop() }
         let service = ConfigurationService(client: fixture.client)
         _ = try await service.configureSubscription(sourceID: "subscription", url: http.url, interval: 3600, nodesOnly: true)
         let status = try await service.refreshSubscription(sourceID: "subscription")
@@ -183,13 +184,13 @@ private final class ConfigurationKernelFixture {
             if (try? await client.call("GetStatus")) != nil { return }
             try await Task.sleep(for: .milliseconds(50))
         }
-        stop()
+        await stop()
         throw ConfigurationError.message("Isolated Reka kernel did not start.")
     }
 
-    func stop() {
-        if process.isRunning { process.terminate(); process.waitUntilExit() }
-        try? FileManager.default.removeItem(at: root)
+    func stop() async {
+        await stopFixtureProcess(process)
+        if !process.isRunning { try? FileManager.default.removeItem(at: root) }
     }
 }
 
@@ -231,7 +232,19 @@ final class SubscriptionHTTPFixture {
         url = "http://127.0.0.1:\(port)/subscription"
     }
 
-    func stop() {
-        if process.isRunning { process.terminate(); process.waitUntilExit() }
+    func stop() async { await stopFixtureProcess(process) }
+}
+
+private func stopFixtureProcess(_ process: Process) async {
+    if process.isRunning { process.terminate() }
+    for _ in 0..<100 {
+        if !process.isRunning { return }
+        try? await Task.sleep(for: .milliseconds(50))
     }
+    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    for _ in 0..<40 {
+        if !process.isRunning { return }
+        try? await Task.sleep(for: .milliseconds(50))
+    }
+    XCTAssertFalse(process.isRunning, "The isolated fixture must exit during teardown.")
 }

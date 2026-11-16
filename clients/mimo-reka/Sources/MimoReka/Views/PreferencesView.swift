@@ -76,7 +76,7 @@ struct PreferencesView: View {
             HStack {
                 Button("复制终端代理命令", systemImage: "terminal") { store.copyProxyCommand() }
                 Spacer()
-                Button("编辑本机配置") { store.editingLayer = .local }
+                Button("编辑本机配置") { openVisual("listeners") }
                     .disabled(!store.isOnline || store.isBusy)
             }
         }
@@ -119,9 +119,9 @@ struct PreferencesView: View {
             VStack(alignment: .leading, spacing: 12) {
                 PanelHeader(title: "编辑配置")
                 ForEach(ConfigurationLayer.allCases) { layer in
-                    Button { store.editingLayer = layer } label: {
+                    Button { openEditor(layer) } label: {
                         HStack {
-                            Text(layer.title)
+                            Text(layer == .sources ? "来源引用" : layer == .overlay ? "高级用户覆盖（YAML）" : layer.title)
                             Spacer()
                             Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                         }.font(.callout).padding(.vertical, 5)
@@ -139,6 +139,18 @@ struct PreferencesView: View {
             Text("独立的单 Reka 内核 macOS 客户端。")
                 .font(.callout).foregroundStyle(.secondary)
         }.panel()
+    }
+
+    private func openVisual(_ section: String) {
+        store.visualSection = section
+        store.showVisualConfiguration = true
+        if let main = NSApp.windows.first(where: { $0.canBecomeMain && !$0.isSheet && $0.title != "Mimo Reka Settings" && $0.title != "设置" }) {
+            main.makeKeyAndOrderFront(nil)
+        }
+    }
+    private func openEditor(_ layer: ConfigurationLayer) {
+        if layer == .overlay { store.editingLayer = .overlay }
+        else { openVisual(layer == .local ? "listeners" : layer == .sources ? "imports" : "general") }
     }
 
     private func applyAppearance() {

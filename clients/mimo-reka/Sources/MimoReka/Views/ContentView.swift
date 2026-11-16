@@ -73,8 +73,9 @@ struct ContentView: View {
         }
         .frame(minWidth: 962, minHeight: 644)
         .sheet(isPresented: $store.showImport) { ImportSheet(store: store) }
+        .sheet(isPresented: $store.showVisualConfiguration) { VisualConfigurationSheet(store: store) }
         .sheet(item: $store.editingLayer) { layer in DocumentEditorSheet(store: store, layer: layer) }
-        .alert("需要处理", isPresented: Binding(get: { store.errorMessage != nil && !store.showImport && store.editingLayer == nil && activeState == .key }, set: { if !$0 { store.errorMessage = nil } })) {
+        .alert("需要处理", isPresented: Binding(get: { store.errorMessage != nil && !store.showImport && !store.showVisualConfiguration && store.editingLayer == nil && activeState == .key }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("好", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
         .safeAreaInset(edge: .bottom, spacing: 0) {

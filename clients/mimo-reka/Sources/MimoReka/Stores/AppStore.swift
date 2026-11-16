@@ -13,6 +13,8 @@ final class AppStore {
     var errorMessage: String?
     var notice: String?
     var showImport = false
+    var showVisualConfiguration = false
+    var visualSection = "general"
     var editingLayer: ConfigurationLayer?
     var preparedChange: PreparedChange?
     var importPreview: String?
@@ -155,6 +157,7 @@ final class AppStore {
             }
             self.preparedChange = nil; self.pendingSourceName = nil; self.importPreview = nil
             self.showImport = false; self.editingLayer = nil
+            self.showVisualConfiguration = false
             self.notice = "配置已提交并生效。"
         }
     }

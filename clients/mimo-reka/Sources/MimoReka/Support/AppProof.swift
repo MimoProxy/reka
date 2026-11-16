@@ -10,11 +10,14 @@ enum AppProof {
         scheduled = true
         Task {
             try? await Task.sleep(for: .seconds(2))
-            guard let window = NSApp.windows.first(where: { $0.canBecomeMain && !$0.isSheet }), let content = window.contentView else { return }
+            guard let main = NSApp.windows.first(where: { $0.attachedSheet != nil })
+                ?? NSApp.windows.first(where: { $0.canBecomeMain && !$0.isSheet }) else { return }
             if ProcessInfo.processInfo.environment["MIMO_REKA_MIN_WINDOW"] == "1" {
-                window.setContentSize(NSSize(width: 962, height: 644))
+                main.setContentSize(NSSize(width: 962, height: 644))
                 try? await Task.sleep(for: .milliseconds(300))
             }
+            let window = main.attachedSheet ?? main
+            guard let content = window.contentView else { return }
             let view = content.superview ?? content
             view.layoutSubtreeIfNeeded()
             guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }

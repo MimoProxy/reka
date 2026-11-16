@@ -1,10 +1,17 @@
 import SwiftUI
 
+private struct PolicyNodeEditRequest: Identifiable {
+    let id = UUID()
+    let nodeID: String
+}
+
 @MainActor
 struct ProxyBrowserView: View {
     let store: AppStore
     var search: String
     @State private var selectedGroup: String?
+    @State private var editingPolicy: PolicyEditorRequest?
+    @State private var editingNode: PolicyNodeEditRequest?
 
     private var groups: [PolicyGroup] { store.groups.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.members.contains { store.displayName($0).localizedCaseInsensitiveContains(search) } } }
     private var current: PolicyGroup? { groups.first { $0.id == selectedGroup } ?? groups.first }
@@ -14,6 +21,13 @@ struct ProxyBrowserView: View {
             groupList.frame(minWidth: 190, idealWidth: 220, maxWidth: 280)
             memberList.frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }.padding(.horizontal, 20).padding(.top, Theme.pageTopInset).padding(.bottom, 20)
+            .sheet(item: $editingPolicy) { request in PolicyEditorSheet(store: store, groupID: request.groupID) }
+            .sheet(item: $editingNode) { request in NodeEditorSheet(store: store, nodeID: request.nodeID) }
+            .task(id: store.isOnline) {
+                if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "policy" {
+                    editingPolicy = PolicyEditorRequest(groupID: current?.id)
+                }
+            }
     }
 
     private var groupList: some View {
@@ -22,6 +36,8 @@ struct ProxyBrowserView: View {
                 Text("策略组").font(.headline)
                 Spacer()
                 Text("\(groups.count)").font(.caption).foregroundStyle(.secondary)
+                Button { editingPolicy = PolicyEditorRequest(groupID: nil) } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless).help("新建策略组").disabled(!store.isOnline || store.isBusy)
             }.padding(16)
             Divider()
             if groups.isEmpty { EmptyState(title: "暂无策略组", symbol: "arrow.triangle.branch") }
@@ -35,6 +51,10 @@ struct ProxyBrowserView: View {
                                 Text(store.displayName(group.selected)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }.padding(.vertical, 5).tag(group.id)
+                            .contextMenu {
+                                Button("编辑策略组…") { editingPolicy = PolicyEditorRequest(groupID: group.id) }
+                                    .disabled(!store.isOnline || store.isBusy)
+                            }
                     }
                 }.listStyle(.inset).scrollContentBackground(.hidden)
             }
@@ -50,8 +70,8 @@ struct ProxyBrowserView: View {
                         Text("\(current.type) · \(current.members.count) 个选项").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button { store.editingLayer = .profile } label: { Image(systemName: "slider.horizontal.3") }
-                        .buttonStyle(.borderless).help("编辑策略配置").disabled(!store.isOnline || store.isBusy)
+                    Button { editingPolicy = PolicyEditorRequest(groupID: current.id) } label: { Label("编辑", systemImage: "slider.horizontal.3") }
+                        .buttonStyle(.borderless).help("可视化编辑策略组").disabled(!store.isOnline || store.isBusy)
                 }
                 if current.type != "select" {
                     Label("由内核根据健康检查自动选择", systemImage: "waveform.path")
@@ -94,5 +114,12 @@ struct ProxyBrowserView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(selected ? Theme.accent.opacity(0.6) : .clear, lineWidth: 1))
         }.buttonStyle(PressableStyle()).disabled(store.isBusy || !store.isOnline)
             .accessibilityLabel("\(store.displayName(id))\(selected ? "，当前已选中" : "")")
+            .contextMenu {
+                if outbound != nil && !["direct", "reject"].contains(id) {
+                    Button("编辑节点…") { editingNode = PolicyNodeEditRequest(nodeID: id) }
+                } else if store.groups.contains(where: { $0.id == id }) {
+                    Button("编辑策略组…") { editingPolicy = PolicyEditorRequest(groupID: id) }
+                }
+            }
     }
 }

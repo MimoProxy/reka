@@ -16,11 +16,17 @@ final class AppStoreIntegrationTests: XCTestCase {
             await store.start()
             XCTAssertNil(store.errorMessage)
             let http = try SubscriptionHTTPFixture(root: root)
-            defer { http.stop() }
+            addTeardownBlock { await http.stop() }
             await store.addSubscription(name: "Managed subscription", url: http.url, interval: 3600, nodesOnly: true)
             XCTAssertNil(store.errorMessage)
             let source = try XCTUnwrap(store.sources.first)
             let selected = try XCTUnwrap(store.groups.first { $0.id == "proxy" }?.selected)
+            let wrapperResource = try VisualConfigurationService.group(id: "proxy", documents: store.documents, effective: store.effectiveConfiguration)
+            var renamed = wrapperResource.definition
+            renamed["name"] = .string("我的默认策略")
+            await store.previewResource(kind: "groups", id: "proxy", definition: renamed, baseRevision: store.revision)
+            await store.applyPrepared()
+            XCTAssertNil(store.errorMessage)
             let before = store.revision
             try """
             proxies:

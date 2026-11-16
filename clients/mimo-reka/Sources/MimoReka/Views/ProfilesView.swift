@@ -25,12 +25,12 @@ struct ProfilesView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     PanelHeader(title: "当前配置")
                     ForEach(ConfigurationLayer.allCases) { layer in
-                        Button { store.editingLayer = layer } label: {
+                        Button { openEditor(layer) } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: layer == .profile ? "doc.text" : layer == .local ? "slider.horizontal.3" : layer == .sources ? "tray.full" : "square.stack")
                                     .foregroundStyle(.secondary).frame(width: 22)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(layer.title).font(.callout.weight(.medium))
+                                    Text(layer == .sources ? "来源引用" : layer == .overlay ? "高级用户覆盖（YAML）" : layer.title).font(.callout.weight(.medium))
                                     Text(layer.detail).font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
@@ -62,6 +62,12 @@ struct ProfilesView: View {
         } message: { Text("当前连接会结束，新配置启动后可重新开启网络接管。") }
     }
 
+    private func openEditor(_ layer: ConfigurationLayer) {
+        if layer == .overlay { store.editingLayer = .overlay; return }
+        store.visualSection = layer == .local ? "listeners" : layer == .sources ? "imports" : "general"
+        store.showVisualConfiguration = true
+    }
+
     private func profileCard(_ profile: ClientProfile) -> some View {
         let active = store.activeProfileID == profile.id
         return VStack(alignment: .leading, spacing: 14) {
@@ -74,7 +80,7 @@ struct ProfilesView: View {
                 Spacer(minLength: 4)
                 Menu {
                     if active {
-                        Button("编辑配置") { store.editingLayer = .profile }
+                        Button("可视化编辑") { openEditor(.profile) }
                         Button("导出主配置") { store.exportConfiguration() }
                     } else {
                         Button("使用此配置") { switching = profile }
@@ -99,7 +105,7 @@ struct ProfilesView: View {
         }.padding(18).surface()
             .overlay(RoundedRectangle(cornerRadius: Theme.radius).strokeBorder(active ? Theme.accent.opacity(0.55) : .clear, lineWidth: 1))
             .contextMenu {
-                if active { Button("编辑配置") { store.editingLayer = .profile } }
+                if active { Button("可视化编辑") { openEditor(.profile) } }
                 else { Button("使用此配置") { switching = profile } }
             }
     }
