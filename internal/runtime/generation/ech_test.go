@@ -11,6 +11,7 @@ import (
 	VWS "github.com/sagernet/sing-box/transport/v2raywebsocket"
 	"github.com/sagernet/ws"
 	"io"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -47,9 +48,9 @@ func TestECHUsesActiveProxyServerDNSAfterResolverOnlyRevision(t *testing.T) {
 				// A TCP-only ephemeral reservation may select an occupied UDP port.
 				var listen netip.AddrPort
 				for attempts := 0; attempts < 100; attempts++ {
-					temporary, err := net.Listen("tcp4", "127.0.0.1:0")
+					temporary, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", 1024+mrand.IntN(65536-1024)))
 					if err != nil {
-						t.Fatal(err)
+						continue
 					}
 					candidate := temporary.Addr().(*net.TCPAddr).AddrPort()
 					packet, err := net.ListenPacket("udp4", candidate.String())

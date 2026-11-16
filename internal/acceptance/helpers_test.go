@@ -42,12 +42,13 @@ func logger(t *testing.T) *slog.Logger {
 func freePort(t *testing.T) int {
 	t.Helper()
 	// These fixtures often listen on TCP and UDP at the same port. Starting
-	// from UDP also avoids Windows UDP exclusions that TCP ephemeral ports
-	// alone cannot detect. Production listeners still report bind failures.
+	// from UDP detects both Windows exclusion tables. Random explicit ports
+	// avoid walking an entire reserved TCP range with consecutive ephemeral
+	// allocations. Production listeners still report bind failures.
 	for attempt := 0; attempt < 64; attempt++ {
-		packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+		packet, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", 1024+mrand.IntN(65536-1024)))
 		if err != nil {
-			t.Fatal(err)
+			continue
 		}
 		listener, err := net.Listen("tcp", packet.LocalAddr().String())
 		port := packet.LocalAddr().(*net.UDPAddr).Port

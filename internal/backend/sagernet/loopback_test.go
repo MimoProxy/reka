@@ -12,11 +12,13 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -63,12 +65,14 @@ func (w *testWriter) Write(p []byte) (int, error) {
 func freePort(t *testing.T) uint16 {
 	t.Helper()
 	// These fixtures often listen on TCP and UDP at the same port. Starting
-	// from UDP also avoids Windows UDP exclusions that TCP ephemeral ports
-	// alone cannot detect. Production listeners still report bind failures.
+	// from UDP detects both Windows exclusion tables. Random explicit ports
+	// avoid walking an entire reserved TCP range with consecutive ephemeral
+	// allocations. Production listeners still report bind failures.
 	for attempt := 0; attempt < 64; attempt++ {
-		packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(1024+mrand.IntN(65536-1024)))
+		packet, err := net.ListenPacket("udp", address)
 		if err != nil {
-			t.Fatal(err)
+			continue
 		}
 		listener, err := net.Listen("tcp", packet.LocalAddr().String())
 		port := packet.LocalAddr().(*net.UDPAddr).Port
