@@ -57,11 +57,15 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 		}
 	}()
 	for _, mode := range []string{"native", "xorpub", "random"} {
-		for _, tc := range []struct{ transport, tlsMode, flow string }{
-			{"", "", ""}, {"", "", "xtls-rprx-vision"}, {"ws", "", "xtls-rprx-vision"}, {"httpupgrade", "", "xtls-rprx-vision"}, {"grpc", "", "xtls-rprx-vision"}, {"h2", "tls", "xtls-rprx-vision"}, {"", "tls", "xtls-rprx-vision"}, {"", "reality", "xtls-rprx-vision"},
-			{"http", "", "xtls-rprx-vision"}, {"http", "tls", "xtls-rprx-vision"}, {"http", "reality", "xtls-rprx-vision"}, {"ws", "reality", "xtls-rprx-vision"}, {"h2", "reality", "xtls-rprx-vision"},
+		for _, tc := range []struct {
+			transport, tlsMode, flow string
+			mux                      bool
+		}{
+			{"", "", "", false}, {"", "", "xtls-rprx-vision", false}, {"ws", "", "xtls-rprx-vision", false}, {"httpupgrade", "", "xtls-rprx-vision", false}, {"grpc", "", "xtls-rprx-vision", false}, {"h2", "tls", "xtls-rprx-vision", false}, {"", "tls", "xtls-rprx-vision", false}, {"", "reality", "xtls-rprx-vision", false},
+			{"http", "", "xtls-rprx-vision", false}, {"http", "tls", "xtls-rprx-vision", false}, {"http", "reality", "xtls-rprx-vision", false}, {"ws", "reality", "xtls-rprx-vision", false}, {"h2", "reality", "xtls-rprx-vision", false},
+			{"", "tls", "xtls-rprx-vision", true}, {"", "reality", "xtls-rprx-vision", true}, {"ws", "reality", "xtls-rprx-vision", true},
 		} {
-			t.Run(fmt.Sprintf("%s/%s/%s/%s", mode, tc.transport, tc.tlsMode, tc.flow), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/%s/%s/mux%v", mode, tc.transport, tc.tlsMode, tc.flow, tc.mux), func(t *testing.T) {
 				private, public, _, err := VE.GenX25519("")
 				if err != nil {
 					t.Fatal(err)
@@ -79,6 +83,10 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 				port := freePort(t)
 				serverOptions := option.VLESSInboundOptions{ListenOptions: listenOpts(loopback(port)), Users: []option.VLESSUser{{UUID: testUUID, Flow: tc.flow}}}
 				clientOptions := map[string]any{"flow": tc.flow, "packet_encoding": "xudp"}
+				if tc.mux {
+					serverOptions.Multiplex = &option.InboundMultiplexOptions{Enabled: true}
+					clientOptions["multiplex"] = map[string]any{"enabled": true, "protocol": "smux", "padding": true}
+				}
 				var clientTLS *TLSSpec
 				if tc.tlsMode == "tls" {
 					serverOptions.TLS = &option.InboundTLSOptions{Enabled: true, Certificate: []string{certPEM}, Key: []string{keyPEM}}

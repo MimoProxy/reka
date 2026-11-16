@@ -2,9 +2,11 @@ package compile
 
 import (
 	"fmt"
+	RT "github.com/metacubex/restls-client-go"
 	"slices"
 	"strings"
 
+	KC "github.com/MimoProxy/reka/internal/compat/kcptun"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"golang.org/x/net/http/httpguts"
 )
@@ -18,6 +20,9 @@ func (c *compiler) ssPlugin(path string, value *model.SSPlugin) *model.SSPlugin 
 		c.errorf(model.DocProfile, path+"/"+field, "outbound.plugin", "%s", message)
 	}
 	fields := map[string][]string{
+		"restls":       {"type", "host", "password", "version-hint", "restls-script", "force-tls12", "client-fingerprint", "tls"},
+		"jls":          {"type", "host", "username", "password", "alpn", "client-fingerprint"},
+		"kcptun":       {"type", "kcp"},
 		"obfs":         {"type", "mode", "host"},
 		"v2ray-plugin": {"type", "mode", "host", "path", "tls", "mux", "headers", "http-upgrade", "fast-open"},
 		"gost-plugin":  {"type", "mode", "host", "path", "tls", "mux", "headers"},
@@ -33,13 +38,47 @@ func (c *compiler) ssPlugin(path string, value *model.SSPlugin) *model.SSPlugin 
 			fail(field, "field does not apply to this plugin")
 		}
 	}
-	if p.Host == "" && p.Type != "shadow-tls" {
+	if p.Host == "" && slices.Contains([]string{"obfs", "v2ray-plugin", "gost-plugin"}, p.Type) {
 		p.Host = "bing.com"
 	}
-	if p.Host == "" || strings.ContainsAny(p.Host, " /\\\r\n\x00") {
+	if p.Type != "kcptun" && (p.Host == "" || strings.ContainsAny(p.Host, " /\\\r\n\x00")) {
 		fail("host", "a valid plugin host is required")
 	}
 	switch p.Type {
+	case "kcptun":
+		if p.KCP == nil {
+			p.KCP = &KC.Config{}
+		} else {
+			copy := *p.KCP
+			p.KCP = &copy
+		}
+		p.KCP.Key = c.resolveSecret(path+"/kcp/key", p.KCP.Key)
+		if err := p.KCP.Normalize(); err != nil {
+			fail("kcp", err.Error())
+		}
+	case "jls":
+		p.Username = c.resolveSecret(path+"/username", p.Username)
+		p.Password = c.resolveSecret(path+"/password", p.Password)
+		p.ALPN = slices.Clone(p.ALPN)
+		if p.Username == "" || p.Password == "" {
+			fail("username", "JLS requires username and password")
+		}
+		for _, a := range p.ALPN {
+			if len(a) < 1 || len(a) > 255 {
+				fail("alpn", "invalid ALPN protocol")
+			}
+		}
+	case "restls":
+		p.Password = c.resolveSecret(path+"/password", p.Password)
+		if len(p.RestlsScript) > 8192 {
+			fail("restls-script", "record script exceeds budget")
+		} else if _, err := RT.NewRestlsConfig(p.Host, p.Password, p.VersionHint, p.RestlsScript, p.ClientFingerprint); err != nil {
+			fail("version-hint", err.Error())
+		}
+		if p.TLS == nil {
+			p.TLS = &model.TLS{}
+		}
+
 	case "obfs":
 		if p.Mode != "http" && p.Mode != "tls" {
 			fail("mode", "obfs requires http or tls")
@@ -80,11 +119,15 @@ func (c *compiler) ssPlugin(path string, value *model.SSPlugin) *model.SSPlugin 
 		if p.TLS.Reality != nil {
 			fail("tls/reality", "plugin TLS does not use REALITY")
 		}
-		if p.Type == "shadow-tls" && p.TLS.ECH != nil {
-			fail("tls/ech", "ShadowTLS does not use ECH")
+		if (p.Type == "shadow-tls" || p.Type == "restls") && p.TLS.ECH != nil {
+			fail("tls/ech", "this plugin does not use ECH")
 		}
 		modelTLS := *p.TLS
-		if len(modelTLS.ALPN) == 0 && modelTLS.ALPN == nil {
+		if p.Type == "restls" && modelTLS.Fingerprint != "" {
+			fail("tls/fingerprint", "Restls ClientHello preset belongs in client-fingerprint")
+		}
+
+		if len(modelTLS.ALPN) == 0 && modelTLS.ALPN == nil && p.Type != "restls" {
 			if p.Type == "shadow-tls" {
 				modelTLS.ALPN = []string{"h2", "http/1.1"}
 			} else {
@@ -93,7 +136,7 @@ func (c *compiler) ssPlugin(path string, value *model.SSPlugin) *model.SSPlugin 
 		}
 		// Like the reference, an explicit websocket Host header also sets SNI.
 		server := p.Host
-		if p.Type != "shadow-tls" {
+		if p.Type != "shadow-tls" && p.Type != "restls" {
 			for _, h := range p.Headers {
 				if strings.EqualFold(h.Name, "Host") {
 					server = h.Value

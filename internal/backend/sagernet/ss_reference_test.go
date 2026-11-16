@@ -23,6 +23,7 @@ func TestSSPluginsAgainstPinnedReference(t *testing.T) {
 		t.Skip("pinned external peers run in the compatibility-reference job")
 	}
 	cases := []SSPluginSpec{{Type: "obfs", Mode: "http"}, {Type: "obfs", Mode: "tls"}, {Type: "shadow-tls", Version: 1}, {Type: "shadow-tls", Version: 2, Password: "outer-secret"}, {Type: "shadow-tls", Version: 3, Password: "outer-secret"}}
+	cases = append(cases, legacyPluginCases()...)
 	for _, kind := range []string{"v2ray-plugin", "gost-plugin"} {
 		for _, mux := range []bool{false, true} {
 			for _, secured := range []bool{false, true} {
@@ -43,7 +44,7 @@ func TestSSPluginsAgainstPinnedReference(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer server.Close()
-			configuration, _ := json.Marshal(map[string]any{"Type": s.Type, "Mode": s.Mode, "Version": s.Version, "Password": s.Password, "Mux": s.Mux, "TLS": s.TLS != nil, "HTTPUpgrade": s.HTTPUpgrade, "Forward": serverAddress.String()})
+			configuration, _ := json.Marshal(map[string]any{"Username": s.Username, "VersionHint": s.VersionHint, "Script": s.RestlsScript, "KCP": s.KCP, "Type": s.Type, "Mode": s.Mode, "Version": s.Version, "Password": s.Password, "Mux": s.Mux, "TLS": s.TLS != nil, "HTTPUpgrade": s.HTTPUpgrade, "Forward": serverAddress.String()})
 			command := exec.Command(program)
 			command.Stdin = bytes.NewReader(configuration)
 			output, err := command.StdoutPipe()

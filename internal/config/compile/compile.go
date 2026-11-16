@@ -476,6 +476,12 @@ func (c *compiler) outbounds(eff *Effective) {
 		switch ob.Type {
 		case model.OutboundShadowsocks:
 			out.Plugin = c.ssPlugin(base+"/plugin", ob.Plugin)
+			if out.Plugin != nil && out.Plugin.Type == "kcptun" {
+				out.UDPOverTCP = true
+				if out.UDPOverTCPVersion == 0 {
+					out.UDPOverTCPVersion = 1
+				}
+			}
 			if !slices.Contains(ShadowsocksMethods, ob.Method) {
 				c.errorf(doc, base+"/method", "outbound.method", "unsupported method %q (supported: %s)", ob.Method, strings.Join(ShadowsocksMethods, ", "))
 			}
@@ -772,6 +778,10 @@ func (c *compiler) groups(eff *Effective) {
 			c.errorf(doc, base+"/selected", "group.selected", "selected %q is not a member", g.Selected)
 			ok = false
 		}
+		if _, err := policy.ParseExpectedStatus(g.ExpectedStatus); err != nil {
+			c.errorf(doc, base+"/expected-status", "group.health", "%s", err)
+			ok = false
+		}
 		if g.Type != "select" {
 			if g.URL == "" {
 				g.URL = "https://www.gstatic.com/generate_204"
@@ -793,7 +803,7 @@ func (c *compiler) groups(eff *Effective) {
 			if g.Lazy != nil {
 				lazy = *g.Lazy
 			}
-			eff.AutoGroups = append(eff.AutoGroups, policy.Group{ID: g.ID, Type: g.Type, Members: g.Members, Selected: g.Selected, URL: g.URL, Interval: g.Interval, Timeout: g.Timeout, Tolerance: g.Tolerance, Lazy: lazy, Strategy: g.Strategy})
+			eff.AutoGroups = append(eff.AutoGroups, policy.Group{ExpectedStatus: g.ExpectedStatus, ID: g.ID, Type: g.Type, Members: g.Members, Selected: g.Selected, URL: g.URL, Interval: g.Interval, Timeout: g.Timeout, Tolerance: g.Tolerance, Lazy: lazy, Strategy: g.Strategy})
 		}
 		if g.DisableUDP {
 			if eff.GroupUDPDisabled == nil {

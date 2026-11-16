@@ -139,6 +139,9 @@ func pluginUDPFront(t *testing.T, listen, target string) {
 
 func pluginTestPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, *TLSSpec) {
 	t.Helper()
+	if s.Type == "restls" || s.Type == "jls" || s.Type == "kcptun" {
+		return legacyPluginPeer(t, s, ss)
+	}
 	handler := pluginForwardHandler{target: ss.String()}
 	listener, err := net.Listen("tcp4", loopback(freePort(t)).String())
 	if err != nil {
@@ -321,6 +324,7 @@ func pluginTestPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, *T
 
 func TestSSPluginsRealTCPNativeUDPAndUOT(t *testing.T) {
 	cases := []SSPluginSpec{{Type: "obfs", Mode: "http"}, {Type: "obfs", Mode: "tls"}, {Type: "shadow-tls", Version: 1}, {Type: "shadow-tls", Version: 2, Password: "plugin-secret"}, {Type: "shadow-tls", Version: 3, Password: "plugin-secret"}}
+	cases = append(cases, legacyPluginCases()...)
 	for _, fingerprint := range []string{"chrome", "firefox"} {
 		cases = append(cases, SSPluginSpec{Type: "shadow-tls", Version: 3, Password: "plugin-secret", TLS: &TLSSpec{Fingerprint: fingerprint}})
 	}
@@ -427,7 +431,11 @@ func TestSSPluginsRealTCPNativeUDPAndUOT(t *testing.T) {
 			}
 			defer uot.Close()
 			roundUDP(uot)
-			if protected.Load() != 3 {
+			expected := int32(3)
+			if s.Type == "kcptun" {
+				expected = 2
+			}
+			if protected.Load() != expected {
 				t.Fatal("plugin protection was bypassed or applied twice", protected.Load())
 			}
 			if s.TLS != nil {
@@ -482,7 +490,7 @@ func TestSSPluginsRealTCPNativeUDPAndUOT(t *testing.T) {
 					t.Fatal("wrong plugin ECH key accepted")
 				}
 			}
-			if s.Type == "shadow-tls" && s.Version > 1 {
+			if s.Type == "shadow-tls" && s.Version > 1 || s.Type == "restls" || s.Type == "jls" {
 				invalid := s
 				invalid.Password = "wrong-secret"
 				bad, err := b.NewOutbound("bad-secret", ProxySpec{Type: "shadowsocks", Server: "127.0.0.1", Port: port, Method: "aes-128-gcm", Password: "test", Plugin: &invalid})

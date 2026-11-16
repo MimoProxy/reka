@@ -3,6 +3,7 @@ package importer
 import (
 	"encoding/json"
 	"errors"
+	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/rulesdata"
@@ -187,20 +188,24 @@ func Providers(req Request) ([]Provider, error) {
 					reader := &converter{}
 					r := proxyReader{c: reader, n: health, path: "/health-check"}
 					enabled := r.boolean("enable", false)
+					if _, err := policy.ParseExpectedStatus(r.str("expected-status")); err != nil {
+						return nil, errors.New("provider_health_status_invalid")
+					}
 					for k := 0; k+1 < len(health.Content); k += 2 {
 						key := health.Content[k].Value
-						if key != "enable" && key != "url" && key != "interval" && key != "timeout" && key != "lazy" {
+						if key != "enable" && key != "url" && key != "interval" && key != "timeout" && key != "lazy" && key != "expected-status" {
 							return nil, errors.New("provider_health_option_unsupported")
 						}
 					}
 					if enabled {
 						p.Health = object{
-							"name":     "provider-health-" + p.ID,
-							"type":     "url-test",
-							"url":      r.str("url"),
-							"interval": r.number("interval", 300),
-							"timeout":  r.number("timeout", 5000),
-							"lazy":     r.boolean("lazy", true),
+							"name":            "provider-health-" + p.ID,
+							"type":            "url-test",
+							"url":             r.str("url"),
+							"interval":        r.number("interval", 300),
+							"timeout":         r.number("timeout", 5000),
+							"lazy":            r.boolean("lazy", true),
+							"expected-status": r.str("expected-status"),
 						}
 					}
 					if r.bad {

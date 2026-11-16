@@ -642,3 +642,18 @@ def hopping_distinct_port(source):
     }''')
 
 MODULES['github.com/sagernet/sing-quic'][1]['hysteria/hop.go'] = ('5ced1b37dd283926c6131e8721c3d359f3bfd1ce6a7f7a6f0fb0a835bb5232b9', hopping_distinct_port)
+
+
+def restls_disabled_debug_reads(source):
+    # Even a disabled debug function evaluates its arguments. Cross-direction
+    # counters are owned by separate TLS read/write locks; don't read them just
+    # for disabled logging while the other direction advances a record.
+    import re
+    result,count=re.subn(r'^\s*debugf\([^\n]*\)\n', '\n', source, flags=re.M)
+    if count != 23:
+        raise RuntimeError('Review Restls disabled debug call sites: '+str(count))
+    return result
+
+MODULES['github.com/metacubex/restls-client-go'] = ('v0.1.9', {
+    'conn.go': ('2f9ed3be4dd2499288f08093cceeb8721dd3b8075fa7f5b03d07e4a7a2aa3325',restls_disabled_debug_reads),
+})

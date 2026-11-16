@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	JLS "github.com/MimoProxy/reka/internal/compat/jls"
+	KC "github.com/MimoProxy/reka/internal/compat/kcptun"
 	"github.com/sagernet/sing-box/adapter"
 	S "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/log"
@@ -30,6 +32,11 @@ import (
 )
 
 type SSPluginSpec struct {
+	Username, ClientFingerprint, VersionHint, RestlsScript string
+	ForceTLS12                                             bool
+	ALPN                                                   []string
+	KCP                                                    *KC.Config
+
 	Type, Mode, Host, Path, Password string
 	Version                          int
 	TLS                              *TLSSpec
@@ -142,7 +149,7 @@ func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, d
 	base = &pluginHandshakeDialer{base}
 	p := &ssPlugin{}
 	var tlsConfig S.Config
-	if s.TLS != nil || s.Type == "shadow-tls" {
+	if s.Type != "restls" && (s.TLS != nil || s.Type == "shadow-tls") {
 		spec := s.TLS
 		if spec == nil {
 			spec = &TLSSpec{ServerName: s.Host}
@@ -162,6 +169,44 @@ func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, d
 		}
 	}
 	switch s.Type {
+	case "restls":
+		var err error
+		p.dial, err = newRestlsPlugin(base, dst, s)
+		if err != nil {
+			return nil, err
+		}
+	case "jls":
+		config := &JLS.ClientConfig{ServerName: s.Host, User: JLS.User{Username: s.Username, Password: s.Password}, ALPN: s.ALPN, ClientFingerprint: s.ClientFingerprint}
+		p.dial = func(ctx context.Context) (net.Conn, error) {
+			raw, err := base.DialContext(ctx, "tcp", dst)
+			if err != nil {
+				return nil, err
+			}
+			conn, err := JLS.NewClient(ctx, raw, config)
+			if err != nil {
+				raw.Close()
+			}
+			return conn, err
+		}
+	case "kcptun":
+		config := KC.Config{}
+		if s.KCP != nil {
+			config = *s.KCP
+		}
+		client, err := KC.NewClient(config, func(ctx context.Context) (net.PacketConn, net.Addr, error) {
+			pc, err := base.ListenPacket(ctx, dst)
+			var remote net.Addr = dst
+			if dst.IsIP() {
+				remote = dst.UDPAddr()
+			}
+			return pc, remote, err
+		})
+		if err != nil {
+			return nil, err
+		}
+		p.resource = client
+		p.dial = client.DialContext
+
 	case "obfs":
 		p.dial = func(ctx context.Context) (net.Conn, error) {
 			c, err := base.DialContext(ctx, "tcp", dst)

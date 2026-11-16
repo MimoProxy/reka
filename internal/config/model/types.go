@@ -1,5 +1,6 @@
 package model
 
+import KC "github.com/MimoProxy/reka/internal/compat/kcptun"
 import RD "github.com/MimoProxy/reka/internal/dns"
 import "github.com/MimoProxy/reka/internal/platform"
 
@@ -111,16 +112,17 @@ const GroupSelect = "select"
 
 // Group is a policy group.
 type Group struct {
-	URL           string `yaml:"url"`
-	Interval      int    `yaml:"interval"`
-	Timeout       int    `yaml:"timeout"`
-	Tolerance     int    `yaml:"tolerance"`
-	Lazy          *bool  `yaml:"lazy"`
-	Strategy      string `yaml:"strategy"`
-	IncludeAll    bool   `yaml:"include-all"`
-	Filter        string `yaml:"filter"`
-	ExcludeFilter string `yaml:"exclude-filter"`
-	DisableUDP    bool   `yaml:"disable-udp"`
+	ExpectedStatus string `yaml:"expected-status"`
+	URL            string `yaml:"url"`
+	Interval       int    `yaml:"interval"`
+	Timeout        int    `yaml:"timeout"`
+	Tolerance      int    `yaml:"tolerance"`
+	Lazy           *bool  `yaml:"lazy"`
+	Strategy       string `yaml:"strategy"`
+	IncludeAll     bool   `yaml:"include-all"`
+	Filter         string `yaml:"filter"`
+	ExcludeFilter  string `yaml:"exclude-filter"`
+	DisableUDP     bool   `yaml:"disable-udp"`
 
 	Icon    string   `yaml:"icon"`
 	ID      string   `yaml:"id"`
@@ -342,9 +344,18 @@ type Brutal struct {
 	DownBPS uint64 `yaml:"down-bps"`
 }
 
-// SSPlugin decorates only the Shadowsocks TCP carrier; native UDP remains
+// SSPlugin decorates the Shadowsocks stream carrier. kcptun requires UoT;
+// for other plugins native UDP remains
 // unchanged unless UDP-over-TCP is enabled.
 type SSPlugin struct {
+	Username          string     `yaml:"username"`
+	ClientFingerprint string     `yaml:"client-fingerprint"`
+	VersionHint       string     `yaml:"version-hint"`
+	RestlsScript      string     `yaml:"restls-script"`
+	ForceTLS12        bool       `yaml:"force-tls12"`
+	ALPN              []string   `yaml:"alpn"`
+	KCP               *KC.Config `yaml:"kcp"`
+
 	Type        string               `yaml:"type"`
 	Mode        string               `yaml:"mode"`
 	Host        string               `yaml:"host"`

@@ -1226,7 +1226,7 @@ func ssPluginSpec(p *model.SSPlugin) *sagernet.SSPluginSpec {
 	if p == nil {
 		return nil
 	}
-	out := &sagernet.SSPluginSpec{Type: p.Type, Mode: p.Mode, Host: p.Host, Path: p.Path, Password: p.Password, Version: p.Version, HTTPUpgrade: p.HTTPUpgrade, FastOpen: p.FastOpen, Headers: http.Header{}}
+	out := &sagernet.SSPluginSpec{Username: p.Username, ClientFingerprint: p.ClientFingerprint, VersionHint: p.VersionHint, RestlsScript: p.RestlsScript, ForceTLS12: p.ForceTLS12, ALPN: p.ALPN, KCP: p.KCP, Type: p.Type, Mode: p.Mode, Host: p.Host, Path: p.Path, Password: p.Password, Version: p.Version, HTTPUpgrade: p.HTTPUpgrade, FastOpen: p.FastOpen, Headers: http.Header{}}
 	out.Mux = p.Mux == nil || *p.Mux
 	for _, h := range p.Headers {
 		out.Headers.Add(h.Name, h.Value)

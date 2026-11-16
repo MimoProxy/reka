@@ -210,6 +210,10 @@ def main():
             target=stage/'module-cache'/relative/original.name
             target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(original,target)
+    # Local pinned replacements expose transitive graph metadata that normal
+    # package builds can prune. Resolve its checksums before listing all nodes;
+    # this only updates the generated build.sum, never the checked-in lockfile.
+    run(['go','mod','download','-modfile',str(ROOT/'bin/build.mod'),'all'])
     # Go may need metadata for unlinked graph nodes during version selection.
     for metadata in json_objects(run(['go','list','-modfile',str(ROOT/'bin/build.mod'),'-m','-json','all'])):
         version=metadata.get('Version')

@@ -13,6 +13,7 @@ import (
 type Group struct {
 	ID, Type, Selected, Strategy string
 	URL                          string `json:"-"`
+	ExpectedStatus               string `json:"expected-status,omitempty"`
 	Members                      []string
 	Interval, Timeout, Tolerance int
 	Lazy                         bool
@@ -113,7 +114,7 @@ func (m *Manager) check(ctx context.Context, s *state) {
 				}
 				q, cancel := context.WithTimeout(ctx, time.Duration(s.group.Timeout)*time.Millisecond)
 				start := time.Now()
-				err := m.probe(q, member, s.group.URL)
+				err := m.probe(context.WithValue(q, expectedStatusKey{}, s.group.ExpectedStatus), member, s.group.URL)
 				cancel()
 				<-m.sem
 				results[i] = Result{member, err == nil, time.Since(start).Milliseconds(), time.Now().UTC()}

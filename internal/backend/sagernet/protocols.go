@@ -186,6 +186,14 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			return plugin, createErr
 		})
 		values["plugin"] = "reka-scoped"
+		if s.Plugin.Type == "kcptun" {
+			uot, ok := values["udp_over_tcp"].(map[string]any)
+			if !ok {
+				uot = map[string]any{"version": 1}
+			}
+			uot["enabled"] = true
+			values["udp_over_tcp"] = uot
+		}
 	}
 	ctx, realmTransport, err = configureRealmContext(ctx, b.componentLogger("realm", s.Type, tag), values, s.Realm)
 	if err != nil {

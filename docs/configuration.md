@@ -286,3 +286,27 @@ sockets retain the node dialer/VPN protection. Native SS UDP bypasses the TCP
 carrier; enabling UoT sends UDP through it instead. SIP002 `plugin` query values
 support escaped SIP003 obfs-local/simple-obfs and v2ray-plugin options; unknown
 options are rejected, and `uot=1` takes precedence over a false UoT alias.
+
+Restls plugins use `type: restls`, `host`, `password`, `version-hint: tls12|tls13`,
+optional `restls-script`, `force-tls12` and `client-fingerprint`. TLS verification
+options remain under `tls`. JLS uses `type: jls`, `host`, `username`, `password`,
+optional `alpn` and `client-fingerprint`; authentication uses the JLS credentials.
+The SS Clash importer accepts the reference's plugin option names.
+
+kcptun uses `plugin: {type: kcptun, kcp: {...}}`; `kcp` uses the reference's JSON
+names (`key`, `crypt`, `mode`, `conn`, `autoexpire`, `scavengettl`, `mtu`,
+`ratelimit`, `sndwnd`, `rcvwnd`, `datashard`, `parityshard`, `dscp`, `nocomp`,
+`acknodelay`, `nodelay`, `interval`, `resend`, `nc`, `sockbuf`, `smuxver`,
+`smuxbuf`, `framesize`, `streambuf`, `keepalive`). Its defaults and key expansion
+match the pinned reference, including its historical default key. Explicit keys
+or secret references are recommended. kcptun enables UDP over TCP automatically;
+its UDP carrier uses the node's protected physical dialer or configured detour.
+The pool reuses carriers, drains retired streams and releases sockets on network
+reset and close. Allocation budgets cap active slots at 64, retired carriers at
+256 and each configured buffer at 64 MiB.
+
+Automatic groups accept `expected-status`, such as `204/300-399` or `200,204`.
+`*` accepts any HTTP response; omitted native values retain the 200–399 default.
+Clash imports explicitly select `*` when omitted, matching the reference. Provider
+health checks propagate their own ranges to generated health groups. Group
+filters use bounded .NET regular expressions and backtick-separated priority.

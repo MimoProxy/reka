@@ -2,6 +2,7 @@ package importer
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -93,6 +94,36 @@ func ssLinkPlugin(value string) (string, object, error) {
 				result[key] = flag
 			default:
 				return "", nil, fmt.Errorf("unknown v2ray-plugin link option")
+			}
+		}
+		return name, result, nil
+	case "gost-plugin", "shadow-tls", "restls", "jls", "kcptun":
+		allowed := ssPluginFields[name]
+		for key, argument := range args {
+			if !slices.Contains(allowed, key) {
+				return "", nil, fmt.Errorf("unknown plugin link option")
+			}
+			switch key {
+			case "version", "conn", "autoexpire", "scavengettl", "mtu", "ratelimit", "sndwnd", "rcvwnd", "datashard", "parityshard", "dscp", "nodelay", "interval", "resend", "nc", "sockbuf", "smuxver", "smuxbuf", "framesize", "streambuf", "keepalive":
+				value, err := strconv.Atoi(argument)
+				if err != nil {
+					return "", nil, fmt.Errorf("invalid plugin integer")
+				}
+				result[key] = value
+			case "force-tls12", "skip-cert-verify", "nocomp", "acknodelay", "mux":
+				value, err := strconv.ParseBool(argument)
+				if err != nil {
+					return "", nil, fmt.Errorf("invalid plugin boolean")
+				}
+				result[key] = value
+			case "tls":
+				result[key] = true
+			case "alpn":
+				result[key] = strings.Split(argument, ",")
+			case "headers", "ech-opts":
+				return "", nil, fmt.Errorf("structured plugin option requires a configuration document")
+			default:
+				result[key] = argument
 			}
 		}
 		return name, result, nil

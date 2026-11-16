@@ -162,6 +162,8 @@ func parseLink(raw string) (object, error) {
 					}
 					out["plugin"], out["plugin-opts"] = name, options
 				}
+			case "client-fingerprint":
+				out[key] = query.Get(key)
 			case "udp-over-tcp":
 				flag, err := strconv.ParseBool(query.Get(key))
 				if err != nil {

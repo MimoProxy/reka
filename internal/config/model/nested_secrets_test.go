@@ -157,3 +157,28 @@ patches: [{op: set, path: /outbounds/node/plugin, value: {password: plugin-priva
 		}
 	}
 }
+
+func TestLegacyPluginCredentialMaskingAndRetention(t *testing.T) {
+	for name, data := range map[string]string{
+		DocProfile: "outbounds: [{id: a, type: shadowsocks, plugin: {type: jls, username: private-user, password: private-password}},{id: b, type: shadowsocks, plugin: {type: kcptun, kcp: {key: private-key}}}]",
+		DocSources: "sources: [{id: remote, outbounds: [{id: a, type: shadowsocks, plugin: {type: jls, username: private-user, password: private-password}},{id: b, type: shadowsocks, plugin: {type: kcptun, kcp: {key: private-key}}}]}]",
+		DocOverlay: "patches: [{op: set, path: /outbounds/a/plugin/username, value: private-user},{op: set, path: /outbounds/a/plugin/password, value: private-password},{op: set, path: /outbounds/b/plugin/kcp/key, value: private-key}]",
+	} {
+		base, ds := LoadDoc(name, []byte(data))
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		masked, _ := LoadDoc(name, []byte(data))
+		if masked.MaskSecrets() != 3 || strings.Contains(string(masked.Bytes()), "private-") {
+			t.Fatal("credential leaked", name)
+		}
+		if err := masked.UnmaskSecrets(base); err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{"private-user", "private-password", "private-key"} {
+			if !strings.Contains(string(masked.Bytes()), secret) {
+				t.Fatal("masked credential was lost", name, secret)
+			}
+		}
+	}
+}

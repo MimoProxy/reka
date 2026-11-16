@@ -66,7 +66,7 @@ Select groups retain supported members in original order. Unsupported group type
 ./bin/rekactl import -source links -format links -apply links.txt
 ```
 
-Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, plugins and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
 
 ## API
 
@@ -119,3 +119,8 @@ opening a remote socket or immediately rejecting the client. A referenced
 `GLOBAL` uses the source's explicit group, or a generated select group with
 DIRECT, REJECT, source nodes and groups in reference order (DIRECT selected by
 default). A source cannot create a cyclic group graph through GLOBAL.
+
+SS SIP003 links support obfs aliases, v2ray-plugin, gost-plugin, ShadowTLS,
+Restls, JLS and kcptun. Escaped semicolons/equal signs are retained. Structured
+headers/ECH options require a configuration document. Plugin credentials and
+JLS usernames/kcptun keys remain masked in profile, source and overlay reads.

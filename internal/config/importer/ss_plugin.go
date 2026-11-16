@@ -1,6 +1,19 @@
 package importer
 
-import "go.yaml.in/yaml/v3"
+import (
+	"go.yaml.in/yaml/v3"
+	"slices"
+)
+
+var ssPluginFields = map[string][]string{
+	"restls":       {"host", "password", "version-hint", "restls-script", "force-tls12", "fingerprint", "skip-cert-verify", "name-cert-verify"},
+	"jls":          {"host", "username", "password", "alpn"},
+	"kcptun":       {"key", "crypt", "mode", "conn", "autoexpire", "scavengettl", "mtu", "ratelimit", "sndwnd", "rcvwnd", "datashard", "parityshard", "dscp", "nocomp", "acknodelay", "nodelay", "interval", "resend", "nc", "sockbuf", "smuxver", "smuxbuf", "framesize", "streambuf", "keepalive"},
+	"obfs":         {"mode", "host"},
+	"v2ray-plugin": {"mode", "host", "path", "tls", "ech-opts", "fingerprint", "certificate", "private-key", "headers", "skip-cert-verify", "name-cert-verify", "mux", "v2ray-http-upgrade", "v2ray-http-upgrade-fast-open"},
+	"gost-plugin":  {"mode", "host", "path", "tls", "ech-opts", "fingerprint", "certificate", "private-key", "headers", "skip-cert-verify", "name-cert-verify", "mux"},
+	"shadow-tls":   {"version", "password", "host", "fingerprint", "certificate", "private-key", "skip-cert-verify", "name-cert-verify", "alpn"},
+}
 
 func (c *converter) convertSSPlugin(parent *proxyReader, out object) {
 	kind := parent.str("plugin")
@@ -22,13 +35,8 @@ func (c *converter) convertSSPlugin(parent *proxyReader, out object) {
 		return
 	}
 	r := proxyReader{c: c, n: n, path: parent.path + "/plugin-opts"}
-	fields := map[string][]string{
-		"obfs":         {"mode", "host"},
-		"v2ray-plugin": {"mode", "host", "path", "tls", "ech-opts", "fingerprint", "certificate", "private-key", "headers", "skip-cert-verify", "name-cert-verify", "mux", "v2ray-http-upgrade", "v2ray-http-upgrade-fast-open"},
-		"gost-plugin":  {"mode", "host", "path", "tls", "ech-opts", "fingerprint", "certificate", "private-key", "headers", "skip-cert-verify", "name-cert-verify", "mux"},
-		"shadow-tls":   {"version", "password", "host", "fingerprint", "certificate", "private-key", "skip-cert-verify", "name-cert-verify", "alpn"},
-	}
-	known, ok := fields[kind]
+
+	known, ok := ssPluginFields[kind]
 	if !ok {
 		parent.fail("plugin", "import.plugin", "plugin is not implemented by this build")
 		return
@@ -44,6 +52,36 @@ func (c *converter) convertSSPlugin(parent *proxyReader, out object) {
 	}
 	p := object{"type": kind, "host": r.str("host")}
 	switch kind {
+	case "restls":
+		p["password"], p["version-hint"], p["restls-script"], p["force-tls12"], p["client-fingerprint"] = r.str("password"), r.str("version-hint"), r.str("restls-script"), r.boolean("force-tls12", false), parent.str("client-fingerprint")
+	case "jls":
+		p["username"], p["password"], p["client-fingerprint"] = r.str("username"), r.str("password"), parent.str("client-fingerprint")
+		if a := get(n, "alpn"); a != nil {
+			var values []string
+			if err := a.Decode(&values); err != nil {
+				r.fail("alpn", "import.plugin", "ALPN must be a string list")
+			} else {
+				p["alpn"] = values
+			}
+		}
+	case "kcptun":
+		delete(p, "host")
+		k := object{}
+		for _, field := range known {
+			if get(n, field) == nil {
+				continue
+			}
+			switch field {
+			case "key", "crypt", "mode":
+				k[field] = r.str(field)
+			case "nocomp", "acknodelay":
+				k[field] = r.boolean(field, false)
+			default:
+				k[field] = r.number(field, 0)
+			}
+		}
+		p["kcp"] = k
+
 	case "obfs":
 		p["mode"] = r.str("mode")
 	case "v2ray-plugin", "gost-plugin":
@@ -69,7 +107,7 @@ func (c *converter) convertSSPlugin(parent *proxyReader, out object) {
 	case "shadow-tls":
 		p["version"], p["password"] = r.number("version", 2), r.str("password")
 	}
-	tlsEnabled := kind == "shadow-tls" || r.boolean("tls", false)
+	tlsEnabled := kind == "shadow-tls" || kind == "restls" || r.boolean("tls", false)
 	if tlsEnabled {
 		tls := object{"server-name": r.str("host"), "insecure": r.boolean("skip-cert-verify", false)}
 		if kind == "shadow-tls" {
@@ -93,7 +131,7 @@ func (c *converter) convertSSPlugin(parent *proxyReader, out object) {
 			}
 		}
 	}
-	if kind != "shadow-tls" && parent.str("client-fingerprint") != "" {
+	if !slices.Contains([]string{"shadow-tls", "restls", "jls"}, kind) && parent.str("client-fingerprint") != "" {
 		c.diag(get(parent.n, "client-fingerprint"), parent.path+"/client-fingerprint", "import.ignored-field", "the reference only uses this preset for ShadowTLS, Restls and JLS", false)
 	}
 	parent.bad = parent.bad || r.bad

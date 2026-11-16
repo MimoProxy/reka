@@ -18,6 +18,9 @@ import (
 	"time"
 
 	MH "github.com/metacubex/http"
+	JLS "github.com/metacubex/mihomo/transport/jls"
+	KC "github.com/metacubex/mihomo/transport/kcptun"
+	RT "github.com/metacubex/mihomo/transport/restls"
 	SH "github.com/metacubex/mihomo/transport/shadowtls"
 	OB "github.com/metacubex/mihomo/transport/simple-obfs"
 	WS "github.com/metacubex/mihomo/transport/vmess"
@@ -29,9 +32,10 @@ import (
 )
 
 type request struct {
-	Type, Mode, Forward, Password string
-	Version                       int
-	Mux, TLS, HTTPUpgrade         bool
+	Type, Mode, Forward, Password, Username, VersionHint, Script string
+	KCP                                                          KC.Config
+	Version                                                      int
+	Mux, TLS, HTTPUpgrade                                        bool
 }
 
 func main() {
@@ -58,6 +62,70 @@ func run() error {
 	pin := ""
 	var serve func() error
 	switch config.Type {
+	case "kcptun":
+		pc, err := net.ListenPacket("udp4", listener.Addr().String())
+		if err != nil {
+			return err
+		}
+		defer pc.Close()
+		config.KCP.FillDefaults()
+		peer := KC.NewServer(config.KCP)
+		serve = func() error { return peer.Serve(pc, forward.accept) }
+	case "jls":
+		peer, err := JLS.NewServerConfig("plugin.test", config.Forward, []JLS.User{{Username: config.Username, Password: config.Password}}, nil, 0, (&net.Dialer{}).DialContext)
+		if err != nil {
+			return err
+		}
+		serve = func() error {
+			for {
+				raw, err := listener.Accept()
+				if err != nil {
+					return err
+				}
+				go func() {
+					ctx := context.Background()
+					raw.SetDeadline(time.Now().Add(5 * time.Second))
+					c, err := JLS.Server(ctx, raw, peer)
+					raw.SetDeadline(time.Time{})
+					if err != nil {
+						raw.Close()
+						return
+					}
+					forward.accept(c)
+				}()
+			}
+		}
+	case "restls":
+		target := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		version := uint16(tls.VersionTLS13)
+		if config.VersionHint == "tls12" {
+			version = tls.VersionTLS12
+		}
+		target.TLS = &tls.Config{MinVersion: version, MaxVersion: version}
+		target.StartTLS()
+		defer target.Close()
+		digest := sha256.Sum256(target.TLS.Certificates[0].Certificate[0])
+		pin = hex.EncodeToString(digest[:])
+		peer := &RT.ServerConfig{ServerHostname: target.Listener.Addr().String(), Password: config.Password, RestlsScript: config.Script}
+		serve = func() error {
+			for {
+				raw, err := listener.Accept()
+				if err != nil {
+					return err
+				}
+				go func() {
+					ctx := context.Background()
+					raw.SetDeadline(time.Now().Add(5 * time.Second))
+					c, err := RT.Server(ctx, raw, peer)
+					raw.SetDeadline(time.Time{})
+					if err != nil {
+						raw.Close()
+						return
+					}
+					forward.accept(c)
+				}()
+			}
+		}
 	case "obfs":
 		serve = func() error {
 			for {
