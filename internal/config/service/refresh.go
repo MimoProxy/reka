@@ -363,6 +363,7 @@ func (m *RefreshManager) work(id string, force bool, job *refreshJob) {
 		record.Status.ErrorCode = ""
 		record.Status.Revision = revision
 		record.Status.RootHash = entries["root"].Hash
+		record.Status.Usage = entries["root"].Usage
 		record.Status.FallbackResources = nil
 		for id, entry := range entries {
 			if entry.Fallback {

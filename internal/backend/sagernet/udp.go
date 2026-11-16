@@ -65,10 +65,11 @@ type udpFlow struct {
 	sendMu       sync.Mutex
 	failed       bool
 
-	up, down atomic.Int64
-	last     atomic.Int64
-	once     sync.Once
-	untrack  func()
+	processTraffic *processTrafficCounter
+	up, down       atomic.Int64
+	last           atomic.Int64
+	once           sync.Once
+	untrack        func()
 }
 
 func (b *Backend) relayUDP(ctx context.Context, r *router, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
@@ -194,7 +195,10 @@ func (f *udpFlow) routeAndDial() {
 		return
 	}
 	f.md, f.rt = md, rt
-	f.untrack = f.s.b.conns.add(&tracked{md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
+	var finishProcess func()
+	f.processTraffic, finishProcess = f.s.b.beginProcessTraffic(rt.Owner)
+	untrack := f.s.b.conns.add(&tracked{md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
+	f.untrack = func() { untrack(); finishProcess() }
 	f.s.mu.Unlock()
 	f.dial()
 }
@@ -371,6 +375,7 @@ func (f *udpFlow) writeLocked(b *buf.Buffer) {
 	}
 	f.up.Add(n)
 	f.s.b.trafficUpload.Add(uint64(n))
+	f.processTraffic.upload.Add(uint64(n))
 }
 
 func (f *udpFlow) receive() {
@@ -399,6 +404,7 @@ func (f *udpFlow) receive() {
 		}
 		f.down.Add(n)
 		f.s.b.trafficDownload.Add(uint64(n))
+		f.processTraffic.download.Add(uint64(n))
 	}
 }
 

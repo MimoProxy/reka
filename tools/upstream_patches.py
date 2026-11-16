@@ -762,3 +762,11 @@ def dns_multiplexer_identity_lifetime(source):
     return source
 
 MODULES['github.com/sagernet/sing-box'][1]['dns/transport/multiplexer.go'] = ('39983a6e841e82246c73cec45c9256f9647d58ad0c338747687d0fc6c36f4702', dns_multiplexer_identity_lifetime)
+
+
+# The Darwin finder already obtained the concrete PID; retain it in the owner
+# returned to Reka rather than discarding it after resolving the executable.
+def darwin_owner_pid(source):
+    return replace(source, '\t\towner := &adapter.ConnectionOwner{\n\t\t\tUserId: entry.uid,', '\t\towner := &adapter.ConnectionOwner{\n\t\t\tProcessID: entry.pid,\n\t\t\tUserId: entry.uid,')
+
+MODULES['github.com/sagernet/sing-box'][1]['common/process/searcher_darwin_shared.go'] = ('efcd094a24fd1a30e96251441f0ad1e1f624eec10733145c436c56ef093351e5', darwin_owner_pid)

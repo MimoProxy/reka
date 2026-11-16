@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
+
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
 )
@@ -101,13 +103,14 @@ func HTTPClientWithControl(control func(string, string, syscall.RawConn) error, 
 }
 
 type Entry struct {
-	Fallback bool      `json:"fallback,omitempty"`
-	Checked  time.Time `json:"checked,omitempty"`
-	Request  string    `json:"request"`
-	Hash     string    `json:"hash"`
-	ETag     string    `json:"etag,omitempty"`
-	Modified string    `json:"modified,omitempty"`
-	Next     time.Time `json:"next"`
+	Usage    *api.SubscriptionUsage `json:"usage,omitempty"`
+	Fallback bool                   `json:"fallback,omitempty"`
+	Checked  time.Time              `json:"checked,omitempty"`
+	Request  string                 `json:"request"`
+	Hash     string                 `json:"hash"`
+	ETag     string                 `json:"etag,omitempty"`
+	Modified string                 `json:"modified,omitempty"`
+	Next     time.Time              `json:"next"`
 }
 type Fetcher struct {
 	Client *http.Client
@@ -202,6 +205,9 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			return nil, failure(fmt.Sprintf("http_status_%d", response.StatusCode))
 		}
 		entry = Entry{Checked: now, Request: request, ETag: response.Header.Get("ETag"), Modified: response.Header.Get("Last-Modified"), Next: now.Add(time.Duration(interval) * time.Second)}
+		if id == "root" && kind == "subscription" {
+			entry.Usage = responseUsage(response.Header.Values("Subscription-Userinfo"), old.Usage, response.StatusCode == http.StatusNotModified, now)
+		}
 		if response.StatusCode == http.StatusNotModified {
 			if entry.ETag == "" {
 				entry.ETag = old.ETag

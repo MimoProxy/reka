@@ -51,7 +51,9 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		up, down  atomic.Int64
 		closeBoth = func() { common.Close(conn, remote) }
 	)
-	untrack := b.conns.add(&tracked{md: toMetadata(metadata), out: out, info: rt.Info, up: &up, down: &down, close: closeBoth})
+	processTraffic, finishProcess := b.beginProcessTraffic(rt.Owner)
+	untrackConnection := b.conns.add(&tracked{md: toMetadata(metadata), out: out, info: rt.Info, up: &up, down: &down, close: closeBoth})
+	untrack := func() { untrackConnection(); finishProcess() }
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {
 		if done.Swap(true) {
@@ -81,8 +83,8 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		return
 	}
 	grace := b.halfCloseTimeout
-	go copyHalf(conn, remote, &up, finish, func() { watchIdle(&down, grace, finished, closeBoth) }, &b.trafficUpload)
-	go copyHalf(remote, conn, &down, finish, func() { watchIdle(&up, grace, finished, closeBoth) }, &b.trafficDownload)
+	go copyHalf(conn, remote, &up, finish, func() { watchIdle(&down, grace, finished, closeBoth) }, &b.trafficUpload, &processTraffic.upload)
+	go copyHalf(remote, conn, &down, finish, func() { watchIdle(&up, grace, finished, closeBoth) }, &b.trafficDownload, &processTraffic.download)
 }
 
 // copyHalf copies source to destination, counting bytes into moved. At EOF
