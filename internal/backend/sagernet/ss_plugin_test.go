@@ -289,7 +289,7 @@ func pluginTestPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, *T
 	} else if s.Type == "shadow-tls" {
 		target := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		target.EnableHTTP2 = true
-		if s.Version == 1 {
+		if s.Version == 1 || s.ForceTLS12 {
 			target.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
 		}
 		target.StartTLS()

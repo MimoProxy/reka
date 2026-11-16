@@ -676,9 +676,60 @@ MODULES['github.com/sagernet/sing-box'][1]['common/tls/client.go'] = ('c25109938
 def shadowtls_v2_auth_publication(source):
     source=replace(source,'import (','import (\n"sync"')
     source=replace(source,'type clientConn struct {','type clientConn struct {\n clientAccess sync.Mutex')
-    source=replace(source,'return &clientConn{newConn(hashConn.Conn), hashConn}','return &clientConn{shadowConn:newConn(hashConn.Conn),hashConn:hashConn}')
+    source=replace(source,'return &clientConn{newConn(hashConn.Conn), hashConn}','return &clientConn{shadowConn:newConn(hashConn.dataConn()),hashConn:hashConn}')
     for signature in ['Write(p []byte) (n int, err error)','WriteVectorised(buffers []*buf.Buffer) error']:
         source=replace(source,'func (c *clientConn) '+signature+' {','func (c *clientConn) '+signature+' {\n c.clientAccess.Lock();defer c.clientAccess.Unlock()')
     return source
 
 MODULES['github.com/sagernet/sing-shadowtls'][1]['v2_client.go'] = ('cfd360330e85fc9cc002fede7334e6fcaea75704115fa2ef20203a34753d9172',shadowtls_v2_auth_publication)
+
+
+def shadowtls_v2_handshake_join(source):
+    source = replace(source, '\t\tgo bufio.Copy(hashConn, handshakeConn)', '''		copyDone := make(chan struct{})
+		go func() {
+			defer close(copyDone)
+			bufio.Copy(hashConn, handshakeConn)
+		}()''')
+    source = replace(source, '\t\t\thandshakeConn.Close()\n\t\t\ts.handler.NewConnectionEx(ctx, bufio.NewCachedConn(newConn(conn), request)', '\t\t\thandshakeConn.Close()\n\t\t\t<-copyDone\n\t\t\ts.handler.NewConnectionEx(ctx, bufio.NewCachedConn(newConn(conn), request)')
+    return source
+
+
+MODULES['github.com/sagernet/sing-shadowtls'][1]['service.go'] = ('51da1ff27b1c3a926b7f5e25c857b9d6df8a82ebfd6d927e22248cd28e7bd225', shadowtls_v2_handshake_join)
+
+
+def shadowtls_v2_post_handshake(source):
+    source = replace(source, 'type hashReadConn struct {\n\tnet.Conn\n\thmac hash.Hash\n}', '''type hashReadConn struct {
+	net.Conn
+	hmac hash.Hash
+	access sync.Mutex
+	postHandshake net.Conn
+	frozen bool
+}
+
+// SetPostHandshakeConn preserves the TLS decoder for late camouflage records.
+// The connection is installed before publication; the original TLS reader keeps
+// using this hash connection and never recursively enters the data reader.
+func (c *hashReadConn) SetPostHandshakeConn(factory func(net.Conn) net.Conn) {
+	c.access.Lock()
+	c.frozen = true
+	c.access.Unlock()
+	c.postHandshake = factory(c.Conn)
+}
+func (c *hashReadConn) dataConn() net.Conn {
+	if c.postHandshake != nil { return c.postHandshake }
+	return c.Conn
+}''')
+    source = replace(source, '''		conn,
+		hmac.New(sha1.New, []byte(password)),''', '''		Conn: conn,
+		hmac: hmac.New(sha1.New, []byte(password)),''')
+    source = replace(source, '''	if err != nil {
+		return
+	}
+	_, err = c.hmac.Write(b[:n])''', '''	c.access.Lock()
+	if !c.frozen { c.hmac.Write(b[:n]) }
+	c.access.Unlock()''')
+    source = replace(source, 'func (c *hashReadConn) Sum() []byte {', 'func (c *hashReadConn) Sum() []byte {\n c.access.Lock(); defer c.access.Unlock()')
+    return source
+
+
+MODULES['github.com/sagernet/sing-shadowtls'][1]['v2_hash.go'] = ('6ec0e04900cc75dbb26c9247dd25846956dc8fa0252a5ebb3f22bc0d34038666', shadowtls_v2_post_handshake)

@@ -143,6 +143,7 @@ func run() error {
 		}
 	case "shadow-tls":
 		target := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		target.EnableHTTP2 = true
 		if config.Version == 1 {
 			target.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
 		}

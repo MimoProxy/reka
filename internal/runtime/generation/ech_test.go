@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,12 +43,26 @@ func TestECHUsesActiveProxyServerDNSAfterResolverOnlyRevision(t *testing.T) {
 				}
 			}()
 			if plugin {
-				temporary, err := net.Listen("tcp4", "127.0.0.1:0")
-				if err != nil {
-					t.Fatal(err)
+				// The Shadowsocks peer binds both transports to the same port.
+				// A TCP-only ephemeral reservation may select an occupied UDP port.
+				var listen netip.AddrPort
+				for attempts := 0; attempts < 100; attempts++ {
+					temporary, err := net.Listen("tcp4", "127.0.0.1:0")
+					if err != nil {
+						t.Fatal(err)
+					}
+					candidate := temporary.Addr().(*net.TCPAddr).AddrPort()
+					packet, err := net.ListenPacket("udp4", candidate.String())
+					temporary.Close()
+					if err == nil {
+						packet.Close()
+						listen = candidate
+						break
+					}
 				}
-				listen := temporary.Addr().(*net.TCPAddr).AddrPort()
-				temporary.Close()
+				if !listen.IsValid() {
+					t.Fatal("could not reserve a TCP/UDP peer port")
+				}
 				server, err := Native.StartShadowsocksServer(listen, "aes-128-gcm", "test", nil)
 				if err != nil {
 					t.Fatal(err)

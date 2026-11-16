@@ -70,3 +70,54 @@ func TestShadowTLSConcurrentFirstVectorAndOrdinaryWriteStayAtomic(t *testing.T) 
 		})
 	}
 }
+
+func TestShadowTLSV2TLSVersionsSmallRecordsAndClose(t *testing.T) {
+	for _, fingerprint := range []string{"", "chrome"} {
+		for _, tls12 := range []bool{false, true} {
+			t.Run(fmt.Sprintf("fingerprint-%s/tls12-%v", fingerprint, tls12), func(t *testing.T) {
+				spec := SSPluginSpec{Type: "shadow-tls", Version: 2, Password: "record-key", Host: "plugin.test", ForceTLS12: tls12, TLS: &TLSSpec{Fingerprint: fingerprint}}
+				port, security := pluginTestPeer(t, spec, echoServer(t))
+				spec.TLS = security
+				spec.TLS.ALPN = []string{"h2"}
+				b := New(Options{Logger: testLogger(t)})
+				defer b.Close()
+				plugin, err := newSSPlugin(b.ctx, b.logger, N.SystemDialer, M.ParseSocksaddr(loopback(port).String()), spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer plugin.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				c, err := plugin.DialContext(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(3 * time.Second))
+				for _, size := range []int{1, 8, 16385, 65536} {
+					payload := bytes.Repeat([]byte{'r'}, size)
+					written := make(chan error, 1)
+					go func() { _, err := c.Write(payload); written <- err }()
+					reply := make([]byte, size)
+					if _, err = io.ReadFull(c, reply); err != nil || !bytes.Equal(reply, payload) {
+						t.Fatal("TLS/proxy record boundary", size, err)
+					}
+					if err = <-written; err != nil {
+						t.Fatal(err)
+					}
+				}
+				readDone := make(chan error, 1)
+				go func() { _, err := c.Read(make([]byte, 1)); readDone <- err }()
+				c.Close()
+				select {
+				case err = <-readDone:
+					if err == nil {
+						t.Fatal("closed connection remained readable")
+					}
+				case <-time.After(time.Second):
+					t.Fatal("close did not interrupt reader")
+				}
+			})
+		}
+	}
+}

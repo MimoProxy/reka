@@ -25,6 +25,7 @@ func tlsCarrierCases() []SSPluginSpec {
 		{Type: "shadow-tls", Version: 1}, {Type: "shadow-tls", Version: 2, Password: "outer-secret"}, {Type: "shadow-tls", Version: 3, Password: "outer-secret", TLS: &TLSSpec{Fingerprint: "chrome"}},
 		{Type: "restls", VersionHint: "tls12", Password: "outer-secret", ClientFingerprint: "chrome"}, {Type: "restls", VersionHint: "tls13", Password: "outer-secret", ClientFingerprint: "firefox", RestlsScript: "100~20,200~50"},
 		{Type: "jls", Username: "outer-user", Password: "outer-secret"}, {Type: "jls", Username: "outer-user", Password: "outer-secret", ClientFingerprint: "chrome"},
+		{Type: "shadow-tls", Version: 2, Password: "outer-secret", TLS: &TLSSpec{Fingerprint: "chrome"}},
 	}
 }
 func carrierNode(t *testing.T, protocol, transport string) (*Server, netip.AddrPort, json.RawMessage) {

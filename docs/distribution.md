@@ -109,3 +109,13 @@ Source-hashed VLESS hooks apply encryption after TLS/stream transports; a
 test-node inbound hook provides the symmetric peer. Vision obtains this
 component's decrypted buffers through a typed interface instead of reflecting
 its layout. Ordinary TLS still uses the guarded upstream buffer path.
+
+Security carriers use a scoped TLS factory on the already protected socket.
+ShadowTLS vector writes and first-authentication publication are serialized;
+the v2 server joins its camouflage writer before handing over the connection.
+The v2 client retains the negotiated TLS decoder to discard late encrypted
+camouflage records (including HTTP/2 SETTINGS), then preserves the entire first
+raw proxy record. TLS alerts and transport failures remain errors, and the
+decoder's transition alert is kept off the proxy wire. Standard TLS and uTLS
+run against independent original peers, including HTTP/2 and gRPC transports.
+The generator pins each changed upstream source hash.

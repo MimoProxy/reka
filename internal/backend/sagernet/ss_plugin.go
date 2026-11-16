@@ -278,6 +278,22 @@ func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, d
 	case "shadow-tls":
 		handshake := func(ctx context.Context, c net.Conn, generator SH.TLSSessionIDGeneratorFunc) error {
 			config := tlsConfig.Clone()
+			if s.Version == 2 {
+				setter, ok := c.(interface{ SetPostHandshakeConn(func(net.Conn) net.Conn) })
+				if !ok {
+					return errors.New("required ShadowTLS v2 record transition overlay is unavailable")
+				}
+				recorder := &shadowTLSV2Recorder{Conn: c}
+				tlsConn, err := S.ClientHandshake(ctx, recorder, config)
+				if err != nil {
+					return err
+				}
+				recorder.finished = true
+				setter.SetPostHandshakeConn(func(raw net.Conn) net.Conn {
+					return &shadowTLSV2DataConn{Conn: raw, tls: tlsConn, recorder: recorder}
+				})
+				return nil
+			}
 			if s.Version != 3 {
 				return common.Error(S.ClientHandshake(ctx, c, config))
 			}
