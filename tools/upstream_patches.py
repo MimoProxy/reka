@@ -350,3 +350,135 @@ def vless_test_decryption(source):
  err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)''')
 
 MODULES['github.com/sagernet/sing-box'][1]['protocol/vless/inbound.go'] = ('5d783df51e9e88cd94c30b4b49402ead55e2a162bc5d72d99d4e3b226fd6d499',vless_test_decryption)
+
+
+def mux_request_headroom(source):
+    import re
+    source = replace(source, '"net"', '"net"\n"io"')
+    methods = {
+        'protocolConn': '''func (c *protocolConn) Write(p []byte) (n int, err error) {
+ if c.requestWritten{return c.Conn.Write(p)}
+ buffer:=EncodeRequest(c.request,p)
+ prefix,total:=buffer.Len()-len(p),buffer.Len()
+ written,err:=c.Conn.Write(buffer.Bytes())
+ buffer.Release()
+ c.requestWritten=true
+ if err==nil && written!=total{err=io.ErrShortWrite}
+ return max(0,min(len(p),written-prefix)),err
+}''',
+        'vectorisedProtocolConn': '''func (c *vectorisedProtocolConn) WriteVectorised(buffers []*buf.Buffer) error {
+ if !c.requestWritten {
+  c.requestWritten=true
+  buffers=append([]*buf.Buffer{EncodeRequest(c.request,nil)},buffers...)
+ }
+ front,rear:=N.CalculateFrontHeadroom(c.Conn),N.CalculateRearHeadroom(c.Conn)
+ for index,buffer:=range buffers {
+  if buffer.Start()>=front && buffer.FreeLen()>=rear{continue}
+  reserved:=buf.NewSize(front+buffer.Len()+rear)
+  reserved.Resize(front,0)
+  _,err:=reserved.Write(buffer.Bytes())
+  if err!=nil{reserved.Release();buf.ReleaseMulti(buffers);return err}
+  buffer.Release();buffers[index]=reserved
+ }
+ return c.writer.WriteVectorised(buffers)
+}'''
+    }
+    for receiver, body in methods.items():
+        method = 'Write' if receiver == 'protocolConn' else 'WriteVectorised'
+        pattern = r'func \(c \*' + receiver + r'\) ' + method + r'\([^\n]*\n.*?\n}'
+        source, count = re.subn(pattern, lambda _: body, source, count=1, flags=re.S)
+        if count != 1:
+            raise SystemExit('Mux protocol patch no longer matches ' + receiver)
+    return source
+
+MODULES['github.com/sagernet/sing-mux'] = ('v0.3.10-0.20260929204512-caf09fe32475', {
+'protocol_conn.go': ('a85c5e2aad78458529c9ac8df24fcdef09ec7b9490ce2ee4da8b70c415936546',mux_request_headroom),
+})
+
+
+def vectorised_headroom(source):
+    source = replace(source, 'func CreateVectorisedWriter(writer any) (N.VectorisedWriter, bool) {', '''func CreateVectorisedWriter(writer any) (result N.VectorisedWriter, ok bool) {
+ defer func(){
+  if ok && result!=nil && (N.CalculateFrontHeadroom(writer)>0 || N.CalculateRearHeadroom(writer)>0){
+   result=&headroomVectorisedWriter{writer:result,upstream:writer}
+  }
+ }()''')
+    source += '''
+// Native vector writers may prepend a protocol header. Callers of the
+// vector interface (including multiplex servers) need not allocate headroom.
+type headroomVectorisedWriter struct {
+ writer N.VectorisedWriter
+ upstream any
+}
+func(w *headroomVectorisedWriter)Upstream()any{return w.upstream}
+func(w *headroomVectorisedWriter)WriteVectorised(buffers []*buf.Buffer)error{
+ front,rear:=N.CalculateFrontHeadroom(w.upstream),N.CalculateRearHeadroom(w.upstream)
+ for index,buffer:=range buffers {
+  if buffer.Start()>=front && buffer.FreeLen()>=rear{continue}
+  reserved:=buf.NewSize(front+buffer.Len()+rear)
+  reserved.Resize(front,0)
+  _,err:=reserved.Write(buffer.Bytes())
+  if err!=nil{reserved.Release();buf.ReleaseMulti(buffers);return err}
+  buffer.Release();buffers[index]=reserved
+ }
+ return w.writer.WriteVectorised(buffers)
+}
+'''
+    return source
+
+MODULES['github.com/sagernet/sing'][1]['common/bufio/vectorised.go'] = ('23187e4124d69376593edbe8b5915cab72d7fc737cb71decfcec81b8a0cbc571',vectorised_headroom)
+
+
+def snell_conn_headroom(source):
+    import re
+    pattern = r'(func \(c \*(?:clientConn|reuseConn|serverReuseConn\[U\])\) (?:FrontHeadroom|RearHeadroom)\(\) int \{)'
+    source, count = re.subn(pattern, lambda m: m[0] + '\n c.access.Lock();defer c.access.Unlock()', source)
+    if count == 0:
+        raise SystemExit('Snell connection headroom patch no longer matches')
+    return source
+
+
+def snell_writer_headroom(source):
+    import re
+    pattern = r'(func \(w \*(?:writer|shapedWriter)\) FrontHeadroom\(\) int \{)'
+    source, count = re.subn(pattern, lambda m: m[0] + '\n w.access.Lock();defer w.access.Unlock()', source)
+    if count != 1:
+        raise SystemExit('Snell writer headroom patch no longer matches')
+    return source
+
+MODULES['github.com/sagernet/sing-snell'] = ('v0.0.0-20260904135315-bc5a12ac736f', {
+'snellv4/client.go': ('f61e960d13881bd47653070b0d15495dd5c1747006e8138c1ecbec279b95d616', snell_conn_headroom),
+'snellv4/reuse.go': ('5f6ca8cd0902d65290e5f2d9504339688ae97c7cd4e990e2713c1fcd2337ee04', snell_conn_headroom),
+'snellv4/record.go': ('9b3fdcda036a12ff4d0368c42d059af4e14deae818673766e570201dacaf9617', snell_writer_headroom),
+'snellv5/reuse.go': ('61dcffdfe1b33f52540de19a1429510c40118b777eb000177c72b5e9f82ea692', snell_conn_headroom),
+'snellv6/client.go': ('2c40c0d1b5a04f266fe7ac77f95588d802519d985c3d2841f388a257b26bcc6c', snell_conn_headroom),
+'snellv6/reuse.go': ('dcd883d3bf647ee89b25251d9a6e8dab9d551850a14be522b2688dce84cc6c57', snell_conn_headroom),
+'snellv6/shaped.go': ('5bb41523f7532559f37993309366fb9bdbc1b0ad81a874fc8fa5e18f9e3598c3', snell_writer_headroom),
+})
+
+
+def hysteria_response_serialization(source):
+    source = replace(source, 'type serverConn struct {', 'type serverConn struct {\n writeAccess sync.Mutex')
+    source = replace(source, 'func (c *serverConn) HandshakeFailure(err error) error {', '''func (c *serverConn) HandshakeFailure(err error) error {
+ // An in-flight success/data write must not delay teardown on failure.
+ if !c.writeAccess.TryLock(){return os.ErrInvalid}
+ defer c.writeAccess.Unlock()''')
+    for signature in ['HandshakeSuccess() error', 'Write(p []byte) (n int, err error)']:
+        source = replace(source, 'func (c *serverConn) ' + signature + ' {', 'func (c *serverConn) ' + signature + ' {\n c.writeAccess.Lock();defer c.writeAccess.Unlock()')
+    return source
+
+MODULES['github.com/sagernet/sing-quic'] = ('v0.7.2-0.20261020082049-7e0a5869a5f4', {
+'hysteria2/service.go': ('8a8720cd5dbd4c58f6372b6b103d38575150a831c3d724b5a0ff3640d6a98b14',hysteria_response_serialization),
+})
+
+
+def smux_frame_ownership(source):
+    source = replace(source, '"encoding/binary"', '"encoding/binary"\n"bytes"')
+    return replace(source, 'func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class CLASSID) (int, error) {', '''func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class CLASSID) (int, error) {
+ // A deadline or session close can return before sendLoop consumes this
+ // queued frame. The queue must own its payload beyond the caller's Write.
+ f.data=bytes.Clone(f.data)''')
+
+MODULES['github.com/sagernet/smux'] = ('v1.5.50-sing-box-mod.1', {
+'session.go': ('b66f8161fa3e9a7614679d17904b4fb71107ec5baff49338ccf141ab684c8a19',smux_frame_ownership),
+})

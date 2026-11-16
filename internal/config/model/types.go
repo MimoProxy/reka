@@ -310,10 +310,19 @@ type Transport struct {
 	EarlyHeader string               `yaml:"early-data-header"`
 }
 type Multiplex struct {
-	Enabled        bool   `yaml:"enabled"`
-	Protocol       string `yaml:"protocol"`
-	MaxConnections int    `yaml:"max-connections"`
-	MinStreams     int    `yaml:"min-streams"`
-	MaxStreams     int    `yaml:"max-streams"`
-	Padding        bool   `yaml:"padding"`
+	OnlyTCP        bool    `yaml:"only-tcp"`
+	Statistic      bool    `yaml:"statistic"`
+	Brutal         *Brutal `yaml:"brutal"`
+	Enabled        bool    `yaml:"enabled"`
+	Protocol       string  `yaml:"protocol"`
+	MaxConnections int     `yaml:"max-connections"`
+	MinStreams     int     `yaml:"min-streams"`
+	MaxStreams     int     `yaml:"max-streams"`
+	Padding        bool    `yaml:"padding"`
+}
+
+type Brutal struct {
+	Enabled bool   `yaml:"enabled"`
+	UpBPS   uint64 `yaml:"up-bps"`
+	DownBPS uint64 `yaml:"down-bps"`
 }

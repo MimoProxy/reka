@@ -253,6 +253,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertTransport(&r, out)
 	}
 	c.convertTLSExtras(&r, typ, out)
+	c.convertMultiplex(&r, out)
 	if !r.bad {
 		r.bad = !c.validateOutbound(out, n, path)
 	}

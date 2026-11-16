@@ -169,11 +169,17 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	}
 	if ob.Multiplex != nil && ob.Multiplex.Enabled {
 		m := ob.Multiplex
-		if !slices.Contains([]string{"vless", "vmess", "trojan"}, ob.Type) || ob.Flow != "" {
-			fail("multiplex", "multiplex requires non-Vision VLESS, VMess or Trojan")
+		if slices.Contains([]string{"reject", "reject-drop", "pass"}, ob.Type) {
+			fail("multiplex", "this action has no transport to multiplex")
 		}
 		if !slices.Contains([]string{"", "h2mux", "smux", "yamux"}, m.Protocol) || m.MaxConnections < 0 || m.MinStreams < 0 || m.MaxStreams < 0 {
 			fail("multiplex", "invalid multiplex options")
+		}
+		if m.Brutal != nil && m.Brutal.Enabled && (m.Brutal.UpBPS < 65536 || m.Brutal.DownBPS < 65536) {
+			fail("multiplex/brutal", "Brutal requires upload and download of at least 65536 bytes/s")
+		}
+		if m.Statistic {
+			c.warnf(model.DocProfile, base+"/multiplex/statistic", "multiplex.statistic", "reference nested accounting is metadata; Reka always reports native per-flow traffic")
 		}
 	}
 }

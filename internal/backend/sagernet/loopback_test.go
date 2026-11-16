@@ -17,7 +17,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +37,7 @@ func testLogger(t *testing.T) *slog.Logger {
 		level = levelTrace
 	}
 	w := &testWriter{t: t}
-	t.Cleanup(func() { w.done.Store(true) })
+	t.Cleanup(func() { w.mu.Lock(); w.done = true; w.mu.Unlock() })
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
@@ -45,11 +45,14 @@ func testLogger(t *testing.T) *slog.Logger {
 // still log while connections wind down, and t.Log panics after completion.
 type testWriter struct {
 	t    *testing.T
-	done atomic.Bool
+	mu   sync.Mutex
+	done bool
 }
 
 func (w *testWriter) Write(p []byte) (int, error) {
-	if w.done.Load() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
 		return len(p), nil
 	}
 	w.t.Helper()
@@ -59,12 +62,24 @@ func (w *testWriter) Write(p []byte) (int, error) {
 
 func freePort(t *testing.T) uint16 {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// These fixtures often listen on TCP and UDP at the same port. Starting
+	// from UDP also avoids Windows UDP exclusions that TCP ephemeral ports
+	// alone cannot detect. Production listeners still report bind failures.
+	for attempt := 0; attempt < 64; attempt++ {
+		packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.Listen("tcp", packet.LocalAddr().String())
+		port := packet.LocalAddr().(*net.UDPAddr).Port
+		packet.Close()
+		if err == nil {
+			listener.Close()
+			return uint16(port)
+		}
 	}
-	defer l.Close()
-	return uint16(l.Addr().(*net.TCPAddr).Port)
+	t.Fatal("no common TCP/UDP fixture port")
+	return 0
 }
 
 func loopback(port uint16) netip.AddrPort {

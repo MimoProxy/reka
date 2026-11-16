@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/transport/v2ray"
 	"net"
 
@@ -28,7 +27,8 @@ import (
 // use a REALITY implementation that keeps the X25519MLKEM768 share. The
 // VLESS framing, Vision and XUDP still come from sing-vmess.
 //
-// Non-Vision streams may use a V2Ray transport and client-owned multiplex.
+// Stream transports precede optional encryption and VLESS framing. Generic
+// multiplexing wraps the completed outbound in the backend factory.
 type vlessRealityOutbound struct {
 	encryption     func(context.Context, net.Conn) (net.Conn, error)
 	httpObfs       *httpObfsOptions
@@ -36,7 +36,6 @@ type vlessRealityOutbound struct {
 	outbound.Adapter
 	h2         *option.V2RayHTTPOptions
 	transport  adapter.V2RayClientTransport
-	multiplex  *mux.Client
 	logger     log.ContextLogger
 	dialer     N.Dialer
 	serverAddr M.Socksaddr
@@ -51,9 +50,8 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 	var extra struct {
 		PacketEncoding *string `json:"packet_encoding"`
 		option.DialerOptions
-		HTTP      *httpObfsOptions                 `json:"reka_http"`
-		Transport *option.V2RayTransportOptions    `json:"transport"`
-		Multiplex *option.OutboundMultiplexOptions `json:"multiplex"`
+		HTTP      *httpObfsOptions              `json:"reka_http"`
+		Transport *option.V2RayTransportOptions `json:"transport"`
 	}
 	if len(s.Options) > 0 {
 		if err := json.Unmarshal(s.Options, &extra); err != nil {
@@ -112,13 +110,6 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 	} else if extra.Transport != nil {
 		h.transport, err = v2ray.NewClientTransport(ctx, &realityTransportDialer{h}, serverAddr, *extra.Transport, nil)
 		if err != nil {
-			return nil, err
-		}
-	}
-	if extra.Multiplex != nil {
-		h.multiplex, err = mux.NewClientWithOptions(&realityFramingDialer{h}, logger, *extra.Multiplex)
-		if err != nil {
-			h.Close()
 			return nil, err
 		}
 	}
@@ -225,22 +216,13 @@ func (h *vlessRealityOutbound) packetFramed(ctx context.Context, destination M.S
 }
 
 func (h *vlessRealityOutbound) DialContext(ctx context.Context, network string, d M.Socksaddr) (net.Conn, error) {
-	if h.multiplex != nil {
-		return h.multiplex.DialContext(ctx, network, d)
-	}
 	return h.dialFramed(ctx, network, d)
 }
 func (h *vlessRealityOutbound) ListenPacket(ctx context.Context, d M.Socksaddr) (net.PacketConn, error) {
-	if h.multiplex != nil {
-		return h.multiplex.ListenPacket(ctx, d)
-	}
 	return h.packetFramed(ctx, d)
 }
 func (h *vlessRealityOutbound) Close() error {
 	var errs []error
-	if h.multiplex != nil {
-		errs = append(errs, h.multiplex.Close())
-	}
 	if h.transport != nil {
 		errs = append(errs, h.transport.Close())
 	}
@@ -256,11 +238,18 @@ func (d *realityTransportDialer) ListenPacket(context.Context, M.Socksaddr) (net
 	return nil, fmt.Errorf("REALITY transport requires TCP")
 }
 
-type realityFramingDialer struct{ h *vlessRealityOutbound }
-
-func (d *realityFramingDialer) DialContext(ctx context.Context, n string, a M.Socksaddr) (net.Conn, error) {
-	return d.h.dialFramed(ctx, n, a)
+func (h *vlessRealityOutbound) InterfaceUpdated(context.Context) {
+	if h.transport != nil {
+		h.transport.Close()
+	}
 }
-func (d *realityFramingDialer) ListenPacket(ctx context.Context, a M.Socksaddr) (net.PacketConn, error) {
-	return d.h.packetFramed(ctx, a)
+func (h *vlessRealityOutbound) SetKeepIdleConnections(keep bool) {
+	if transport, ok := h.transport.(adapter.IdleConnectionKeeper); ok {
+		transport.SetKeepIdleConnections(keep)
+	}
+}
+func (h *vlessRealityOutbound) CloseIdleConnections() {
+	if transport, ok := h.transport.(adapter.IdleConnectionKeeper); ok {
+		transport.CloseIdleConnections()
+	}
 }

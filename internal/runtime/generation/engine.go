@@ -607,6 +607,9 @@ func parseLevel(s string) slog.Level {
 // upstream protocol packages with generic options. REALITY keeps Reka's own
 // handshake client; all other TLS protocols use the scoped component adapter.
 func usesUpstreamOutbound(o compile.Outbound) bool {
+	if o.Multiplex != nil && o.Multiplex.Enabled && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
+		return true
+	}
 	if (o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
 	}
@@ -1121,12 +1124,16 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 	}
 	if m := o.Multiplex; m != nil {
 		values["multiplex"] = map[string]any{
+			"only_tcp":        m.OnlyTCP,
 			"enabled":         m.Enabled,
 			"protocol":        m.Protocol,
 			"max_connections": m.MaxConnections,
 			"min_streams":     m.MinStreams,
 			"max_streams":     m.MaxStreams,
 			"padding":         m.Padding,
+		}
+		if m.Brutal != nil {
+			values["multiplex"].(map[string]any)["brutal"] = map[string]any{"enabled": m.Brutal.Enabled, "up_bps": m.Brutal.UpBPS, "down_bps": m.Brutal.DownBPS}
 		}
 	}
 	raw, _ := json.Marshal(values)

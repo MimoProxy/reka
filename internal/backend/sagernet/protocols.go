@@ -1,6 +1,7 @@
 package sagernet
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/sagernet/sing-box/adapter"
@@ -18,6 +19,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/vmess"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/service"
+	"io"
 	"strings"
 )
 
@@ -30,16 +32,44 @@ type ProxySpec struct {
 	Options                                        json.RawMessage
 }
 
-func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound, returnErr error) {
-	var values map[string]any
-	if len(s.Options) > 0 {
-		if err := json.Unmarshal(s.Options, &values); err != nil {
-			return nil, err
-		}
+func decodeProtocolOptions(data []byte) (map[string]any, error) {
+	values := map[string]any{}
+	if len(data) == 0 {
+		return values, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&values); err != nil {
+		return nil, err
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return nil, fmt.Errorf("outbound options must contain one JSON object")
 	}
 	if values == nil {
 		values = map[string]any{}
 	}
+	return values, nil
+}
+
+func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound, returnErr error) {
+	values, err := decodeProtocolOptions(s.Options)
+	if err != nil {
+		return nil, err
+	}
+	multiplex, err := popMultiplex(values)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if returnErr == nil && result != nil {
+			base := result
+			result, returnErr = wrapMultiplex(base, multiplex, b.componentLogger("multiplex", s.Type, tag))
+			if returnErr != nil {
+				common.Close(base)
+			}
+		}
+	}()
 	values["server"], values["server_port"] = s.Server, s.Port
 	if s.UUID != "" && (s.Type == "vmess" || s.Type == "vless" || s.Type == "tuic") {
 		values["uuid"] = s.UUID

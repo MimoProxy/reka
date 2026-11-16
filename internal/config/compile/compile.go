@@ -330,7 +330,7 @@ var fieldsByType = map[string][]string{
 	"snell":                   {"server", "port", "password", "udp", "protocol"},
 }
 
-var commonFields = []string{"id", "name", "type", "dialer"}
+var commonFields = []string{"id", "name", "type", "dialer", "multiplex"}
 
 // ShadowsocksMethods are the ciphers the Shadowsocks outbound accepts.
 var ShadowsocksMethods = []string{
@@ -453,6 +453,9 @@ func (c *compiler) outbounds(eff *Effective) {
 		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundReject {
 			out.UDP = false
 		}
+		if ob.Multiplex != nil && ob.Multiplex.Enabled && !ob.Multiplex.OnlyTCP {
+			out.UDP = true
+		}
 		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject && ob.Type != "pass" && ob.Type != "reject-drop" {
 			if ob.Server == "" {
 				c.errorf(doc, base, "outbound.server", "server is required")
@@ -554,6 +557,11 @@ func (c *compiler) outbounds(eff *Effective) {
 	for i := range eff.Outbounds {
 		identity := eff.Outbounds[i]
 		identity.Name = "" // display metadata must not rebuild a live outbound
+		if identity.Multiplex != nil {
+			m := *identity.Multiplex
+			m.Statistic = false
+			identity.Multiplex = &m
+		}
 		params, _ := json.Marshal(identity.Protocol)
 		transport, _ := json.Marshal(identity.Transport)
 		headers, _ := json.Marshal(identity.Headers)

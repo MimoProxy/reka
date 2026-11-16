@@ -14,7 +14,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,9 +28,6 @@ import (
 )
 
 func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
-	// Accepted handshake errors can finish logging after a subtest returns;
-	// keep the fixture's asynchronous logger independent of testing.T.
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	web := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(bytes.Repeat([]byte("inner-TLS"), 4096)) }))
 	web.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	web.EnableHTTP2 = true
@@ -115,7 +111,7 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 						clientOptions["transport"] = transport
 					}
 				}
-				server, err := startNode(logger, func(b *Backend) (adapter.Inbound, string, error) {
+				server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
 					decrypt := func(ctx context.Context, c net.Conn) (net.Conn, error) {
 						ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 						defer cancel()
@@ -131,7 +127,7 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer server.Close()
-				b := New(Options{Logger: logger})
+				b := New(Options{Logger: testLogger(t)})
 				defer b.Close()
 				raw, _ := json.Marshal(clientOptions)
 				var spec any = ProxySpec{Type: "vless", Server: "127.0.0.1", Port: port, UUID: testUUID, Encryption: encryption, TLS: clientTLS, Options: raw}

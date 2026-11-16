@@ -14,10 +14,14 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/sagernet/sing-box/adapter"
+	MX "github.com/sagernet/sing-box/common/mux"
 	S "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
+	PHTTP "github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
+	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/snell"
+	PSOCKS "github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/trojan"
 	"github.com/sagernet/sing-box/protocol/tuic"
 	"github.com/sagernet/sing-box/protocol/vless"
@@ -53,6 +57,16 @@ func TestProtocolInteroperability(t *testing.T) {
 		mux            bool
 		version        int
 	}{{"vmess", "", false, 0}, {"trojan", "", false, 0}, {"hysteria2", "", false, 0}, {"tuic", "", false, 0}, {"snell", "", false, 5}, {"snell", "", false, 6}}
+	for _, tc := range []struct {
+		typ     string
+		version int
+	}{{"shadowsocks", 0}, {"hysteria2", 0}, {"tuic", 0}, {"snell", 5}, {"snell", 6}, {"http", 0}, {"socks", 0}} {
+		cases = append(cases, struct {
+			typ, transport string
+			mux            bool
+			version        int
+		}{tc.typ, "", true, tc.version})
+	}
 	for _, typ := range []string{"hysteria2", "tuic"} {
 		for _, transport := range []string{"ech", "ech-dns"} {
 			cases = append(cases, struct {
@@ -115,6 +129,14 @@ func TestProtocolInteroperability(t *testing.T) {
 				}
 				base["tls"] = tlsOptions
 			}
+			if tc.typ == "shadowsocks" {
+				delete(base, "users")
+				base["method"] = "aes-128-gcm"
+				base["password"] = password
+			}
+			if tc.typ == "http" || tc.typ == "socks" {
+				delete(base, "users")
+			}
 			if tc.typ == "snell" {
 				delete(base, "users")
 				base["psk"], base["version"] = password, tc.version
@@ -145,7 +167,6 @@ func TestProtocolInteroperability(t *testing.T) {
 				}
 			}
 			if tc.mux {
-				base["multiplex"] = map[string]any{"enabled": true}
 				opts["multiplex"] = map[string]any{"enabled": true, "protocol": "smux"}
 			}
 			raw, _ := json.Marshal(base)
@@ -153,42 +174,68 @@ func TestProtocolInteroperability(t *testing.T) {
 				var in adapter.Inbound
 				var err error
 				logger := b.componentLogger("inbound", tc.typ, "test")
+				var route adapter.Router = b.router
+				if tc.mux {
+					routed, err := MX.NewRouterWithOptions(b.router, logger, option.InboundMultiplexOptions{Enabled: true})
+					if err != nil {
+						return nil, tc.typ, err
+					}
+					route = &multiplexTestRouter{Router: b.router, mux: routed}
+				}
 				switch tc.typ {
+				case "shadowsocks":
+					var o option.ShadowsocksInboundOptions
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = shadowsocks.NewInbound(b.ctx, route, logger, "test", o)
+					}
+				case "http":
+					var o option.HTTPMixedInboundOptions
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = PHTTP.NewInbound(b.ctx, route, logger, "test", o)
+					}
+				case "socks":
+					var o option.SocksInboundOptions
+					err = json.Unmarshal(raw, &o)
+					if err == nil {
+						in, err = PSOCKS.NewInbound(b.ctx, route, logger, "test", o)
+					}
 				case "vmess":
 					var o option.VMessInboundOptions
 					err = json.Unmarshal(raw, &o)
 					if err == nil {
-						in, err = vmess.NewInbound(b.ctx, b.router, logger, "test", o)
+						in, err = vmess.NewInbound(b.ctx, route, logger, "test", o)
 					}
 				case "trojan":
 					var o option.TrojanInboundOptions
 					err = json.Unmarshal(raw, &o)
 					if err == nil {
-						in, err = trojan.NewInbound(b.ctx, b.router, logger, "test", o)
+						in, err = trojan.NewInbound(b.ctx, route, logger, "test", o)
 					}
 				case "vless":
 					var o option.VLESSInboundOptions
 					err = json.Unmarshal(raw, &o)
 					if err == nil {
-						in, err = vless.NewInbound(b.ctx, b.router, logger, "test", o)
+						in, err = vless.NewInbound(b.ctx, route, logger, "test", o)
 					}
 				case "hysteria2":
 					var o option.Hysteria2InboundOptions
 					err = json.Unmarshal(raw, &o)
 					if err == nil {
-						in, err = hysteria2.NewInbound(b.ctx, b.router, logger, "test", o)
+						in, err = hysteria2.NewInbound(b.ctx, route, logger, "test", o)
 					}
 				case "tuic":
 					var o option.TUICInboundOptions
 					err = json.Unmarshal(raw, &o)
 					if err == nil {
-						in, err = tuic.NewInbound(b.ctx, b.router, logger, "test", o)
+						in, err = tuic.NewInbound(b.ctx, route, logger, "test", o)
 					}
 				case "snell":
 					var o option.SnellInboundOptions
 					err = json.Unmarshal(raw, &o)
 					if err == nil {
-						in, err = snell.NewInbound(b.ctx, b.router, logger, "test", o)
+						in, err = snell.NewInbound(b.ctx, route, logger, "test", o)
 					}
 				}
 				return in, tc.typ, err
@@ -201,6 +248,9 @@ func TestProtocolInteroperability(t *testing.T) {
 			defer b.Close()
 			optionBytes, _ := json.Marshal(opts)
 			spec := ProxySpec{Type: tc.typ, Server: "127.0.0.1", Port: port, UUID: uuid, Password: password, Options: optionBytes}
+			if tc.typ == "shadowsocks" {
+				spec.Method = "aes-128-gcm"
+			}
 			if base["tls"] != nil {
 				pin := sha256.Sum256(cert.Certificate[0])
 				spec.TLS = &TLSSpec{CertificatePin: hex.EncodeToString(pin[:]), ServerName: "localhost", ALPN: []string{"h3"}}

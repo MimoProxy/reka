@@ -158,6 +158,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	}
 	c.convertTLSExtras(&r, nativeType, out)
 	c.convertTransport(&r, out)
+	c.convertMultiplex(&r, out)
 	if !r.bad && !c.validateOutbound(out, n, path) {
 		r.bad = true
 	}
@@ -239,26 +240,6 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 			r.bad = r.bad || br.bad
 		}
 		out["transport"] = t
-	}
-	if mux := get(r.n, "smux"); !empty(mux) {
-		br := proxyReader{c: c, n: mux, path: r.path + "/smux"}
-		m := object{"enabled": br.boolean("enabled", false)}
-		for i := 0; i+1 < len(mux.Content); i += 2 {
-			key := mux.Content[i].Value
-			switch key {
-			case "enabled":
-			case "protocol":
-				m[key] = br.str(key)
-			case "max-connections", "min-streams", "max-streams":
-				m[key] = br.number(key, 0)
-			case "padding":
-				m[key] = br.boolean(key, false)
-			default:
-				br.fail(key, "import.multiplex", "unsupported multiplex option")
-			}
-		}
-		r.bad = r.bad || br.bad
-		out["multiplex"] = m
 	}
 	for _, key := range []string{"ws-opts", "grpc-opts", "http-upgrade-opts"} {
 		if !empty(get(r.n, key)) && strings.TrimSpace(network) == "" {

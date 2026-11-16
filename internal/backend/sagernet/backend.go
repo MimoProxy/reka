@@ -293,6 +293,7 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		out        adapter.Outbound
 		err        error
 		dependency *DetourSpec
+		multiplex  *multiplexSpec
 	)
 	switch s := spec.(type) {
 	case ProxySpec:
@@ -332,11 +333,10 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		dependency = s.Detour
 		typ = "vless"
 		if s.TLS == nil || s.TLS.Reality == nil {
-			values := map[string]any{}
-			if len(s.Options) > 0 {
-				if err = json.Unmarshal(s.Options, &values); err != nil {
-					break
-				}
+			var values map[string]any
+			values, err = decodeProtocolOptions(s.Options)
+			if err != nil {
+				break
 			}
 			if s.Flow != "" {
 				values["flow"] = s.Flow
@@ -346,15 +346,19 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 			break
 		}
 		ctx := detourContext(b.ctx, s.Detour)
-		if s.Detour != nil {
-			var values map[string]any
-			_ = json.Unmarshal(s.Options, &values)
-			if values == nil {
-				values = map[string]any{}
-			}
-			values["detour"] = "reka-detour"
-			s.Options, _ = json.Marshal(values)
+		var values map[string]any
+		values, err = decodeProtocolOptions(s.Options)
+		if err != nil {
+			break
 		}
+		multiplex, err = popMultiplex(values)
+		if err != nil {
+			break
+		}
+		if s.Detour != nil {
+			values["detour"] = "reka-detour"
+		}
+		s.Options, _ = json.Marshal(values)
 		// Reka's own REALITY client; see vless.go.
 		out, err = newVLESSRealityOutbound(ctx, b.componentLogger("outbound", typ, tag), tag, s)
 	default:
@@ -363,6 +367,15 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	if err != nil {
 		dependency.Close()
 		return nil, fmt.Errorf("create outbound/%s[%s]: %w", typ, tag, err)
+	}
+	if multiplex != nil {
+		base := out
+		out, err = wrapMultiplex(base, multiplex, b.componentLogger("multiplex", typ, tag))
+		if err != nil {
+			common.Close(base)
+			dependency.Close()
+			return nil, err
+		}
 	}
 	wrapped, err := b.adoptOutbound(tag, typ, out)
 	if err != nil {
