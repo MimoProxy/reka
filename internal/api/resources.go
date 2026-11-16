@@ -1,10 +1,11 @@
 package api
 
 type StageResourceRequest struct {
-	Hash   string `json:"hash"`
-	Size   int    `json:"size"`
-	Offset int    `json:"offset"`
-	Data   []byte `json:"data"`
+	ProfileID string `json:"profile_id,omitempty"`
+	Hash      string `json:"hash"`
+	Size      int    `json:"size"`
+	Offset    int    `json:"offset"`
+	Data      []byte `json:"data"`
 }
 
 type StageResourceResult struct {
@@ -38,6 +39,7 @@ type ExportManifest struct {
 }
 
 type ReadResourceRequest struct {
+	ArchiveHash  string `json:"archive_hash,omitempty"`
 	BaseRevision uint64 `json:"base_revision"`
 	Hash         string `json:"hash"`
 	Offset       int    `json:"offset"`
@@ -52,4 +54,10 @@ type ReadResourceResult struct {
 	Size     int    `json:"size"`
 	Data     []byte `json:"data"`
 	EOF      bool   `json:"eof"`
+}
+
+type ProfileArchiveManifest struct {
+	Revision    uint64           `json:"revision"`
+	ArchiveHash string           `json:"archive_hash"`
+	Resources   []ExportResource `json:"resources"`
 }

@@ -105,7 +105,10 @@ def main():
         fetched = rpc(normal/'control.sock', 'RefreshSubscription', {'source_id':'locked', 'wait':True})
         assert fetched['state']=='current', fetched
         current = rpc(normal/'control.sock', 'GetConfiguration', {'reveal':True})
-        blobs = list((normal/'resources/sha256').iterdir())
+        archive_manifest = rpc(normal/'control.sock', 'ExportProfileArchive', {'reveal':True, 'base_revision':current['revision']})
+        blobs = [normal/'resources/sha256'/item['hash'] for item in archive_manifest['resources']]
+        history = sorted(path.name for path in (normal/'revisions').iterdir() if path.is_dir())
+        cache = json.loads((normal/'subscriptions/locked.json').read_text())
         assert blobs, 'subscription must create an immutable locked body'
         staging = root/'promotion'
         staging.mkdir(mode=0o700)
@@ -157,6 +160,39 @@ def main():
         host_command(controls/'host.sock','stop '+token)
         session.communicate(timeout=10)
         print('Retry promotion applies fresh documents to existing private state: PASS')
+
+        # Full migration keeps every immutable revision and refresh validators.
+        archive_key=uuid.uuid4().hex
+        archive_token=str(uuid.uuid4())
+        bundle['documents']={field:current[field] for field in ('profile','local','sources','overlay')}
+        bundle['archive_hash']=archive_manifest['archive_hash']
+        payload.write_text(json.dumps(bundle)); payload.chmod(0o600)
+        session=subprocess.Popen([str(binary),'--privileged',str(uid),str(os.getpid()),archive_key,str(CORE),archive_token,str(payload)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        processes.append(session)
+        archive_controls=root/'run'/str(uid)/archive_key
+        wait(lambda: int(host_command(archive_controls/'host.sock','status '+archive_token)) > 0)
+        archived=rpc(archive_controls/'control.sock','GetConfiguration',{'reveal':True})
+        archived_root=root/'state'/str(uid)/archive_key/'state'
+        assert archived['revision']==current['revision']
+        assert sorted(path.name for path in (archived_root/'revisions').iterdir() if path.is_dir())==history
+        for number in history:
+            for filename in ('meta.json','profile.yaml','local.yaml','sources.yaml','overlay.yaml'):
+                assert (archived_root/'revisions'/number/filename).read_bytes()==(normal/'revisions'/number/filename).read_bytes()
+        migrated_cache=json.loads((archived_root/'subscriptions/locked.json').read_text())
+        assert migrated_cache['status']['source_id']==cache['status']['source_id']
+        original_pid=int(host_command(archive_controls/'host.sock','status '+archive_token))
+        duplicate=subprocess.run([str(binary),'--privileged',str(uid),str(os.getpid()),uuid.uuid4().hex,str(CORE),str(uuid.uuid4()),str(payload)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=10)
+        assert duplicate.returncode!=0
+        assert int(host_command(archive_controls/'host.sock','status '+archive_token))==original_pid
+        before=rpc(archive_controls/'control.sock','GetProfileState')
+        target=uuid.uuid4().hex
+        switched=rpc(archive_controls/'control.sock','SwitchProfile',{'profile_id':target,'base_profile':before['profile_id'],'base_epoch':before['profile_epoch'],'base_revision':before['revision'],'operation_id':str(uuid.uuid4()),'preserve_network':True})
+        assert switched['state']=='committed',switched
+        assert int(host_command(archive_controls/'host.sock','status '+archive_token))==original_pid
+        host_command(archive_controls/'host.sock','stop '+archive_token)
+        session.communicate(timeout=10)
+        bundle.pop('archive_hash'); payload.write_text(json.dumps(bundle)); payload.chmod(0o600)
+        print('Full-history administrator migration, workspace exclusion and same-PID switching: PASS')
 
         # The watched surrogate is killed; its session host must then restore
         # off and terminate even though no GUI stop command can be sent.

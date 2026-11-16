@@ -21,6 +21,8 @@ final class RuntimeHost {
     private var coreSocket = ""
     private var listener: Int32 = -1
     private var logHandle: FileHandle?
+    private var workspaceLock: Int32 = -1
+    private var bootstrapArchiveHash: String?
     private var bootstrapDocuments: [String: String]?
     private var ready = false
     private var directoryOwner: uid_t {
@@ -51,7 +53,7 @@ final class RuntimeHost {
         try child.run()
         FileHandle.standardError.write(Data("MIMO_REKA_CORE_PID=\(child.processIdentifier)\n".utf8))
         if privileged {
-            let path = coreSocket, documents = bootstrapDocuments
+            let path = coreSocket, documents = bootstrapArchiveHash == nil ? bootstrapDocuments : nil
             Task {
                 do {
                     try await Task.detached {
@@ -74,7 +76,14 @@ final class RuntimeHost {
     private func startNormal(_ arguments: [String]) throws {
         guard geteuid() != 0, [3, 5].contains(arguments.count) else { throw HostFailure.invalid("normal host requires an unprivileged user and explicit profile paths") }
         child.executableURL = URL(fileURLWithPath: arguments[0])
+        let profileRoot = URL(fileURLWithPath: arguments[1]).deletingLastPathComponent().path
+        let profileID = URL(fileURLWithPath: arguments[1]).lastPathComponent
         var flags = ["-state-root", arguments[1], "-control", "unix://" + arguments[2], "-edit-dir", "-", "-defer-network"]
+        var workspaceInfo = stat()
+        if lstat(profileRoot, &workspaceInfo) == 0, workspaceInfo.st_mode & S_IFMT == S_IFDIR,
+           workspaceInfo.st_uid == getuid(), workspaceInfo.st_mode & 0o022 == 0 {
+            flags += ["-profile-root", profileRoot, "-profile-id", profileID]
+        }
         if arguments.count == 5 { flags += ["-profile", arguments[3], "-local", arguments[4]] }
         child.arguments = flags
         child.standardInput = FileHandle.nullDevice
@@ -115,6 +124,12 @@ final class RuntimeHost {
         let base = "/Library/Application Support/MimoReka", runBase = "/var/run/mimo-reka"
         #endif
         for directory in [base, base + "/\(uid)", base + "/\(uid)/\(key)", base + "/\(uid)/\(key)/state"] { try secureDirectory(directory, mode: 0o700) }
+        let lockPath = base + "/\(uid)/host-session.lock"
+        workspaceLock = open(lockPath, O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        var lockInfo = stat()
+        guard workspaceLock >= 0, fstat(workspaceLock, &lockInfo) == 0,
+              lockInfo.st_mode & S_IFMT == S_IFREG, lockInfo.st_uid == directoryOwner,
+              flock(workspaceLock, LOCK_EX | LOCK_NB) == 0 else { throw HostFailure.invalid("another administrator runtime owns this workspace") }
         let state = base + "/\(uid)/\(key)/state"
         let runUser = runBase + "/\(uid)"
         let run = runUser + "/\(key)"
@@ -123,9 +138,10 @@ final class RuntimeHost {
         if socketReachable(hostSocket) { throw HostFailure.invalid("this profile already has a running privileged session") }
         _ = unlink(hostSocket)
 
-        var flags = ["-state-root", state, "-control", "unix://" + coreSocket, "-owner", String(uid), "-edit-dir", "-", "-defer-network"]
+        var flags = ["-profile-root", base + "/\(uid)", "-profile-id", key, "-profile-state-subdir", "-profile-resume=" + (arguments.count == 6 ? "false" : "true"), "-state-root", state, "-control", "unix://" + coreSocket, "-owner", String(uid), "-edit-dir", "-", "-defer-network"]
         if arguments.count == 6 { bootstrapDocuments = try bootstrap(arguments[5], owner: uid, state: state) }
-        if !FileManager.default.fileExists(atPath: state + "/active.json") {
+        if let bootstrapArchiveHash { flags += ["-profile-archive", bootstrapArchiveHash] }
+        if bootstrapArchiveHash == nil && !FileManager.default.fileExists(atPath: state + "/active.json") {
             guard let documents = bootstrapDocuments else { throw HostFailure.invalid("the privileged profile has not been initialized") }
             let directory = base + "/\(uid)/\(key)/bootstrap"
             try secureDirectory(directory, mode: 0o700)
@@ -160,6 +176,10 @@ final class RuntimeHost {
               let documents = bundle["documents"] as? [String: String], let resources = bundle["resources"] as? [String],
               Set(documents.keys) == Set(["profile", "local", "sources", "overlay"]),
               documents.values.allSatisfy({ $0.utf8.count <= 16 * 1024 * 1024 && !$0.contains("secret://") }) else { throw HostFailure.invalid("invalid bootstrap configuration") }
+        if let hash = bundle["archive_hash"] as? String {
+            guard hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil, resources.contains(hash) else { throw HostFailure.invalid("invalid profile archive hash") }
+            bootstrapArchiveHash = hash
+        }
         let source = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("sha256")
         try secureDirectory(state + "/resources", mode: 0o700)
         try secureDirectory(state + "/resources/sha256", mode: 0o700)
@@ -248,6 +268,7 @@ final class RuntimeHost {
         if listener >= 0 { close(listener); listener = -1 }
         if !hostSocket.isEmpty { _ = unlink(hostSocket) }
         try? logHandle?.close(); logHandle = nil
+        if workspaceLock >= 0 { flock(workspaceLock, LOCK_UN); close(workspaceLock); workspaceLock = -1 }
     }
     private func output(_ executable: String, _ arguments: [String]) throws -> String {
         let task = Process(), pipe = Pipe()

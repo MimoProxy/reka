@@ -22,6 +22,7 @@ final class AppStore {
     var visualSection = "general"
     var editingLayer: ConfigurationLayer?
     var preparedChange: PreparedChange?
+    var profileEpoch = 0
     var revision = 0
     var generation = 0
     var connectionCount = 0
@@ -276,48 +277,17 @@ final class AppStore {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func switchProfile(_ id: UUID) async {
-        guard !isBusy, id != activeProfileID, profiles.contains(where: { $0.id == id }) else { return }
-        isBusy = true; errorMessage = nil
-        defer { isBusy = false }
-        let previous = activeProfileID
-        let previousNetwork = snapshot["effective"]["network"]
-        let wasRunning = kernel.isRunning
-        do {
-            try await stopCurrentRuntime()
-            configureProfile(id)
-            try await startCurrentRuntime()
-            catalog.activeProfileID = id
-            try catalog.save(to: homeURL)
-            notice = "已切换配置，网络接管保持关闭。"
-        } catch {
-            let failure = error
-            if kernel.isRunning { await kernel.stop() }
-            guard !kernel.isRunning else { errorMessage = "切换未完成，新运行时仍在清理。"; return }
-            configureProfile(previous)
-            do {
-                if wasRunning {
-                    try await startCurrentRuntime()
-                    if previousNetwork["mode"].stringValue != "off", previousNetwork.objectValue != nil {
-                        let back = try await configurationService.prepare(["local_patch": .array([.object([
-                            "op": .string("set"), "path": .string("/network"), "value": previousNetwork
-                        ])])], summary: "恢复原网络模式")
-                        _ = try await configurationService.commit(back)
-                        try await loadSnapshot(force: true)
-                    }
-                }
-                errorMessage = "切换失败，已恢复原配置：\(failure.localizedDescription)"
-            } catch { errorMessage = "切换失败；原配置恢复仍需处理：\(error.localizedDescription)" }
-        }
-    }
-
     func deleteProfile(_ profile: ClientProfile) async {
         guard !isBusy else { return }
+        isBusy = true; errorMessage = nil
+        defer { isBusy = false }
         guard profile.id != activeProfileID, profiles.count > 1 else { errorMessage = "请先切换到其他配置再移除。"; return }
         guard !profile.privileged else { errorMessage = "此配置有独立的管理员运行时。试用版保留其受保护的数据，请先保留该配置。"; return }
         do {
             let directory = Self.profileDirectory(root: homeURL, id: profile.id)
-            if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+            if kernel.isRunning, !kernel.isPrivileged {
+                _ = try await client.call("DeleteInactiveProfile", params: ["profile_id": .string(profile.id.uuidString.lowercased()), "base_profile": .string(activeProfileID.uuidString.lowercased()), "base_epoch": .number(Double(profileEpoch))])
+            } else if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
             catalog.profiles.removeAll { $0.id == profile.id }
             catalog.sourceNames.removeValue(forKey: profile.id.uuidString)
             try catalog.save(to: homeURL)
@@ -332,24 +302,7 @@ final class AppStore {
                 throw ClientError.message("当前内核不支持此网络模式。")
             }
             if mode != "off", !self.kernel.isPrivileged {
-                let reveal = try await self.client.call("GetConfiguration", params: ["reveal": .bool(true)])
-                self.resourceUpdates.downloader?.cancel()
-                self.operations.reset()
-                let manifest = try await self.client.call("ExportManifest", params: ["base_revision": reveal["revision"]])
-                let hashes = Set((manifest["resources"].arrayValue ?? []).compactMap { $0["hash"].stringValue })
-                try await self.kernel.promote(configuration: reveal, resourceHashes: hashes)
-                // Promotion changes the control socket immediately. Keep stop
-                // and recovery usable even if catalog persistence later fails.
-                self.rebuildController()
-                if let index = self.catalog.profiles.firstIndex(where: { $0.id == self.activeProfileID }) {
-                    self.catalog.profiles[index].privileged = true
-                }
-                self.profiles = self.catalog.profiles
-                try self.catalog.save(to: self.homeURL)
-                self.startedAt = Date()
-                self.snapshot = .null
-                self.capabilities = try await self.client.call("GetCapabilities")
-                try await self.loadSnapshot(force: true)
+                try await self.promoteCurrentProfile()
             }
             let network: JSONValue
             var change: [String: JSONValue] = [:]
@@ -422,11 +375,11 @@ final class AppStore {
         }
     }
 
-    private func startCurrentRuntime() async throws {
+    func startCurrentRuntime() async throws {
         operations.reset()
         startupPhase = "正在启动待机内核"
         try await kernel.start()
-        rebuildController()
+        try await synchronizeProfileContext()
         let deferred = try await configurationService.recoverPendingForStartup()
         if deferred { notice = "上次未确认的网络变更已留档，请在就绪后重新选择网络模式。" }
         startupPhase = "校验配置与恢复选组"
@@ -467,28 +420,19 @@ final class AppStore {
         }
         pollTask?.cancel(); pollTask = nil
         operations.reset()
+        profileEpoch = 0
+        rebuildController()
         startupPhase = "已停止"
         isOnline = false; networkMode = "off"; networkState = "未接管系统网络"
         connections = []; connectionCount = 0; uploaded = 0; downloaded = 0; uptime = nil; coreMemoryBytes = nil
     }
 
-    private func configureProfile(_ id: UUID) {
-        operations.reset()
-        activeProfileID = id
-        let directory = Self.profileDirectory(root: homeURL, id: id)
-        kernel = KernelProcess(stateRoot: directory, privileged: profiles.first { $0.id == id }?.privileged ?? false)
-        rebuildController()
-        snapshot = .null; revision = 0; generation = 0
-        groups = []; outbounds = []; sources = []; revisions = []; documents = [:]
-        preparedChange = nil; pendingSourceName = nil; editingLayer = nil
+    func rebuildController() {
+        client = RekaControlClient(socketPath: kernel.socketPath, profileID: profileEpoch > 0 ? activeProfileID.uuidString.lowercased() : nil, profileEpoch: profileEpoch)
+        configurationService = ConfigurationService(client: client, pendingURL: Self.profileDirectory(root: homeURL, id: activeProfileID).appendingPathComponent("client/pending-operation.json"))
     }
 
-    private func rebuildController() {
-        client = RekaControlClient(socketPath: kernel.socketPath)
-        configurationService = ConfigurationService(client: client, pendingURL: kernel.stateRoot.appendingPathComponent("client/pending-operation.json"))
-    }
-
-    private static func profileDirectory(root: URL, id: UUID) -> URL {
+    static func profileDirectory(root: URL, id: UUID) -> URL {
         root.appendingPathComponent("profiles", isDirectory: true).appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
     }
 }

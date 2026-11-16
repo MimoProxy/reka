@@ -144,6 +144,8 @@ final class AppStoreIntegrationTests: XCTestCase {
             XCTAssertEqual(store.profiles.count, 1)
             let firstProfile = store.activeProfileID
             let originalStateRoot = store.kernel.stateRoot
+            let originalPID = store.kernel.corePID
+            let oldClient = store.client
             let firstData = """
             proxies:
               - {name: First, type: socks5, server: 127.0.0.1, port: 9}
@@ -170,7 +172,11 @@ final class AppStoreIntegrationTests: XCTestCase {
             XCTAssertNotEqual(store.activeProfileID, firstProfile)
             XCTAssertEqual(store.profiles.count, 2)
             XCTAssertEqual(store.sources.count, 0)
-            XCTAssertNotEqual(store.kernel.stateRoot, originalStateRoot)
+            XCTAssertEqual(store.kernel.stateRoot, originalStateRoot)
+            XCTAssertEqual(store.kernel.corePID, originalPID)
+            XCTAssertTrue(store.kernel.runtimeStateRoot.hasSuffix(store.activeProfileID.uuidString.lowercased()))
+            do { _ = try await oldClient.call("GetConfiguration"); XCTFail("Late profile client accepted") }
+            catch RekaControlError.server(let code, _) { XCTAssertEqual(code, "conflict") }
             XCTAssertEqual(store.networkMode, "off")
             let secondProfile = store.activeProfileID
             let secondData = "proxies: [{name: Third, type: socks5, server: 127.0.0.1, port: 11}]"
@@ -183,6 +189,7 @@ final class AppStoreIntegrationTests: XCTestCase {
             XCTAssertNil(store.errorMessage)
             XCTAssertEqual(store.activeProfileID, firstProfile)
             XCTAssertEqual(store.kernel.stateRoot, originalStateRoot)
+            XCTAssertEqual(store.kernel.corePID, originalPID)
             XCTAssertEqual(store.revision, firstRevision)
             XCTAssertEqual(store.groups.first { $0.id == "proxy" }?.selected, selected)
             XCTAssertEqual(store.sources.first?.name, "First profile nodes")
@@ -207,8 +214,16 @@ final class AppStoreIntegrationTests: XCTestCase {
             XCTAssertEqual(store.groups.first { $0.id == "proxy" }?.selected, "direct")
             await store.stop()
             XCTAssertFalse(store.kernel.isRunning)
+            var staleCatalog = store.catalog
+            staleCatalog.activeProfileID = secondProfile
+            try staleCatalog.save(to: root)
             let reloaded = AppStore(home: root)
+            await reloaded.start()
+            XCTAssertNil(reloaded.errorMessage)
             XCTAssertEqual(reloaded.activeProfileID, firstProfile)
+            XCTAssertEqual(reloaded.sources.first?.name, "First profile nodes")
+            await reloaded.stop()
+            XCTAssertFalse(reloaded.kernel.isRunning)
             XCTAssertEqual(reloaded.profiles.count, 2)
             XCTAssertTrue(reloaded.profiles.contains { $0.id == secondProfile })
             XCTAssertEqual(reloaded.catalog.sourceNames[firstProfile.uuidString]?.values.first, "First profile nodes")

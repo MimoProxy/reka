@@ -22,25 +22,28 @@ enum RekaControlError: LocalizedError, Sendable {
 actor RekaControlClient {
     let socketPath: String
     private let timeout: TimeInterval
+    private let profileID: String?
+    private let profileEpoch: Int
 
-    init(socketPath: String, timeout: TimeInterval = 15) {
+    init(socketPath: String, timeout: TimeInterval = 15, profileID: String? = nil, profileEpoch: Int = 0) {
         self.socketPath = socketPath
         self.timeout = timeout
+        self.profileID = profileID; self.profileEpoch = profileEpoch
     }
 
     func call(_ method: String, params: [String: JSONValue] = [:]) async throws -> JSONValue {
         try Task.checkCancellation()
         let socketPath = socketPath
-        let timeout = timeout
+        let timeout = timeout, profileID = profileID, profileEpoch = profileEpoch
         return try await Task.detached(priority: .userInitiated) {
-            try Self.perform(socketPath: socketPath, timeout: timeout, method: method, params: params)
+            try Self.perform(socketPath: socketPath, timeout: timeout, method: method, params: params, profileID: profileID, profileEpoch: profileEpoch)
         }.value
     }
 
     private static let maximumFrame = 16 * 1024 * 1024
 
     private static func perform(socketPath: String, timeout: TimeInterval,
-                                method: String, params: [String: JSONValue]) throws -> JSONValue {
+                                method: String, params: [String: JSONValue], profileID: String?, profileEpoch: Int) throws -> JSONValue {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let path = Array(socketPath.utf8) + [UInt8(0)]
@@ -78,14 +81,14 @@ actor RekaControlClient {
         guard hello["version"].intValue == 1 else {
             throw RekaControlError.protocolError("内核未协商受支持的 API 版本")
         }
-        return try exchange(descriptor, id: 2, method: method, params: params, deadline: deadline)
+        return try exchange(descriptor, id: 2, method: method, params: params, deadline: deadline, profileID: profileID, profileEpoch: profileEpoch)
     }
 
     private static func exchange(_ descriptor: Int32, id: Int, method: String,
-                                 params: [String: JSONValue], deadline: TimeInterval) throws -> JSONValue {
-        let request = JSONValue.object([
-            "id": .number(Double(id)), "method": .string(method), "params": .object(params)
-        ])
+                                 params: [String: JSONValue], deadline: TimeInterval, profileID: String? = nil, profileEpoch: Int = 0) throws -> JSONValue {
+        var fields: [String: JSONValue] = ["id": .number(Double(id)), "method": .string(method), "params": .object(params)]
+        if let profileID { fields["profile_id"] = .string(profileID); fields["profile_epoch"] = .number(Double(profileEpoch)) }
+        let request = JSONValue.object(fields)
         // Patch values become ordered YAML nodes in the kernel. Preserve the
         // same nested key order between PlanConfiguration and its commit.
         let encoder = JSONEncoder()

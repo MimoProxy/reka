@@ -2,6 +2,8 @@ import Foundation
 
 extension AppStore {
     func loadSnapshot(force: Bool = false) async throws {
+        let expectedProfile = activeProfileID, expectedEpoch = profileEpoch
+        let client = self.client
         resourceUpdates.load(profile: activeProfileID, home: homeURL)
         var status = try await client.call("GetStatus")
         let startError = status["start_error"].stringValue ?? ""
@@ -36,7 +38,7 @@ extension AppStore {
             offset += rows.count
             if rows.isEmpty { break }
         } while offset < total && offset < 25_000
-        guard kernel.isRunning, !Task.isCancelled else { return }
+        guard kernel.isRunning, !Task.isCancelled, activeProfileID == expectedProfile, profileEpoch == expectedEpoch else { return }
 
         snapshot = config
         revision = config["revision"].intValue ?? reportedRevision

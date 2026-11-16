@@ -33,13 +33,15 @@ func NewHandler(svc *service.Service) *Handler { return &Handler{svc: svc} }
 // Session is one client connection's state. send writes one message
 // frame; it must be safe for concurrent use.
 type Session struct {
-	h     *Handler
-	send  func([]byte) error
-	ctx   context.Context
-	stop  context.CancelFunc
-	mu    sync.Mutex
-	hello bool
-	sub   *service.Subscription
+	h            *Handler
+	send         func([]byte) error
+	ctx          context.Context
+	stop         context.CancelFunc
+	mu           sync.Mutex
+	profileID    string
+	profileEpoch uint64
+	hello        bool
+	sub          *service.Subscription
 }
 
 // NewSession starts a session that replies through send.
@@ -109,6 +111,7 @@ func decode[T any](raw json.RawMessage) (T, error) {
 
 // Methods lists the API methods of this version.
 var Methods = []string{
+	"ExportProfileArchive", "GetProfileState", "SwitchProfile", "GetProfileSwitchOperation", "InstallProfile", "DeleteInactiveProfile",
 	"GetProcessTraffic", "ExportManifest", "ReadResource",
 	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
 	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
@@ -119,7 +122,88 @@ var Methods = []string{
 
 func (s *Session) dispatch(req Request) (any, error) {
 	svc := s.h.svc
+	if req.Method == "SwitchProfile" {
+		p, err := decode[api.SwitchProfileRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if req.ProfileID != "" && (req.ProfileID != p.BaseProfile || req.ProfileEpoch != p.BaseEpoch) {
+			return nil, &service.Error{Code: service.CodeConflict, Message: "switch context does not match its base profile"}
+		}
+		result, err := svc.SwitchProfile(s.ctx, p)
+		if err == nil && result.State == "committed" {
+			s.profileID = result.ProfileID
+			s.profileEpoch = result.Epoch
+		}
+		return result, err
+	}
+	if req.Method == "DeleteInactiveProfile" {
+		p, err := decode[struct {
+			ProfileID   string `json:"profile_id"`
+			BaseProfile string `json:"base_profile"`
+			BaseEpoch   uint64 `json:"base_epoch"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		// Delete has its own writer gate. An explicit active context is mandatory.
+		state, err := svc.ProfileState("")
+		if err != nil {
+			return nil, err
+		}
+		if p.BaseProfile != state.ProfileID || p.BaseEpoch != state.Epoch {
+			return nil, &service.Error{Code: service.CodeConflict, Message: "profile changed"}
+		}
+		return map[string]bool{"deleted": true}, svc.DeleteInactiveProfile(p.ProfileID, p.BaseProfile, p.BaseEpoch)
+	}
+	id, epoch := req.ProfileID, req.ProfileEpoch
+	if id == "" {
+		id, epoch = s.profileID, s.profileEpoch
+	}
+	if req.Method == "Hello" || req.Method == "GetProfileState" || req.Method == "GetProfileSwitchOperation" {
+		id, epoch = "", 0
+	}
+	release, err := svc.AcquireProfileCall(id, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if req.Method == "Hello" {
+		state, err := svc.ProfileState("")
+		if err != nil {
+			return nil, err
+		}
+		s.profileID, s.profileEpoch = state.ProfileID, state.Epoch
+	}
 	switch req.Method {
+	case "ExportProfileArchive":
+		p, err := decode[api.ExportManifestRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ExportProfileArchive(p)
+	case "GetProfileState":
+		p, err := decode[struct {
+			ProfileID string `json:"profile_id"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ProfileState(p.ProfileID)
+	case "GetProfileSwitchOperation":
+		p, err := decode[struct {
+			OperationID string `json:"operation_id"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ProfileSwitchOperation(p.OperationID)
+	case "InstallProfile":
+		p, err := decode[api.InstallProfileRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.InstallProfile(p)
 	case "GetProcessTraffic":
 		p, err := decode[struct {
 			Offset int `json:"offset"`

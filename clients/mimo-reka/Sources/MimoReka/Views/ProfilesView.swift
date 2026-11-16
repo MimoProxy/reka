@@ -22,6 +22,8 @@ struct ProfilesView: View {
                         .frame(maxWidth: .infinity, minHeight: 60)
                         .foregroundStyle(.secondary).surface()
                 }.buttonStyle(.plain).disabled(store.isBusy)
+                Label("配置、订阅和版本历史分别保存；切档由内核原子完成，失败继续使用原配置。", systemImage: "arrow.triangle.swap")
+                    .font(.callout).foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 12) {
                     PanelHeader(title: "当前配置")
                     ForEach(ConfigurationLayer.allCases) { layer in
@@ -47,7 +49,7 @@ struct ProfilesView: View {
             Button("取消", role: .cancel) {}
             Button("创建") { Task { await store.createProfile(name: name) } }
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        } message: { Text("创建后切换到新配置，当前连接会结束。新配置初始使用直连，网络接管保持关闭。") }
+        } message: { Text("创建后由当前内核切换到新配置，保留当前网络接管模式。新配置初始使用直连。") }
         .confirmationDialog("移除“\(removing?.name ?? "")”？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             Button("移除配置", role: .destructive) {
                 if let removing { Task { await store.deleteProfile(removing) } }
@@ -59,7 +61,7 @@ struct ProfilesView: View {
                 if let switching { Task { await store.switchProfile(switching.id) } }
                 switching = nil
             }
-        } message: { Text("当前连接会结束，新配置启动后可重新开启网络接管。") }
+        } message: { Text("内核先校验再原子切换，失败继续使用原配置。保留当前接管模式；接管参数变化可能中断连接。") }
     }
 
     private func openEditor(_ layer: ConfigurationLayer) {

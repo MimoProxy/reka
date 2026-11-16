@@ -66,7 +66,7 @@ enum ResourceImportService {
         guard read == size else { throw ClientError.message("资源文件读取不完整。") }
         return (digest.finalize().map { String(format: "%02x", $0) }.joined(), size)
     }
-    static func stage(file: URL, client: RekaControlClient, progress: @Sendable (Int, Int) async -> Void = { _, _ in }) async throws -> String {
+    static func stage(file: URL, client: RekaControlClient, profileID: String? = nil, progress: @Sendable (Int, Int) async -> Void = { _, _ in }) async throws -> String {
         let info = try digest(file: file)
         let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
         var offset = 0
@@ -74,7 +74,9 @@ enum ResourceImportService {
             try Task.checkCancellation()
             let count = min(1024 * 1024, info.size - offset)
             guard let chunk = try handle.read(upToCount: count), chunk.count == count else { throw ClientError.message("资源文件发生变化，请重新选择。") }
-            let result = try await client.call("StageResource", params: ["hash": .string(info.hash), "size": .number(Double(info.size)), "offset": .number(Double(offset)), "data": .string(chunk.base64EncodedString())])
+            var params: [String: JSONValue] = ["hash": .string(info.hash), "size": .number(Double(info.size)), "offset": .number(Double(offset)), "data": .string(chunk.base64EncodedString())]
+            if let profileID { params["profile_id"] = .string(profileID) }
+            let result = try await client.call("StageResource", params: params)
             let received = result["received"].intValue ?? -1
             guard result["hash"].stringValue == info.hash, received >= offset + chunk.count, received <= info.size else { throw ClientError.message("资源上传响应不一致。") }
             await progress(received, info.size)

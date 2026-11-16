@@ -14,7 +14,12 @@ final class KernelProcess {
     private(set) var logText = ""
     let stateRoot: URL
     var socketPath: String { isPrivileged ? controlDirectory + "/control.sock" : normalControlDirectory + "/" + profileKey + ".sock" }
-    var runtimeStateRoot: String { isPrivileged ? "/Library/Application Support/MimoReka/\(getuid())/\(profileKey)/state" : stateRoot.path }
+    var runtimeStateRoot: String { isPrivileged ? "/Library/Application Support/MimoReka/\(getuid())/\(activeProfileKey)/state" : normalActiveRoot.path }
+    private var normalActiveRoot: URL { stateRoot.deletingLastPathComponent().appendingPathComponent(activeProfileKey) }
+    private var activeProfileKey: String { activeKey ?? normalProfileKey }
+    @ObservationIgnored private var activeKey: String?
+    @ObservationIgnored private var privilegedSessionKey: String?
+    func adoptProfile(_ id: UUID) { activeKey = id.uuidString.lowercased() }
 
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var lifetime: Pipe?
@@ -23,7 +28,8 @@ final class KernelProcess {
     @ObservationIgnored private var rootLogOffset: UInt64 = 0
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var sessionToken = UUID().uuidString
-    private var profileKey: String {
+    private var profileKey: String { isPrivileged ? privilegedSessionKey ?? normalProfileKey : normalProfileKey }
+    private var normalProfileKey: String {
         if let identifier = UUID(uuidString: stateRoot.lastPathComponent) { return identifier.uuidString.lowercased() }
         return String(SHA256.hash(data: Data(stateRoot.standardizedFileURL.path.utf8)).map { String(format: "%02x", $0) }.joined().prefix(32))
     }
@@ -45,9 +51,9 @@ final class KernelProcess {
         if isPrivileged { try await startPrivileged(bootstrap: nil) } else { try await startNormal() }
     }
 
-    /// Explicitly promotes the current four documents into a private root
+    /// Promotes the complete quiesced profile history into a private root
     /// runtime. The old user state remains an untouched rollback archive.
-    func promote(configuration: JSONValue, resourceHashes: Set<String>? = nil) async throws {
+    func promote(configuration: JSONValue) async throws {
         guard !isPrivileged else { return }
         guard configuration["effective"]["network"]["mode"].stringValue == "off" else { throw RekaControlError.transport("请先关闭当前网络接管，再授权网络模式。") }
         var documents: [String: String] = [:]
@@ -60,19 +66,34 @@ final class KernelProcess {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let staging = directory.appendingPathComponent("bootstrap.json")
-        let resources = try stageResources(into: directory, allowed: resourceHashes)
-        let bundle: [String: Any] = ["documents": documents, "resources": resources]
-        try JSONSerialization.data(withJSONObject: bundle, options: [.sortedKeys]).write(to: staging, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
         await stop()
         guard !isRunning else { throw RekaControlError.transport("原内核尚未完成停止，请稍后重试。") }
-        isPrivileged = true
-        do { try await startPrivileged(bootstrap: staging) }
+        do {
+            // Snapshot after the refresh manager has joined, so a final
+            // subscription commit cannot be lost during authorization.
+            guard let archive = try await Task.detached(operation: { [root = normalActiveRoot] in try ProfileArchiveService.prepare(root: root) }).value else {
+                throw RekaControlError.transport("缺少完整配置历史，未启动管理员运行时。")
+            }
+            defer { try? FileManager.default.removeItem(at: archive.file) }
+            let hashes = Set(archive.resources.map { $0.hash })
+            var resources = try stageResources(into: directory, allowed: hashes)
+            let info = try ResourceImportService.digest(file: archive.file)
+            let destination = directory.appendingPathComponent("sha256/" + info.hash)
+            try FileManager.default.copyItem(at: archive.file, to: destination)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            resources.append(info.hash)
+            let bundle: [String: Any] = ["documents": documents, "resources": resources, "archive_hash": info.hash]
+            try JSONSerialization.data(withJSONObject: bundle, options: [.sortedKeys]).write(to: staging, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
+            privilegedSessionKey = activeProfileKey
+            isPrivileged = true
+            try await startPrivileged(bootstrap: staging)
+        }
         catch {
             let failure = error
             await stop()
             guard !isRunning else { throw RekaControlError.transport("授权启动未完成，网络运行时仍在清理。") }
-            isPrivileged = false
+            isPrivileged = false; privilegedSessionKey = nil
             try await startNormal()
             throw failure
         }
@@ -220,7 +241,7 @@ final class KernelProcess {
     /// referenced by foreign configurations. Root verifies every digest again.
     private func stageResources(into directory: URL, allowed: Set<String>?) throws -> [String] {
         let manager = FileManager.default
-        let source = stateRoot.appendingPathComponent("resources/sha256", isDirectory: true)
+        let source = normalActiveRoot.appendingPathComponent("resources/sha256", isDirectory: true)
         guard manager.fileExists(atPath: source.path) else {
             guard allowed?.isEmpty != false else { throw RekaControlError.transport("缺少配置引用的资源，无法授权迁移。") }; return []
         }
@@ -229,6 +250,7 @@ final class KernelProcess {
         var names: [String] = [], total = 0
         for file in try manager.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) {
             let name = file.lastPathComponent
+            if let allowed, !allowed.contains(name) { continue }
             guard name.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else { continue }
             let attributes = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard attributes.isRegularFile == true, attributes.isSymbolicLink != true else { throw RekaControlError.transport("资源缓存包含非普通文件，无法安全迁移。") }
@@ -257,7 +279,17 @@ final class KernelProcess {
     }
     private static func shellQuote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     private static func appleScriptQuote(_ text: String) -> String { "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
-    private static let initialProfile = """
+    static func starterProfile(networkMode: String) -> String {
+        guard networkMode == "tun" else { return initialProfile }
+        return initialProfile + "\n" + """
+        dns:
+          nameserver: [https://1.1.1.1/dns-query]
+          default-nameserver: [1.1.1.1]
+          proxy-server-nameserver: [1.1.1.1]
+          ipv6: false
+        """
+    }
+    static let initialProfile = """
     schema-version: 1
     groups:
       - {id: proxy, name: 默认策略, type: select, members: [direct], selected: direct}
