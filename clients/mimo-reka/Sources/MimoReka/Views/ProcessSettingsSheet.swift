@@ -20,14 +20,12 @@ struct ProcessSettingsSheet: View {
             Text("变更影响之后建立的连接。应用累计流量保留本次内核运行中已完成的连接；无法识别和超出统计容量的流量单独归类。")
                 .font(.caption).foregroundStyle(.secondary)
             if store.capabilities["process_lookup"].boolValue != true { Label("当前运行平台无法查询进程归属。", systemImage: "info.circle").foregroundStyle(.orange) }
-            if let plan = store.preparedChange { ChangePlanView(prepared: plan).frame(height: 110) }
             if let error = store.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览变更") { Task { await store.previewProcessMode(mode, revision: revision) } }
-                Button("应用") { Task { await store.applyPrepared(); if store.errorMessage == nil { dismiss() } } }
-                    .buttonStyle(.borderedProminent).disabled(store.preparedChange == nil)
+                Button("保存") { Task { if await store.previewProcessMode(mode, revision: revision, save: true) { dismiss() } } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!store.isOnline)
             }
         }.padding(24).frame(width: 640).disabled(store.isBusy).interactiveDismissDisabled(store.isBusy)
             .onAppear { store.preparedChange = nil }

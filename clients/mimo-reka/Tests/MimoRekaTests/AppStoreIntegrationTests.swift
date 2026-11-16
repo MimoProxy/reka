@@ -149,10 +149,9 @@ final class AppStoreIntegrationTests: XCTestCase {
               - {name: First, type: socks5, server: 127.0.0.1, port: 9}
               - {name: Second, type: socks5, server: 127.0.0.1, port: 10}
             """
-            await store.previewImport(data: firstData, format: "clash", nodesOnly: true, sourceName: "First profile nodes")
-            XCTAssertNil(store.errorMessage)
-            XCTAssertNotNil(store.preparedChange)
-            await store.applyPrepared()
+            let imported = await store.previewImport(data: firstData, format: "clash", nodesOnly: true, sourceName: "First profile nodes", save: true)
+            XCTAssertTrue(imported)
+            XCTAssertNil(store.preparedChange)
             XCTAssertNil(store.errorMessage)
             XCTAssertEqual(store.sources.count, 1)
             XCTAssertEqual(store.sources.first?.name, "First profile nodes")
@@ -175,8 +174,7 @@ final class AppStoreIntegrationTests: XCTestCase {
             XCTAssertEqual(store.networkMode, "off")
             let secondProfile = store.activeProfileID
             let secondData = "proxies: [{name: Third, type: socks5, server: 127.0.0.1, port: 11}]"
-            await store.previewImport(data: secondData, format: "clash", nodesOnly: true, sourceName: "Second profile nodes")
-            await store.applyPrepared()
+            await store.previewImport(data: secondData, format: "clash", nodesOnly: true, sourceName: "Second profile nodes", save: true)
             XCTAssertNil(store.errorMessage)
             XCTAssertTrue(store.outbounds.contains { $0.name == "Third" })
             XCTAssertFalse(store.outbounds.contains { $0.name == "First" })

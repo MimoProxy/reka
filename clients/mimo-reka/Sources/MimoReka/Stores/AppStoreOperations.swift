@@ -64,12 +64,13 @@ extension AppStore {
         }
     }
 
-    func previewRoutingMode(_ mode: String, global: String, baseRevision: Int) async {
-        guard supportsMethod("GetRules") else { errorMessage = "当前内核不支持切换路由模式。"; return }
+    @discardableResult
+    func previewRoutingMode(_ mode: String, global: String, baseRevision: Int, save: Bool = false) async -> Bool {
+        guard supportsMethod("GetRules") else { errorMessage = "当前内核不支持切换路由模式。"; return false }
         var routing: [String: JSONValue] = ["mode": .string(mode)]
         if mode == "global" { routing["global"] = .string(global) }
-        await previewVisualChange(["base_revision": .number(Double(baseRevision)), "local_patch": .array([
+        return await previewVisualChange(["base_revision": .number(Double(baseRevision)), "local_patch": .array([
             .object(["op": .string("set"), "path": .string("/routing"), "value": .object(routing)])
-        ])], summary: "路由模式 · \(Self.routingTitle(mode))")
+        ])], summary: "路由模式 · \(Self.routingTitle(mode))", save: save)
     }
 }

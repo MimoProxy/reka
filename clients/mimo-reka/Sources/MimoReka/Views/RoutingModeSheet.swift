@@ -46,15 +46,13 @@ struct RoutingModeSheet: View {
                 .font(.callout).foregroundStyle(.secondary)
             Text("路由模式决定流量出口；系统代理和 TUN 在网络设置中控制。")
                 .font(.caption).foregroundStyle(.secondary)
-            if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(height: 120) }
             Divider()
             HStack {
                 Text("基于 r\(baseRevision)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览变更") { Task { await store.previewRoutingMode(mode, global: global, baseRevision: baseRevision) } }
-                Button("应用") { Task { await store.applyPrepared(); if store.errorMessage == nil { dismiss() } } }
-                    .buttonStyle(.borderedProminent).disabled(store.preparedChange == nil)
+                Button("保存") { Task { if await store.previewRoutingMode(mode, global: global, baseRevision: baseRevision, save: true) { dismiss() } } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!store.isOnline)
             }
         }.padding(24).frame(width: 620).disabled(store.isBusy)
             .onAppear { store.preparedChange = nil }

@@ -211,6 +211,72 @@ final class VisualEditingIntegrationTests: XCTestCase {
         }
     }
 
+    func testDirectSavesValidateCommitAndRejectStaleDraftsWithoutASeparateApply() async throws {
+        try await withStore { store in
+            let node: [String: JSONValue] = ["id": .string("one-click"), "name": .string("一次保存"), "type": .string("socks"), "server": .string("127.0.0.1"), "port": .number(9)]
+            let added = await store.previewResource(kind: "outbounds", id: nil, definition: node, baseRevision: store.revision, save: true)
+            XCTAssertTrue(added)
+            XCTAssertNil(store.preparedChange)
+            XCTAssertTrue(store.outbounds.contains { $0.id == "one-click" })
+            let rule: [String: JSONValue] = ["id": .string("one-click-rule"), "match": .object(["domain-suffix": .array([.string("example.test")])]), "outbound": .string("one-click")]
+            let ruleSaved = await store.previewRule(definition: rule, record: nil, baseRevision: store.revision, save: true)
+            XCTAssertTrue(ruleSaved)
+            let referencedRevision = store.revision
+            let blocked = await store.removeResource(kind: "outbounds", id: "one-click", baseRevision: referencedRevision, save: true)
+            XCTAssertFalse(blocked)
+            XCTAssertNotNil(store.errorMessage)
+            XCTAssertEqual(store.revision, referencedRevision)
+            XCTAssertTrue(store.outbounds.contains { $0.id == "one-click" })
+
+            let staleRevision = store.revision
+            let staleDocument = store.documents[.local] ?? ""
+            let modeSaved = await store.previewProcessMode("always", revision: store.revision, save: true)
+            XCTAssertTrue(modeSaved)
+            let currentRevision = store.revision
+            let staleSaved = await store.previewDocument(layer: .local, text: staleDocument, baseRevision: staleRevision, save: true)
+            XCTAssertFalse(staleSaved)
+            XCTAssertNotNil(store.errorMessage)
+            XCTAssertEqual(store.revision, currentRevision)
+            XCTAssertEqual(store.processMode, "always")
+
+            let local = (store.documents[.local] ?? "") + "\nlog: {level: debug}\n"
+            let documentSaved = await store.previewDocument(layer: .local, text: local, baseRevision: store.revision, save: true)
+            XCTAssertTrue(documentSaved, store.errorMessage ?? "Missing save result")
+            XCTAssertNil(store.preparedChange)
+            XCTAssertEqual(try YAMLDocument.object(store.documents[.local] ?? "")["log"]?["level"], .string("debug"))
+            let validRevision = store.revision
+            let invalidSaved = await store.previewDocument(layer: .local, text: "network: [", baseRevision: validRevision, save: true)
+            XCTAssertFalse(invalidSaved)
+            XCTAssertNotNil(store.errorMessage)
+            XCTAssertEqual(store.revision, validRevision)
+            let unauthorized = await store.previewVisualChange(["base_revision": .number(Double(validRevision)), "local_patch": .array([
+                .object(["op": .string("set"), "path": .string("/network"), "value": .object(["mode": .string("tun")])])
+            ])], summary: "不能绕过授权", save: true)
+            XCTAssertFalse(unauthorized)
+            XCTAssertEqual(store.networkMode, "off")
+            XCTAssertEqual(store.revision, validRevision)
+
+            let savedRule = try XCTUnwrap(store.ruleRecords.first { $0.definition["id"]?.stringValue == "one-click-rule" })
+            let moved = await store.moveRule(savedRule, direction: -1, baseRevision: store.revision, save: true)
+            XCTAssertTrue(moved)
+            XCTAssertNil(store.preparedChange)
+            let movedRule = try XCTUnwrap(store.ruleRecords.first { $0.definition["id"]?.stringValue == "one-click-rule" })
+            let removedRule = await store.removeRule(movedRule, baseRevision: store.revision, save: true)
+            XCTAssertTrue(removedRule)
+            let removedNode = await store.removeResource(kind: "outbounds", id: "one-click", baseRevision: store.revision, save: true)
+            XCTAssertTrue(removedNode)
+            XCTAssertFalse(store.outbounds.contains { $0.id == "one-click" })
+            XCTAssertNil(store.preparedChange)
+
+            // A busy/offline guard must never be mistaken for a successful save.
+            store.isBusy = true
+            let skipped = await store.previewProcessMode("off", revision: store.revision, save: true)
+            store.isBusy = false
+            XCTAssertFalse(skipped)
+            XCTAssertEqual(store.processMode, "always")
+        }
+    }
+
     private func withStore(_ work: (AppStore) async throws -> Void) async throws {
         guard ProcessInfo.processInfo.environment["MIMO_REKA_KERNEL_BINARY"] != nil,
               ProcessInfo.processInfo.environment["MIMO_REKA_HOST_BINARY"] != nil else { throw XCTSkip("Set production kernel and supervisor paths.") }

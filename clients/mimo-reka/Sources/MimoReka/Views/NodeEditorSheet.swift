@@ -10,7 +10,6 @@ struct NodeEditorSheet: View {
     @State private var baseRevision: Int
     @State private var failure: String?
     @State private var confirmingDelete = false
-    @State private var deleting = false
 
     init(store: AppStore, nodeID: String? = nil) {
         self.store = store
@@ -70,7 +69,6 @@ struct NodeEditorSheet: View {
                     }
                 }.padding(.trailing, 3)
             }
-            if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(height: 110) }
             Divider()
             HStack {
                 if let nodeID {
@@ -82,24 +80,22 @@ struct NodeEditorSheet: View {
                 if store.isBusy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览变更") {
-                    deleting = false
-                    Task { await store.previewResource(kind: "outbounds", id: nodeID, definition: fields, baseRevision: baseRevision) }
-                }.disabled(!store.isOnline || failure != nil)
-                Button(deleting ? "确认删除" : "应用") {
-                    Task { await store.applyPrepared(); if store.errorMessage == nil { dismiss() } }
+                Button("保存") {
+                    Task {
+                        if await store.previewResource(kind: "outbounds", id: nodeID, definition: fields, baseRevision: baseRevision, save: true) { dismiss() }
+                    }
                 }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(!store.isOnline || store.preparedChange == nil)
+                    .disabled(!store.isOnline || failure != nil)
             }
         }.padding(24).frame(width: 760, height: 690)
             .disabled(store.isBusy).interactiveDismissDisabled(store.isBusy)
-            .onChange(of: fields) { store.preparedChange = nil; deleting = false }
+            .onChange(of: fields) { store.preparedChange = nil }
             .onAppear { store.preparedChange = nil }
             .onDisappear { store.preparedChange = nil }
             .confirmationDialog("删除这个节点？", isPresented: $confirmingDelete) {
-                Button("预览删除", role: .destructive) {
+                Button("删除节点", role: .destructive) {
                     if let nodeID {
-                        Task { await store.removeResource(kind: "outbounds", id: nodeID, baseRevision: baseRevision); deleting = store.preparedChange != nil }
+                        Task { if await store.removeResource(kind: "outbounds", id: nodeID, baseRevision: baseRevision, save: true) { dismiss() } }
                     }
                 }
             } message: { Text("仍被策略或规则引用的节点无法删除。内核会先检查引用，原配置在提交成功前保持不变。") }

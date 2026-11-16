@@ -44,10 +44,7 @@ struct DocumentEditorSheet: View {
                     }
                     Text(layer.detail).font(.caption).foregroundStyle(.secondary)
                     TextEditor(text: $text).trackEditor().accessibilityLabel("\(layer.title) YAML 编辑器")
-                    if let prepared = store.preparedChange {
-                        ChangePlanView(prepared: prepared).frame(height: 120)
-                    }
-                    Text("保存前先预览。隐藏的凭据保持为星号时会保留原值。")
+                    Text("保存时自动校验配置。隐藏的凭据保持为星号时会保留原值。")
                         .font(.caption).foregroundStyle(.tertiary)
                 }
             }
@@ -57,14 +54,9 @@ struct DocumentEditorSheet: View {
                 if store.isBusy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览变更") { Task { await store.previewDocument(layer: layer, text: text, baseRevision: baseRevision) } }
-                    .disabled(!store.isOnline)
-                Button("应用") {
-                    Task {
-                        await store.applyPrepared()
-                        if store.errorMessage == nil { dismiss() }
-                    }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(store.preparedChange == nil || !store.isOnline)
+                Button("保存") {
+                    Task { if await store.previewDocument(layer: layer, text: text, baseRevision: baseRevision, save: true) { dismiss() } }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!store.isOnline)
             }
         }.padding(24).frame(width: 900, height: 650)
             .disabled(store.isBusy).interactiveDismissDisabled(store.isBusy || text != original)

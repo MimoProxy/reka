@@ -15,6 +15,7 @@ struct ImportSheet: View {
     @State private var showFilePicker = false
     @State private var choosingResource = false
     @State private var attachments: [ResourceAttachment] = []
+    @State private var confirmingReplace = false
     @State private var uploading = false
     @State private var uploadProgress = ""
     private var canStageResources: Bool { (store.capabilities["methods"].arrayValue ?? []).contains(.string("StageResource")) }
@@ -70,12 +71,7 @@ struct ImportSheet: View {
                 Text("原生配置会替换当前主配置，保留本机设置、来源和用户覆盖。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let prepared = store.preparedChange, input == "text" {
-                ChangePlanView(prepared: prepared).frame(maxHeight: 150)
-            } else if let report = store.importPreview, input == "text" {
-                ScrollView { Text(report).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(maxHeight: 130).padding(12).surface()
-            } else if input == "url" {
+            if input == "url" {
                 Text("由 Reka 下载并管理订阅。刷新失败时保留上次成功的内容。")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -86,16 +82,10 @@ struct ImportSheet: View {
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
                 if input == "text" {
-                    Button("预览") {
-                        Task { await previewWithResources() }
-                    }.disabled(!canSubmit)
-                    Button("应用配置") {
-                        Task {
-                            await store.applyPrepared()
-                            if store.errorMessage == nil { dismiss() }
-                        }
-                    }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                        .disabled(!canSubmit || store.preparedChange == nil)
+                    Button(format == "native" ? "替换主配置…" : "导入") {
+                        if format == "native" { confirmingReplace = true }
+                        else { Task { await saveWithResources() } }
+                    }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!canSubmit)
                 } else {
                     Button("添加并刷新") {
                         Task {
@@ -108,6 +98,12 @@ struct ImportSheet: View {
         }.padding(24).frame(width: 720, height: 650)
             .interactiveDismissDisabled(store.isBusy || uploading)
             .disabled(store.isBusy || uploading)
+            .confirmationDialog("替换当前主配置？", isPresented: $confirmingReplace) {
+                Button("替换主配置", role: .destructive) { Task { await saveWithResources() } }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("将替换“\(store.activeProfile?.name ?? "当前配置")”的完整主配置。本机设置、来源和用户覆盖会保留；校验失败时保留现有配置。")
+            }
             .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.data]) { result in load(result) }
             .onChange(of: data) { invalidate() }
             .onChange(of: format) { invalidate() }
@@ -125,7 +121,7 @@ struct ImportSheet: View {
     private var resourceAttachments: some View {
         DisclosureGroup("规则提供者与地理数据库（\(attachments.count) 个资源）") {
             VStack(alignment: .leading, spacing: 8) {
-                Text("为配置中的 rule-providers / proxy-providers 绑定本地文件，或选择 geoip / geosite 数据库。资源先分块上传并校验 SHA-256，再进入导入预览。")
+                Text("为配置中的 rule-providers / proxy-providers 绑定本地文件，或选择 geoip / geosite 数据库。资源先分块上传并校验 SHA-256，再自动校验并导入。")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     VStack(spacing: 8) {
@@ -158,7 +154,7 @@ struct ImportSheet: View {
         attachments.append(ResourceAttachment(name: file.deletingPathExtension().lastPathComponent, filename: file.lastPathComponent, data: bytes))
     }
 
-    private func previewWithResources() async {
+    private func saveWithResources() async {
         guard !uploading else { return }
         do {
             let selected = format == "native" ? [] : attachments
@@ -171,12 +167,12 @@ struct ImportSheet: View {
                     await MainActor.run { uploadProgress = "上传 \(item.filename) · \(total == 0 ? 100 : received * 100 / total)%" }
                 }
             }
-            await store.previewImport(data: data, format: format, nodesOnly: nodesOnly, sourceName: name,
-                                      providerResources: mappings.providers, geodataResources: mappings.geodata)
+            if await store.previewImport(data: data, format: format, nodesOnly: nodesOnly, sourceName: name,
+                                      providerResources: mappings.providers, geodataResources: mappings.geodata, save: true) { dismiss() }
         } catch { store.errorMessage = error.localizedDescription }
     }
 
-    private func invalidate() { store.preparedChange = nil; store.importPreview = nil }
+    private func invalidate() { store.preparedChange = nil }
     private func load(_ result: Result<URL, Error>) {
         do {
             let file = try result.get()
@@ -191,25 +187,5 @@ struct ImportSheet: View {
         } catch {
             if (error as NSError).code != NSUserCancelledError { store.errorMessage = error.localizedDescription }
         }
-    }
-}
-
-struct ChangePlanView: View {
-    let prepared: PreparedChange
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                Label(prepared.summary, systemImage: "checkmark.circle").font(.callout.weight(.medium))
-                if prepared.plan["interrupts"].boolValue == true {
-                    Label("这次变更可能中断现有连接。", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
-                }
-                if let note = prepared.plan["network_note"].stringValue, !note.isEmpty {
-                    Text(note).font(.caption).foregroundStyle(.secondary)
-                }
-                if !prepared.report.isEmpty {
-                    Text(prepared.report).font(.caption.monospaced()).textSelection(.enabled).foregroundStyle(.secondary)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }.padding(12).surface()
     }
 }

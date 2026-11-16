@@ -7,6 +7,7 @@ struct BackupSheet: View {
     @Bindable var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var backup: NativeBackup?
+    @State private var confirmingRestore = false
     @State private var busy = false
     @State private var picking = false
     @State private var status = ""
@@ -27,11 +28,9 @@ struct BackupSheet: View {
                     LabeledContent("备份配置", value: backup.profileName)
                     LabeledContent("创建时间", value: backup.createdAt.formatted())
                     LabeledContent("引用资源", value: "\(backup.resources.count) 个")
-                    Text("恢复将替换当前配置的四个层和来源名称。网络接管保持关闭；应用前请核对内核生成的计划。") .font(.caption).foregroundStyle(.secondary)
-                    Button("预览恢复") { Task { await previewRestore() } }
+                    Text("恢复将替换当前配置的四个层和来源名称，并关闭网络接管。保存前会自动校验资源与配置。") .font(.caption).foregroundStyle(.secondary)
                 }.panel()
             }
-            if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(height: 130) }
             if !status.isEmpty { Text(status).font(.caption).foregroundStyle(.secondary) }
             if let failure { Text(failure).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
             if let error = store.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
@@ -39,12 +38,18 @@ struct BackupSheet: View {
                 if busy || store.isBusy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("应用恢复") { Task { await applyRestore() } }.buttonStyle(.borderedProminent).disabled(backup == nil || store.preparedChange == nil)
+                Button("恢复备份…") { confirmingRestore = true }.buttonStyle(.borderedProminent).disabled(backup == nil)
             }
         }.padding(24).frame(width: 730).disabled(busy || store.isBusy || !store.isOnline)
             .interactiveDismissDisabled(busy || store.isBusy)
             .onAppear { store.preparedChange = nil }
             .onDisappear { store.preparedChange = nil }
+            .confirmationDialog("恢复此备份？", isPresented: $confirmingRestore, presenting: backup) { backup in
+                Button("恢复备份", role: .destructive) { Task { await restore(backup) } }
+                Button("取消", role: .cancel) {}
+            } message: { backup in
+                Text("用“\(backup.profileName)”的备份替换当前配置的四个层、选组及来源名称，包含 \(backup.resources.count) 个引用资源。网络接管将关闭。")
+            }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data]) { load($0) }
     }
     private func export() {
@@ -71,24 +76,18 @@ struct BackupSheet: View {
             store.preparedChange = nil; failure = nil; status = "备份文件及资源校验通过。"
         } catch { if (error as NSError).code != NSUserCancelledError { failure = error.localizedDescription } }
     }
-    private func previewRestore() async {
-        guard let backup else { return }
+    private func restore(_ backup: NativeBackup) async {
         busy = true; failure = nil
         defer { busy = false }
         do {
             try await BackupService.stage(backup, client: store.client) { value in await MainActor.run { status = value } }
-            await store.previewVisualChange(try BackupService.restorationChange(backup, revision: baseRevision), summary: "恢复完整备份 · " + backup.profileName)
+            guard await store.previewVisualChange(try BackupService.restorationChange(backup, revision: baseRevision), summary: "恢复完整备份 · " + backup.profileName, save: true) else { return }
+            do {
+                store.catalog.sourceNames[store.activeProfileID.uuidString] = backup.sourceNames
+                try store.catalog.save(to: store.homeURL)
+                await store.refresh()
+                self.backup = nil; baseRevision = store.revision; status = "备份已恢复，网络接管保持关闭。"
+            } catch { failure = "配置已恢复，来源名称保存失败：" + error.localizedDescription }
         } catch { failure = error.localizedDescription }
-    }
-    private func applyRestore() async {
-        guard let backup else { return }
-        await store.applyPrepared()
-        guard store.errorMessage == nil else { return }
-        do {
-            store.catalog.sourceNames[store.activeProfileID.uuidString] = backup.sourceNames
-            try store.catalog.save(to: store.homeURL)
-            await store.refresh()
-            self.backup = nil; baseRevision = store.revision; status = "备份已恢复，网络接管保持关闭。"
-        } catch { failure = "配置已恢复，来源名称保存失败：" + error.localizedDescription }
     }
 }

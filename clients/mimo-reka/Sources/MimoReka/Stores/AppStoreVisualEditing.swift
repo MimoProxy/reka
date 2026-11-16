@@ -4,7 +4,8 @@ extension AppStore {
     var effectiveConfiguration: JSONValue { snapshot["effective"] }
     var ruleRecords: [RuleRecord] { (try? VisualConfigurationService.rules(documents: documents, effective: effectiveConfiguration)) ?? [] }
 
-    func previewVisualChange(_ change: [String: JSONValue], summary: String) async {
+    @discardableResult
+    func previewVisualChange(_ change: [String: JSONValue], summary: String, save: Bool = false) async -> Bool {
         await perform {
             self.preparedChange = nil
             self.pendingSourceName = nil
@@ -18,38 +19,44 @@ extension AppStore {
                 }
             }
             self.preparedChange = try await self.configurationService.prepare(change, summary: summary)
+            if save { try await self.commitPreparedChange() }
         }
     }
-    func previewResource(kind: String, id: String?, definition: [String: JSONValue], baseRevision: Int) async {
+    @discardableResult
+    func previewResource(kind: String, id: String?, definition: [String: JSONValue], baseRevision: Int, save: Bool = false) async -> Bool {
         do {
             let resource = try id.map { try VisualConfigurationService.resource(kind: kind, id: $0, documents: documents, effective: effectiveConfiguration) }
             let change = try VisualConfigurationService.resourceChange(kind: kind, resource: resource, value: definition, baseRevision: baseRevision, documents: documents)
-            await previewVisualChange(change, summary: id == nil ? "新增节点" : "编辑节点")
-        } catch { preparedChange = nil; errorMessage = error.localizedDescription }
+            return await previewVisualChange(change, summary: id == nil ? "新增节点" : "编辑节点", save: save)
+        } catch { preparedChange = nil; errorMessage = error.localizedDescription; return false }
     }
-    func removeResource(kind: String, id: String, baseRevision: Int) async {
+    @discardableResult
+    func removeResource(kind: String, id: String, baseRevision: Int, save: Bool = false) async -> Bool {
         do {
             let resource = try VisualConfigurationService.resource(kind: kind, id: id, documents: documents, effective: effectiveConfiguration)
             let change = try VisualConfigurationService.removeResourceChange(resource: resource, baseRevision: baseRevision, documents: documents)
-            await previewVisualChange(change, summary: "删除节点")
-        } catch { preparedChange = nil; errorMessage = error.localizedDescription }
+            return await previewVisualChange(change, summary: "删除节点", save: save)
+        } catch { preparedChange = nil; errorMessage = error.localizedDescription; return false }
     }
-    func previewRule(definition: [String: JSONValue], record: RuleRecord?, baseRevision: Int) async {
+    @discardableResult
+    func previewRule(definition: [String: JSONValue], record: RuleRecord?, baseRevision: Int, save: Bool = false) async -> Bool {
         do {
             let change = try VisualConfigurationService.ruleChange(definition: definition, record: record, baseRevision: baseRevision, documents: documents)
-            await previewVisualChange(change, summary: record == nil ? "新增规则" : "编辑规则")
-        } catch { preparedChange = nil; errorMessage = error.localizedDescription }
+            return await previewVisualChange(change, summary: record == nil ? "新增规则" : "编辑规则", save: save)
+        } catch { preparedChange = nil; errorMessage = error.localizedDescription; return false }
     }
-    func removeRule(_ record: RuleRecord, baseRevision: Int) async {
+    @discardableResult
+    func removeRule(_ record: RuleRecord, baseRevision: Int, save: Bool = false) async -> Bool {
         do {
             let change = try VisualConfigurationService.removeRuleChange(record, baseRevision: baseRevision, documents: documents)
-            await previewVisualChange(change, summary: "删除规则")
-        } catch { preparedChange = nil; errorMessage = error.localizedDescription }
+            return await previewVisualChange(change, summary: "删除规则", save: save)
+        } catch { preparedChange = nil; errorMessage = error.localizedDescription; return false }
     }
-    func moveRule(_ record: RuleRecord, direction: Int, baseRevision: Int) async {
+    @discardableResult
+    func moveRule(_ record: RuleRecord, direction: Int, baseRevision: Int, save: Bool = false) async -> Bool {
         do {
             let change = try VisualConfigurationService.moveRuleChange(record, direction: direction, baseRevision: baseRevision, documents: documents)
-            await previewVisualChange(change, summary: direction < 0 ? "上移规则" : "下移规则")
-        } catch { preparedChange = nil; errorMessage = error.localizedDescription }
+            return await previewVisualChange(change, summary: direction < 0 ? "上移规则" : "下移规则", save: save)
+        } catch { preparedChange = nil; errorMessage = error.localizedDescription; return false }
     }
 }

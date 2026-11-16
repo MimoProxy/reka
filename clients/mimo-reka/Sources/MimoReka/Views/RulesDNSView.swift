@@ -7,7 +7,9 @@ struct RulesDNSView: View {
     var search: String
     @State private var section = "rules"
     @State private var editing: RuleEditRequest?
-    @State private var showingPlan = false
+    @State private var confirmingDelete = false
+    @State private var deletingRule: RuleRecord? = nil
+    @State private var deletionRevision = 0
     @State private var diagnostics: String?
     @State private var showingEffective = false
     @State private var showingResources = false
@@ -68,7 +70,14 @@ struct RulesDNSView: View {
             }
             .sheet(isPresented: $showingEffective) { EffectiveRulesSheet(store: store) }
             .sheet(isPresented: $showingResources) { RuleResourcesSheet(store: store) }
-            .sheet(isPresented: $showingPlan, onDismiss: { store.preparedChange = nil }) { RuleChangeSheet(store: store) }
+            .confirmationDialog("删除这条规则？", isPresented: $confirmingDelete, presenting: deletingRule) { rule in
+                Button("删除规则", role: .destructive) {
+                    Task { await store.removeRule(rule, baseRevision: deletionRevision, save: true) }
+                }
+                Button("取消", role: .cancel) {}
+            } message: { rule in
+                Text("\(matchTitle(rule)) → \(targetTitle(rule))。删除后，新连接将继续匹配后面的规则。")
+            }
             .task(id: store.isOnline) {
                 if store.isOnline, ProcessInfo.processInfo.environment["MIMO_REKA_PREVIEW_EDITOR"] == "rule" {
                     editing = RuleEditRequest(record: nil)
@@ -148,20 +157,11 @@ struct RulesDNSView: View {
     }
     private func edit(_ rule: RuleRecord) { editing = RuleEditRequest(record: rule, sourceMarker: rule.sourceMarker) }
     private func remove(_ rule: RuleRecord) {
-        let base = store.revision
-        store.preparedChange = nil
-        Task {
-            await store.removeRule(rule, baseRevision: base)
-            if store.preparedChange != nil { showingPlan = true }
-        }
+        deletingRule = rule; deletionRevision = store.revision; confirmingDelete = true
     }
     private func move(_ rule: RuleRecord, direction: Int) {
         let base = store.revision
-        store.preparedChange = nil
-        Task {
-            await store.moveRule(rule, direction: direction, baseRevision: base)
-            if store.preparedChange != nil { showingPlan = true }
-        }
+        Task { await store.moveRule(rule, direction: direction, baseRevision: base, save: true) }
     }
     private func openVisual(_ section: String) { store.visualSection = section; store.showVisualConfiguration = true }
     private func matchTitle(_ rule: RuleRecord) -> String {
@@ -218,31 +218,5 @@ struct RulesDNSView: View {
     }
     private func yaml(_ value: Any) -> String {
         ((try? Yams.dump(object: value, sortKeys: true)) ?? String(describing: value)).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-@MainActor
-private struct RuleChangeSheet: View {
-    @Bindable var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SheetHeader(symbol: "list.bullet.rectangle", title: store.preparedChange?.summary ?? "规则变更")
-            if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(minHeight: 150, maxHeight: 230) }
-            Text("规则按顺序匹配。调整顺序或删除规则会改变后续新连接的路由。")
-                .font(.caption).foregroundStyle(.secondary)
-            Divider()
-            HStack {
-                if store.isBusy { ProgressView().controlSize(.small) }
-                Spacer()
-                Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("应用变更") {
-                    Task { await store.applyPrepared(); if store.errorMessage == nil { dismiss() } }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(store.preparedChange == nil)
-            }
-        }.padding(24).frame(width: 590).disabled(store.isBusy).interactiveDismissDisabled(store.isBusy)
-            .alert("规则未应用", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
-                Button("好", role: .cancel) { store.errorMessage = nil }
-            } message: { Text(store.errorMessage ?? "") }
     }
 }

@@ -21,7 +21,6 @@ final class AppStore {
     var visualSection = "general"
     var editingLayer: ConfigurationLayer?
     var preparedChange: PreparedChange?
-    var importPreview: String?
     var revision = 0
     var generation = 0
     var connectionCount = 0
@@ -123,19 +122,21 @@ final class AppStore {
         }
     }
 
-    func previewImport(data: String, format: String, nodesOnly: Bool, sourceName: String, providerResources: [String: String] = [:], geodataResources: [String: String] = [:]) async {
+    @discardableResult
+    func previewImport(data: String, format: String, nodesOnly: Bool, sourceName: String, providerResources: [String: String] = [:], geodataResources: [String: String] = [:], save: Bool = false) async -> Bool {
         await perform {
-            self.preparedChange = nil; self.importPreview = nil; self.pendingSourceName = nil
+            self.preparedChange = nil; self.pendingSourceName = nil
             let sourceID = "s-" + UUID().uuidString.lowercased()
             let result = try await self.configurationService.previewImport(data: data, format: format, nodesOnly: nodesOnly,
                                                                            sourceID: sourceID, name: sourceName, providerResources: providerResources, geodataResources: geodataResources)
             self.preparedChange = result
-            self.importPreview = result.report
             if format != "native" { self.pendingSourceName = (sourceID, sourceName) }
+            if save { try await self.commitPreparedChange() }
         }
     }
 
-    func previewDocument(layer: ConfigurationLayer, text: String, baseRevision: Int) async {
+    @discardableResult
+    func previewDocument(layer: ConfigurationLayer, text: String, baseRevision: Int, save: Bool = false) async -> Bool {
         await perform {
             self.preparedChange = nil; self.pendingSourceName = nil
             // The settings flow must acquire a privileged runtime before a
@@ -148,22 +149,28 @@ final class AppStore {
             self.preparedChange = try await self.configurationService.prepare([
                 "base_revision": .number(Double(baseRevision)), layer.rawValue: .string(text)
             ], summary: "更新\(layer.title)")
+            if save { try await self.commitPreparedChange() }
         }
     }
 
-    func applyPrepared() async {
-        await perform {
-            guard let prepared = self.preparedChange else { throw ClientError.message("请先预览当前变更。") }
-            _ = try await self.configurationService.commit(prepared)
-            if let source = self.pendingSourceName {
-                self.catalog.sourceNames[self.activeProfileID.uuidString, default: [:]][source.id] = source.name
-                try self.catalog.save(to: self.homeURL)
-            }
-            self.preparedChange = nil; self.pendingSourceName = nil; self.importPreview = nil
-            self.showImport = false; self.editingLayer = nil
-            self.showVisualConfiguration = false
-            self.notice = "配置已提交并生效。"
+    @discardableResult
+    func applyPrepared() async -> Bool {
+        await perform { try await self.commitPreparedChange() }
+    }
+
+    // Both direct saves and confirmed replacements use the same transaction.
+    // Never nest perform: validation and commit must share one busy interval.
+    func commitPreparedChange() async throws {
+        guard let prepared = preparedChange else { throw ClientError.message("没有可提交的变更。") }
+        _ = try await configurationService.commit(prepared)
+        if let source = pendingSourceName {
+            catalog.sourceNames[activeProfileID.uuidString, default: [:]][source.id] = source.name
+            try catalog.save(to: homeURL)
         }
+        preparedChange = nil; pendingSourceName = nil
+        showImport = false; editingLayer = nil
+        showVisualConfiguration = false
+        notice = "配置已保存并生效。"
     }
 
     func addSubscription(name: String, url: String, interval: Int, nodesOnly: Bool) async {
@@ -386,14 +393,16 @@ final class AppStore {
         catch { errorMessage = error.localizedDescription }
     }
 
-    func perform(_ body: () async throws -> Void) async {
-        guard !isBusy, isOnline else { return }
+    @discardableResult
+    func perform(_ body: () async throws -> Void) async -> Bool {
+        guard !isBusy, isOnline else { return false }
         isBusy = true; errorMessage = nil
         defer { isBusy = false }
-        do { try await body(); try await loadSnapshot(force: true) }
+        do { try await body(); try await loadSnapshot(force: true); return true }
         catch {
             errorMessage = error.localizedDescription
             if kernel.isRunning { try? await loadSnapshot(force: true) }
+            return false
         }
     }
 
@@ -453,7 +462,7 @@ final class AppStore {
         rebuildController()
         snapshot = .null; revision = 0; generation = 0
         groups = []; outbounds = []; sources = []; revisions = []; documents = [:]
-        preparedChange = nil; pendingSourceName = nil; editingLayer = nil; importPreview = nil
+        preparedChange = nil; pendingSourceName = nil; editingLayer = nil
     }
 
     private func rebuildController() {

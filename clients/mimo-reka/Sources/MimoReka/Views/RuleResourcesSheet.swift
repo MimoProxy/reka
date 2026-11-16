@@ -18,7 +18,9 @@ struct RuleResourcesSheet: View {
     @State private var failure: String?
     @State private var status = ""
     @State private var baseRevision: Int
-    @State private var deleting = false
+    @State private var confirmingDelete = false
+    @State private var deletingResource: JSONValue? = nil
+    @State private var deletionRevision = 0
 
     init(store: AppStore) { self.store = store; _baseRevision = State(initialValue: store.revision) }
     private var localResources: [JSONValue] { (try? YAMLDocument.array(store.documents[.profile] ?? "", key: "rule-sets")) ?? [] }
@@ -41,7 +43,6 @@ struct RuleResourcesSheet: View {
                 VStack(alignment: .leading, spacing: 16) {
                     existingResources
                     resourceForm
-                    if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(height: 110) }
                     if let failure { Text(failure).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                 }
             }
@@ -50,10 +51,9 @@ struct RuleResourcesSheet: View {
                 if busy || store.isBusy { ProgressView().controlSize(.small); Text(status).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览资源变更") { Task { await preview() } }.disabled(identifier.isEmpty || (hash.isEmpty && bytes == nil))
-                Button(deleting ? "确认删除" : "应用") {
-                    Task { await store.applyPrepared(); if store.errorMessage == nil { reset() } }
-                }.buttonStyle(.borderedProminent).disabled(store.preparedChange == nil)
+                Button("保存") { Task { await save() } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(identifier.isEmpty || (hash.isEmpty && bytes == nil))
             }.disabled(busy || store.isBusy || !store.isOnline)
         }.padding(24).frame(width: 790, height: 690)
             .interactiveDismissDisabled(busy || store.isBusy)
@@ -63,6 +63,12 @@ struct RuleResourcesSheet: View {
             .onChange(of: behavior) { if !formats.contains(format) { format = formats[0] }; invalidate() }
             .onChange(of: format) { invalidate() }
             .onChange(of: code) { invalidate() }
+            .confirmationDialog("删除规则集？", isPresented: $confirmingDelete, presenting: deletingResource) { resource in
+                Button("删除规则集", role: .destructive) { Task { await remove(resource) } }
+                Button("取消", role: .cancel) {}
+            } message: { resource in
+                Text("将删除规则集 \(resource["id"].stringValue ?? "")。仍被规则引用时，内核会拒绝删除。")
+            }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data]) { result in load(result) }
             .alert("资源未应用", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("好", role: .cancel) { store.errorMessage = nil }
@@ -81,7 +87,7 @@ struct RuleResourcesSheet: View {
                     }
                     Spacer()
                     if resource["hash"].stringValue != nil { Button("编辑") { edit(resource) } }
-                    Button(role: .destructive) { Task { await remove(resource) } } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
+                    Button(role: .destructive) { deletingResource = resource; deletionRevision = store.revision; confirmingDelete = true } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
                 }
             }
             ForEach(importedResources, id: \.id) { resource in
@@ -111,7 +117,7 @@ struct RuleResourcesSheet: View {
             if !hash.isEmpty { Text("SHA-256: " + hash).font(.caption2.monospaced()).textSelection(.enabled) }
         }.panel().disabled(busy || store.isBusy)
     }
-    private func invalidate() { store.preparedChange = nil; deleting = false }
+    private func invalidate() { store.preparedChange = nil }
     private func reset() {
         identifier = ""; original = [:]; behavior = "domain"; format = "text"; code = ""; hash = ""; bytes = nil; filename = ""; failure = nil
         baseRevision = store.revision; invalidate()
@@ -130,7 +136,7 @@ struct RuleResourcesSheet: View {
             bytes = try Data(contentsOf: file); filename = file.lastPathComponent; invalidate()
         } catch { if (error as NSError).code != NSUserCancelledError { failure = error.localizedDescription } }
     }
-    private func preview() async {
+    private func save() async {
         busy = true; failure = nil
         defer { busy = false; status = "" }
         do {
@@ -140,12 +146,14 @@ struct RuleResourcesSheet: View {
             value["id"] = .string(identifier); value["behavior"] = .string(behavior); value["format"] = .string(format); value["hash"] = .string(hash)
             if code.isEmpty { value.removeValue(forKey: "code") } else { value["code"] = .string(code) }
             let operation: JSONValue = .object(["op": .string(original.isEmpty ? "insert" : "set"), "path": .string(original.isEmpty ? "/rule-sets" : "/rule-sets/" + ConfigurationService.escape(identifier)), "value": .object(value)])
-            await store.previewVisualChange(["base_revision": .number(Double(baseRevision)), "patch": .array([operation])], summary: "保存规则集 · " + identifier)
+            if await store.previewVisualChange(["base_revision": .number(Double(baseRevision)), "patch": .array([operation])], summary: "保存规则集 · " + identifier, save: true) { reset() }
         } catch { failure = error.localizedDescription }
     }
     private func remove(_ resource: JSONValue) async {
         guard let id = resource["id"].stringValue else { return }
-        await store.previewVisualChange(["base_revision": .number(Double(store.revision)), "patch": .array([.object(["op": .string("remove"), "path": .string("/rule-sets/" + ConfigurationService.escape(id))])])], summary: "删除规则集 · " + id)
-        deleting = store.preparedChange != nil
+        if await store.previewVisualChange(["base_revision": .number(Double(deletionRevision)), "patch": .array([.object(["op": .string("remove"), "path": .string("/rule-sets/" + ConfigurationService.escape(id))])])], summary: "删除规则集 · " + id, save: true) {
+            if identifier == id { reset() }
+            else { baseRevision = store.revision }
+        }
     }
 }

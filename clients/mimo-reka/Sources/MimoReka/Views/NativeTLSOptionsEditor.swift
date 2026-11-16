@@ -66,7 +66,7 @@ struct NativeTLSOptionsEditor: View {
                             FieldRow(title: "记录脚本") { TextField("script", text: form.string(["carrier", "script"])).trackField() }
                         }
                     }
-                    Text("安全载体与 REALITY、ECH 互斥；组合由内核在预览时校验。") .font(.caption).foregroundStyle(.secondary)
+                    Text("安全载体与 REALITY、ECH 互斥；组合由内核在保存时校验。") .font(.caption).foregroundStyle(.secondary)
                 }
             } }
         }

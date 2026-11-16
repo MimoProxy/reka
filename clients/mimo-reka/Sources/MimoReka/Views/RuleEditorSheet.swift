@@ -59,7 +59,6 @@ struct RuleEditorSheet: View {
                         Label("修改保存在用户覆盖层，订阅刷新后继续保留。", systemImage: "square.stack")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(minHeight: 100, maxHeight: 160) }
                 }
             }
             if let localError { Text(localError).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
@@ -68,14 +67,9 @@ struct RuleEditorSheet: View {
                 if store.isBusy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览变更") { preview() }.disabled(!store.isOnline)
-                Button("应用") {
-                    Task {
-                        await store.applyPrepared()
-                        if store.errorMessage == nil { dismiss() }
-                    }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(store.preparedChange == nil || !store.isOnline)
+                Button("保存") { save() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(!store.isOnline)
             }
         }.padding(24).frame(width: 720, height: 650)
             .disabled(store.isBusy).interactiveDismissDisabled(store.isBusy)
@@ -155,11 +149,11 @@ struct RuleEditorSheet: View {
         }.panel()
     }
 
-    private func preview() {
+    private func save() {
         do {
             let definition = try draft.definition()
             localError = nil
-            Task { await store.previewRule(definition: definition, record: record, baseRevision: baseRevision) }
+            Task { if await store.previewRule(definition: definition, record: record, baseRevision: baseRevision, save: true) { dismiss() } }
         } catch { localError = error.localizedDescription }
     }
 }

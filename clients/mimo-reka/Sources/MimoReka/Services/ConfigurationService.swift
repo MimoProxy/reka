@@ -346,7 +346,7 @@ actor ConfigurationService {
     }
 
     static func diagnostics(_ value: JSONValue) -> String {
-        if value["conflict"].objectValue != nil { return "配置版本已变化，请刷新并重新预览。" }
+        if value["conflict"].objectValue != nil { return "配置版本已变化，请核对最新配置后重新编辑并保存。" }
         var lines: [String] = []
         if let message = value["error"]["message"].stringValue { lines.append(message) }
         for item in value["diagnostics"].arrayValue ?? [] {

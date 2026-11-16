@@ -18,9 +18,10 @@ extension AppStore {
             operations.processEpoch = result["epoch"].stringValue ?? ""; operations.processError = nil
         } catch { if session == operations.session, request == operations.processRequest { operations.processError = error.localizedDescription } }
     }
-    func previewProcessMode(_ mode: String, revision: Int) async {
-        await previewVisualChange(["base_revision": .number(Double(revision)), "local_patch": .array([
+    @discardableResult
+    func previewProcessMode(_ mode: String, revision: Int, save: Bool = false) async -> Bool {
+        return await previewVisualChange(["base_revision": .number(Double(revision)), "local_patch": .array([
             .object(["op": .string("set"), "path": .string("/process"), "value": .object(["mode": .string(mode)])])
-        ])], summary: "进程识别 · " + Self.processModeTitle(mode))
+        ])], summary: "进程识别 · " + Self.processModeTitle(mode), save: save)
     }
 }

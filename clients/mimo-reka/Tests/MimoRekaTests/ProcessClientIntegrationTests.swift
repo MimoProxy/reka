@@ -14,9 +14,9 @@ final class ProcessClientIntegrationTests: XCTestCase {
             guard store.isOnline else { throw ClientError.message(store.errorMessage ?? "startup failed") }
             let http = try SubscriptionHTTPFixture(root: root)
             addTeardownBlock { await http.stop() }
-            await store.previewProcessMode("always", revision: store.revision)
+            let saved = await store.previewProcessMode("always", revision: store.revision, save: true)
+            XCTAssertTrue(saved)
             XCTAssertNil(store.errorMessage)
-            await store.applyPrepared(); XCTAssertNil(store.errorMessage)
             XCTAssertEqual(store.processMode, "always")
             let request = Process()
             request.executableURL = URL(fileURLWithPath: "/usr/bin/curl")

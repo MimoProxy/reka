@@ -23,7 +23,6 @@ struct PolicyEditorSheet: View {
     @State private var localError: String?
     @State private var memberSearch = ""
     @State private var confirmingDelete = false
-    @State private var deleting = false
     @State private var showAdvanced = false
     @State private var hasChanges = false
 
@@ -93,9 +92,6 @@ struct PolicyEditorSheet: View {
                 }
                 .padding(.trailing, 4)
             }
-            if let prepared = store.preparedChange {
-                ChangePlanView(prepared: prepared).frame(height: 110)
-            }
             if let errorText, !errorText.isEmpty {
                 Text(errorText).font(.caption).foregroundStyle(.red).textSelection(.enabled).lineLimit(4)
             }
@@ -121,7 +117,7 @@ struct PolicyEditorSheet: View {
             invalidatePreview()
         }
         .confirmationDialog("删除此策略组？", isPresented: $confirmingDelete) {
-            Button("预览删除", role: .destructive) { Task { await previewDeletion() } }
+            Button("删除策略组", role: .destructive) { Task { await deleteGroup() } }
             Button("取消", role: .cancel) {}
         } message: {
             Text("Reka 会检查引用。若规则或其他策略组仍然使用它，删除将被拒绝，当前配置保持不变。")
@@ -153,9 +149,9 @@ struct PolicyEditorSheet: View {
             if let index = resource?.profileIndex {
                 Divider()
                 FieldRow(title: "显示顺序") {
-                    Button("上移", systemImage: "arrow.up") { Task { await previewMove(-1) } }
+                    Button("上移", systemImage: "arrow.up") { Task { await moveGroup(-1) } }
                         .disabled(index == 0 || hasChanges)
-                    Button("下移", systemImage: "arrow.down") { Task { await previewMove(1) } }
+                    Button("下移", systemImage: "arrow.down") { Task { await moveGroup(1) } }
                         .disabled(index >= profileGroupCount - 1 || hasChanges)
                     Spacer()
                     if hasChanges { Text("先保存表单修改").font(.caption).foregroundStyle(.secondary) }
@@ -207,7 +203,7 @@ struct PolicyEditorSheet: View {
                     }.toggleStyle(.checkbox)
                 }
             }
-            Text("故障转移按成员顺序尝试；组间循环引用会在预览时被拒绝。")
+            Text("故障转移按成员顺序尝试；保存时会检查并拒绝组间循环引用。")
                 .font(.caption).foregroundStyle(.secondary)
         }.panel()
     }
@@ -272,15 +268,9 @@ struct PolicyEditorSheet: View {
             Spacer()
             if store.isBusy { ProgressView().controlSize(.small) }
             Button("取消", role: .cancel) { store.preparedChange = nil; dismiss() }.keyboardShortcut(.cancelAction)
-            Button("预览变更") { Task { await preview() } }
+            Button("保存") { Task { await save() } }
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                 .disabled(definition.isEmpty || !store.isOnline)
-            Button(deleting ? "应用删除" : "应用") {
-                Task {
-                    await store.applyPrepared()
-                    if store.errorMessage == nil { dismiss() }
-                }
-            }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                .disabled(store.preparedChange == nil || !store.isOnline)
         }
     }
 
@@ -310,37 +300,33 @@ struct PolicyEditorSheet: View {
     }
     private func invalidatePreview() {
         store.preparedChange = nil
-        deleting = false
         localError = nil
         hasChanges = true
     }
-    private func preview() async {
+    private func save() async {
         localError = nil
         do {
             let change = try VisualConfigurationService.groupChange(resource: resource, value: definition, baseRevision: baseRevision, documents: store.documents)
-            deleting = false
-            await store.previewVisualChange(change, summary: resource == nil ? "新增策略组" : "修改策略组")
+            if await store.previewVisualChange(change, summary: resource == nil ? "新增策略组" : "修改策略组", save: true) { dismiss() }
         } catch { localError = error.localizedDescription }
     }
-    private func previewDeletion() async {
+    private func deleteGroup() async {
         guard let resource else { return }
         localError = nil
         do {
             let change = try VisualConfigurationService.removeGroupChange(resource: resource, baseRevision: baseRevision, documents: store.documents)
-            await store.previewVisualChange(change, summary: "删除策略组")
-            deleting = store.preparedChange != nil
+            if await store.previewVisualChange(change, summary: "删除策略组", save: true) { dismiss() }
         } catch { localError = error.localizedDescription }
     }
     private var profileGroupCount: Int {
         (try? YAMLDocument.array(store.documents[.profile] ?? "", key: "groups").count) ?? 0
     }
-    private func previewMove(_ direction: Int) async {
+    private func moveGroup(_ direction: Int) async {
         guard let resource else { return }
         localError = nil
         do {
             let change = try VisualConfigurationService.moveGroupChange(resource: resource, direction: direction, baseRevision: baseRevision, documents: store.documents)
-            deleting = false
-            await store.previewVisualChange(change, summary: direction < 0 ? "上移策略组" : "下移策略组")
+            if await store.previewVisualChange(change, summary: direction < 0 ? "上移策略组" : "下移策略组", save: true) { dismiss() }
         } catch { localError = error.localizedDescription }
     }
     private func choiceName(_ id: String) -> String {

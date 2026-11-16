@@ -63,10 +63,9 @@ final class OperationsIntegrationTests: XCTestCase {
             XCTAssertNotNil(store.errorMessage)
             XCTAssertNil(store.preparedChange)
             for (mode, target) in [("global", "proxy"), ("direct", ""), ("rule", "")] {
-                await store.previewRoutingMode(mode, global: target, baseRevision: store.revision)
-                XCTAssertNil(store.errorMessage)
-                XCTAssertNotNil(store.preparedChange)
-                await store.applyPrepared()
+                let saved = await store.previewRoutingMode(mode, global: target, baseRevision: store.revision, save: true)
+                XCTAssertTrue(saved)
+                XCTAssertNil(store.preparedChange)
                 XCTAssertNil(store.errorMessage)
                 XCTAssertEqual(store.routingMode, mode)
                 XCTAssertEqual(store.documents[.profile], profile, "Changing routing mode must preserve stored rules and selections.")

@@ -54,18 +54,15 @@ struct VisualConfigurationSheet: View {
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(.trailing, 3)
                 }
             }
-            if let prepared = store.preparedChange { ChangePlanView(prepared: prepared).frame(height: 112) }
             Divider()
             HStack {
                 Text("基于 r\(baseRevision)").font(.caption).foregroundStyle(.secondary)
                 if store.isBusy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("预览变更") { preview() }.disabled(draft == nil || !store.isOnline)
-                Button("应用") {
-                    Task { await store.applyPrepared(); if store.errorMessage == nil { dismiss() } }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(store.preparedChange == nil || !store.isOnline)
+                Button("保存") { save() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(draft == nil || !store.isOnline)
             }
         }.padding(24).frame(width: 900, height: 680)
             .disabled(store.isBusy).interactiveDismissDisabled(store.isBusy)
@@ -94,7 +91,7 @@ struct VisualConfigurationSheet: View {
             LabeledContent("策略组", value: "\(store.groups.count)")
             LabeledContent("节点", value: "\(store.outbounds.filter { !["direct", "reject"].contains($0.id) }.count)")
             Divider()
-            Text("在左侧编辑监听、DNS、来源引用和节点。策略组与路由规则在各自页面编辑，保存前会显示内核校验和变更计划。")
+            Text("在左侧编辑监听、DNS、来源引用和节点。策略组与路由规则在各自页面编辑，保存时由内核自动校验并生效。")
                 .font(.callout).foregroundStyle(.secondary)
             Text("未显示的高级字段会保留。")
                 .font(.caption).foregroundStyle(.secondary)
@@ -342,9 +339,11 @@ struct VisualConfigurationSheet: View {
             Text(prompt).font(.caption).foregroundStyle(.tertiary)
         }
     }
-    private func preview() {
+    private func save() {
         guard let draft else { return }
-        Task { await store.previewVisualChange(draft.change(baseRevision: baseRevision), summary: "更新可视化配置") }
+        Task {
+            if await store.previewVisualChange(draft.change(baseRevision: baseRevision), summary: "更新可视化配置", save: true) { dismiss() }
+        }
     }
 }
 
