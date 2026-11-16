@@ -1,5 +1,7 @@
 # Atomic profile workspace
 
+Atomic profile workspaces currently require Unix directory ownership. Windows
+workspaces fail closed until a namespace ACL policy is implemented.
 The macOS companion opts into a trusted workspace at daemon startup. Existing
 single-profile and mobile callers keep their existing behavior. Example:
 
