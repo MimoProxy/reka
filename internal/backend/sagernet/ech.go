@@ -11,7 +11,7 @@ import (
 
 type ECHSpec struct {
 	Config, QueryServerName string
-	Lookup                  func(context.Context, string) ([]byte, error)
+	Lookup                  func(context.Context, string) ([]byte, error) `json:"-"`
 }
 
 func configureECHContext(ctx context.Context, s *TLSSpec) context.Context {

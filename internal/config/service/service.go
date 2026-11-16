@@ -48,10 +48,11 @@ import (
 
 // Options configure a Service.
 type Options struct {
-	StateRoot string
-	Secrets   secret.Store
-	Engine    *generation.Engine
-	Logger    *slog.Logger
+	DeferNetwork bool
+	StateRoot    string
+	Secrets      secret.Store
+	Engine       *generation.Engine
+	Logger       *slog.Logger
 	// InitialProfile and InitialLocal become revision 1 when the state
 	// root is empty. Without them revision 1 is an empty profile.
 	InitialProfile []byte
@@ -86,6 +87,8 @@ func errf(code, format string, args ...any) *Error {
 
 // Service is the ConfigService.
 type Service struct {
+	uploadMu  sync.Mutex
+	uploads   map[string]*resourceUpload
 	refreshMu sync.Mutex
 	refresh   *RefreshManager
 	closed    bool
@@ -135,6 +138,13 @@ func Open(opts Options) (*Service, error) {
 	}
 	if a == nil {
 		profile, local := opts.InitialProfile, opts.InitialLocal
+		if opts.DeferNetwork {
+			var err error
+			local, _, err = networkOffDocument(local)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if profile == nil {
 			profile = []byte(DefaultProfile)
 		}
@@ -162,6 +172,9 @@ func Open(opts Options) (*Service, error) {
 		return s, nil
 	}
 	if err := s.startActive(a); err != nil {
+		if opts.DeferNetwork {
+			return nil, fmt.Errorf("defer network takeover: %w", err)
+		}
 		s.startErr = err
 		s.log.Error("active configuration did not start; fix it with a new commit", "revision", a.Revision, "err", err)
 	}
@@ -215,6 +228,7 @@ func (s *Service) storeUnstarted(profile, local, sources, overlay []byte, diags 
 	s.mu.Lock()
 	s.active, s.profile, s.local, s.warnings = 1, profile, local, diags
 	s.sources, s.overlay = sources, overlay
+
 	s.startErr = diags.Errors()
 	s.mu.Unlock()
 	return nil
@@ -292,6 +306,23 @@ func (s *Service) startActive(a *store.Active) error {
 	}
 	s.active, s.profile, s.local = a.Revision, profile, local
 	s.sources, s.overlay = sources, overlay
+	if s.opts.DeferNetwork {
+		off, changed, err := networkOffDocument(local)
+		if err != nil {
+			return err
+		}
+		if changed {
+			text := string(off)
+			result, err := s.Commit(context.Background(), CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: a.Revision, Local: &text}, OperationID: newOperationID(), Source: "defer-network", Message: "start in standby before client handoff"})
+			if err != nil {
+				return err
+			}
+			if result.State != store.OpCommitted {
+				return fmt.Errorf("standby transaction: %s", describe(result))
+			}
+			return nil
+		}
+	}
 	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	s.warnings = diags
 	if eff == nil {
@@ -344,7 +375,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay
 		if whole != nil {
 			base = []byte(*whole)
 		}
-		masked := name != model.DocLocal && containsMask(base)
+		masked := containsMask(base)
 		if len(patch) == 0 && !masked {
 			return base, nil
 		}
@@ -359,7 +390,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay
 		if err := doc.Apply(patch...); err != nil {
 			return nil, errf(CodeBadRequest, "%s patch: %v", name, err)
 		}
-		if name != model.DocLocal {
+		{
 			activeDoc, _ := model.LoadDoc(name, active)
 			if err := doc.UnmaskSecrets(activeDoc); err != nil {
 				return nil, errf(CodeBadRequest, "%v", err)
@@ -380,7 +411,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay
 		return nil, nil, nil, nil, err
 	}
 	if req.Import != nil {
-		if sources, err = mergeImport(sources, req.Import); err != nil {
+		if sources, err = s.mergeImport(sources, req.Import); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}
@@ -415,9 +446,7 @@ func diffDocs(name, prefix string, a, b []byte) []FieldChange {
 		if diags.HasErrors() {
 			return map[string]any{}
 		}
-		if name != model.DocLocal {
-			doc.MaskSecrets()
-		}
+		doc.MaskSecrets()
 		return model.Flatten(doc.Mapping())
 	}
 	fa, fb := flat(a), flat(b)
@@ -760,7 +789,7 @@ func (s *Service) GetConfiguration(reveal bool) Configuration {
 			data []byte
 			dest *string
 		}{
-			{model.DocProfile, s.profile, &c.Profile}, {model.DocSources, s.sources, &c.Sources}, {model.DocOverlay, s.overlay, &c.Overlay},
+			{model.DocProfile, s.profile, &c.Profile}, {model.DocLocal, s.local, &c.Local}, {model.DocSources, s.sources, &c.Sources}, {model.DocOverlay, s.overlay, &c.Overlay},
 		} {
 			if doc, diags := model.LoadDoc(item.name, item.data); !diags.HasErrors() {
 				if n := doc.MaskSecrets(); n > 0 {

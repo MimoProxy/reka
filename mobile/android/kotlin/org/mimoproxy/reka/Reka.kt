@@ -51,6 +51,8 @@ class Reka private constructor(private val handle: Long) : AutoCloseable {
     interface Host {
         fun protect(fd: Int): Boolean
         fun findProcess(network: String, source: String, destination: String): String = ""
+        /** JSON path/uid from one OS lookup; {} means unknown, empty uses the legacy callback. */
+        fun findProcessInfo(network: String, source: String, destination: String): String = ""
         fun seal(plain: ByteArray): ByteArray
         fun open(sealed: ByteArray): ByteArray
         fun onEvent(event: JSONObject) {}
@@ -58,17 +60,19 @@ class Reka private constructor(private val handle: Long) : AutoCloseable {
 
     companion object {
         /** Starts the kernel and negotiates the API version. */
-        fun start(stateRoot: String, profile: String? = null, local: String? = null, host: Host, tunFd: Int = 0): Reka {
+        fun start(stateRoot: String, profile: String? = null, local: String? = null, host: Host, tunFd: Int = 0, deferNetwork: Boolean = false): Reka {
             val native = object : Native.Host {
                 override fun protect(fd: Int) = host.protect(fd)
                 override fun findProcess(network: String, source: String, destination: String) = host.findProcess(network, source, destination)
+                override fun findProcessInfo(network: String, source: String, destination: String) = host.findProcessInfo(network, source, destination)
                 override fun seal(plain: ByteArray) = host.seal(plain)
                 override fun open(sealed: ByteArray) = host.open(sealed)
                 override fun onMessage(message: String) {
                     JSONObject(message).optJSONObject("event")?.let(host::onEvent)
                 }
             }
-            val handle = if (tunFd > 0) Native.startVPN(stateRoot, profile, local, native, tunFd) else Native.start(stateRoot, profile, local, native)
+            require(!deferNetwork || tunFd == 0) { "Standby startup cannot attach a VPN descriptor" }
+            val handle = if (deferNetwork) Native.startOff(stateRoot, profile, local, native) else if (tunFd > 0) Native.startVPN(stateRoot, profile, local, native, tunFd) else Native.start(stateRoot, profile, local, native)
             if (handle == 0L) throw RekaException("start", Native.lastError())
             return Reka(handle).also {
                 it.call("Hello", JSONObject().put("versions", JSONArray(listOf(1))).put("client", "android"))

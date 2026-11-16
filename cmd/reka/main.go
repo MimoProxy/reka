@@ -31,16 +31,17 @@ func main() {
 func run() error {
 	defRoot, _ := platform.DefaultStateRoot()
 	var (
-		owner     = flag.String("owner", "", "control API owner: numeric UID on Unix, SID on Windows (privileged service)")
-		stateRoot = flag.String("state-root", defRoot, "directory holding configuration revisions and state")
-		ctl       = flag.String("control", "", "control API address (unix:///path or pipe://name); default from local settings or the state root")
-		editDir   = flag.String("edit-dir", "", `directory for candidate files edited by hand; default <state-root>/edit, "-" to disable`)
-		profile   = flag.String("profile", "", "profile to import as revision 1 when the state root is empty")
-		local     = flag.String("local", "", "local settings to import as revision 1 when the state root is empty")
-		sources   = flag.String("sources", "", "normalized sources to import as revision 1")
-		overlay   = flag.String("overlay", "", "overlay to import as revision 1")
-		logLevel  = flag.String("log-level", "", "log level until the configuration sets one (debug, info, warn, error)")
-		showVer   = flag.Bool("version", false, "print the version and exit")
+		owner        = flag.String("owner", "", "control API owner: numeric UID on Unix, SID on Windows (privileged service)")
+		stateRoot    = flag.String("state-root", defRoot, "directory holding configuration revisions and state")
+		ctl          = flag.String("control", "", "control API address (unix:///path or pipe://name); default from local settings or the state root")
+		editDir      = flag.String("edit-dir", "", `directory for candidate files edited by hand; default <state-root>/edit, "-" to disable`)
+		profile      = flag.String("profile", "", "profile to import as revision 1 when the state root is empty")
+		local        = flag.String("local", "", "local settings to import as revision 1 when the state root is empty")
+		sources      = flag.String("sources", "", "normalized sources to import as revision 1")
+		overlay      = flag.String("overlay", "", "overlay to import as revision 1")
+		logLevel     = flag.String("log-level", "", "log level until the configuration sets one (debug, info, warn, error)")
+		showVer      = flag.Bool("version", false, "print the version and exit")
+		deferNetwork = flag.Bool("defer-network", false, "commit network takeover off before startup for a client handoff")
 	)
 	flag.Parse()
 	if *showVer {
@@ -63,7 +64,7 @@ func run() error {
 	slog.SetDefault(logger)
 	control.Version = version
 
-	opts := daemon.Options{StateRoot: *stateRoot, Logger: logger, LogLevel: level, ControlAddress: *ctl}
+	opts := daemon.Options{StateRoot: *stateRoot, Logger: logger, LogLevel: level, ControlAddress: *ctl, DeferNetwork: *deferNetwork}
 	switch *editDir {
 	case "":
 		opts.EditDir = filepath.Join(*stateRoot, "edit")

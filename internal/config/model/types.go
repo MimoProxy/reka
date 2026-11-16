@@ -9,6 +9,8 @@ const SchemaVersion = 1
 
 // Profile is the user's main configuration document.
 type Profile struct {
+	Routing       *Routing   `yaml:"routing"`
+	Sniff         *Sniff     `yaml:"sniff"`
 	DNS           *RD.Config `yaml:"dns"`
 	SchemaVersion int        `yaml:"schema-version"`
 	Imports       []Import   `yaml:"imports"`
@@ -26,6 +28,8 @@ type Profile struct {
 // LocalSettings are per-machine settings kept apart from the profile, so
 // switching profiles never changes ports or the control endpoint.
 type LocalSettings struct {
+	Routing       *Routing          `yaml:"routing"`
+	Sniff         *Sniff            `yaml:"sniff"`
 	Network       *platform.Network `yaml:"network"`
 	SchemaVersion int               `yaml:"schema-version"`
 	Listeners     []Listener        `yaml:"listeners"`
@@ -244,12 +248,20 @@ const (
 
 // Listener is a local proxy endpoint.
 type Listener struct {
-	ID     string `yaml:"id"`
-	Type   string `yaml:"type"`
-	Listen string `yaml:"listen"`
+	Users  []ListenerUser `yaml:"users"`
+	ID     string         `yaml:"id"`
+	Type   string         `yaml:"type"`
+	Listen string         `yaml:"listen"`
 	// UDP enables SOCKS5 UDP ASSOCIATE on mixed and socks listeners.
 	// Default true.
 	UDP *bool `yaml:"udp"`
+}
+
+// ListenerUser authenticates one local proxy client. Both fields may reference
+// SecretStore values and are masked when documents are read through the API.
+type ListenerUser struct {
+	Username string `yaml:"username" json:"username"`
+	Password string `yaml:"password" json:"password"`
 }
 
 // Log settings.
@@ -325,6 +337,7 @@ type Obfs struct {
 	Host          string `yaml:"host"`
 }
 type Transport struct {
+	XHTTP       *XHTTPOptions        `yaml:"xhttp"`
 	Method      string               `yaml:"method"`
 	Paths       []string             `yaml:"paths"`
 	Hosts       []string             `yaml:"hosts"`

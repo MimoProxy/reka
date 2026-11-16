@@ -184,6 +184,13 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 }
 func (c *converter) convertTransport(r *proxyReader, out object) {
 	network := r.str("network")
+	if network == "xhttp" {
+		c.convertXHTTPTransport(r, out)
+		return
+	}
+	if get(r.n, "xhttp-opts") != nil {
+		r.fail("xhttp-opts", "import.transport", "XHTTP options require network: xhttp")
+	}
 	if network != "" && network != "tcp" {
 		t := object{"type": network}
 		key := ""

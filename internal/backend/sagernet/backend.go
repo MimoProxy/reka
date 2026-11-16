@@ -27,6 +27,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/common/json/badoption"
 	"github.com/sagernet/sing/service"
@@ -34,7 +35,8 @@ import (
 
 // Options configures a Backend.
 type Options struct {
-	ProcessLookup func(context.Context, Metadata) (string, bool)
+	ProcessInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)
+	ProcessLookup     func(context.Context, Metadata) (string, bool)
 	// Logger receives all upstream logs. Defaults to slog.Default().
 	Logger *slog.Logger
 	// Protect, when set, is applied to every outbound socket before it
@@ -60,15 +62,18 @@ const defaultHalfCloseTimeout = 2 * time.Second
 // from it are independent instances: each has its own lifecycle scope and can
 // be closed without touching the others.
 type Backend struct {
-	protect       control.Func
-	processLookup func(context.Context, Metadata) (string, bool)
-	resolver      *net.Resolver
-	ctx           context.Context
-	cancel        context.CancelFunc
-	slog          *slog.Logger
-	logger        *slogLogger
-	router        *router
-	conns         connTable
+	trafficUpload     atomic.Uint64
+	trafficDownload   atomic.Uint64
+	processInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)
+	protect           control.Func
+	processLookup     func(context.Context, Metadata) (string, bool)
+	resolver          *net.Resolver
+	ctx               context.Context
+	cancel            context.CancelFunc
+	slog              *slog.Logger
+	logger            *slogLogger
+	router            *router
+	conns             connTable
 
 	halfCloseTimeout time.Duration
 	udpTimeout       time.Duration
@@ -82,11 +87,12 @@ func New(opts Options) *Backend {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = service.ContextWithDefaultRegistry(ctx)
 	b := &Backend{
-		processLookup: opts.ProcessLookup,
-		ctx:           ctx,
-		cancel:        cancel,
-		slog:          opts.Logger,
-		logger:        newLogger(opts.Logger, "backend"),
+		processInfoLookup: opts.ProcessInfoLookup,
+		processLookup:     opts.ProcessLookup,
+		ctx:               ctx,
+		cancel:            cancel,
+		slog:              opts.Logger,
+		logger:            newLogger(opts.Logger, "backend"),
 
 		halfCloseTimeout: opts.HalfCloseTimeout,
 	}
@@ -145,27 +151,22 @@ func (b *Backend) Close() error {
 	return nil
 }
 
+func (o *Outbound) CloseIdleConnections() {
+	if keeper, ok := o.out.(adapter.IdleConnectionKeeper); ok {
+		keeper.CloseIdleConnections()
+	}
+}
+
 // CanFindProcess reports whether FindProcess can return results.
-func (b *Backend) CanFindProcess() bool { return b.searcher != nil || b.processLookup != nil }
+func (b *Backend) CanFindProcess() bool {
+	return b.searcher != nil || b.processLookup != nil || b.processInfoLookup != nil
+}
 
 // FindProcess returns the path of the process that opened the connection
 // described by md, if the platform can tell.
 func (b *Backend) FindProcess(ctx context.Context, md Metadata) (string, bool) {
-	if b.processLookup != nil {
-		return b.processLookup(ctx, md)
-	}
-	if b.searcher == nil || !md.Source.IsValid() {
-		return "", false
-	}
-	dst := md.Local
-	if !dst.IsValid() {
-		return "", false
-	}
-	info, err := b.searcher.FindProcessInfo(ctx, md.Network, md.Source, dst)
-	if err != nil || info == nil || info.ProcessPath == "" {
-		return "", false
-	}
-	return info.ProcessPath, true
+	info, ok := b.FindProcessInfo(ctx, md)
+	return info.Path, ok && info.Path != ""
 }
 
 func (b *Backend) componentLogger(kind, typ, tag string) log.ContextLogger {
@@ -254,6 +255,7 @@ type SOCKSSpec struct {
 
 // VLESSSpec is a VLESS client. Flow is "" or "xtls-rprx-vision".
 type VLESSSpec struct {
+	ECHLookup  func(context.Context, string) ([]byte, error)
 	Encryption string
 	Detour     *DetourSpec
 	Options    json.RawMessage
@@ -343,10 +345,13 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 				values["flow"] = s.Flow
 			}
 			s.Options, _ = json.Marshal(values)
-			out, err = b.newProtocol(tag, ProxySpec{Type: typ, Server: s.Server, Port: s.Port, UUID: s.UUID, Encryption: s.Encryption, TLS: s.TLS, Options: s.Options, Detour: s.Detour})
+			out, err = b.newProtocol(tag, ProxySpec{Type: typ, Server: s.Server, Port: s.Port, UUID: s.UUID, Encryption: s.Encryption, TLS: s.TLS, Options: s.Options, Detour: s.Detour, ECHLookup: s.ECHLookup})
 			break
 		}
 		ctx := detourContext(b.ctx, s.Detour)
+		if s.ECHLookup != nil {
+			ctx = context.WithValue(ctx, "reka.tls.ech.lookup.v1", s.ECHLookup)
+		}
 		var values map[string]any
 		values, err = decodeProtocolOptions(s.Options)
 		if err != nil {
@@ -454,8 +459,20 @@ func (b *Backend) NewMixedInbound(tag string, listen netip.AddrPort) (*Inbound, 
 // NewInbound starts a listener of type typ ("mixed", "socks" or "http")
 // on listen. Binding errors, such as a port in use, are returned here.
 func (b *Backend) NewInbound(tag, typ string, listen netip.AddrPort) (*Inbound, error) {
+	return b.NewInboundWithUsers(tag, typ, listen, nil)
+}
+
+type InboundUser struct{ Username, Password string }
+
+// NewInboundWithUsers starts a local application proxy with optional explicit
+// authentication. User identity is passed to the router by the protocol parser.
+func (b *Backend) NewInboundWithUsers(tag, typ string, listen netip.AddrPort, users []InboundUser) (*Inbound, error) {
 	addr := badoption.Addr(listen.Addr())
 	lo := option.ListenOptions{Listen: &addr, ListenPort: listen.Port()}
+	credentials := make([]auth.User, len(users))
+	for i, user := range users {
+		credentials[i] = auth.User{Username: user.Username, Password: user.Password}
+	}
 	logger := b.componentLogger("inbound", typ, tag)
 	var (
 		in  adapter.Inbound
@@ -463,11 +480,11 @@ func (b *Backend) NewInbound(tag, typ string, listen netip.AddrPort) (*Inbound, 
 	)
 	switch typ {
 	case "mixed":
-		in, err = mixed.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo})
+		in, err = mixed.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo, Users: credentials})
 	case "socks":
-		in, err = socks.NewInbound(b.ctx, b.router, logger, tag, option.SocksInboundOptions{ListenOptions: lo})
+		in, err = socks.NewInbound(b.ctx, b.router, logger, tag, option.SocksInboundOptions{ListenOptions: lo, Users: credentials})
 	case "http":
-		in, err = http.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo})
+		in, err = http.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo, Users: credentials})
 	default:
 		return nil, fmt.Errorf("reka: unsupported inbound type %q", typ)
 	}

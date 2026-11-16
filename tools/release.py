@@ -33,7 +33,7 @@ def sha(path):
 
 def copy_public_docs(destination):
     """Ship repository documentation, excluding local maintainer evidence."""
-    for raw in run(['git', 'ls-files', '-z', '--', 'docs']).split(b'\0'):
+    for raw in run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', 'docs']).split(b'\0'):
         if not raw:
             continue
         source = ROOT / os.fsdecode(raw)

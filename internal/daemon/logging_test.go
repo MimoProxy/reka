@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -102,5 +103,13 @@ func TestDefaultLoggerFollowsActiveConfiguration(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "outbound connection") {
 		t.Fatalf("info level did not enable traffic logs: %s", data)
+	}
+	var mirrored bool
+	for _, event := range k.Service.Events().Recent(service.EventLog, 256) {
+		data, _ := json.Marshal(event.Data)
+		mirrored = mirrored || strings.Contains(string(data), "outbound connection")
+	}
+	if !mirrored {
+		t.Fatal("actual traffic log was not exposed to native clients")
 	}
 }

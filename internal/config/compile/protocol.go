@@ -145,7 +145,7 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 			t.Headers[i].Value = c.resolveSecret(fmt.Sprintf("%s/transport/headers/#%d/value", base, i), t.Headers[i].Value)
 		}
 		out.Transport = t
-		allowed := map[string][]string{"ws": {"type", "path", "host", "headers", "max-early-data", "early-data-header"}, "grpc": {"type", "service-name"}, "httpupgrade": {"type", "path", "host", "headers"}, "http": {"type", "paths", "method", "headers", "host"}, "h2": {"type", "hosts", "path"}}
+		allowed := map[string][]string{"ws": {"type", "path", "host", "headers", "max-early-data", "early-data-header"}, "grpc": {"type", "service-name"}, "httpupgrade": {"type", "path", "host", "headers"}, "http": {"type", "paths", "method", "headers", "host"}, "h2": {"type", "hosts", "path"}, "xhttp": {"type", "host", "path", "headers", "xhttp"}}
 		for _, field := range c.present(base + "/transport") {
 			if !slices.Contains(allowed[t.Type], field) {
 				fail("transport/"+field, "option does not apply to this transport")
@@ -160,7 +160,7 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 			}
 		}
 
-		if !slices.Contains([]string{"ws", "grpc", "httpupgrade", "http", "h2"}, t.Type) {
+		if !slices.Contains([]string{"ws", "grpc", "httpupgrade", "http", "h2", "xhttp"}, t.Type) {
 			fail("transport/type", "unsupported transport")
 		}
 		if !slices.Contains([]string{"vless", "vmess", "trojan"}, ob.Type) {
@@ -171,6 +171,9 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		}
 		if t.Type == "h2" && ob.TLS == nil {
 			fail("tls", "H2 requires TLS")
+		}
+		if t.Type == "xhttp" {
+			c.xhttp(base, ob, out)
 		}
 		if t.Method != "" && !httpguts.ValidHeaderFieldName(t.Method) {
 			fail("transport/method", "invalid HTTP method")

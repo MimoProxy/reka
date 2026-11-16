@@ -28,6 +28,19 @@ type LookupFunc func(context.Context, string) ([]netip.Addr, error)
 
 type lookupKey struct{}
 
+type pinnedOutboundsKey struct{}
+
+// WithPinnedOutbounds permits DNS work belonging to a captured routing
+// snapshot to borrow its exact outbounds even after a concurrent retirement.
+// Pins are owned by the preparation; every borrowed socket retains its pin.
+func WithPinnedOutbounds(ctx context.Context, pins map[*Outbound]*PinnedOutbound) context.Context {
+	copy := make(map[*Outbound]*PinnedOutbound, len(pins))
+	for out, pin := range pins {
+		copy[out] = pin
+	}
+	return context.WithValue(ctx, pinnedOutboundsKey{}, copy)
+}
+
 // WithLookup attaches the resolver outbounds use for server host names.
 func WithLookup(ctx context.Context, fn LookupFunc) context.Context {
 	if fn == nil {
@@ -53,6 +66,11 @@ func (c *leasedConn) Close() error {
 // (DNS upstreams, downloads). The connection holds a lease, so a replaced
 // outbound drains before it closes.
 func (o *Outbound) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if pins, ok := ctx.Value(pinnedOutboundsKey{}).(map[*Outbound]*PinnedOutbound); ok {
+		if pin := pins[o]; pin != nil {
+			return pin.Dial(ctx, network, address)
+		}
+	}
 	if !o.lease.Acquire() {
 		return nil, errors.New("outbound retired")
 	}
@@ -90,22 +108,7 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 	}
 	// Certificates are checked against the configured name, not the
 	// bootstrap address.
-	tlsConfig := &tls.Config{ServerName: ep.Host, MinVersion: tls.VersionTLS12, RootCAs: roots}
-	tlsConfig.InsecureSkipVerify = ep.Params["skip-cert-verify"] == "true"
-	if name := ep.Params["name-cert-verify"]; name != "" {
-		tlsConfig.InsecureSkipVerify = true
-		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
-			if len(state.PeerCertificates) == 0 {
-				return errors.New("DNS peer did not present a certificate")
-			}
-			intermediates := x509.NewCertPool()
-			for _, cert := range state.PeerCertificates[1:] {
-				intermediates.AddCert(cert)
-			}
-			_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: name, Roots: roots, Intermediates: intermediates})
-			return err
-		}
-	}
+	tlsConfig := dnsTLSConfig(ep, roots)
 
 	var (
 		m   *D.Msg
@@ -144,6 +147,27 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 		return nil, err
 	}
 	return m, nil
+}
+
+func dnsTLSConfig(ep RD.Endpoint, roots *x509.CertPool) *tls.Config {
+	tlsConfig := &tls.Config{ServerName: ep.Host, MinVersion: tls.VersionTLS12, RootCAs: roots}
+	tlsConfig.InsecureSkipVerify = ep.Params["skip-cert-verify"] == "true"
+	if name := ep.Params["name-cert-verify"]; name != "" {
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return errors.New("DNS peer did not present a certificate")
+			}
+			intermediates := x509.NewCertPool()
+			for _, cert := range state.PeerCertificates[1:] {
+				intermediates.AddCert(cert)
+			}
+			_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: name, Roots: roots, Intermediates: intermediates})
+			return err
+		}
+	}
+
+	return tlsConfig
 }
 
 // exchangeDeadline is the earlier of the context deadline and dnsTimeout.

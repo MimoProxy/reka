@@ -2,11 +2,13 @@ package sagernet
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/sniff"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -46,13 +48,22 @@ type udpSession struct {
 }
 
 type udpFlow struct {
-	s       *udpSession
-	dest    M.Socksaddr
-	rt      Route
-	remote  N.PacketConn
-	ready   chan struct{} // closed once remote is set or the dial failed
-	pending []*buf.Buffer
-	failed  bool
+	s            *udpSession
+	ctx          context.Context
+	cancel       context.CancelFunc
+	dest         M.Socksaddr
+	md           Metadata
+	prepared     PreparedFlow
+	sniff        SniffOptions
+	rt           Route
+	remote       N.PacketConn
+	ready        chan struct{} // closed once remote is set or the dial failed
+	pending      []*buf.Buffer
+	pendingBytes int
+	notify       chan struct{}
+	readyOnce    sync.Once
+	sendMu       sync.Mutex
+	failed       bool
 
 	up, down atomic.Int64
 	last     atomic.Int64
@@ -135,47 +146,156 @@ func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 		delete(s.rejected, dest)
 	}
 	md := toMetadata(s.metadata)
+	md.InboundProtocol = inboundProtocol(s.ctx, md.InboundType)
 	md.Network = N.NetworkUDP
 	md.Destination = toDestination(dest)
-	rt := s.r.pick(s.ctx, md)
-	if rt.Outbound == nil {
-		s.rejected[dest] = time.Now()
-		s.b.logger.DebugContext(s.ctx, "reject packets to ", dest)
-		return nil
-	}
-	f := &udpFlow{s: s, dest: dest, rt: rt, ready: make(chan struct{})}
+	ctx, cancel := context.WithCancel(s.ctx)
+	prepared := s.r.prepareFlow(ctx, md)
+	f := &udpFlow{s: s, ctx: ctx, cancel: cancel, dest: dest, md: md, prepared: prepared, sniff: prepared.Sniff, ready: make(chan struct{}), notify: make(chan struct{}, 1)}
 	f.touch()
-	f.untrack = s.b.conns.add(&tracked{md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
 	s.flows[dest] = f
-	go f.dial()
+	go f.routeAndDial()
 	return f
 }
 
 func (f *udpFlow) touch() { f.last.Store(time.Now().UnixNano()) }
+
+func (f *udpFlow) routeAndDial() {
+	prepared := f.prepared
+	f.prepared = PreparedFlow{}
+	defer prepared.Release()
+	md := f.md
+	if prepared.Sniff.Enabled && prepared.Sniff.protocol("quic") && f.s.r.takeSniffSlot() {
+		md = f.sniffQUIC(md, prepared.Sniff)
+		f.s.r.releaseSniffSlot()
+	}
+	if f.ctx.Err() != nil {
+		f.close()
+		return
+	}
+	rt := prepared.pick(f.ctx, md)
+	prepared.Release()
+	if prepared.Sniff.OverrideDestination && md.SniffedDomain != "" && rt.Outbound != nil {
+		destination := Destination{Domain: md.SniffedDomain, Port: md.Destination.Port}
+		rt.Destination = &destination
+	}
+	f.s.mu.Lock()
+	if f.failed {
+		f.s.mu.Unlock()
+		if rt.Release != nil {
+			rt.Release()
+		}
+		return
+	}
+	if rt.Outbound == nil {
+		f.s.rejected[f.dest] = time.Now()
+		f.s.mu.Unlock()
+		f.close()
+		return
+	}
+	f.md, f.rt = md, rt
+	f.untrack = f.s.b.conns.add(&tracked{md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
+	f.s.mu.Unlock()
+	f.dial()
+}
+
+// sniffQUIC examines only packets retained in the ordinary flow queue. Each
+// datagram is copied before parsing so closing the flow can release buffers
+// immediately. The sing-box parser carries fragmented CRYPTO state in parsed.
+func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) Metadata {
+	timer := time.NewTimer(o.Timeout)
+	defer timer.Stop()
+	var parsed adapter.InboundContext
+	index, total := 0, 0
+	for index < o.MaxPackets && total < o.MaxBytes {
+		select {
+		case <-f.ctx.Done():
+			return md
+		case <-timer.C:
+			return md
+		default:
+		}
+		f.s.mu.Lock()
+		if f.failed {
+			f.s.mu.Unlock()
+			return md
+		}
+		var packet []byte
+		if index < len(f.pending) {
+			b := f.pending[index]
+			if b.Len() > o.MaxBytes-total {
+				f.s.mu.Unlock()
+				return md
+			}
+			packet = make([]byte, b.Len())
+			copy(packet, b.Bytes())
+		}
+		f.s.mu.Unlock()
+		if packet == nil {
+			select {
+			case <-f.ctx.Done():
+				return md
+			case <-timer.C:
+				return md
+			case <-f.notify:
+				continue
+			}
+		}
+		index++
+		total += len(packet)
+		err := sniff.QUICClientHello(f.ctx, &parsed, packet)
+		if err == nil {
+			return sniffResult(md, parsed)
+		}
+		if !errors.Is(err, sniff.ErrNeedMoreData) {
+			return md
+		}
+	}
+	return md
+}
 
 func (f *udpFlow) dial() {
 	s := f.s
 	metadata := s.metadata
 	metadata.Destination = f.dest
 	metadata.Network = N.NetworkUDP
-	ctx := adapter.WithContext(s.ctx, &metadata)
+	metadata.Domain, metadata.Protocol = f.md.SniffedDomain, f.md.Protocol
+	ctx := f.ctx
+	if f.rt.Context != nil {
+		ctx = f.rt.Context(ctx)
+	}
+	ctx = adapter.WithContext(ctx, &metadata)
 	ctx = WithLookup(ctx, f.rt.Lookup)
 	dialDest := f.dest
 	if f.rt.Destination != nil {
 		dialDest = M.ParseSocksaddr(f.rt.Destination.String())
 	}
 	remote, err := f.rt.Outbound.out.ListenPacket(ctx, dialDest)
+	f.sendMu.Lock()
 	s.mu.Lock()
+	if f.failed {
+		s.mu.Unlock()
+		if remote != nil {
+			remote.Close()
+		}
+		f.sendMu.Unlock()
+		return
+	}
 	if err != nil {
+		f.sendMu.Unlock()
 		f.failed = true
 	} else {
 		f.remote = bufio.NewPacketConn(remote)
 	}
 	pending := f.pending
 	f.pending = nil
-	close(f.ready)
+	f.pendingBytes = 0
+	f.readyOnce.Do(func() { close(f.ready) })
 	s.mu.Unlock()
 	if err != nil {
+		if remote != nil {
+			remote.Close()
+		}
 		for _, b := range pending {
 			b.Release()
 		}
@@ -184,8 +304,9 @@ func (f *udpFlow) dial() {
 		return
 	}
 	for _, b := range pending {
-		f.write(b)
+		f.writeLocked(b)
 	}
+	f.sendMu.Unlock()
 	go f.receive()
 }
 
@@ -193,27 +314,50 @@ func (f *udpFlow) dial() {
 func (f *udpFlow) send(b *buf.Buffer) {
 	f.touch()
 	f.s.mu.Lock()
+	if f.failed {
+		f.s.mu.Unlock()
+		b.Release()
+		return
+	}
 	select {
 	case <-f.ready:
 	default:
-		if len(f.pending) < pendingPackets {
+		limit := pendingPackets
+		if f.sniff.Enabled {
+			limit = max(limit, f.sniff.MaxPackets)
+		}
+		withinBytes := !f.sniff.Enabled || len(f.pending) == 0 || f.pendingBytes+b.Len() <= f.sniff.MaxBytes
+		if len(f.pending) < limit && withinBytes {
 			f.pending = append(f.pending, b)
+			f.pendingBytes += b.Len()
+			select {
+			case f.notify <- struct{}{}:
+			default:
+			}
 		} else {
 			b.Release()
 		}
 		f.s.mu.Unlock()
 		return
 	}
+	f.s.mu.Unlock()
+	f.write(b)
+}
+
+func (f *udpFlow) write(b *buf.Buffer) {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	f.writeLocked(b)
+}
+
+func (f *udpFlow) writeLocked(b *buf.Buffer) {
+	f.s.mu.Lock()
 	failed := f.failed
 	f.s.mu.Unlock()
 	if failed {
 		b.Release()
 		return
 	}
-	f.write(b)
-}
-
-func (f *udpFlow) write(b *buf.Buffer) {
 	n := int64(b.Len())
 	b = N.NewReadWaitOptions(nil, f.remote).Copy(b)
 	destination := f.dest
@@ -226,6 +370,7 @@ func (f *udpFlow) write(b *buf.Buffer) {
 		return
 	}
 	f.up.Add(n)
+	f.s.b.trafficUpload.Add(uint64(n))
 }
 
 func (f *udpFlow) receive() {
@@ -253,6 +398,7 @@ func (f *udpFlow) receive() {
 			return
 		}
 		f.down.Add(n)
+		f.s.b.trafficDownload.Add(uint64(n))
 	}
 }
 
@@ -260,16 +406,30 @@ func (f *udpFlow) close() {
 	f.once.Do(func() {
 		s := f.s
 		s.mu.Lock()
+		f.failed = true
 		if s.flows[f.dest] == f {
 			delete(s.flows, f.dest)
 		}
 		remote := f.remote
+		pending := f.pending
+		f.pending = nil
+		f.pendingBytes = 0
+		untrack, release := f.untrack, f.rt.Release
+		f.readyOnce.Do(func() { close(f.ready) })
 		s.mu.Unlock()
+		f.cancel()
+		for _, b := range pending {
+			b.Release()
+		}
 		if remote != nil {
 			remote.Close()
 		}
-		f.untrack()
-		f.rt.Release()
+		if untrack != nil {
+			untrack()
+		}
+		if release != nil {
+			release()
+		}
 	})
 }
 

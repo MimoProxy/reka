@@ -15,6 +15,7 @@ const (
 	EventOperation = "operation"
 	EventRuntime   = "runtime.generation"
 	EventCandidate = "candidate.invalid"
+	EventLog       = "log"
 )
 
 const (
@@ -42,6 +43,26 @@ func NewBroker() *Broker {
 
 // Epoch identifies this process run.
 func (b *Broker) Epoch() string { return b.epoch }
+
+// Recent returns a bounded chronological view from the same event history
+// used by cursor replay. It does not synthesize logs or bypass drop tracking.
+func (b *Broker) Recent(typ string, limit int) []Event {
+	if limit <= 0 || limit > 256 {
+		limit = 100
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := []Event{}
+	for i := len(b.history) - 1; i >= 0 && len(out) < limit; i-- {
+		if b.history[i].Type == typ {
+			out = append(out, b.history[i])
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
 
 // Subscription receives events on C until Close.
 type Subscription struct {

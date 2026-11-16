@@ -25,7 +25,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 		return r != nil && r.Route(context.Background(), router.Metadata{Domain: router.NormalizeDomain(domain), Addr: addr}, nil).Outbound == "yes"
 	}
 	var resolver *RD.Service
-	dial := func(ctx context.Context, network, address, via string) (net.Conn, error) {
+	resolveOutbound := func(via, address string) (string, error) {
 		if via == "" {
 			via = "direct"
 		}
@@ -35,6 +35,10 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 			}
 			return g.Selected
 		})
+		return id, err
+	}
+	dial := func(ctx context.Context, network, address, via string) (net.Conn, error) {
+		id, err := resolveOutbound(via, address)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +71,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 		if ep.Scheme == "udp" {
 			network = "udp"
 		}
-		dec := p.eff.Router.ExplainWithResolver(ctx, router.Metadata{Domain: host, Addr: addr, Port: uint16(port), Network: network}, noDNS{}, func(dec *router.Decision) {
+		dec := p.eff.RoutingRouter().ExplainWithResolver(ctx, router.Metadata{Domain: host, Addr: addr, Port: uint16(port), Network: network}, noDNS{}, func(dec *router.Decision) {
 			if p.policies != nil {
 				dec.Outbound, dec.Chain, _ = p.eff.Router.ResolveDynamic(dec.Target, func(g router.Group) string { return p.policies.Choose(g.ID, "DNS:"+ep.Host, g.Selected) })
 			}
@@ -84,12 +88,26 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 	if same {
 		sequence = old.dns.Generation()
 	}
-	resolver, err = RD.New(*cfg, RD.Options{Generation: sequence, Pool: e.fake, Match: match, System: func(ctx context.Context, d string) ([]netip.Addr, error) {
+	pool := sagernet.NewDNSPool()
+	resolver, err = RD.New(*cfg, RD.Options{Generation: sequence, Pool: e.fake, Match: match, Retire: pool.Retire, ResetIdle: pool.ResetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
+		retained, release, active, err := e.retainCurrentDNS(ctx)
+		if err == nil && active != resolver {
+			release()
+			return ctx, func() {}, errors.New("DNS generation retired")
+		}
+		return retained, release, err
+	}, System: func(ctx context.Context, d string) ([]netip.Addr, error) {
 		return e.opts.Resolver.LookupNetIP(ctx, "ip", d)
 	}, Route: route, Exchange: func(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
-		return sagernet.ExchangeDNS(ctx, ep, q, lookup, dial)
+		id, err := resolveOutbound(ep.Via, net.JoinHostPort(ep.Host, ep.Port))
+		if err != nil {
+			return nil, err
+		}
+		ep.Via = id
+		return pool.Exchange(ctx, ep, q, lookup, dial)
 	}})
 	if err != nil {
+		pool.Retire()
 		return err
 	}
 	networkSame := same && reflect.DeepEqual(old.eff.Groups, p.eff.Groups) && len(old.eff.Outbounds) == len(p.eff.Outbounds)
@@ -102,7 +120,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 			}
 		}
 	}
-	if networkSame && (!cfg.RespectRules || old.eff.RulesFingerprint == p.eff.RulesFingerprint) {
+	if networkSame && (!cfg.RespectRules || old.eff.RulesFingerprint == p.eff.RulesFingerprint && reflect.DeepEqual(old.eff.Routing, p.eff.Routing)) {
 		resolver.InheritCache(old.dns)
 	}
 	p.dns = resolver
@@ -124,11 +142,41 @@ type noDNS struct{}
 func (noDNS) Resolve(context.Context, string) ([]netip.Addr, error) { return nil, router.ErrNoLookup }
 func (noDNS) Process(context.Context) (string, bool)                { return "", false }
 func (e *Engine) ExchangeDNS(ctx context.Context, q *D.Msg) (*D.Msg, error) {
-	_, g := e.current()
-	if g.dns == nil {
-		return nil, errors.New("DNS disabled")
+	ctx, release, resolver, err := e.retainCurrentDNS(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return g.dns.Exchange(ctx, q, "normal", true)
+	defer release()
+	return resolver.Exchange(ctx, q, "normal", true)
+}
+
+// A foreground DNS operation owns its captured dependencies until all racing
+// upstream attempts finish. This also covers native API queries and listeners.
+func (e *Engine) retainCurrentDNS(ctx context.Context) (context.Context, func(), *RD.Service, error) {
+	for ctx.Err() == nil {
+		snapshot, g := e.current()
+		if g.dns == nil {
+			return ctx, func() {}, nil, errors.New("DNS disabled")
+		}
+		pins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
+		valid := true
+		for outbound := range sniffDNSDependencies(g, snapshot.Resources) {
+			pin, err := outbound.Pin()
+			if err != nil {
+				valid = false
+				break
+			}
+			pins[outbound] = pin
+		}
+		if valid {
+			return sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, pins), snapshot), func() { closeSniffPins(pins) }, g.dns, nil
+		}
+		closeSniffPins(pins)
+		if e.rt.Current() == snapshot {
+			return ctx, func() {}, nil, errors.New("DNS runtime stopped")
+		}
+	}
+	return ctx, func() {}, nil, ctx.Err()
 }
 
 func (e *Engine) DNSState(path string) error { return e.fake.UseFile(path) }

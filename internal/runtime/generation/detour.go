@@ -10,6 +10,7 @@ import (
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/runtime"
 )
 
 type outboundDetour struct {
@@ -45,17 +46,23 @@ func (d *outboundDetour) attach() error {
 	}
 	return nil
 }
-func (d *outboundDetour) parent(network, address string) (*sagernet.PinnedOutbound, error) {
+func (d *outboundDetour) parent(ctx context.Context, network, address string) (*sagernet.PinnedOutbound, error) {
 	if !d.ready.Load() {
 		return nil, errors.New("detour is not prepared")
 	}
 	eff, manager := d.prepared.eff, d.prepared.policies
-	// Rule-only revisions retain the child. New connections then observe the
-	// active policy manager, while the parent's immutable transport graph is
-	// unchanged (dependency fingerprints enforce that invariant).
-	current, g := d.engine.current()
-	if current.Resources[d.node] == d.owner.Load() {
+	// A sniff-prepared flow follows its captured generation through every
+	// nested detour. Other new connections to a reused child observe the active
+	// policy manager; dependency fingerprints keep the transport graph equal.
+	captured, _ := ctx.Value(sniffSnapshotKey{}).(*runtime.Snapshot[*sagernet.Outbound])
+	if captured != nil && captured.Resources[d.node] == d.owner.Load() {
+		g := captured.Value.(*generation)
 		eff, manager = g.eff, g.policies
+	} else {
+		current, g := d.engine.current()
+		if current.Resources[d.node] == d.owner.Load() {
+			eff, manager = g.eff, g.policies
+		}
 	}
 	id, chain, err := eff.Router.ResolveDynamic(d.target, func(group router.Group) string {
 		if manager != nil {
@@ -89,14 +96,14 @@ func (d *outboundDetour) parent(network, address string) (*sagernet.PinnedOutbou
 	return pin, nil
 }
 func (d *outboundDetour) dial(ctx context.Context, network, address string) (net.Conn, error) {
-	parent, err := d.parent(network, address)
+	parent, err := d.parent(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
 	return parent.Dial(ctx, network, address)
 }
 func (d *outboundDetour) packet(ctx context.Context, address string) (net.PacketConn, error) {
-	parent, err := d.parent("udp", address)
+	parent, err := d.parent(ctx, "udp", address)
 	if err != nil {
 		return nil, err
 	}

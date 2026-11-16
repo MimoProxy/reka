@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
@@ -23,9 +24,11 @@ import (
 
 // Options configure Start.
 type Options struct {
-	ProcessLookup func(context.Context, sagernet.Metadata) (string, bool)
-	TUNFD         int
-	StateRoot     string
+	DeferNetwork      bool
+	ProcessInfoLookup func(context.Context, sagernet.Metadata) (sagernet.ProcessInfo, bool)
+	ProcessLookup     func(context.Context, sagernet.Metadata) (string, bool)
+	TUNFD             int
+	StateRoot         string
 	// Secrets defaults to the platform store for StateRoot.
 	Secrets  secret.Store
 	Logger   *slog.Logger
@@ -88,12 +91,16 @@ func Start(opts Options) (*Kernel, error) {
 		}
 		opts.Secrets = s
 	}
+	logEvents := new(atomic.Pointer[service.Broker])
+	opts.Logger = slog.New(&eventLogHandler{Handler: opts.Logger.Handler(), target: logEvents})
 	bopts := sagernet.Options{Logger: opts.Logger, FindProcess: true}
 	bopts.ProtectFD = opts.Protect
 	bopts.ProcessLookup = opts.ProcessLookup
+	bopts.ProcessInfoLookup = opts.ProcessInfoLookup
 	eng := generation.NewEngine(generation.EngineOptions{Backend: bopts, LogLevel: opts.LogLevel, StateRoot: opts.StateRoot, TUNFD: opts.TUNFD})
 	svc, err := service.Open(service.Options{
-		StateRoot: opts.StateRoot, Secrets: opts.Secrets, Engine: eng, Logger: opts.Logger,
+		DeferNetwork: opts.DeferNetwork,
+		StateRoot:    opts.StateRoot, Secrets: opts.Secrets, Engine: eng, Logger: opts.Logger,
 		InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal, InitialSources: opts.InitialSources, InitialOverlay: opts.InitialOverlay,
 	})
 	if err != nil {
@@ -101,6 +108,7 @@ func Start(opts Options) (*Kernel, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	logEvents.Store(svc.Events())
 	k := &Kernel{stateLock: stateLock, Service: svc, Handler: control.NewHandler(svc), cancel: cancel}
 
 	if err := svc.StartSubscriptions(service.RefreshOptions{Client: eng.SubscriptionClient(), ClientFor: eng.SubscriptionProxyClient}); err != nil {

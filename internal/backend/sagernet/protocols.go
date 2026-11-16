@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	XC "github.com/MimoProxy/reka/internal/compat/xhttp"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/option"
@@ -29,6 +30,7 @@ import (
 )
 
 type ProxySpec struct {
+	ECHLookup                                      func(context.Context, string) ([]byte, error)
 	Plugin                                         *SSPluginSpec
 	Realm                                          *RealmSpec
 	UpBPS, DownBPS                                 *uint64
@@ -73,6 +75,7 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	}
 	var realmTransport *realmHTTPTransport
 	var plugin *ssPlugin
+	var xhttpTransport outboundResource
 	var bandwidthConfigured *atomic.Bool
 	multiplex, err := popMultiplex(values)
 	if err != nil {
@@ -80,6 +83,9 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	}
 	defer func() {
 		if returnErr == nil && result != nil {
+			if xhttpTransport != nil {
+				result = &ownedResourceOutbound{Outbound: result, resource: xhttpTransport}
+			}
 			if realmTransport != nil {
 				result = &ownedResourceOutbound{Outbound: result, resource: realmTransport}
 			}
@@ -91,6 +97,9 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			if returnErr != nil {
 				common.Close(base)
 			}
+		}
+		if returnErr != nil && xhttpTransport != nil {
+			_ = xhttpTransport.Close()
 		}
 		if returnErr != nil && plugin != nil {
 			plugin.Close()
@@ -131,7 +140,11 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if s.Type == "socks" {
 		values["version"] = "5"
 	}
-	ctx, carrierConfigured := configureTLSCarrierContext(detourContext(b.ctx, s.Detour), s.TLS)
+	baseContext := detourContext(b.ctx, s.Detour)
+	if s.ECHLookup != nil {
+		baseContext = context.WithValue(baseContext, "reka.tls.ech.lookup.v1", s.ECHLookup)
+	}
+	ctx, carrierConfigured := configureTLSCarrierContext(baseContext, s.TLS)
 	ctx, configured := configureTLSContext(configureECHContext(ctx, s.TLS), s.TLS)
 	if s.Type == "hysteria2" && (s.UpBPS != nil || s.DownBPS != nil) {
 		bandwidthConfigured = &atomic.Bool{}
@@ -177,6 +190,19 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if bind, _ := values["bind_interface"].(string); bind != "" && b.protect != nil {
 		ctx = service.ExtendContext(ctx)
 		service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: b.protect, explicitProtect: true})
+	}
+	if values["reka_xhttp"] != nil {
+		if s.Type != "vless" {
+			return nil, fmt.Errorf("XHTTP applies only to VLESS")
+		}
+		var scoped *XC.Client
+		ctx, scoped, err = xhttpContext(ctx, b.componentLogger("outbound", s.Type, tag), values, s.Server, s.Port, s.TLS)
+		if err != nil {
+			return nil, err
+		}
+		if scoped != nil {
+			xhttpTransport = scoped
+		}
 	}
 	ctx, err = streamContext(ctx, b.componentLogger("outbound", s.Type, tag), values, s.Server, s.Port)
 	if err != nil {

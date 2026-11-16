@@ -17,6 +17,9 @@ import (
 const ReferenceVersion = "v1.19.34"
 
 type Request struct {
+	// Resource references are resolved by ConfigService, never as file paths.
+	ProviderResources map[string]string `json:"provider_resources,omitempty"`
+	GeodataResources  map[string]string `json:"geodata_resources,omitempty"`
 	// CertificateFiles contains explicit, caller-supplied file contents, keyed
 	// by the exact path string used by the foreign configuration. Import never
 	// opens those paths. Contents are consumed into the masked TLS identity.
