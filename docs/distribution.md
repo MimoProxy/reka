@@ -1,15 +1,15 @@
 # Distribution and installation
 
-Current artifacts are **unsigned local staging packages**, version `1.0.0-dev`. They are reviewable build outputs, not a published 1.0 release. Reka's own releases are not code-signed; their integrity comes from `SHA256SUMS`, build metadata and the corresponding source. Applications that bundle the kernel, such as Mimo, sign it as part of their own packages. The signing scripts below support that. Signing identities, notarization credentials, publication and any GitHub release are separate authorized operations.
+Reka **1.0.0** packages are available from the [GitHub release](https://github.com/MimoProxy/reka/releases/tag/v1.0.0). Reka's releases are unsigned; verify `SHA256SUMS`, `artifacts.json` and the corresponding-source archive. Applications that bundle the kernel, such as Mimo, sign it as part of their own packages. The scripts below support separately authorized signing. Local development packages and workflow artifacts remain staging outputs until published.
 
 ```sh
 make build
 make test
 make vet
 make race
-REKA_VERSION=1.0.0-dev ANDROID_HOME=/path/to/sdk make android
-python3 tools/release.py --version 1.0.0-dev --android-library bin/android/libreka.so
-python3 tools/verify-release.py bin/dist/1.0.0-dev
+REKA_VERSION=1.0.0 ANDROID_HOME=/path/to/sdk make android
+python3 tools/release.py --version 1.0.0 --android-library bin/android/libreka.so
+python3 tools/verify-release.py bin/dist/1.0.0
 ```
 
 On macOS, add `--macos-pkg` to produce unsigned installer packages as well.
@@ -52,7 +52,7 @@ Choose the SID of the intended GUI user, not a different account used only to el
 
 `packaging/windows/reka.iss` builds an unsigned Inno Setup installer from the matching staged directory. Select `TargetArch=x64compatible` or `arm64` to match its executables. Setup stops a recognized service before replacing files, then restarts it with the existing owner and state. A fresh installation defaults to the elevated user's SID; supply `/OWNERSID=S-1-5-21-...` when installing for another GUI user. Setup reports service failures, and uninstall refuses to remove files if service removal fails. State is retained after uninstall.
 
-The `windows installers` workflow builds both architectures and runs fresh-install, configuration-preserving upgrade, owner-change refusal and uninstall checks on native runners. The same checks can be run locally with `tools/windows-installer-runtime.ps1` on a dedicated administrator test machine; it refuses existing Reka state or service. Workflow definitions alone do not establish that a particular run passed.
+The `windows installers` workflow builds both architectures and runs fresh-install, configuration-preserving upgrade, owner-change refusal and uninstall checks on native runners. A manual workflow dispatch accepts a `version` input; pull-request checks use `1.0.0-dev`. Windows release checkout preserves exact source bytes. The same checks can be run locally with `tools/windows-installer-runtime.ps1` on a dedicated administrator test machine; it refuses existing Reka state or service. Pass `-Version 1.0.0` to test the formal installer. Workflow definitions alone do not establish that a particular run passed.
 
 For a separately authorized signed distribution, sign both executables before compiling Setup and sign the installer afterwards with `packaging/windows/sign.ps1`. It uses SHA-256, a timestamp and Authenticode verification. Reka's unsigned packages do not require a signing certificate.
 

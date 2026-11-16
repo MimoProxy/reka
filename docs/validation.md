@@ -1,6 +1,6 @@
-# 1.0 candidate validation
+# 1.0 validation
 
-This records the implemented M0–M4 scope and the checks completed on 2026-11-16. Packages remain unsigned staging builds until release review and publication. The [configuration reference](configuration.md), [Clash support matrix](clash-support.md), [distribution guide](distribution.md) and [reproducible benchmarks](benchmarks.md) describe the supported contracts.
+This records the implemented M0–M4 scope and the checks completed on 2026-11-16. The user accepted this scope on 2026-11-16. Version 1.0.0 release assets retain their own exact commit, version and build metadata; the measurements below retain their actual earlier checkpoints. The [configuration reference](configuration.md), [Clash support matrix](clash-support.md), [distribution guide](distribution.md) and [reproducible benchmarks](benchmarks.md) describe the supported contracts.
 
 ## Automated checks
 

@@ -1,16 +1,17 @@
 # Isolated installer acceptance: refuse pre-existing production service/state.
 param([Parameter(Mandatory=$true)][string]$Root,
-      [ValidateSet('amd64','arm64')][string]$Arch='amd64')
+      [ValidateSet('amd64','arm64')][string]$Arch='amd64',
+      [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.+_-]{0,79}$')][string]$Version='1.0.0-dev')
 $ErrorActionPreference='Stop'
 $Root=[IO.Path]::GetFullPath($Root)
 $app=Join-Path $env:ProgramFiles 'RekaAcceptance\installer'
 $state=Join-Path $env:ProgramData 'Reka'
-$setup=Join-Path $Root ("installer-$Arch\reka-1.0.0-dev-setup.exe")
+$setup=Join-Path $Root ("installer-$Arch\reka-$Version-setup.exe")
 $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if(Get-Service Reka -ErrorAction SilentlyContinue){throw 'Existing Reka service must be preserved'}
 if(Test-Path $state){throw 'Existing Reka state must be preserved'}
 if(Test-Path $app){throw 'Acceptance app directory already exists'}
-$report=[ordered]@{fresh_install=$false;upgrade=$false;uninstall=$false;state_retained=$false}
+$report=[ordered]@{version=$Version;fresh_install=$false;upgrade=$false;uninstall=$false;state_retained=$false}
 function RunSetup([string]$Log) {
     $p=Start-Process $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/OWNERSID='+$owner),('/DIR="'+$app+'"'),('/LOG="'+(Join-Path $Root $Log)+'"')) -Wait -PassThru
     if($p.ExitCode -ne 0){throw "Installer exit $($p.ExitCode)"}

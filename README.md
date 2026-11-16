@@ -15,7 +15,7 @@
 
 Reka (the Reka proxy core) is a headless proxy kernel for macOS, Windows and Android. It is being built as the core of the [Mimo](https://github.com/MimoProxy/Mimo) clients, and any GUI can drive it through its control API.
 
-> **Status: preparing 1.0; no published version yet.** Implementation and platform evidence are recorded in the [candidate validation report](docs/validation.md), with [reproducible benchmarks](docs/benchmarks.md). Builds are unsigned; verify the supplied SHA-256 checksums, build metadata and corresponding source. Publication follows release review.
+> **Reka 1.0.0.** Download packages from the [release page](https://github.com/MimoProxy/reka/releases/tag/v1.0.0). Builds are unsigned; verify the supplied SHA-256 checksums, build metadata and corresponding source. See the [validation scope](docs/validation.md), [benchmarks](docs/benchmarks.md) and [changelog](CHANGELOG.md).
 
 ## Why
 

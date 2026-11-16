@@ -27,7 +27,7 @@ jobs:
           OVERLAY=$(python3 tools/build-overlay.py)
           CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
           CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -modfile bin/build.mod -overlay "$OVERLAY" -trimpath -buildmode=c-shared \
-            -tags with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal -ldflags "-checklinkname=0 -s -w -buildid= -X github.com/MimoProxy/reka/internal/control.Version=$STAGING_VERSION" -o bin/libreka.so ./mobile/jni
+            -tags with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal -ldflags "-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid= -X github.com/MimoProxy/reka/internal/control.Version=$STAGING_VERSION" -o bin/libreka.so ./mobile/jni
           python3 tools/android-build-info.py bin/libreka.so --version "$STAGING_VERSION"
       - run: python3 tools/release.py --version "$STAGING_VERSION" --android-library bin/libreka.so
       - uses: actions/upload-artifact@v4

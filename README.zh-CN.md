@@ -15,7 +15,7 @@
 
 Reka（Reka proxy core）是一个无界面的代理内核，面向 macOS、Windows 和 Android。它正作为 [Mimo](https://github.com/MimoProxy/Mimo) 客户端的内核开发，任何 GUI 都可以通过它的控制 API 驱动它。
 
-> **状态：1.0 候选验收阶段，尚未正式发布。** 实现与实测范围见[候选验收说明](docs/validation.md)，固定参数性能结果见[可复现对照报告](docs/benchmarks.md)。构建不签名，请核对随附的 SHA-256、构建元数据和对应源码；正式发布在发行评审后进行。
+> **Reka 1.0.0。** 安装包与库见[发行页面](https://github.com/MimoProxy/reka/releases/tag/v1.0.0)。构建不签名，请核对随附的 SHA-256、构建元数据和对应源码。实测范围见[验收说明](docs/validation.md)，另附[性能报告](docs/benchmarks.md)和[更新记录](CHANGELOG.md)。
 
 ## 为什么
 
