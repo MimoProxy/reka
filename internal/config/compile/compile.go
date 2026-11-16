@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -93,15 +94,16 @@ type Outbound struct {
 
 // TLS is validated client TLS.
 type TLS struct {
-	CertificatePin string   `json:"certificate-sha256,omitempty"`
-	VerifyName     string   `json:"verify-name,omitempty"`
-	Certificate    string   `json:"-"`
-	PrivateKey     string   `json:"-"`
-	ServerName     string   `json:"server-name,omitempty"`
-	Insecure       bool     `json:"insecure,omitempty"`
-	Fingerprint    string   `json:"fingerprint,omitempty"`
-	ALPN           []string `json:"alpn,omitempty"`
-	Reality        *Reality `json:"reality,omitempty"`
+	ECH            *model.ECH `json:"ech,omitempty"`
+	CertificatePin string     `json:"certificate-sha256,omitempty"`
+	VerifyName     string     `json:"verify-name,omitempty"`
+	Certificate    string     `json:"-"`
+	PrivateKey     string     `json:"-"`
+	ServerName     string     `json:"server-name,omitempty"`
+	Insecure       bool       `json:"insecure,omitempty"`
+	Fingerprint    string     `json:"fingerprint,omitempty"`
+	ALPN           []string   `json:"alpn,omitempty"`
+	Reality        *Reality   `json:"reality,omitempty"`
 }
 
 // Reality is validated REALITY client configuration.
@@ -574,7 +576,31 @@ func isIP(s string) bool {
 func (c *compiler) tls(path string, ob model.Outbound) *TLS {
 	const doc = model.DocProfile
 	t := ob.TLS
-	out := &TLS{CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: c.resolveSecret(path+"/certificate", t.Certificate), PrivateKey: c.resolveSecret(path+"/private-key", t.PrivateKey), ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
+	out := &TLS{ECH: t.ECH, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: c.resolveSecret(path+"/certificate", t.Certificate), PrivateKey: c.resolveSecret(path+"/private-key", t.PrivateKey), ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
+	if ech := t.ECH; ech != nil && ech.Enabled {
+		if ech.Config != "" {
+			data, err := base64.StdEncoding.DecodeString(ech.Config)
+			valid := err == nil && len(data) >= 6 && len(data) <= 65537 && int(binary.BigEndian.Uint16(data)) == len(data)-2
+			if valid {
+				for rest := data[2:]; len(rest) > 0; {
+					if len(rest) < 4 || int(binary.BigEndian.Uint16(rest[2:])) > len(rest)-4 {
+						valid = false
+						break
+					}
+					rest = rest[4+int(binary.BigEndian.Uint16(rest[2:])):]
+				}
+			}
+			if !valid {
+				c.errorf(doc, path+"/ech/config", "tls.ech", "expected a base64 ECHConfigList with valid framing")
+			}
+		}
+		if strings.ContainsAny(ech.QueryServerName, " /\\\r\n\x00") {
+			c.errorf(doc, path+"/ech/query-server-name", "tls.ech", "invalid ECH query server name")
+		}
+		if t.Reality != nil {
+			c.errorf(doc, path+"/ech", "tls.ech", "ECH does not apply to a REALITY handshake")
+		}
+	}
 	if out.Certificate != "" || out.PrivateKey != "" {
 		if _, err := tls.X509KeyPair([]byte(out.Certificate), []byte(out.PrivateKey)); err != nil {
 			c.errorf(doc, path+"/private-key", "tls.client-certificate", "client certificate and key must be a matching inline PEM pair or secret references")

@@ -222,3 +222,13 @@ or unavailable parents never fall back to a direct socket. UDP requires an
 enabled parent and group. Put physical socket options on the parent: as in the
 reference, a dialer proxy takes precedence over the child's interface, routing
 mark, IP version, TFO and MPTCP settings; the compiler reports that precedence.
+
+TLS `ech: {enabled: true, config: BASE64_ECHCONFIGLIST}` enables Encrypted
+ClientHello. Omitting `config` queries HTTPS records using the active native
+DNS configuration's proxy-server scope; `query-server-name` can override the
+query name. Configure native DNS (or activate imported DNS with `dns.from`)
+for this automatic mode. Missing ECH data or authentication failure is an
+error; it does not silently send clear SNI. TLS/uTLS and Hysteria2/TUIC QUIC
+are exercised by real TCP/UDP tests. REALITY uses its own handshake and cannot
+be combined with ECH. The matching Clash field is `ech-opts` with `enable`,
+`config` and `query-server-name`.

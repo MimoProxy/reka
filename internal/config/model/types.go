@@ -76,6 +76,7 @@ type Outbound struct {
 
 // TLS is client TLS for an outbound.
 type TLS struct {
+	ECH            *ECH   `yaml:"ech"`
 	CertificatePin string `yaml:"certificate-sha256"`
 	VerifyName     string `yaml:"verify-name"`
 	Certificate    string `yaml:"certificate"`
@@ -86,6 +87,12 @@ type TLS struct {
 	Fingerprint string   `yaml:"fingerprint"`
 	ALPN        []string `yaml:"alpn"`
 	Reality     *Reality `yaml:"reality"`
+}
+
+type ECH struct {
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Config          string `yaml:"config" json:"config,omitempty"`
+	QueryServerName string `yaml:"query-server-name" json:"query-server-name,omitempty"`
 }
 
 // Reality is the client side of REALITY.
@@ -151,6 +158,7 @@ type Sources struct {
 }
 
 type Subscription struct {
+	CertificateFiles  []CertificateFile    `yaml:"certificate-files" json:"certificate_files,omitempty"`
 	ProviderDirectory string               `yaml:"provider-directory" json:"provider_directory,omitempty"`
 	Geodata           []GeoAsset           `yaml:"geodata" json:"geodata,omitempty"`
 	URL               string               `yaml:"url" json:"url"`
@@ -160,6 +168,13 @@ type Subscription struct {
 	AllowPartial      bool                 `yaml:"allow-partial" json:"allow_partial,omitempty"`
 	Paused            bool                 `yaml:"paused" json:"paused,omitempty"`
 	Headers           []SubscriptionHeader `yaml:"headers" json:"headers,omitempty"`
+}
+
+// CertificateFile attaches local TLS identity material to a foreign path name.
+// Value is inline PEM or a secret reference, never a path to open remotely.
+type CertificateFile struct {
+	Path  string `yaml:"path" json:"path"`
+	Value string `yaml:"value" json:"value"`
 }
 type SubscriptionHeader struct {
 	Name  string `yaml:"name" json:"name"`

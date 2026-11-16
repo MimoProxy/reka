@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate pinned overlays for unused ECH and fragmented Trojan node auth.
+"""Generate pinned overlays for scoped ECH and component lifetime corrections.
 
 Go refuses overlays for files inside the module cache, so this script
 copies the locked sing-box module to bin/upstream/sing-box, verifies the

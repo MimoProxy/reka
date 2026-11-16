@@ -30,6 +30,16 @@ func ValidSubscription(s *Subscription) error {
 	if s.Format != "" && s.Format != "auto" && s.Format != "clash" && s.Format != "links" {
 		return errors.New("subscription format must be auto, clash or links")
 	}
+	files := map[string]bool{}
+	if len(s.CertificateFiles) > 64 {
+		return errors.New("at most 64 certificate file attachments are allowed")
+	}
+	for _, file := range s.CertificateFiles {
+		if file.Path == "" || len(file.Path) > 4096 || strings.ContainsRune(file.Path, 0) || files[file.Path] || file.Value == "" {
+			return errors.New("certificate file attachments require unique path names and contents")
+		}
+		files[file.Path] = true
+	}
 	if s.Interval < 0 || s.Interval > 604800 || s.Interval > 0 && s.Interval < 30 {
 		return errors.New("subscription interval must be 0 (default) or 30–604800 seconds")
 	}

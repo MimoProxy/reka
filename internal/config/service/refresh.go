@@ -470,6 +470,16 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 		return fail(subscription.Code(err))
 	}
 	request := importer.Request{SourceID: id, Format: spec.Format, Data: string(root), NodesOnly: spec.NodesOnly, AllowPartial: spec.AllowPartial}
+	if len(spec.CertificateFiles) > 0 {
+		request.CertificateFiles = map[string]string{}
+		for _, attachment := range spec.CertificateFiles {
+			contents, err := m.resolve(attachment.Value)
+			if err != nil {
+				return fail("credentials_unavailable")
+			}
+			request.CertificateFiles[attachment.Path] = contents
+		}
+	}
 	providers, err := importer.Providers(request)
 	if err != nil {
 		return fail(err.Error())
@@ -599,6 +609,7 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 	// Restore only masked fields whose stored identity is unchanged.
 	if spec != nil {
 		copy := *spec
+		copy.CertificateFiles = append([]model.CertificateFile{}, spec.CertificateFiles...)
 		copy.Geodata = append([]model.GeoAsset{}, spec.Geodata...)
 		copy.Headers = append([]model.SubscriptionHeader{}, spec.Headers...)
 		spec = &copy
@@ -644,6 +655,23 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 				}
 			}
 		}
+		for i, file := range spec.CertificateFiles {
+			if file.Value != model.Mask {
+				continue
+			}
+			found := false
+			if existing != nil && existing.Subscription != nil {
+				for _, old := range existing.Subscription.CertificateFiles {
+					if old.Path == file.Path {
+						spec.CertificateFiles[i].Value, found = old.Value, true
+						break
+					}
+				}
+			}
+			if !found {
+				return Result{}, errf(CodeBadRequest, "masked certificate attachment has no stored value")
+			}
+		}
 	}
 	// Reuse native ID validation without making any network request.
 	if spec != nil {
@@ -666,6 +694,7 @@ func (s *Service) ConfigureSubscription(ctx context.Context, base uint64, id str
 			headers = append(headers, map[string]string{"name": h.Name, "value": h.Value})
 		}
 		value := map[string]any{
+			"certificate-files":  spec.CertificateFiles,
 			"url":                spec.URL,
 			"format":             spec.Format,
 			"interval":           spec.Interval,

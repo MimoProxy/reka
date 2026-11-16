@@ -841,6 +841,27 @@ func cmdImport(args []string) error {
 	nodesOnly := fs.Bool("nodes-only", false, "explicitly import only proxy nodes")
 	partial := fs.Bool("allow-partial", false, "allow omissions after reviewing their diagnostics")
 	apply := fs.Bool("apply", false, "plan and commit the imported source")
+	attachments := map[string]string{}
+	fs.Func("certificate-file", "explicit TLS attachment FOREIGN_PATH=LOCAL_FILE (repeatable)", func(value string) error {
+		name, path, ok := strings.Cut(value, "=")
+		if !ok || name == "" || path == "" || len(attachments) >= 64 {
+			return errors.New("expected FOREIGN_PATH=LOCAL_FILE, at most 64 attachments")
+		}
+		if _, duplicate := attachments[name]; duplicate {
+			return errors.New("duplicate certificate attachment")
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return errors.New("cannot open explicitly attached certificate file")
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+		if err != nil || len(data) > 1<<20 {
+			return errors.New("certificate attachment exceeds 1 MiB or could not be read")
+		}
+		attachments[name] = string(data)
+		return nil
+	})
 	parse(fs, args)
 	if *id == "" || fs.NArg() != 1 {
 		return errors.New("usage: import -source ID [-nodes-only] [-allow-partial] [-apply] FILE")
@@ -860,7 +881,7 @@ func cmdImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	request := importer.Request{SourceID: *id, Format: *format, Data: string(data), NodesOnly: *nodesOnly, AllowPartial: *partial}
+	request := importer.Request{SourceID: *id, Format: *format, Data: string(data), NodesOnly: *nodesOnly, AllowPartial: *partial, CertificateFiles: attachments}
 	var preview importer.Preview
 	if err := call("ImportSource", map[string]any{"import": request}, &preview); err != nil {
 		return err

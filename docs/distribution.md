@@ -60,7 +60,7 @@ Windows uses the unmodified official Wintun 0.14.1 DLL embedded by the locked si
 
 ## Build trimming
 
-Default make/release/JNI builds use `reka_minimal` and a generated overlay. Its ECH replacement returns explicit errors for unsupported upstream ECH entry points. It removes the unused sing-box DNS/router import path; Reka's UDP/TCP DNS exchange uses its own bounded connected-socket implementation, with UDP truncation retry and reply checks. Supported protocol and DNS behavior remains covered by the existing tests.
+Default make/release/JNI builds use `reka_minimal` and a generated overlay. Its ECH replacement uses Reka's generation-scoped HTTPS DNS callback and clones TLS configuration per connection, retaining explicit ECH configs, server key parsing and synchronized retry configs. This removes the unused sing-box DNS/router import path. Reka's UDP/TCP DNS exchange uses its own bounded connected-socket implementation, with UDP truncation retry and reply checks. Real TLS/uTLS and Hysteria2/TUIC ECH tests cover successful encrypted handshakes, TCP/UDP and wrong-key rejection.
 
 The generated overlay also corrects the pinned Trojan inbound's authentication-key read to use `io.ReadFull`. Reka uses that inbound for loopback test/tool nodes; a stream read can return a partial key, including data cached during HTTPUpgrade. Deterministic fragmented-key tests cover this correction. The normal proxy client uses the upstream outbound implementation.
 

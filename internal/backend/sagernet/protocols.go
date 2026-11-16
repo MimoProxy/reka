@@ -71,7 +71,7 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if s.Type == "socks" {
 		values["version"] = "5"
 	}
-	ctx, configured := configureTLSContext(detourContext(b.ctx, s.Detour), s.TLS)
+	ctx, configured := configureTLSContext(configureECHContext(detourContext(b.ctx, s.Detour), s.TLS), s.TLS)
 	if s.Detour != nil {
 		values["detour"] = "reka-detour"
 	}

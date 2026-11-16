@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime"
 	"github.com/MimoProxy/reka/internal/subscription"
+	D "github.com/miekg/dns"
 	"io"
 	goruntime "runtime"
 )
@@ -323,6 +325,7 @@ func (e *Engine) listenerChanges(eff *compile.Effective) []listenerChange {
 // Prepared holds instances built for a configuration that is not active
 // yet. Pass it to Activate or Abort exactly once.
 type Prepared struct {
+	ready       atomic.Bool
 	detours     []*outboundDetour
 	policies    *policy.Manager
 	dns         *RD.Service
@@ -385,6 +388,24 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 			continue
 		}
 		spec := specFor(o)
+		var owner atomic.Pointer[sagernet.Outbound]
+		if proxy, ok := spec.(sagernet.ProxySpec); ok && proxy.TLS != nil && proxy.TLS.ECH != nil {
+			proxy.TLS.ECH.Lookup = func(ctx context.Context, name string) ([]byte, error) {
+				if !p.ready.Load() {
+					return nil, errors.New("ECH resolver is not prepared")
+				}
+				resolver := p.dns
+				current, g := e.current()
+				if current.Resources[o.ID] == owner.Load() {
+					resolver = g.dns
+				}
+				if resolver == nil {
+					return nil, errors.New("automatic ECH requires configured proxy-server DNS")
+				}
+				return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
+			}
+			spec = proxy
+		}
 		var detour *outboundDetour
 		if o.Dialer != nil && o.Dialer.Proxy != "" {
 			detour = e.newDetour(p, o)
@@ -394,6 +415,7 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		if err != nil {
 			return fail(&PrepareError{Path: "/outbounds/" + o.ID, Err: err})
 		}
+		owner.Store(out)
 		if detour != nil {
 			detour.owner.Store(out)
 			p.detours = append(p.detours, detour)
@@ -410,6 +432,7 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		return fail(&PrepareError{Path: "/dns", Err: err})
 	}
 	e.preparePolicies(p)
+	p.ready.Store(true)
 	for _, detour := range p.detours {
 		detour.ready.Store(true)
 	}
@@ -602,6 +625,9 @@ func specFor(o compile.Outbound) any {
 			return nil
 		}
 		t := &sagernet.TLSSpec{CertificatePin: o.TLS.CertificatePin, VerifyName: o.TLS.VerifyName, Certificate: o.TLS.Certificate, PrivateKey: o.TLS.PrivateKey, ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
+		if ech := o.TLS.ECH; ech != nil && ech.Enabled {
+			t.ECH = &sagernet.ECHSpec{Config: ech.Config, QueryServerName: ech.QueryServerName}
+		}
 		if r := o.TLS.Reality; r != nil {
 			t.Reality = &sagernet.RealitySpec{PublicKey: r.PublicKey, ShortID: r.ShortID, X25519MLKEM768: r.X25519MLKEM768}
 		}

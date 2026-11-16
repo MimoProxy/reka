@@ -2,7 +2,9 @@ package sagernet
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -264,6 +266,7 @@ type VLESSSpec struct {
 
 // TLSSpec is client TLS. Fingerprint enables uTLS (for example "chrome").
 type TLSSpec struct {
+	ECH                                                 *ECHSpec
 	CertificatePin, VerifyName, Certificate, PrivateKey string
 	ServerName                                          string
 	Insecure                                            bool
@@ -391,6 +394,13 @@ func (t *TLSSpec) build() *option.OutboundTLSOptions {
 		ServerName: t.ServerName,
 		Insecure:   t.Insecure,
 		ALPN:       t.ALPN,
+	}
+	if t.ECH != nil {
+		o.ECH = &option.OutboundECHOptions{Enabled: true, QueryServerName: t.ECH.QueryServerName}
+		if t.ECH.Config != "" {
+			data, _ := base64.StdEncoding.DecodeString(t.ECH.Config)
+			o.ECH.Config = []string{string(pem.EncodeToMemory(&pem.Block{Type: "ECH CONFIGS", Bytes: data}))}
+		}
 	}
 	if t.Certificate != "" {
 		o.ClientCertificate = []string{t.Certificate}

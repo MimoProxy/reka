@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/sagernet/sing-box/adapter"
+	S "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/snell"
@@ -40,6 +41,11 @@ func TestProtocolInteroperability(t *testing.T) {
 		t.Fatal(e)
 	}
 	serverTLS := map[string]any{"enabled": true, "certificate": []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))}, "key": []string{string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}))}}
+	echConfigPEM, echKeyPEM, err := S.ECHKeygenDefault("public.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echConfig, _ := pem.Decode([]byte(echConfigPEM))
 	uuid := "b831381d-6324-4d53-ad4f-8cda48b30811"
 	password := "test-password-with-enough-entropy"
 	cases := []struct {
@@ -47,6 +53,15 @@ func TestProtocolInteroperability(t *testing.T) {
 		mux            bool
 		version        int
 	}{{"vmess", "", false, 0}, {"trojan", "", false, 0}, {"hysteria2", "", false, 0}, {"tuic", "", false, 0}, {"snell", "", false, 5}, {"snell", "", false, 6}}
+	for _, typ := range []string{"hysteria2", "tuic"} {
+		for _, transport := range []string{"ech", "ech-dns"} {
+			cases = append(cases, struct {
+				typ, transport string
+				mux            bool
+				version        int
+			}{typ, transport, false, 0})
+		}
+	}
 	for _, typ := range []string{"vmess", "trojan", "vless"} {
 		for _, tr := range []string{"ws", "grpc", "httpupgrade"} {
 			cases = append(cases, struct {
@@ -92,6 +107,9 @@ func TestProtocolInteroperability(t *testing.T) {
 				for k, v := range serverTLS {
 					tlsOptions[k] = v
 				}
+				if tc.transport == "ech" || tc.transport == "ech-dns" {
+					tlsOptions["ech"] = map[string]any{"enabled": true, "key": []string{echKeyPEM}}
+				}
 				if tc.typ == "hysteria2" || tc.typ == "tuic" {
 					tlsOptions["alpn"] = []string{"h3"}
 				}
@@ -109,7 +127,7 @@ func TestProtocolInteroperability(t *testing.T) {
 			if tc.typ == "vmess" {
 				opts["security"] = "auto"
 			}
-			if tc.transport != "" {
+			if tc.transport != "" && tc.transport != "ech" && tc.transport != "ech-dns" {
 				transport := map[string]any{"type": tc.transport}
 				if tc.transport == "grpc" {
 					transport["service_name"] = "reka-test"
@@ -186,6 +204,13 @@ func TestProtocolInteroperability(t *testing.T) {
 			if base["tls"] != nil {
 				pin := sha256.Sum256(cert.Certificate[0])
 				spec.TLS = &TLSSpec{CertificatePin: hex.EncodeToString(pin[:]), ServerName: "localhost", ALPN: []string{"h3"}}
+				if tc.transport == "ech" || tc.transport == "ech-dns" {
+					spec.TLS.ECH = &ECHSpec{Config: base64.StdEncoding.EncodeToString(echConfig.Bytes)}
+					if tc.transport == "ech-dns" {
+						spec.TLS.ECH.Config = ""
+						spec.TLS.ECH.Lookup = func(context.Context, string) ([]byte, error) { return echConfig.Bytes, nil }
+					}
+				}
 				if tc.typ == "trojan" || tc.transport == "h2" || tc.transport == "http-tls" {
 					spec.TLS.ALPN = nil
 				}
@@ -295,6 +320,30 @@ func TestProtocolInteroperability(t *testing.T) {
 			buffer = make([]byte, len("still-alive"))
 			if _, err = io.ReadFull(conn, buffer); err != nil || string(buffer) != "still-alive" {
 				t.Fatal("old instance stopped", err)
+			}
+			if tc.transport == "ech" || tc.transport == "ech-dns" {
+				wrongPEM, _, _ := S.ECHKeygenDefault("public.test")
+				wrong, _ := pem.Decode([]byte(wrongPEM))
+				spec.TLS.ECH = &ECHSpec{Config: base64.StdEncoding.EncodeToString(wrong.Bytes)}
+				negative, err := b.NewOutbound("wrong-ech", spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer negative.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				c, err := negative.Dial(ctx, "tcp", echoServer(t).String())
+				if err == nil {
+					c.SetDeadline(time.Now().Add(time.Second))
+					_, err = c.Write([]byte("must-not-fallback"))
+					if err == nil {
+						_, err = io.ReadFull(c, make([]byte, 17))
+					}
+					c.Close()
+				}
+				if err == nil {
+					t.Fatal("invalid QUIC ECH fell back to clear SNI")
+				}
 			}
 
 		})

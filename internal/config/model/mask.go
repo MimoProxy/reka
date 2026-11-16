@@ -167,6 +167,9 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 		for i, src := range sources.Content {
 			prefix := JoinPath("/sources", ElementSegment(src, i), "subscription")
 			if subscription, e := child(src, "subscription", false, 0); e == nil && unalias(subscription).Kind == yaml.MappingNode {
+				if files, e := child(subscription, "certificate-files", false, 0); e == nil {
+					nested(files, JoinPath(prefix, "certificate-files"))
+				}
 				if u, e := child(subscription, "url", false, 0); e == nil {
 					u = unalias(u)
 					if u.Kind == yaml.ScalarNode && !strings.HasPrefix(u.Value, SecretPrefix) {

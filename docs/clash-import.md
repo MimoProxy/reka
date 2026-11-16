@@ -15,6 +15,23 @@ Start Reka normally, then preview a local file:
 
 A report gives imported/total counts, unavailable resources, ignored fields, original-name-to-ID mappings and diagnostics with document, path, line and column. The JSON result also contains normalized `sources` YAML with credentials masked. Preview has no side effects. A blocked preview exits nonzero.
 
+For TLS client identities named by file paths, explicitly attach each local
+file. The left side is the exact foreign path; the right side is the local
+file the CLI is authorized to read (at most 1 MiB each). Repeat the option for
+the certificate and private key:
+
+```sh
+./bin/rekactl import -source airport \
+  -certificate-file '/foreign/client.pem=/local/client.pem' \
+  -certificate-file '/foreign/client.key=/local/client.key' subscription.yaml
+```
+
+The API equivalent is `certificate_files: {"/foreign/client.pem": "PEM contents"}`
+in the import request. Import never opens a path from downloaded YAML. The
+matching identity is normalized to inline PEM and masked in previews. Scheduled
+subscriptions can retain the explicit mapping as `certificate-files` entries
+with `path` and `value`; `value` accepts PEM or a local `secret://` reference.
+
 The default full conversion reports unsupported nodes, groups, rules, provider fields and DNS fields; **any unavailable content blocks application**. To import just the supported nodes explicitly:
 
 ```sh
