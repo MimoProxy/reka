@@ -492,3 +492,153 @@ def hysteria_exact_bandwidth(source):
  client,err:=hysteria2.NewClient(clientOptions)''')
 
 MODULES['github.com/sagernet/sing-box'][1]['protocol/hysteria2/outbound.go'] = ('25b9c083a39a7d47be9fac675a8672e68654179858f7589ae60398ece0c48d80',hysteria_exact_bandwidth)
+
+
+def shadowtls_record_writes(source):
+    import re
+    receiver='shadowConn' if 'type shadowConn struct' in source else 'verifiedConn'
+    if receiver=='shadowConn':
+        source=replace(source,'"net"','"net"\n"sync"')
+    source=replace(source,'type '+receiver+' struct {','type '+receiver+' struct {\n writeAccess sync.Mutex')
+    source=replace(source,'func (c *'+receiver+') Write(p []byte) (n int, err error) {','func (c *'+receiver+') Write(p []byte) (n int, err error) {\n c.writeAccess.Lock();defer c.writeAccess.Unlock()')
+    if receiver=='verifiedConn':
+        start=source.index('func (c *verifiedConn) Write(p []byte)')
+        end=source.index('\nfunc (c *verifiedConn) write(',start)
+        source=source[:start]+'''func(c *verifiedConn)Write(p []byte)(n int,err error){
+ c.writeAccess.Lock();defer c.writeAccess.Unlock()
+ for len(p)>0{
+  size:=len(p);if size>16384{size=16384}
+  written,err:=c.write(p[:size]);n+=written
+  if err!=nil{return n,err}
+  if written!=size{return n,io.ErrShortWrite}
+  p=p[size:]
+ }
+ return n,nil
+}
+'''+source[end:]
+        pattern=r'func \(c \*verifiedConn\) WriteBuffer\(buffer \*buf.Buffer\) error \{.*?\n}'
+        source,count=re.subn(pattern,'''func(c *verifiedConn)WriteBuffer(buffer *buf.Buffer)error{
+ defer buffer.Release()
+ _,err:=c.Write(buffer.Bytes());return err
+}''',source,count=1,flags=re.S)
+        if count!=1:raise SystemExit('ShadowTLS WriteBuffer context changed')
+    pattern=r'func \(c \*'+receiver+r'\) WriteVectorised\(buffers \[\]\*buf.Buffer\) error \{.*?\n}'
+    replacement='''func(c *'''+receiver+''')WriteVectorised(buffers []*buf.Buffer)error{
+ // A vector can exceed the TLS record length. The ordinary writer already
+ // splits records, maintains the correct rolling HMAC, and reports errors.
+ defer buf.ReleaseMulti(buffers)
+ for _,buffer:=range buffers{
+  written,err:=c.Write(buffer.Bytes());if err!=nil{return err}
+  if written!=buffer.Len(){return io.ErrShortWrite}
+ }
+ return nil
+}'''
+    source,count=re.subn(pattern,lambda _:replacement,source,count=1,flags=re.S)
+    if count!=1:raise SystemExit('ShadowTLS vector context changed')
+    return source
+
+MODULES['github.com/sagernet/sing-shadowtls'] = ('v0.2.2-0.20260928201441-a9c0127d5c99', {
+'v2_conn.go': ('1d56d9e5535a285c279003438bc26c60d3da958c8adfe6c61bb7747c97023406',shadowtls_record_writes),
+'v3_conn.go': ('b2dbea8cf093dd133302c9d4afc6dd64d3bf42f0bf882a5a57c7bc43af14f3bf',shadowtls_record_writes),
+})
+
+
+def simple_obfs_eof(source):
+    return replace(source,'_, err = io.ReadFull(to.Conn, sizeBuf)\n\tif err != nil {\n\t\treturn 0, nil','_, err = io.ReadFull(to.Conn, sizeBuf)\n\tif err != nil {\n\t\treturn 0, err')
+
+MODULES['github.com/sagernet/sing-box'][1]['transport/simple-obfs/tls.go'] = ('5dc636d2b39e9992366488a46899defc8568e70dade5a2bdf9bea18f62b389b7',simple_obfs_eof)
+
+
+def lazy_tls_publication(source):
+    # Keep the embedded physical socket immutable: net/http may close it while
+    # the first read is still completing the TLS handshake.
+    source = replace(source, '"sync"', '"sync"\n"sync/atomic"')
+    source = replace(source, 'needHandshake bool', 'tlsConn atomic.Pointer[Conn]')
+    source = replace(source, '\n\t\tneedHandshake: true,', '')
+    source = replace(source, 'if !c.needHandshake {', 'if c.tlsConn.Load() != nil {')
+    source = replace(source, 'if c.needHandshake {', 'if c.tlsConn.Load() == nil {')
+    source = replace(source, 'c.Conn = tlsConn\n\t\tc.needHandshake = false', 'c.tlsConn.Store(&tlsConn)')
+    source = replace(source, 'return c.Conn.Read(p)', 'return (*c.tlsConn.Load()).Read(p)')
+    source = replace(source, 'return c.Conn.Write(p)', 'return (*c.tlsConn.Load()).Write(p)')
+    source = replace(source, 'return c.needHandshake', 'return c.tlsConn.Load() == nil')
+    source = replace(source, 'return !c.needHandshake', 'return c.tlsConn.Load() != nil', 2)
+    return replace(source, 'return c.Conn\n}', 'if conn := c.tlsConn.Load(); conn != nil { return *conn }; return c.Conn\n}')
+
+MODULES['github.com/sagernet/sing'][1]['common/tls/listener.go'] = ('db3287682b4be62be1d1982acceb102a12bd10bf019bfe4c7a411bc952f581ba', lazy_tls_publication)
+
+
+def h2_reservation_lock(source):
+    # Backport golang/net 8d10596 (Go issue 80680), BSD-3-Clause. Reserve
+    # synchronously invokes stateHook, so neither call may hold cc.mu.
+    source = replace(source, 'err := func() error {\n\t\tcc.mu.Lock()', 'haveReservation, err := func() (bool, error) {\n\t\tcc.mu.Lock()')
+    source = replace(source, '''\t\t\treturn errClientConnUnusable
+\t\t}
+\t\tcc.roundTrips++
+\t\tif cc.reserved > 0 {
+\t\t\t// We've already reserved a concurrency slot for this request.
+\t\t\tcc.reserved--
+\t\t} else if cc.cc.Reserve() != nil {
+\t\t\t// We don't seem to have an available concurrency slot,
+\t\t\t// so bump the pending count (requests waiting for a slot).
+\t\t\tcc.pending++
+\t\t}''', '''\t\t\treturn false, errClientConnUnusable
+\t\t}''')
+    source = replace(source, '''\t\tcc.starting++
+\t\treturn nil
+\t}()
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tresp, err := cc.cc.RoundTrip(req)''', '''\t\tcc.starting++
+        cc.roundTrips++
+        if cc.reserved == 0 { return false, nil }
+        cc.reserved--
+        return true, nil
+    }()
+    if err != nil { return nil, err }
+    if !haveReservation && cc.cc.Reserve() != nil {
+        cc.mu.Lock()
+        cc.pending++
+        cc.mu.Unlock()
+    }
+    resp, err := cc.cc.RoundTrip(req)''')
+    return replace(source, '''\tcc.mu.Lock()
+\tdefer cc.mu.Unlock()
+\tif cc.doNotReuse {
+\t\treturn false
+\t}
+\tif err := cc.cc.Reserve(); err != nil {
+\t\treturn false
+\t}
+\tcc.reserved++
+\treturn true''', '''if err := cc.cc.Reserve(); err != nil { return false }
+    reserved := true
+    cc.mu.Lock()
+    if cc.doNotReuse { reserved = false } else { cc.reserved++ }
+    cc.mu.Unlock()
+    if !reserved { cc.cc.Release() }
+    return reserved''')
+
+MODULES['golang.org/x/net'] = ('v0.57.0', {
+    'http2/transport_wrap.go': ('f3ec26dd40aac3b81b6b75ac4603214d7e37d461c4ec43c189063ab202d26f89', h2_reservation_lock),
+})
+
+
+def hopping_distinct_port(source):
+    source = replace(source, '\t\tports:       ports,', '\t\tports:       ports,\n\t\tportIndex: -1,')
+    return replace(source, '\tc.portIndex = rand.Intn(len(c.ports))', '''// A hop must change the destination when alternatives exist. Duplicate
+    // entries and a single-port list remain valid and cannot spin forever.
+    candidates := 0
+    for _, port := range c.ports {
+        if c.portIndex < 0 || port != c.ports[c.portIndex] { candidates++ }
+    }
+    if candidates == 0 { c.portIndex = rand.Intn(len(c.ports)) } else {
+        choice := rand.Intn(candidates)
+        for index, port := range c.ports {
+            if c.portIndex >= 0 && port == c.ports[c.portIndex] { continue }
+            if choice == 0 { c.portIndex = index; break }
+            choice--
+        }
+    }''')
+
+MODULES['github.com/sagernet/sing-quic'][1]['hysteria/hop.go'] = ('5ced1b37dd283926c6131e8721c3d359f3bfd1ce6a7f7a6f0fb0a835bb5232b9', hopping_distinct_port)

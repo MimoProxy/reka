@@ -389,23 +389,34 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		}
 		spec := specFor(o)
 		var owner atomic.Pointer[sagernet.Outbound]
-		if proxy, ok := spec.(sagernet.ProxySpec); ok && proxy.TLS != nil && proxy.TLS.ECH != nil {
-			proxy.TLS.ECH.Lookup = func(ctx context.Context, name string) ([]byte, error) {
-				if !p.ready.Load() {
-					return nil, errors.New("ECH resolver is not prepared")
+
+		if proxy, ok := spec.(sagernet.ProxySpec); ok {
+			tlsSpecs := []*sagernet.TLSSpec{proxy.TLS}
+			if proxy.Plugin != nil {
+				tlsSpecs = append(tlsSpecs, proxy.Plugin.TLS)
+			}
+			for _, tlsSpec := range tlsSpecs {
+				if tlsSpec == nil || tlsSpec.ECH == nil {
+					continue
 				}
-				resolver := p.dns
-				current, g := e.current()
-				if current.Resources[o.ID] == owner.Load() {
-					resolver = g.dns
+				tlsSpec.ECH.Lookup = func(ctx context.Context, name string) ([]byte, error) {
+					if !p.ready.Load() {
+						return nil, errors.New("ECH resolver is not prepared")
+					}
+					resolver := p.dns
+					current, g := e.current()
+					if current.Resources[o.ID] == owner.Load() {
+						resolver = g.dns
+					}
+					if resolver == nil {
+						return nil, errors.New("automatic ECH requires configured proxy-server DNS")
+					}
+					return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
 				}
-				if resolver == nil {
-					return nil, errors.New("automatic ECH requires configured proxy-server DNS")
-				}
-				return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
 			}
 			spec = proxy
 		}
+
 		var detour *outboundDetour
 		if o.Dialer != nil && o.Dialer.Proxy != "" {
 			detour = e.newDetour(p, o)
@@ -610,7 +621,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 	if o.Multiplex != nil && o.Multiplex.Enabled && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
 	}
-	if (o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
+	if (o.Plugin != nil || o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
 	}
 	switch o.Type {
@@ -649,7 +660,7 @@ func specFor(o compile.Outbound) any {
 			}
 		}
 		return sagernet.ProxySpec{
-			Realm: realm, UpBPS: up, DownBPS: down,
+			Realm: realm, UpBPS: up, DownBPS: down, Plugin: ssPluginSpec(o.Plugin),
 			Encryption: o.Encryption,
 			Type:       o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, Username: o.Username, Method: o.Method,
 			TLS: tls(), Options: protocolOptions(o),
@@ -1210,3 +1221,21 @@ func proxyEndpoint(eff *compile.Effective) string {
 }
 
 func (e *Engine) TUNStacks() []string { return sagernet.TUNStacks() }
+
+func ssPluginSpec(p *model.SSPlugin) *sagernet.SSPluginSpec {
+	if p == nil {
+		return nil
+	}
+	out := &sagernet.SSPluginSpec{Type: p.Type, Mode: p.Mode, Host: p.Host, Path: p.Path, Password: p.Password, Version: p.Version, HTTPUpgrade: p.HTTPUpgrade, FastOpen: p.FastOpen, Headers: http.Header{}}
+	out.Mux = p.Mux == nil || *p.Mux
+	for _, h := range p.Headers {
+		out.Headers.Add(h.Name, h.Value)
+	}
+	if t := p.TLS; t != nil {
+		out.TLS = &sagernet.TLSSpec{ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: t.Certificate, PrivateKey: t.PrivateKey}
+		if t.ECH != nil && t.ECH.Enabled {
+			out.TLS.ECH = &sagernet.ECHSpec{Config: t.ECH.Config, QueryServerName: t.ECH.QueryServerName}
+		}
+	}
+	return out
+}

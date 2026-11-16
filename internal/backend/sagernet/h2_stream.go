@@ -40,10 +40,19 @@ func newH2Stream(ctx context.Context, raw net.Conn, options option.V2RayHTTPOpti
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = time.Until(deadline)
 	}
+	// The pipe must be released even if the peer never accepts request data.
+	// A cancelled request alone cannot unblock an io.PipeWriter.
+	context.AfterFunc(requestCtx, func() {
+		writer.CloseWithError(requestCtx.Err())
+		reader.CloseWithError(requestCtx.Err())
+		raw.Close()
+	})
+	parentStop := context.AfterFunc(ctx, cancel)
 	timer := time.AfterFunc(timeout, cancel)
 	go func() {
 		response, err := client.RoundTrip(request)
 		timer.Stop()
+		parentStop()
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if err == nil && response.StatusCode != http.StatusOK {
@@ -59,6 +68,11 @@ func newH2Stream(ctx context.Context, raw net.Conn, options option.V2RayHTTPOpti
 			}
 		}
 		c.err = err
+		if err != nil {
+			writer.CloseWithError(err)
+			reader.CloseWithError(err)
+			cancel()
+		}
 		close(c.ready)
 	}()
 	return c, nil

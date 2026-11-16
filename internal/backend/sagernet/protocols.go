@@ -18,7 +18,10 @@ import (
 	"github.com/sagernet/sing-box/protocol/tuic"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/vmess"
+	"github.com/sagernet/sing-box/transport/sip003"
 	"github.com/sagernet/sing/common"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 	"io"
 	"strings"
@@ -26,6 +29,7 @@ import (
 )
 
 type ProxySpec struct {
+	Plugin                                         *SSPluginSpec
 	Realm                                          *RealmSpec
 	UpBPS, DownBPS                                 *uint64
 	Encryption                                     string
@@ -68,6 +72,7 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		return nil, fmt.Errorf("Realm applies only to Hysteria2")
 	}
 	var realmTransport *realmHTTPTransport
+	var plugin *ssPlugin
 	var bandwidthConfigured *atomic.Bool
 	multiplex, err := popMultiplex(values)
 	if err != nil {
@@ -76,13 +81,19 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	defer func() {
 		if returnErr == nil && result != nil {
 			if realmTransport != nil {
-				result = &realmOwnedOutbound{Outbound: result, transport: realmTransport}
+				result = &ownedResourceOutbound{Outbound: result, resource: realmTransport}
+			}
+			if plugin != nil {
+				result = &ownedResourceOutbound{Outbound: result, resource: plugin}
 			}
 			base := result
 			result, returnErr = wrapMultiplex(base, multiplex, b.componentLogger("multiplex", s.Type, tag))
 			if returnErr != nil {
 				common.Close(base)
 			}
+		}
+		if returnErr != nil && plugin != nil {
+			plugin.Close()
 		}
 		if returnErr != nil && realmTransport != nil {
 			realmTransport.CloseIdleConnections()
@@ -164,6 +175,17 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	ctx, err = streamContext(ctx, b.componentLogger("outbound", s.Type, tag), values, s.Server, s.Port)
 	if err != nil {
 		return nil, err
+	}
+	if s.Plugin != nil {
+		if s.Type != "shadowsocks" {
+			return nil, fmt.Errorf("SS plugins apply only to Shadowsocks")
+		}
+		ctx = context.WithValue(ctx, ssPluginFactoryKey{}, func(pluginCtx context.Context, base N.Dialer, dst M.Socksaddr) (sip003.Plugin, error) {
+			var createErr error
+			plugin, createErr = newSSPlugin(pluginCtx, b.componentLogger("plugin", s.Plugin.Type, tag), base, dst, *s.Plugin)
+			return plugin, createErr
+		})
+		values["plugin"] = "reka-scoped"
 	}
 	ctx, realmTransport, err = configureRealmContext(ctx, b.componentLogger("realm", s.Type, tag), values, s.Realm)
 	if err != nil {

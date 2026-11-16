@@ -266,3 +266,23 @@ Hysteria2 `server-ports` uses explicit `start:end` ranges, with
 `hop-interval-seconds`/`hop-interval-max-seconds` (minimum five seconds). Tests
 observe several destination ports during continuous TCP and UDP traffic; this
 does not assert reachability through every NAT or third-party Realm service.
+
+Shadowsocks accepts a `plugin` mapping. Implemented carriers currently include
+`{type: obfs, mode: http|tls, host: front.example}`,
+`{type: v2ray-plugin|gost-plugin, mode: websocket, host: front.example,
+path: /tunnel, mux: true, tls: {...}, headers: [{name: X-Key, value: ...}]}`,
+and `{type: shadow-tls, version: 1|2|3, host: front.example, password: ...,
+tls: {...}}`. ShadowTLS defaults to version 2; websocket plugin mux defaults
+to true. V2ray-plugin additionally supports `http-upgrade` and `fast-open`.
+Fast-open sends the encrypted payload before the upgrade response; the response
+is still checked before any reply is accepted. These are built-in Go carriers.
+
+Plugin TLS is independent of the node's Shadowsocks cipher. Websocket carriers
+support certificate pins, verification names, client PEM identities and scoped
+ECH; ShadowTLS supports ordinary certificate options and ClientHello presets.
+An explicit websocket Host header also sets SNI. Plugin passwords, TLS identities
+and header values are masked and participate in transport replacement. Physical
+sockets retain the node dialer/VPN protection. Native SS UDP bypasses the TCP
+carrier; enabling UoT sends UDP through it instead. SIP002 `plugin` query values
+support escaped SIP003 obfs-local/simple-obfs and v2ray-plugin options; unknown
+options are rejected, and `uot=1` takes precedence over a false UoT alias.

@@ -45,6 +45,7 @@ const (
 // Outbound is one proxy node or built-in action. Which fields apply depends
 // on Type; a field that does not apply is an error, not ignored.
 type Outbound struct {
+	Plugin            *SSPlugin            `yaml:"plugin"`
 	Encryption        string               `yaml:"encryption"`
 	UDPOverTCP        bool                 `yaml:"udp-over-tcp"`
 	UDPOverTCPVersion int                  `yaml:"udp-over-tcp-version"`
@@ -339,4 +340,20 @@ type Brutal struct {
 	Enabled bool   `yaml:"enabled"`
 	UpBPS   uint64 `yaml:"up-bps"`
 	DownBPS uint64 `yaml:"down-bps"`
+}
+
+// SSPlugin decorates only the Shadowsocks TCP carrier; native UDP remains
+// unchanged unless UDP-over-TCP is enabled.
+type SSPlugin struct {
+	Type        string               `yaml:"type"`
+	Mode        string               `yaml:"mode"`
+	Host        string               `yaml:"host"`
+	Path        string               `yaml:"path"`
+	TLS         *TLS                 `yaml:"tls"`
+	Mux         *bool                `yaml:"mux"`
+	Headers     []SubscriptionHeader `yaml:"headers"`
+	HTTPUpgrade bool                 `yaml:"http-upgrade"`
+	FastOpen    bool                 `yaml:"fast-open"`
+	Version     int                  `yaml:"version"`
+	Password    string               `yaml:"password"`
 }

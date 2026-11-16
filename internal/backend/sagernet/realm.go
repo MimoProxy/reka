@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -15,7 +14,6 @@ import (
 	ST "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	L "github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/service"
@@ -92,48 +90,9 @@ func configureRealmContext(ctx context.Context, logger log.ContextLogger, values
 	return ctx, transport, nil
 }
 
-type realmOwnedOutbound struct {
-	adapter.Outbound
-	transport *realmHTTPTransport
-	once      sync.Once
-	err       error
-}
-
-func (r *realmOwnedOutbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
-	if lifecycle, ok := r.Outbound.(adapter.Lifecycle); ok {
-		if err := lifecycle.Start(stage, scope); err != nil {
-			return err
-		}
+func (r *realmHTTPTransport) Close() error { r.CloseIdleConnections(); return nil }
+func (r *realmHTTPTransport) SetKeepIdleConnections(keep bool) {
+	if !keep {
+		r.CloseIdleConnections()
 	}
-	if stage == adapter.StartStateInitialize {
-		scope.Add(r.Close)
-	}
-	return nil
-}
-func (r *realmOwnedOutbound) Close() error {
-	r.once.Do(func() { r.err = common.Close(r.Outbound); r.transport.CloseIdleConnections() })
-	return r.err
-}
-func (r *realmOwnedOutbound) InterfaceUpdated(ctx context.Context) {
-	if base, ok := r.Outbound.(adapter.InterfaceUpdateListener); ok {
-		base.InterfaceUpdated(ctx)
-	}
-	r.transport.Reset()
-}
-func (r *realmOwnedOutbound) SetKeepIdleConnections(keep bool) {
-	if base, ok := r.Outbound.(adapter.IdleConnectionKeeper); ok {
-		base.SetKeepIdleConnections(keep)
-	}
-}
-func (r *realmOwnedOutbound) CloseIdleConnections() {
-	if base, ok := r.Outbound.(adapter.IdleConnectionKeeper); ok {
-		base.CloseIdleConnections()
-	}
-	r.transport.CloseIdleConnections()
-}
-func (r *realmOwnedOutbound) MultiplexEnabled() bool {
-	if base, ok := r.Outbound.(adapter.OutboundWithMultiplex); ok {
-		return base.MultiplexEnabled()
-	}
-	return false
 }

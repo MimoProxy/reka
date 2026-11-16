@@ -119,7 +119,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 		if ob.Kind != yaml.MappingNode {
 			return
 		}
-		for _, key := range []string{"protocol", "transport", "headers", "tls"} {
+		for _, key := range []string{"protocol", "transport", "headers", "tls", "plugin"} {
 			if v, err := child(ob, key, false, 0); err == nil {
 				nested(v, JoinPath(prefix, key))
 			}
@@ -219,7 +219,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				continue
 			}
 			path, value = unalias(path), unalias(value)
-			if strings.Contains(path.Value, "/protocol") || strings.Contains(path.Value, "/transport") || strings.Contains(path.Value, "/headers") || strings.Contains(path.Value, "/tls") {
+			if strings.Contains(path.Value, "/protocol") || strings.Contains(path.Value, "/transport") || strings.Contains(path.Value, "/headers") || strings.Contains(path.Value, "/tls") || strings.Contains(path.Value, "/plugin") {
 				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
 				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/password") || strings.HasSuffix(path.Value, "/user-key") || strings.HasSuffix(path.Value, "/token") || strings.HasSuffix(path.Value, "/value") || strings.HasSuffix(path.Value, "/certificate") || strings.HasSuffix(path.Value, "/private-key")) {
 					if !strings.HasPrefix(value.Value, SecretPrefix) {

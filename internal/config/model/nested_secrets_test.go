@@ -128,3 +128,32 @@ func TestRealmTokenMaskAndRestore(t *testing.T) {
 		t.Fatal("Realm token retention failed", err)
 	}
 }
+
+func TestPluginNestedSecretsAcrossDocuments(t *testing.T) {
+	for _, tc := range []struct{ kind, input string }{
+		{DocProfile, `schema-version: 1
+outbounds: [{id: node, type: shadowsocks, plugin: {password: plugin-private, headers: [{name: Authorization, value: header-private}], tls: {certificate: certificate-private, private-key: key-private}}}]
+`},
+		{DocSources, `schema-version: 1
+sources: [{id: source, outbounds: [{id: node, type: shadowsocks, plugin: {password: plugin-private, headers: [{name: Authorization, value: header-private}], tls: {certificate: certificate-private, private-key: key-private}}}]}]
+`},
+		{DocOverlay, `schema-version: 1
+patches: [{op: set, path: /outbounds/node/plugin, value: {password: plugin-private, headers: [{name: Authorization, value: header-private}], tls: {certificate: certificate-private, private-key: key-private}}}]
+`},
+	} {
+		original, ds := LoadDoc(tc.kind, []byte(tc.input))
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		masked, _ := LoadDoc(tc.kind, []byte(tc.input))
+		if n := masked.MaskSecrets(); n != 4 {
+			t.Fatal("plugin secrets not masked", tc.kind, n)
+		}
+		if strings.Contains(string(masked.Bytes()), "-private") {
+			t.Fatal("plugin credential leaked", tc.kind)
+		}
+		if err := masked.UnmaskSecrets(original); err != nil || !strings.Contains(string(masked.Bytes()), "plugin-private") {
+			t.Fatal("masked plugin values were not retained", err)
+		}
+	}
+}

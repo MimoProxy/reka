@@ -67,6 +67,7 @@ type Origin struct {
 // changes whenever anything that affects the instance changes, including
 // a resolved secret; equal fingerprints mean the instance can be reused.
 type Outbound struct {
+	Plugin            *model.SSPlugin            `json:"-"`
 	Encryption        string                     `json:"-"`
 	UDPOverTCP        bool                       `json:"udp-over-tcp,omitempty"`
 	UDPOverTCPVersion int                        `json:"udp-over-tcp-version,omitempty"`
@@ -321,7 +322,7 @@ var fieldsByType = map[string][]string{
 	"pass":               {}, "reject-drop": {},
 	model.OutboundHTTP:        {"server", "port", "username", "password", "tls", "headers"},
 	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp", "tls"},
-	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version"},
+	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version", "plugin"},
 	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "encryption", "packet-encoding", "tls", "udp", "transport", "multiplex"},
 	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
 	"trojan":                  {"server", "port", "password", "tls", "udp", "transport", "multiplex"},
@@ -474,6 +475,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		out.Encryption = c.resolveSecret(base+"/encryption", ob.Encryption)
 		switch ob.Type {
 		case model.OutboundShadowsocks:
+			out.Plugin = c.ssPlugin(base+"/plugin", ob.Plugin)
 			if !slices.Contains(ShadowsocksMethods, ob.Method) {
 				c.errorf(doc, base+"/method", "outbound.method", "unsupported method %q (supported: %s)", ob.Method, strings.Join(ShadowsocksMethods, ", "))
 			}
@@ -563,6 +565,7 @@ func (c *compiler) outbounds(eff *Effective) {
 			m.Statistic = false
 			identity.Multiplex = &m
 		}
+		plugin, _ := json.Marshal(identity.Plugin)
 		params, _ := json.Marshal(identity.Protocol)
 		transport, _ := json.Marshal(identity.Transport)
 		headers, _ := json.Marshal(identity.Headers)
@@ -570,7 +573,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		if identity.TLS != nil {
 			tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey
 		}
-		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(params), string(transport), string(headers), tlsSecrets)
+		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(plugin), string(params), string(transport), string(headers), tlsSecrets)
 	}
 }
 

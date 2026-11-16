@@ -13,3 +13,10 @@ The transport tests exchange encrypted streams in both directions with the
 unmodified reference implementation. They cover native/xorpub/random,
 1-RTT/0-RTT, combined X25519 and ML-KEM-768 keys and resumed sessions over
 loopback TCP. Product binaries do not import this module.
+
+`referencepeer` runs original pinned obfs, websocket/mux and ShadowTLS peers in
+an independent process. The compatibility CI job builds it, then sets
+`REKA_REFERENCE_PEER` while running Reka's native SS plugin tests. Ordinary
+platform jobs run the local controlled wire fixtures; they do not need the
+reference dependency graph. The reference process is never part of a product
+package.

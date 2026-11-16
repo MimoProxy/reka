@@ -96,6 +96,8 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		}
 	}
 	if typ == "ss" {
+		allowed["plugin"], allowed["plugin-opts"], allowed["client-fingerprint"] = true, true, true
+		c.convertSSPlugin(&r, out)
 		allowed["udp-over-tcp"], allowed["udp-over-tcp-version"] = true, true
 		out["udp-over-tcp"], out["udp-over-tcp-version"] = r.boolean("udp-over-tcp", false), r.number("udp-over-tcp-version", 0)
 	}

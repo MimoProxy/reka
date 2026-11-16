@@ -80,6 +80,25 @@ func TestClashTLSFileAttachmentsAreExplicitMaskedAndValidated(t *testing.T) {
 		t.Fatal("Realm identity exposed")
 	}
 
+	pluginRequest := req
+	pluginRequest.Data = `proxies: [{name: node, type: ss, server: node.test, port: 443, cipher: aes-128-gcm, password: test, plugin: shadow-tls, plugin-opts: {host: target.test, version: 3, password: outer-secret, certificate: /foreign/client.pem, private-key: /foreign/client.key}}]`
+	pluginRequest.CertificateFiles = nil
+	if Import(pluginRequest).Report.CanApply {
+		t.Fatal("unattached plugin identity accepted")
+	}
+	pluginRequest.CertificateFiles = req.CertificateFiles
+	pluginResult := Import(pluginRequest)
+	if !pluginResult.Report.CanApply {
+		t.Fatal(pluginResult.Report)
+	}
+	pluginTLS := compileImport(t, pluginResult).Outbounds[0].Plugin.TLS
+	if pluginTLS.Certificate != certPEM || pluginTLS.PrivateKey != keyPEM {
+		t.Fatal("plugin attachments changed")
+	}
+	if strings.Contains(pluginResult.Preview(false).Sources, "BEGIN ") {
+		t.Fatal("plugin identity exposed")
+	}
+
 	req.CertificateFiles["/foreign/client.key"] = certPEM
 	if Import(req).Report.CanApply {
 		t.Fatal("invalid key attachment accepted")
