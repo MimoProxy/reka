@@ -15,17 +15,20 @@ import (
 )
 
 type Provider struct {
-	ID       string
-	Name     string
-	Kind     string
-	Type     string
-	URL      string
-	Interval int
-	Headers  map[string][]string
-	Format   string
-	Behavior string
-	Health   object
-	Inline   []byte
+	Path, Proxy string
+	transform   *providerTransform
+	Fallback    []byte
+	ID          string
+	Name        string
+	Kind        string
+	Type        string
+	URL         string
+	Interval    int
+	Headers     map[string][]string
+	Format      string
+	Behavior    string
+	Health      object
+	Inline      []byte
 }
 
 func checkedDocument(data []byte) (*yaml.Node, error) {
@@ -174,7 +177,7 @@ func Providers(req Request) ([]Provider, error) {
 			}
 			for j := 0; j+1 < len(n.Content); j += 2 {
 				key := n.Content[j].Value
-				allowed := key == "type" || key == "url" || key == "interval" || key == "path" || key == "header" || key == "payload" || kind == "rule" && (key == "behavior" || key == "format")
+				allowed := key == "type" || key == "url" || key == "interval" || key == "path" || key == "header" || key == "payload" || key == "proxy" || kind == "proxy" && (key == "filter" || key == "exclude-filter" || key == "exclude-type" || key == "override") || kind == "rule" && (key == "behavior" || key == "format")
 				if key == "health-check" && kind == "proxy" {
 					allowed = true
 					health := get(n, key)
@@ -261,13 +264,33 @@ func Providers(req Request) ([]Provider, error) {
 					return nil, errors.New("provider_format_invalid")
 				}
 			}
+			p.Path, p.Proxy = text(get(n, "path")), text(get(n, "proxy"))
+			if kind == "proxy" {
+				p.transform, err = parseProviderTransform(n)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if payload := get(n, "payload"); !empty(payload) && len(payload.Content) > 0 {
+				if payload.Kind != yaml.SequenceNode || kind == "rule" && p.Format != "yaml" {
+					return nil, errors.New("provider_payload_invalid")
+				}
+				key := "proxies"
+				if kind == "rule" {
+					key = "payload"
+				}
+				wrapper := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, payload}}
+				p.Fallback = model.Format(wrapper)
+			}
 			switch p.Type {
 			case "http":
 				if p.URL == "" {
 					return nil, errors.New("provider_url_invalid")
 				}
-				if payload := get(n, "payload"); !empty(payload) && len(payload.Content) > 0 {
-					return nil, errors.New("provider_fallback_unsupported")
+
+			case "file":
+				if p.Path == "" {
+					return nil, errors.New("provider_path_invalid")
 				}
 			case "inline":
 				payload := get(n, "payload")
@@ -407,7 +430,14 @@ func ImportProviders(req Request, payloads map[string][]byte) Result {
 			continue
 		}
 		payload, _ := checkedDocument(data)
-		for _, node := range get(payload, "proxies").Content {
+		providerNodes := get(payload, "proxies").Content
+		if p.transform != nil {
+			providerNodes, err = p.transform.apply(providerNodes)
+			if err != nil {
+				return invalidBundle(req, err)
+			}
+		}
+		for _, node := range providerNodes {
 			n := copyNode(node)
 			name := text(get(n, "name"))
 			if strings.TrimSpace(name) == "" {

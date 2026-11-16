@@ -103,7 +103,7 @@ func Start(opts Options) (*Kernel, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	k := &Kernel{stateLock: stateLock, Service: svc, Handler: control.NewHandler(svc), cancel: cancel}
 
-	if err := svc.StartSubscriptions(service.RefreshOptions{Client: eng.SubscriptionClient()}); err != nil {
+	if err := svc.StartSubscriptions(service.RefreshOptions{Client: eng.SubscriptionClient(), ClientFor: eng.SubscriptionProxyClient}); err != nil {
 		k.Close()
 		return nil, err
 	}

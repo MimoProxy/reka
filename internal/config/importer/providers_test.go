@@ -45,7 +45,7 @@ func TestProviderMissingNestedAndUnsupported(t *testing.T) {
 		strings.Replace(providerInput, "use: [one, two]", "use: [missing]", 1),
 		strings.Replace(providerInput, "type: http", "type: file", 1),
 		strings.Replace(providerInput, "interval: 30", "interval: 1", 1),
-		strings.Replace(providerInput, "interval: 30", "override: {udp: true}", 1),
+		strings.Replace(providerInput, "interval: 30", "override: {unknown: true}", 1),
 	} {
 		if _, err := Providers(request(data)); err == nil {
 			t.Fatal("invalid provider accepted")

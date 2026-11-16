@@ -14,10 +14,13 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-vmess/packetaddr"
 	"github.com/sagernet/sing-vmess/vless"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 // vlessRealityOutbound is a VLESS client over Reka's own REALITY client.
@@ -27,7 +30,10 @@ import (
 //
 // Non-Vision streams may use a V2Ray transport and client-owned multiplex.
 type vlessRealityOutbound struct {
+	httpObfs       *httpObfsOptions
+	packetEncoding string
 	outbound.Adapter
+	h2         *option.V2RayHTTPOptions
 	transport  adapter.V2RayClientTransport
 	multiplex  *mux.Client
 	logger     log.ContextLogger
@@ -41,11 +47,10 @@ var _ adapter.Outbound = (*vlessRealityOutbound)(nil)
 
 func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag string, s VLESSSpec) (*vlessRealityOutbound, error) {
 	serverAddr := M.ParseSocksaddrHostPort(s.Server, s.Port)
-	outboundDialer, err := dialer.New(ctx, option.DialerOptions{}, serverAddr.IsDomain())
-	if err != nil {
-		return nil, err
-	}
 	var extra struct {
+		PacketEncoding *string `json:"packet_encoding"`
+		option.DialerOptions
+		HTTP      *httpObfsOptions                 `json:"reka_http"`
 		Transport *option.V2RayTransportOptions    `json:"transport"`
 		Multiplex *option.OutboundMultiplexOptions `json:"multiplex"`
 	}
@@ -54,10 +59,20 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 			return nil, err
 		}
 	}
-	if extra.Transport != nil && len(s.TLS.ALPN) == 0 {
+	if extra.BindInterface != "" {
+		if manager, ok := service.FromContext[adapter.NetworkManager](ctx).(*networkManager); ok && manager.protect != nil {
+			ctx = service.ExtendContext(ctx)
+			service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: manager.protect, explicitProtect: true})
+		}
+	}
+	outboundDialer, err := dialer.New(ctx, extra.DialerOptions, serverAddr.IsDomain())
+	if err != nil {
+		return nil, err
+	}
+	if (extra.Transport != nil || extra.HTTP != nil) && len(s.TLS.ALPN) == 0 {
 		copy := *s.TLS
 		s.TLS = &copy
-		if extra.Transport.Type == "grpc" {
+		if extra.Transport != nil && (extra.Transport.Type == "grpc" || extra.Transport.Type == "http") {
 			s.TLS.ALPN = []string{"h2"}
 		} else {
 			s.TLS.ALPN = []string{"http/1.1"}
@@ -71,16 +86,24 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 	if err != nil {
 		return nil, err
 	}
+	encoding := "xudp"
+	if extra.PacketEncoding != nil {
+		encoding = *extra.PacketEncoding
+	}
 	h := &vlessRealityOutbound{
-		Adapter:    outbound.NewAdapter("vless", tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
-		logger:     logger,
-		dialer:     outboundDialer,
-		serverAddr: serverAddr,
-		reality:    reality,
-		client:     client,
+		packetEncoding: encoding,
+		httpObfs:       extra.HTTP,
+		Adapter:        outbound.NewAdapter("vless", tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
+		logger:         logger,
+		dialer:         outboundDialer,
+		serverAddr:     serverAddr,
+		reality:        reality,
+		client:         client,
 	}
 
-	if extra.Transport != nil {
+	if extra.Transport != nil && extra.Transport.Type == "http" {
+		h.h2 = &extra.Transport.HTTPOptions
+	} else if extra.Transport != nil {
 		h.transport, err = v2ray.NewClientTransport(ctx, &realityTransportDialer{h}, serverAddr, *extra.Transport, nil)
 		if err != nil {
 			return nil, err
@@ -100,7 +123,14 @@ func (h *vlessRealityOutbound) connect(ctx context.Context) (net.Conn, error) {
 	if h.transport != nil {
 		return h.transport.DialContext(ctx)
 	}
-	return h.connectRaw(ctx)
+	c, err := h.connectRaw(ctx)
+	if err == nil && h.h2 != nil {
+		return newH2Stream(ctx, c, *h.h2)
+	}
+	if err == nil && h.httpObfs != nil {
+		c = newHTTPObfsConn(c, h.serverAddr.AddrString(), *h.httpObfs)
+	}
+	return c, err
 }
 func (h *vlessRealityOutbound) connectRaw(ctx context.Context) (net.Conn, error) {
 	conn, err := h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
@@ -132,7 +162,23 @@ func (h *vlessRealityOutbound) dialFramed(ctx context.Context, network string, d
 		return nil, fmt.Errorf("connect to %s: %w", h.serverAddr, err)
 	}
 	if N.NetworkName(network) == N.NetworkUDP {
-		return h.client.DialEarlyXUDPPacketConn(conn, destination)
+		switch h.packetEncoding {
+		case "packetaddr":
+			if destination.IsDomain() {
+				conn.Close()
+				return nil, errors.New("packetaddr requires a resolved IP destination")
+			}
+			framed, err := h.client.DialEarlyPacketConn(conn, M.Socksaddr{Fqdn: packetaddr.SeqPacketMagicAddress})
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return bufio.NewBindPacketConn(packetaddr.NewConn(framed, destination), destination), nil
+		case "":
+			return h.client.DialEarlyPacketConn(conn, destination)
+		default:
+			return h.client.DialEarlyXUDPPacketConn(conn, destination)
+		}
 	}
 	return h.client.DialEarlyConn(conn, destination)
 }
@@ -146,7 +192,23 @@ func (h *vlessRealityOutbound) packetFramed(ctx context.Context, destination M.S
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", h.serverAddr, err)
 	}
-	return h.client.DialEarlyXUDPPacketConn(conn, destination)
+	switch h.packetEncoding {
+	case "packetaddr":
+		if destination.IsDomain() {
+			conn.Close()
+			return nil, errors.New("packetaddr requires a resolved IP destination")
+		}
+		framed, err := h.client.DialEarlyPacketConn(conn, M.Socksaddr{Fqdn: packetaddr.SeqPacketMagicAddress})
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return packetaddr.NewConn(framed, destination), nil
+	case "":
+		return h.client.DialEarlyPacketConn(conn, destination)
+	default:
+		return h.client.DialEarlyXUDPPacketConn(conn, destination)
+	}
 }
 
 func (h *vlessRealityOutbound) DialContext(ctx context.Context, network string, d M.Socksaddr) (net.Conn, error) {

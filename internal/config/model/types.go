@@ -45,12 +45,16 @@ const (
 // Outbound is one proxy node or built-in action. Which fields apply depends
 // on Type; a field that does not apply is an error, not ignored.
 type Outbound struct {
-	Protocol  *Protocol  `yaml:"protocol"`
-	Transport *Transport `yaml:"transport"`
-	Multiplex *Multiplex `yaml:"multiplex"`
-	ID        string     `yaml:"id"`
-	Name      string     `yaml:"name"`
-	Type      string     `yaml:"type"`
+	UDPOverTCP        bool                 `yaml:"udp-over-tcp"`
+	UDPOverTCPVersion int                  `yaml:"udp-over-tcp-version"`
+	Headers           []SubscriptionHeader `yaml:"headers"`
+	Dialer            *Dialer              `yaml:"dialer"`
+	Protocol          *Protocol            `yaml:"protocol"`
+	Transport         *Transport           `yaml:"transport"`
+	Multiplex         *Multiplex           `yaml:"multiplex"`
+	ID                string               `yaml:"id"`
+	Name              string               `yaml:"name"`
+	Type              string               `yaml:"type"`
 
 	Server string `yaml:"server"`
 	Port   int    `yaml:"port"`
@@ -64,7 +68,7 @@ type Outbound struct {
 	UUID string `yaml:"uuid"` // vless
 	// Flow is "" or "xtls-rprx-vision".
 	Flow string `yaml:"flow"`
-	// PacketEncoding is "xudp" (default) or "none" for vless UDP.
+	// PacketEncoding is xudp (default), packetaddr, or none for raw VLESS UDP.
 	PacketEncoding string `yaml:"packet-encoding"`
 
 	TLS *TLS `yaml:"tls"` // http, vless
@@ -72,8 +76,12 @@ type Outbound struct {
 
 // TLS is client TLS for an outbound.
 type TLS struct {
-	ServerName string `yaml:"server-name"`
-	Insecure   bool   `yaml:"insecure"`
+	CertificatePin string `yaml:"certificate-sha256"`
+	VerifyName     string `yaml:"verify-name"`
+	Certificate    string `yaml:"certificate"`
+	PrivateKey     string `yaml:"private-key"`
+	ServerName     string `yaml:"server-name"`
+	Insecure       bool   `yaml:"insecure"`
 	// Fingerprint selects a uTLS ClientHello, for example "chrome".
 	Fingerprint string   `yaml:"fingerprint"`
 	ALPN        []string `yaml:"alpn"`
@@ -143,14 +151,15 @@ type Sources struct {
 }
 
 type Subscription struct {
-	Geodata      []GeoAsset           `yaml:"geodata" json:"geodata,omitempty"`
-	URL          string               `yaml:"url" json:"url"`
-	Format       string               `yaml:"format" json:"format,omitempty"`
-	Interval     int                  `yaml:"interval" json:"interval,omitempty"`
-	NodesOnly    bool                 `yaml:"nodes-only" json:"nodes_only,omitempty"`
-	AllowPartial bool                 `yaml:"allow-partial" json:"allow_partial,omitempty"`
-	Paused       bool                 `yaml:"paused" json:"paused,omitempty"`
-	Headers      []SubscriptionHeader `yaml:"headers" json:"headers,omitempty"`
+	ProviderDirectory string               `yaml:"provider-directory" json:"provider_directory,omitempty"`
+	Geodata           []GeoAsset           `yaml:"geodata" json:"geodata,omitempty"`
+	URL               string               `yaml:"url" json:"url"`
+	Format            string               `yaml:"format" json:"format,omitempty"`
+	Interval          int                  `yaml:"interval" json:"interval,omitempty"`
+	NodesOnly         bool                 `yaml:"nodes-only" json:"nodes_only,omitempty"`
+	AllowPartial      bool                 `yaml:"allow-partial" json:"allow_partial,omitempty"`
+	Paused            bool                 `yaml:"paused" json:"paused,omitempty"`
+	Headers           []SubscriptionHeader `yaml:"headers" json:"headers,omitempty"`
 }
 type SubscriptionHeader struct {
 	Name  string `yaml:"name" json:"name"`
@@ -273,6 +282,9 @@ type Obfs struct {
 	Host     string `yaml:"host"`
 }
 type Transport struct {
+	Method      string               `yaml:"method"`
+	Paths       []string             `yaml:"paths"`
+	Hosts       []string             `yaml:"hosts"`
 	Type        string               `yaml:"type"`
 	Path        string               `yaml:"path"`
 	Host        string               `yaml:"host"`

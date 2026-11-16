@@ -921,6 +921,7 @@ func cmdSubscription(args []string) error {
 	format := fs.String("format", "auto", "auto, clash or links")
 	nodes := fs.Bool("nodes-only", false, "only nodes, including declared proxy providers")
 	partial := fs.Bool("allow-partial", false, "explicitly accept supported subset")
+	providerDirectory := fs.String("provider-directory", "", "explicit local directory for file providers")
 	geoip := fs.String("geoip", "", "explicit GeoIP protobuf .dat URL or secret reference")
 	geosite := fs.String("geosite", "", "explicit GeoSite protobuf .dat URL or secret reference")
 	parse(fs, args[1:])
@@ -940,7 +941,7 @@ func cmdSubscription(args []string) error {
 	var spec *model.Subscription
 	switch action {
 	case "set":
-		spec = &model.Subscription{URL: fs.Arg(1), Interval: *interval, Format: *format, NodesOnly: *nodes, AllowPartial: *partial}
+		spec = &model.Subscription{ProviderDirectory: *providerDirectory, URL: fs.Arg(1), Interval: *interval, Format: *format, NodesOnly: *nodes, AllowPartial: *partial}
 		if *geoip != "" {
 			spec.Geodata = append(spec.Geodata, model.GeoAsset{ID: "geoip", URL: *geoip})
 		}

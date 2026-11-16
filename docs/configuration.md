@@ -64,7 +64,7 @@ Outbounds, groups and listeners need an `id`; rules may have one. IDs start with
 | `http` | `server`, `port`, `username`, `password`, `tls` (no `reality`) |
 | `socks` | `server`, `port`, `username`, `password`, `udp` (SOCKS5) |
 | `shadowsocks` | `server`, `port`, `method`, `password`, `udp` |
-| `vless` | `server`, `port`, `uuid`, `flow` (`xtls-rprx-vision`), `packet-encoding` (`xudp`), `tls`, `udp`, `transport`, `multiplex` |
+| `vless` | `server`, `port`, `uuid`, `flow` (`xtls-rprx-vision`), `packet-encoding` (`xudp`, `packetaddr`, `none`), `tls`, `udp`, `transport`, `multiplex` |
 | `vmess` | `server`, `port`, `uuid`, `tls`, `udp`, `protocol` (`security`, `alter-id`), `packet-encoding`, `transport`, `multiplex` |
 | `trojan` | `server`, `port`, `password`, `tls` (required), `udp`, `transport`, `multiplex` |
 | `hysteria2` | `server`, `port`, `password`, `tls` (required), `udp`, `protocol` (`up-mbps`, `down-mbps`, `obfs`) |
@@ -116,7 +116,7 @@ Named `rule-sets`, `sub-rules`, resource hashes and explicit GeoIP/GeoSite asset
 
 ### Secrets
 
-Any `password`, `uuid`, `username`, protocol `user-key`/obfs password or transport header value may be `secret://<name>`. Secrets live in the platform store (macOS Keychain, Windows DPAPI, the host's cipher on Android, a 0600 file on Linux) and are set with `rekactl secret set NAME` (value on stdin), which also re-applies the configuration. A first import (`reka -profile`) whose only problem is a secret that is not stored yet is kept as revision 1 and starts once the secret is set. Credentials written inline are masked as `********` when the configuration is read through the API; sending `********` back keeps the stored value.
+Any `password`, `uuid`, `username`, TLS client `certificate`/`private-key`, protocol `user-key`/obfs password or HTTP/transport header value may be `secret://<name>`. Secrets live in the platform store (macOS Keychain, Windows DPAPI, the host's cipher on Android, a 0600 file on Linux) and are set with `rekactl secret set NAME` (value on stdin), which also re-applies the configuration. A first import (`reka -profile`) whose only problem is a secret that is not stored yet is kept as revision 1 and starts once the secret is set. Credentials written inline are masked as `********` when the configuration is read through the API; sending `********` back keeps the stored value.
 
 ## Local settings
 
@@ -185,3 +185,29 @@ are 30 seconds and a 5-second minimum. An omitted/zero `port` is allowed when
 `ports` supplies the remote ports. Native profiles use `protocol.server-ports`
 with explicit `start:end` ranges and `hop-interval-seconds` /
 `hop-interval-max-seconds`.
+
+Per-node `dialer` accepts `interface-name`, uint32 `routing-mark`, `ip-version`
+(`dual`, `ipv4`, `ipv6`, `ipv4-prefer`, `ipv6-prefer`), `tfo`, and `mptcp`.
+These describe the physical socket, including its mandatory VPN protection.
+Unsupported host socket options return an error.
+
+Native HTTP CONNECT outbounds accept `headers: [{name: X-Key, value: ...}]`;
+configured username/password take precedence over `Proxy-Authorization`.
+Shadowsocks supports `udp-over-tcp: true` and `udp-over-tcp-version: 1|2`
+(default 1, matching Clash). VLESS `packetaddr` destinations use normal DNS,
+while proxy server addresses continue to use the proxy DNS scope.
+
+VLESS/VMess additionally accept `transport: {type: http, method: POST,
+paths: [/one, /two], headers: [{name: Host, value: front.example}]}` and
+`transport: {type: h2, hosts: [front.example], path: /tunnel}`. HTTP selects one
+path and one value per header per connection; H2 requires TLS. The Clash
+importer enables TLS for `network: h2` even when `tls` is omitted. REALITY
+supports these non-Vision transports too.
+
+TLS `certificate-sha256` is a SHA256 hex digest of the full DER certificate,
+with optional colon separators; it is separate from the uTLS ClientHello
+`fingerprint`. A pinned leaf is trusted directly; a pinned intermediate/root
+must validate the leaf's chain and name. `verify-name` verifies a different
+certificate name while retaining the configured SNI. `certificate` and
+`private-key` are a matching inline PEM client identity or secret references;
+these values are masked and participate in transport replacement.

@@ -3,6 +3,7 @@ package compile
 import (
 	"fmt"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"golang.org/x/net/http/httpguts"
 	"slices"
 	"strings"
 )
@@ -113,30 +114,46 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		copy := *ob.Transport
 		t := &copy
 		t.Headers = slices.Clone(t.Headers)
+		t.Paths = slices.Clone(t.Paths)
+		t.Hosts = slices.Clone(t.Hosts)
 		for i := range t.Headers {
 			t.Headers[i].Value = c.resolveSecret(fmt.Sprintf("%s/transport/headers/#%d/value", base, i), t.Headers[i].Value)
 		}
 		out.Transport = t
-		allowed := map[string][]string{"ws": {"type", "path", "host", "headers", "max-early-data", "early-data-header"}, "grpc": {"type", "service-name"}, "httpupgrade": {"type", "path", "host", "headers"}}
+		allowed := map[string][]string{"ws": {"type", "path", "host", "headers", "max-early-data", "early-data-header"}, "grpc": {"type", "service-name"}, "httpupgrade": {"type", "path", "host", "headers"}, "http": {"type", "paths", "method", "headers", "host"}, "h2": {"type", "hosts", "path"}}
 		for _, field := range c.present(base + "/transport") {
 			if !slices.Contains(allowed[t.Type], field) {
 				fail("transport/"+field, "option does not apply to this transport")
 			}
 		}
 		if ob.TLS != nil && len(ob.TLS.ALPN) > 0 {
-			if t.Type == "grpc" && !slices.Contains(ob.TLS.ALPN, "h2") {
-				fail("tls/alpn", "gRPC requires h2")
+			if (t.Type == "grpc" || t.Type == "h2") && !slices.Contains(ob.TLS.ALPN, "h2") {
+				fail("tls/alpn", "this transport requires h2")
 			}
-			if (t.Type == "ws" || t.Type == "httpupgrade") && (len(ob.TLS.ALPN) != 1 || ob.TLS.ALPN[0] != "http/1.1") {
+			if (t.Type == "ws" || t.Type == "httpupgrade" || t.Type == "http") && (len(ob.TLS.ALPN) != 1 || ob.TLS.ALPN[0] != "http/1.1") {
 				fail("tls/alpn", "WebSocket/HTTPUpgrade requires http/1.1")
 			}
 		}
 
-		if !slices.Contains([]string{"ws", "grpc", "httpupgrade"}, t.Type) {
+		if !slices.Contains([]string{"ws", "grpc", "httpupgrade", "http", "h2"}, t.Type) {
 			fail("transport/type", "unsupported transport")
 		}
 		if !slices.Contains([]string{"vless", "vmess", "trojan"}, ob.Type) {
 			fail("transport", "transport does not apply to protocol")
+		}
+		if (t.Type == "http" || t.Type == "h2") && ob.Type != "vless" && ob.Type != "vmess" {
+			fail("transport", "HTTP and H2 apply to VLESS and VMess")
+		}
+		if t.Type == "h2" && ob.TLS == nil {
+			fail("tls", "H2 requires TLS")
+		}
+		if t.Method != "" && !httpguts.ValidHeaderFieldName(t.Method) {
+			fail("transport/method", "invalid HTTP method")
+		}
+		for _, path := range t.Paths {
+			if strings.ContainsAny(path, "\r\n\x00") {
+				fail("transport/paths", "invalid HTTP path")
+			}
 		}
 		if ob.Flow != "" {
 			fail("flow", "Vision requires raw TCP")
@@ -145,7 +162,7 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 			fail("transport/max-early-data", "invalid early data limit")
 		}
 		for _, h := range t.Headers {
-			if strings.ContainsAny(h.Name+h.Value, "\r\n") {
+			if !httpguts.ValidHeaderFieldName(h.Name) || !httpguts.ValidHeaderFieldValue(h.Value) {
 				fail("transport/headers", "invalid header")
 			}
 		}

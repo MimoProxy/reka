@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -59,14 +61,33 @@ func TestProtocolInteroperability(t *testing.T) {
 			version        int
 		}{typ, "", true, 0})
 	}
+	for _, typ := range []string{"vmess", "vless"} {
+		for _, tr := range []string{"http", "http-tls", "h2"} {
+			cases = append(cases, struct {
+				typ, transport string
+				mux            bool
+				version        int
+			}{typ, tr, false, 0})
+		}
+	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/%s/mux-%v/v%d", tc.typ, tc.transport, tc.mux, tc.version), func(t *testing.T) {
 			port := freePort(t)
+			if tc.typ == "hysteria2" || tc.typ == "tuic" {
+				// Windows reserves different TCP and UDP ranges. A free TCP
+				// port is not evidence that a QUIC listener may bind UDP there.
+				packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				port = uint16(packet.LocalAddr().(*net.UDPAddr).Port)
+				packet.Close()
+			}
 			base := map[string]any{"listen": "127.0.0.1", "listen_port": port}
 			opts := map[string]any{}
 			users := []map[string]any{{"name": "test", "uuid": uuid, "password": password}}
 			base["users"] = users
-			if tc.typ == "trojan" || tc.typ == "hysteria2" || tc.typ == "tuic" {
+			if tc.typ == "trojan" || tc.typ == "hysteria2" || tc.typ == "tuic" || tc.transport == "http-tls" || tc.transport == "h2" {
 				tlsOptions := map[string]any{}
 				for k, v := range serverTLS {
 					tlsOptions[k] = v
@@ -95,7 +116,15 @@ func TestProtocolInteroperability(t *testing.T) {
 				} else {
 					transport["path"] = "/reka-test"
 				}
+				if tc.transport == "http" || tc.transport == "http-tls" || tc.transport == "h2" {
+					transport["type"] = "http"
+				}
 				base["transport"], opts["transport"] = transport, transport
+				if tc.transport == "http" || tc.transport == "http-tls" {
+					delete(opts, "transport")
+					opts["reka_http"] = map[string]any{"method": "POST", "paths": []string{"/reka-test"}, "headers": map[string][]string{"X-Test": []string{"proof"}}}
+					transport["method"] = "POST"
+				}
 			}
 			if tc.mux {
 				base["multiplex"] = map[string]any{"enabled": true}
@@ -155,8 +184,9 @@ func TestProtocolInteroperability(t *testing.T) {
 			optionBytes, _ := json.Marshal(opts)
 			spec := ProxySpec{Type: tc.typ, Server: "127.0.0.1", Port: port, UUID: uuid, Password: password, Options: optionBytes}
 			if base["tls"] != nil {
-				spec.TLS = &TLSSpec{ServerName: "localhost", Insecure: true, ALPN: []string{"h3"}}
-				if tc.typ == "trojan" {
+				pin := sha256.Sum256(cert.Certificate[0])
+				spec.TLS = &TLSSpec{CertificatePin: hex.EncodeToString(pin[:]), ServerName: "localhost", ALPN: []string{"h3"}}
+				if tc.typ == "trojan" || tc.transport == "h2" || tc.transport == "http-tls" {
 					spec.TLS.ALPN = nil
 				}
 			}
@@ -272,7 +302,7 @@ func TestProtocolInteroperability(t *testing.T) {
 }
 
 func TestRealityTransportAndMux(t *testing.T) {
-	for _, typ := range []string{"ws", "grpc", "httpupgrade", "smux"} {
+	for _, typ := range []string{"ws", "grpc", "httpupgrade", "http", "h2", "smux"} {
 		t.Run(typ, func(t *testing.T) {
 			target := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			target.EnableHTTP2 = true
@@ -292,8 +322,15 @@ func TestRealityTransportAndMux(t *testing.T) {
 				if typ == "grpc" {
 					value = map[string]any{"type": typ, "service_name": "reka"}
 				}
+				if typ == "h2" {
+					value["type"] = "http"
+				}
 				transport, _ = json.Marshal(value)
-				opts["transport"] = value
+				if typ == "http" {
+					opts["reka_http"] = map[string]any{"paths": []string{"/reka"}}
+				} else {
+					opts["transport"] = value
+				}
 			}
 			port := freePort(t)
 			server, err := StartRealityServer(RealityServerOptions{Listen: loopback(port), UUID: testUUID, ServerName: "reality.test", Target: address, PrivateKey: private.Bytes(), ShortID: "abcd", Transport: transport, Multiplex: typ == "smux"}, testLogger(t))

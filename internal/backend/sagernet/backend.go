@@ -58,6 +58,7 @@ const defaultHalfCloseTimeout = 2 * time.Second
 // from it are independent instances: each has its own lifecycle scope and can
 // be closed without touching the others.
 type Backend struct {
+	protect       control.Func
 	processLookup func(context.Context, Metadata) (string, bool)
 	resolver      *net.Resolver
 	ctx           context.Context
@@ -111,6 +112,7 @@ func New(opts Options) *Backend {
 			return perr
 		}
 	}
+	b.protect = protect
 	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: protect})
 	b.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		d := &net.Dialer{}
@@ -258,11 +260,12 @@ type VLESSSpec struct {
 
 // TLSSpec is client TLS. Fingerprint enables uTLS (for example "chrome").
 type TLSSpec struct {
-	ServerName  string
-	Insecure    bool
-	Fingerprint string
-	ALPN        []string
-	Reality     *RealitySpec
+	CertificatePin, VerifyName, Certificate, PrivateKey string
+	ServerName                                          string
+	Insecure                                            bool
+	Fingerprint                                         string
+	ALPN                                                []string
+	Reality                                             *RealitySpec
 }
 
 // RealitySpec is the client side of REALITY. X25519MLKEM768 keeps the
@@ -355,6 +358,10 @@ func (t *TLSSpec) build() *option.OutboundTLSOptions {
 		ServerName: t.ServerName,
 		Insecure:   t.Insecure,
 		ALPN:       t.ALPN,
+	}
+	if t.Certificate != "" {
+		o.ClientCertificate = []string{t.Certificate}
+		o.ClientKey = []string{t.PrivateKey}
 	}
 	if t.Fingerprint != "" {
 		o.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: t.Fingerprint}

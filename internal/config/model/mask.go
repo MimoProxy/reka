@@ -45,7 +45,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			for i := 0; i+1 < len(n.Content); i += 2 {
 				k, v := n.Content[i].Value, unalias(n.Content[i+1])
 				path := JoinPath(prefix, k)
-				if (k == "password" || k == "user-key" || k == "value") && v.Kind == yaml.ScalarNode && !strings.HasPrefix(v.Value, SecretPrefix) {
+				if (k == "password" || k == "user-key" || k == "certificate" || k == "private-key" || k == "value") && v.Kind == yaml.ScalarNode && !strings.HasPrefix(v.Value, SecretPrefix) {
 					fn(path, v)
 				} else {
 					nested(v, path)
@@ -119,7 +119,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 		if ob.Kind != yaml.MappingNode {
 			return
 		}
-		for _, key := range []string{"protocol", "transport"} {
+		for _, key := range []string{"protocol", "transport", "headers", "tls"} {
 			if v, err := child(ob, key, false, 0); err == nil {
 				nested(v, JoinPath(prefix, key))
 			}
@@ -216,9 +216,9 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				continue
 			}
 			path, value = unalias(path), unalias(value)
-			if strings.Contains(path.Value, "/protocol") || strings.Contains(path.Value, "/transport") {
+			if strings.Contains(path.Value, "/protocol") || strings.Contains(path.Value, "/transport") || strings.Contains(path.Value, "/headers") || strings.Contains(path.Value, "/tls") {
 				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
-				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/password") || strings.HasSuffix(path.Value, "/user-key") || strings.HasSuffix(path.Value, "/value")) {
+				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/password") || strings.HasSuffix(path.Value, "/user-key") || strings.HasSuffix(path.Value, "/value") || strings.HasSuffix(path.Value, "/certificate") || strings.HasSuffix(path.Value, "/private-key")) {
 					if !strings.HasPrefix(value.Value, SecretPrefix) {
 						fn(prefix, value)
 					}
@@ -320,11 +320,12 @@ func (d *Doc) UnmaskSecrets(base *Doc) error {
 		var old *yaml.Node
 		if base != nil {
 			old = unalias(base.Get(path))
-			if d.name == DocSources {
-				parts, _ := SplitPath(path)
-				if len(parts) == 6 && parts[0] == "sources" && parts[2] == "subscription" && parts[3] == "headers" {
-					prefix := JoinPath("", parts[:5]...)
-					a, b := unalias(d.Get(prefix+"/name")), unalias(base.Get(prefix+"/name"))
+			parts, _ := SplitPath(path)
+			if len(parts) > 0 && parts[len(parts)-1] == "value" {
+				prefix := JoinPath("", parts[:len(parts)-1]...)
+				a, b := unalias(d.Get(prefix+"/name")), unalias(base.Get(prefix+"/name"))
+				headerPath := len(parts) >= 3 && parts[len(parts)-3] == "headers"
+				if headerPath || a != nil || b != nil {
 					if a == nil || b == nil || !strings.EqualFold(a.Value, b.Value) {
 						err = fmt.Errorf("%s: masked header changed identity; supply its value again", path)
 						return

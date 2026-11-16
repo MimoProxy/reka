@@ -142,3 +142,23 @@ func TestSubscriptionChangingIntervalAndBundleBudget(t *testing.T) {
 		t.Fatal("bundle limit", err)
 	}
 }
+
+func TestDeclaredStartupFallbackDoesNotReplaceCommittedOrInvalidData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	defer server.Close()
+	f := fetcher(t)
+	batch := f.Batch(nil, true)
+	data, err := batch.FetchFallback(context.Background(), "p", "proxy", "p", server.URL, nil, 30, []byte("declared"))
+	if err != nil || string(data) != "declared" || !batch.Entries["p"].Fallback {
+		t.Fatal(err, batch.Entries)
+	}
+	next := f.Batch(batch.Entries, true)
+	if _, err = next.FetchFallback(context.Background(), "p", "proxy", "p", server.URL, nil, 30, []byte("different")); err == nil {
+		t.Fatal("committed resource replaced by fallback")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = f.Batch(nil, true).FetchFallback(ctx, "p", "proxy", "p", server.URL, nil, 30, []byte("declared")); err == nil {
+		t.Fatal("cancellation hidden by fallback")
+	}
+}

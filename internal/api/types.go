@@ -116,15 +116,16 @@ type RestoreRequest struct {
 }
 
 type SubscriptionStatus struct {
-	SourceID    string    `json:"source_id"`
-	State       string    `json:"state"`
-	Stale       bool      `json:"stale"`
-	LastAttempt time.Time `json:"last_attempt,omitempty"`
-	LastSuccess time.Time `json:"last_success,omitempty"`
-	NextAttempt time.Time `json:"next_attempt,omitempty"`
-	ErrorCode   string    `json:"error_code,omitempty"`
-	Revision    uint64    `json:"revision,omitempty"`
-	RootHash    string    `json:"root_hash,omitempty"`
+	FallbackResources []string  `json:"fallback_resources,omitempty"`
+	SourceID          string    `json:"source_id"`
+	State             string    `json:"state"`
+	Stale             bool      `json:"stale"`
+	LastAttempt       time.Time `json:"last_attempt,omitempty"`
+	LastSuccess       time.Time `json:"last_success,omitempty"`
+	NextAttempt       time.Time `json:"next_attempt,omitempty"`
+	ErrorCode         string    `json:"error_code,omitempty"`
+	Revision          uint64    `json:"revision,omitempty"`
+	RootHash          string    `json:"root_hash,omitempty"`
 }
 
 // Event is one entry of the event stream. Seq increases by one per event

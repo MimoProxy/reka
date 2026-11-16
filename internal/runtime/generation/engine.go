@@ -61,13 +61,14 @@ type EngineOptions struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
-	policies *policy.Manager
-	dns      *RD.Service
-	revision uint64
-	eff      *compile.Effective
-	router   *router.Router
-	outUDP   map[string]bool
-	inUDP    map[string]bool
+	policies   *policy.Manager
+	dns        *RD.Service
+	revision   uint64
+	eff        *compile.Effective
+	router     *router.Router
+	outUDP     map[string]bool
+	packetAddr map[string]bool
+	inUDP      map[string]bool
 }
 
 // Engine turns effective configurations into running generations: it
@@ -451,9 +452,10 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	p.done = true
 	eff := p.eff
 	_, previousGeneration := e.current()
-	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}}
+	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
+		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
 	}
 	for _, l := range eff.Listeners {
 		g.inUDP[l.ID] = l.UDP
@@ -560,16 +562,17 @@ func parseLevel(s string) slog.Level {
 }
 
 // usesUpstreamOutbound reports whether an outbound is built from the
-// upstream protocol packages with generic options: the protocols added for
-// subscriptions, and VLESS with a transport or multiplex but without
-// REALITY (REALITY uses Reka's own client).
+// upstream protocol packages with generic options. REALITY keeps Reka's own
+// handshake client; all other TLS protocols use the scoped component adapter.
 func usesUpstreamOutbound(o compile.Outbound) bool {
+	if (o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
+		return true
+	}
 	switch o.Type {
-	case "vmess", "trojan", "hysteria2", "tuic", "snell":
+	case "http", "socks", "vmess", "trojan", "hysteria2", "tuic", "snell":
 		return true
 	case "vless":
-		hasExtras := o.Transport != nil || o.Multiplex != nil
-		return hasExtras && (o.TLS == nil || o.TLS.Reality == nil)
+		return o.TLS == nil || o.TLS.Reality == nil
 	}
 	return false
 }
@@ -579,7 +582,7 @@ func specFor(o compile.Outbound) any {
 		if o.TLS == nil {
 			return nil
 		}
-		t := &sagernet.TLSSpec{ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
+		t := &sagernet.TLSSpec{CertificatePin: o.TLS.CertificatePin, VerifyName: o.TLS.VerifyName, Certificate: o.TLS.Certificate, PrivateKey: o.TLS.PrivateKey, ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
 		if r := o.TLS.Reality; r != nil {
 			t.Reality = &sagernet.RealitySpec{PublicKey: r.PublicKey, ShortID: r.ShortID, X25519MLKEM768: r.X25519MLKEM768}
 		}
@@ -587,7 +590,7 @@ func specFor(o compile.Outbound) any {
 	}
 	if usesUpstreamOutbound(o) {
 		return sagernet.ProxySpec{
-			Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password,
+			Type: o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, Username: o.Username, Method: o.Method,
 			TLS: tls(), Options: protocolOptions(o),
 		}
 	}
@@ -741,7 +744,25 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 		}
 	}
 	result := sagernet.Route{Outbound: out, Release: release, Info: info}
-	if fakeRelease != nil {
+	if md.Network == "udp" && md.Destination.Domain != "" && g.packetAddr[dec.Outbound] {
+		addresses, err := env.Resolve(ctx, md.Destination.Domain)
+		if err != nil || len(addresses) == 0 {
+			release()
+			return sagernet.Route{Info: info}
+		}
+		addr := addresses[0]
+		for _, a := range addresses {
+			if a.Unmap().Is4() {
+				addr = a.Unmap()
+				break
+			}
+		}
+		destination := md.Destination
+		destination.Domain = ""
+		destination.Addr = addr
+		result.Destination = &destination
+	}
+	if fakeRelease != nil && result.Destination == nil {
 		d := md.Destination
 		result.Destination = &d
 	}
@@ -952,6 +973,27 @@ func (e *Engine) ListenerInstance(id string) any {
 
 func protocolOptions(o compile.Outbound) json.RawMessage {
 	values := map[string]any{}
+	if d := o.Dialer; d != nil {
+		values["bind_interface"], values["routing_mark"], values["tcp_fast_open"], values["tcp_multi_path"] = d.Interface, d.RoutingMark, d.TFO, d.MPTCP
+		strategy := map[string]string{"ipv4": "ipv4_only", "ipv6": "ipv6_only", "ipv4-prefer": "prefer_ipv4", "ipv6-prefer": "prefer_ipv6"}[d.IPVersion]
+		if strategy != "" {
+			values["domain_strategy"] = strategy
+		}
+	}
+	if o.UDPOverTCP {
+		values["udp_over_tcp"] = map[string]any{"enabled": true, "version": o.UDPOverTCPVersion}
+	}
+	if len(o.Headers) > 0 {
+		headers := map[string][]string{}
+		for _, h := range o.Headers {
+			key := http.CanonicalHeaderKey(h.Name)
+			headers[key] = append(headers[key], h.Value)
+		}
+		if o.Username != "" {
+			delete(headers, "Proxy-Authorization")
+		}
+		values["headers"] = headers
+	}
 	if o.Type == "vmess" {
 		values["security"], values["packet_encoding"] = "auto", o.PacketEncoding
 	}
@@ -997,7 +1039,11 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		}
 	}
 	if o.Type == "vless" {
-		values["flow"], values["packet_encoding"] = o.Flow, o.PacketEncoding
+		encoding := o.PacketEncoding
+		if encoding == "none" {
+			encoding = ""
+		}
+		values["flow"], values["packet_encoding"] = o.Flow, encoding
 	}
 	if t := o.Transport; t != nil {
 		headers := map[string][]string{}
@@ -1010,6 +1056,10 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		}
 		transport := map[string]any{"type": t.Type}
 		switch t.Type {
+		case "http":
+			values["reka_http"] = map[string]any{"method": t.Method, "paths": t.Paths, "host": t.Host, "headers": headers}
+		case "h2":
+			transport["type"], transport["host"], transport["path"] = "http", t.Hosts, t.Path
 		case "ws":
 			transport["path"], transport["headers"], transport["max_early_data"], transport["early_data_header_name"] = t.Path, headers, t.EarlyData, t.EarlyHeader
 		case "grpc":
@@ -1021,7 +1071,9 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			}
 			transport["host"], transport["path"], transport["headers"] = host, t.Path, headers
 		}
-		values["transport"] = transport
+		if t.Type != "http" {
+			values["transport"] = transport
+		}
 	}
 	if m := o.Multiplex; m != nil {
 		values["multiplex"] = map[string]any{

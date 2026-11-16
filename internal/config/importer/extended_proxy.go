@@ -11,7 +11,12 @@ func (r *proxyReader) number(key string, def int) int {
 	if get(r.n, key) == nil {
 		return def
 	}
-	v, err := strconv.Atoi(r.str(key))
+	base := 10
+	if get(r.n, key).Tag == "!!int" {
+		base = 0
+	}
+	value, err := strconv.ParseInt(r.str(key), base, 64)
+	v := int(value)
 	if err != nil {
 		r.fail(key, "import.type", "expected an integer")
 	}
@@ -44,7 +49,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	p := object{}
 	switch nativeType {
 	case "vmess":
-		permit("uuid", "alterId", "cipher", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux", "packet-encoding")
+		permit("uuid", "alterId", "cipher", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "h2-opts", "http-opts", "smux", "packet-encoding")
 		out["uuid"] = r.str("uuid")
 		security := r.str("cipher")
 		if security == "" {
@@ -103,6 +108,8 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	if len(p) > 0 {
 		out["protocol"] = p
 	}
+	c.convertDialer(&r, out, allowed)
+	permitTLSExtras(nativeType, allowed)
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		key, v := n.Content[i].Value, n.Content[i+1]
 		if !allowed[key] {
@@ -114,6 +121,9 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	}
 	tlsEnabled := nativeType == "trojan" || nativeType == "hysteria2" || nativeType == "tuic"
 	tlsEnabled = r.boolean("tls", tlsEnabled)
+	if nativeType == "vmess" && r.str("network") == "h2" {
+		tlsEnabled = true
+	}
 	if nativeType == "snell" && tlsEnabled {
 		r.fail("tls", "import.tls", "Snell TLS is an obfs option, not outer TLS")
 	}
@@ -146,6 +156,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 			}
 		}
 	}
+	c.convertTLSExtras(&r, nativeType, out)
 	c.convertTransport(&r, out)
 	if !r.bad && !c.validateOutbound(out, n, path) {
 		r.bad = true
@@ -169,6 +180,8 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 			key = "grpc-opts"
 		case "httpupgrade":
 			key = "http-upgrade-opts"
+		case "http", "h2":
+			key = network + "-opts"
 		default:
 			r.fail("network", "import.transport", "unsupported transport")
 			return
@@ -178,10 +191,20 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 			for i := 0; i+1 < len(opts.Content); i += 2 {
 				field := opts.Content[i].Value
 				switch field {
+				case "method":
+					t["method"] = br.str(field)
 				case "path":
-					t["path"] = br.str(field)
+					if network == "http" {
+						t["paths"] = transportStrings(&br, opts, field)
+					} else {
+						t["path"] = br.str(field)
+					}
 				case "host":
-					t["host"] = br.str(field)
+					if network == "h2" {
+						t["hosts"] = transportStrings(&br, opts, field)
+					} else {
+						t["host"] = br.str(field)
+					}
 				case "grpc-service-name":
 					t["service-name"] = br.str(field)
 				case "max-early-data":
@@ -196,6 +219,12 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 						continue
 					}
 					for j := 0; j+1 < len(v.Content); j += 2 {
+						if network == "http" {
+							for _, value := range transportStrings(&br, v, v.Content[j].Value) {
+								headers = append(headers, object{"name": v.Content[j].Value, "value": value})
+							}
+							continue
+						}
 						if v.Content[j+1].Kind != yaml.ScalarNode {
 							br.fail(field, "import.type", "headers must be scalar")
 							continue
@@ -236,4 +265,23 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 			r.fail(key, "import.transport", "transport options require network")
 		}
 	}
+}
+
+// Clash HTTP obfuscation selects one value from each configured list.
+func transportStrings(r *proxyReader, n *yaml.Node, key string) []string {
+	v := get(n, key)
+	if v == nil || v.Kind != yaml.SequenceNode {
+		r.fail(key, "import.transport", "expected a list of strings")
+		return nil
+	}
+	values := []string{}
+	for _, item := range v.Content {
+		item = deref(item)
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			r.fail(key, "import.transport", "expected a list of strings")
+			continue
+		}
+		values = append(values, item.Value)
+	}
+	return values
 }

@@ -101,6 +101,7 @@ func HTTPClientWithControl(control func(string, string, syscall.RawConn) error, 
 }
 
 type Entry struct {
+	Fallback bool      `json:"fallback,omitempty"`
 	Checked  time.Time `json:"checked,omitempty"`
 	Request  string    `json:"request"`
 	Hash     string    `json:"hash"`
@@ -228,4 +229,20 @@ func (b *Batch) record(id, kind, name string, data []byte, entry Entry) ([]byte,
 	b.Entries[id] = entry
 	b.Locks = append(b.Locks, model.ResourceLock{ID: id, Kind: kind, Name: name, Hash: hash, Request: entry.Request})
 	return data, nil
+}
+
+// FetchFallback materializes the explicitly declared startup payload only on
+// an initial network/status failure. A previously committed resource or an
+// invalid response never silently becomes the fallback. Its request identity
+// is distinct from HTTP, so the next refresh attempts the real URL again.
+func (b *Batch) FetchFallback(ctx context.Context, id, kind, name, raw string, headers http.Header, interval int, fallback []byte) ([]byte, error) {
+	data, err := b.Fetch(ctx, id, kind, name, raw, headers, interval)
+	if err == nil || len(fallback) == 0 || ctx.Err() != nil || b.Previous[id].Hash != "" {
+		return data, err
+	}
+	code := Code(err)
+	if code != "request_failed" && !strings.HasPrefix(code, "http_status_") {
+		return nil, err
+	}
+	return b.record(id, kind, name, fallback, Entry{Fallback: true, Request: resource.Hash(append([]byte("declared-startup-fallback:"), fallback...)), Next: time.Now().UTC().Add(time.Duration(interval) * time.Second)})
 }

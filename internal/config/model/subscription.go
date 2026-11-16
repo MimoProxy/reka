@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -22,6 +23,9 @@ func ValidSubscription(s *Subscription) error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Fragment != "" {
 			return errors.New("subscription URL must be HTTP(S) or a secret reference")
 		}
+	}
+	if s.ProviderDirectory != "" && (!filepath.IsAbs(s.ProviderDirectory) || strings.ContainsRune(s.ProviderDirectory, 0)) {
+		return errors.New("provider-directory must be an absolute local directory")
 	}
 	if s.Format != "" && s.Format != "auto" && s.Format != "clash" && s.Format != "links" {
 		return errors.New("subscription format must be auto, clash or links")

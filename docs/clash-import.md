@@ -75,3 +75,22 @@ The existing `ValidateConfiguration`, `PlanConfiguration` and `CommitConfigurati
 ```
 
 Whole documents/patches are built first, then import replaces/inserts the named source. A single request can also update profile references or an overlay when these must change atomically. Incomplete imports return `invalid` with their diagnostics, leaving the active revision unchanged. Import request data participates in operation identity; the normalized four documents participate in the plan hash. `ImportSource` preview output with masked credentials is for review; submit the original input in the transaction, not its masked preview.
+
+### File providers, transformations and download routes
+
+Set the local subscription `provider-directory` (or `rekactl subscription set
+-provider-directory /absolute/directory ...`) before refreshing file providers.
+Provider `path` values resolve inside that directory using `os.Root`; traversal,
+absolute paths and symlinks escaping the root fail. Pure import never reads files:
+`ImportProviders` accepts already loaded and locked resource bytes.
+
+Proxy-provider filters run against original names, in backtick-separated filter
+priority, before overrides. Structured overrides, regex name replacement,
+prefix/suffix and the pinned reference's `override-expr` subset run before node
+validation. Unknown options or invalid output reject the bundle.
+
+A provider's `proxy` uses an already active outbound/group; missing or rejected
+routes fail without direct fallback. An HTTP provider may declare startup
+`payload`: on its initial transport/status failure this is locked as the actual
+resource and listed in `fallback_resources`. A later failure preserves the
+committed snapshot. Invalid response bodies do not select startup fallback.

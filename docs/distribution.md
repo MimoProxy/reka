@@ -69,3 +69,20 @@ Go forbids overlays inside its module cache, so `tools/build-overlay.py` makes a
 CI runs native tests on six hosted OS/architecture combinations; Android hosted CI only builds the library. The dedicated self-hosted ARM64 Android workflow runs the device harness. Actual run results and pending gates are recorded separately from workflow definitions. Runner labels follow [GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
 The pinned component overlays also synchronize Vision TLS classification and SOCKS UDP remote-address state, retain TLS object pointers through `unsafe.Add`, and validate the expected TLS buffer layout. Vision and SOCKS UDP tests run under the ordinary race detector with checkptr enabled; no corresponding race exemptions remain in the default build. The original sing/sing-vmess copies and module cache are verified unchanged.
+
+The TLS client overlay exposes a scoped configuration hook for whole-certificate
+SHA256 pinning and independent certificate verification names. The pinned STD
+and uTLS source hashes are checked before applying it. A build without this
+hook rejects configurations requiring these checks instead of ignoring them.
+Hysteria2's Chrome QUIC TLS path uses its supported peer-certificate callback.
+
+Provider override expressions adapt a standalone GPL-3.0-or-later component
+from mihomo v1.19.34; [origin and local changes](../internal/compat/providerexpr/ORIGIN.md)
+are shipped with the corresponding source. The runtime, router, refresh service
+and configuration transactions remain Reka implementations.
+
+The sing cached-connection overlay serializes access to cached TCP/reader/UDP
+prefix buffers without holding a lock during underlying network reads. Closing
+a connection cannot release a buffer while it is being consumed. `WriteTo`
+also consumes its cached prefix once. Repeated real protocol shutdown and
+read/close ownership tests run with the race detector and checkptr enabled.
