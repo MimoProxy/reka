@@ -48,11 +48,13 @@ import (
 
 // Options configure a Service.
 type Options struct {
-	DeferNetwork bool
-	StateRoot    string
-	Secrets      secret.Store
-	Engine       *generation.Engine
-	Logger       *slog.Logger
+	DeferNetwork     bool
+	ProfileSecrets   func(string) (secret.Store, error)
+	RuntimeStateRoot string
+	StateRoot        string
+	Secrets          secret.Store
+	Engine           *generation.Engine
+	Logger           *slog.Logger
 	// InitialProfile and InitialLocal become revision 1 when the state
 	// root is empty. Without them revision 1 is an empty profile.
 	InitialProfile []byte
@@ -87,16 +89,18 @@ func errf(code, format string, args ...any) *Error {
 
 // Service is the ConfigService.
 type Service struct {
-	uploadMu  sync.Mutex
-	uploads   map[string]*resourceUpload
-	refreshMu sync.Mutex
-	refresh   *RefreshManager
-	closed    bool
-	opts      Options
-	store     *store.Store
-	engine    *generation.Engine
-	events    *Broker
-	log       *slog.Logger
+	profileArchives map[string]map[string]bool
+	profiles        *ProfileWorkspace
+	uploadMu        sync.Mutex
+	uploads         map[string]*resourceUpload
+	refreshMu       sync.Mutex
+	refresh         *RefreshManager
+	closed          bool
+	opts            Options
+	store           *store.Store
+	engine          *generation.Engine
+	events          *Broker
+	log             *slog.Logger
 
 	mu       sync.Mutex
 	active   uint64
@@ -123,7 +127,11 @@ func Open(opts Options) (*Service, error) {
 	if opts.Engine == nil {
 		return nil, fmt.Errorf("runtime engine required")
 	}
-	if err := s.engine.DNSState(filepath.Join(opts.StateRoot, "cache", "fake-ip.json")); err != nil {
+	runtimeRoot := opts.RuntimeStateRoot
+	if runtimeRoot == "" {
+		runtimeRoot = opts.StateRoot
+	}
+	if err := s.engine.DNSState(filepath.Join(runtimeRoot, "cache", "fake-ip.json")); err != nil {
 		return nil, fmt.Errorf("restore fake-IP state: %w", err)
 	}
 	if s.log == nil {
@@ -787,6 +795,10 @@ func (s *Service) GetConfiguration(reveal bool) Configuration {
 		Effective:   s.eff,
 		Diagnostics: s.warnings,
 	}
+	if s.profiles != nil {
+		c.ProfileID = s.profiles.cursor.ProfileID
+		c.ProfileEpoch = s.profiles.cursor.Epoch
+	}
 	if s.startErr != nil {
 		c.StartError = s.startErr.Error()
 	}
@@ -848,6 +860,10 @@ func (s *Service) RestoreRevision(ctx context.Context, req RestoreRequest) (Resu
 
 // Close stops the runtime.
 func (s *Service) Close() {
+	if s.profiles != nil {
+		s.profiles.gate.Lock()
+		defer s.profiles.gate.Unlock()
+	}
 	s.refreshMu.Lock()
 	s.closed = true
 	m := s.refresh
@@ -856,6 +872,9 @@ func (s *Service) Close() {
 		m.Close()
 	}
 	s.engine.Close()
+	if s.profiles != nil {
+		s.profiles.Close()
+	}
 }
 
 // sameInstances reports whether two compilations of the same documents

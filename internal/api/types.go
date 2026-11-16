@@ -97,15 +97,17 @@ type PlanResult struct {
 
 // Configuration is the answer to GetConfiguration.
 type Configuration struct {
-	Revision    uint64             `json:"revision"`
-	Profile     string             `json:"profile"`
-	Local       string             `json:"local"`
-	Sources     string             `json:"sources"`
-	Overlay     string             `json:"overlay"`
-	Masked      int                `json:"masked,omitempty"`
-	Effective   *compile.Effective `json:"effective,omitempty"`
-	Diagnostics model.Diagnostics  `json:"diagnostics,omitempty"`
-	StartError  string             `json:"start_error,omitempty"`
+	ProfileID    string             `json:"profile_id,omitempty"`
+	ProfileEpoch uint64             `json:"profile_epoch,omitempty"`
+	Revision     uint64             `json:"revision"`
+	Profile      string             `json:"profile"`
+	Local        string             `json:"local"`
+	Sources      string             `json:"sources"`
+	Overlay      string             `json:"overlay"`
+	Masked       int                `json:"masked,omitempty"`
+	Effective    *compile.Effective `json:"effective,omitempty"`
+	Diagnostics  model.Diagnostics  `json:"diagnostics,omitempty"`
+	StartError   string             `json:"start_error,omitempty"`
 }
 
 // RestoreRequest restores an old revision as a new one.

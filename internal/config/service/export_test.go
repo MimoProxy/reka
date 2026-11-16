@@ -156,9 +156,11 @@ func TestExportReferencesRecognizeWholeAndChildOverlayOperations(t *testing.T) {
 	first := resource.Hash([]byte("first"))
 	second := resource.Hash([]byte("second"))
 	third := resource.Hash([]byte("third"))
+	geo := resource.Hash([]byte("geodata"))
 	overlay := fmt.Sprintf("patches:\n - {op: set, path: /rule-sets, value: [{id: first, hash: %s}]}\n - {op: set, path: /rule-sets/source~1second, value: {id: source/second, hash: %s}}\n - {op: set, path: /rule-sets/third/hash, value: %s}\n - {op: set, path: /outbounds/not-a-resource/password, value: %s}\n", first, second, third, resource.Hash([]byte("not-a-resource")))
+	overlay += fmt.Sprintf(" - {op: insert, path: /geodata, value: {kind: geoip, hash: %s}}\n", geo)
 	refs, err := exportReferences([]byte(DefaultProfile), nil, []byte(overlay))
-	if err != nil || len(refs) != 3 || !containsExportHash(refs, first) || !containsExportHash(refs, second) || !containsExportHash(refs, third) {
+	if err != nil || len(refs) != 4 || !containsExportHash(refs, geo) || !containsExportHash(refs, first) || !containsExportHash(refs, second) || !containsExportHash(refs, third) {
 		t.Fatal(refs, err)
 	}
 }

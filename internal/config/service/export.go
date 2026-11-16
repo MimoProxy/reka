@@ -95,7 +95,11 @@ func (s *Service) ReadResource(req api.ReadResourceRequest) (api.ReadResourceRes
 	if err != nil {
 		return result, err
 	}
-	if !containsExportHash(refs, req.Hash) {
+	allowed := containsExportHash(refs, req.Hash)
+	if req.ArchiveHash != "" {
+		allowed = s.profileArchives[req.ArchiveHash][req.Hash]
+	}
+	if !allowed {
 		return result, errf(CodeNotFound, "resource is not referenced by the active configuration")
 	}
 	data, err := resource.At(s.store.Root()).Read(req.Hash)
@@ -170,7 +174,7 @@ func exportReferences(profile, sources, overlay []byte) ([]string, error) {
 			continue
 		}
 		parts := strings.Split(strings.TrimPrefix(patch.Path, "/"), "/")
-		if len(parts) == 0 || parts[0] != "rule-sets" {
+		if len(parts) == 0 || (parts[0] != "rule-sets" && parts[0] != "geodata") {
 			continue
 		}
 		if len(parts) == 3 && parts[2] == "hash" {

@@ -24,11 +24,17 @@ import (
 
 // Options configure Start.
 type Options struct {
-	DeferNetwork      bool
-	ProcessInfoLookup func(context.Context, sagernet.Metadata) (sagernet.ProcessInfo, bool)
-	ProcessLookup     func(context.Context, sagernet.Metadata) (string, bool)
-	TUNFD             int
-	StateRoot         string
+	FailPoint          func(string) error
+	InitialArchiveHash string
+	ProfileRoot        string
+	ProfileID          string
+	ProfileNested      bool
+	ProfileResume      bool
+	DeferNetwork       bool
+	ProcessInfoLookup  func(context.Context, sagernet.Metadata) (sagernet.ProcessInfo, bool)
+	ProcessLookup      func(context.Context, sagernet.Metadata) (string, bool)
+	TUNFD              int
+	StateRoot          string
 	// Secrets defaults to the platform store for StateRoot.
 	Secrets  secret.Store
 	Logger   *slog.Logger
@@ -68,16 +74,49 @@ func Start(opts Options) (*Kernel, error) {
 	if opts.StateRoot == "" {
 		return nil, errors.New("state root is required")
 	}
+	var workspace *service.ProfileWorkspace
+	runtimeRoot := opts.StateRoot
+	if opts.ProfileRoot != "" {
+		if opts.EditDir != "" {
+			return nil, errors.New("profile workspace requires candidate-file watching disabled")
+		}
+		var err error
+		workspace, err = service.OpenProfileWorkspace(opts.ProfileRoot, opts.ProfileID, opts.ProfileNested, opts.ProfileResume)
+		if err != nil {
+			return nil, err
+		}
+		opts.StateRoot, err = workspace.StateRoot()
+		if err != nil {
+			workspace.Close()
+			return nil, err
+		}
+		runtimeRoot, err = workspace.RuntimeRoot()
+		if err != nil {
+			workspace.Close()
+			return nil, err
+		}
+	}
 	stateLock, err := platform.LockStateRoot(opts.StateRoot)
 	if err != nil {
+		if workspace != nil {
+			workspace.Close()
+		}
 		return nil, err
 	}
 	success := false
 	defer func() {
 		if !success {
 			stateLock.Close()
+			if workspace != nil {
+				workspace.Close()
+			}
 		}
 	}()
+	if workspace != nil {
+		if err := workspace.LockRuntime(); err != nil {
+			return nil, err
+		}
+	}
 	if opts.LogLevel == nil {
 		opts.LogLevel = new(slog.LevelVar)
 	}
@@ -97,14 +136,24 @@ func Start(opts Options) (*Kernel, error) {
 	bopts.ProtectFD = opts.Protect
 	bopts.ProcessLookup = opts.ProcessLookup
 	bopts.ProcessInfoLookup = opts.ProcessInfoLookup
-	eng := generation.NewEngine(generation.EngineOptions{Backend: bopts, LogLevel: opts.LogLevel, StateRoot: opts.StateRoot, TUNFD: opts.TUNFD})
+	eng := generation.NewEngine(generation.EngineOptions{Backend: bopts, LogLevel: opts.LogLevel, StateRoot: runtimeRoot, TUNFD: opts.TUNFD})
+	if opts.InitialArchiveHash != "" {
+		if err := service.InstallInitialProfileArchive(opts.StateRoot, opts.InitialArchiveHash, eng.ProcessLookup()); err != nil {
+			eng.Close()
+			return nil, err
+		}
+	}
 	svc, err := service.Open(service.Options{
-		DeferNetwork: opts.DeferNetwork,
-		StateRoot:    opts.StateRoot, Secrets: opts.Secrets, Engine: eng, Logger: opts.Logger,
+		DeferNetwork: opts.DeferNetwork, RuntimeStateRoot: runtimeRoot, FailPoint: opts.FailPoint,
+		StateRoot: opts.StateRoot, Secrets: opts.Secrets, Engine: eng, Logger: opts.Logger,
 		InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal, InitialSources: opts.InitialSources, InitialOverlay: opts.InitialOverlay,
 	})
 	if err != nil {
 		eng.Close()
+		return nil, err
+	}
+	if err = svc.BindProfiles(workspace); err != nil {
+		svc.Close()
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())

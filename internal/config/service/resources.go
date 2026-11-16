@@ -21,9 +21,14 @@ func (s *Service) StageResource(req api.StageResourceRequest) (api.StageResource
 	if !resource.ValidHash(req.Hash) || req.Size < 0 || req.Size > resource.MaxSize || req.Offset < 0 || len(req.Data) > 1<<20 || req.Offset > req.Size || len(req.Data) > req.Size-req.Offset {
 		return result, errf(CodeBadRequest, "invalid resource hash, size, offset or chunk (maximum 1 MiB)")
 	}
+	root, err := s.ActiveProfileResourceRoot(req.ProfileID)
+	if err != nil {
+		return result, err
+	}
+	uploadKey := root + "\x00" + req.Hash
 	s.uploadMu.Lock()
 	defer s.uploadMu.Unlock()
-	store, err := resource.Open(s.store.Root())
+	store, err := resource.Open(root)
 	if err != nil {
 		return result, err
 	}
@@ -43,7 +48,7 @@ func (s *Service) StageResource(req api.StageResourceRequest) (api.StageResource
 			delete(s.uploads, hash)
 		}
 	}
-	upload := s.uploads[req.Hash]
+	upload := s.uploads[uploadKey]
 	if upload == nil {
 		if req.Offset != 0 {
 			return result, errf(CodeConflict, "resource upload expired or is missing; restart at offset zero")
@@ -52,7 +57,7 @@ func (s *Service) StageResource(req api.StageResourceRequest) (api.StageResource
 			return result, errf(CodeBlocked, "four resource uploads are already in progress")
 		}
 		upload = &resourceUpload{size: req.Size, updated: now}
-		s.uploads[req.Hash] = upload
+		s.uploads[uploadKey] = upload
 	}
 	if upload.size != req.Size {
 		return result, errf(CodeConflict, "resource upload size changed")
@@ -72,7 +77,7 @@ func (s *Service) StageResource(req api.StageResourceRequest) (api.StageResource
 	if result.Received != req.Size {
 		return result, nil
 	}
-	delete(s.uploads, req.Hash)
+	delete(s.uploads, uploadKey)
 	if resource.Hash(upload.data) != req.Hash {
 		return result, errf(CodeInvalid, "uploaded resource SHA-256 does not match")
 	}
