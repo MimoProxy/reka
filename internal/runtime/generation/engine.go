@@ -621,7 +621,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 	if o.Multiplex != nil && o.Multiplex.Enabled && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
 	}
-	if (o.Plugin != nil || o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
+	if (o.TLS != nil && o.TLS.Carrier != nil || o.Plugin != nil || o.Dialer != nil || o.UDPOverTCP || len(o.Headers) > 0 || (o.Type == "socks" && o.TLS != nil)) && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
 	}
 	switch o.Type {
@@ -638,7 +638,7 @@ func specFor(o compile.Outbound) any {
 		if o.TLS == nil {
 			return nil
 		}
-		t := &sagernet.TLSSpec{CertificatePin: o.TLS.CertificatePin, VerifyName: o.TLS.VerifyName, Certificate: o.TLS.Certificate, PrivateKey: o.TLS.PrivateKey, ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
+		t := &sagernet.TLSSpec{Carrier: tlsCarrierSpec(o.TLS.Carrier), CertificatePin: o.TLS.CertificatePin, VerifyName: o.TLS.VerifyName, Certificate: o.TLS.Certificate, PrivateKey: o.TLS.PrivateKey, ServerName: o.TLS.ServerName, Insecure: o.TLS.Insecure, Fingerprint: o.TLS.Fingerprint, ALPN: o.TLS.ALPN}
 		if ech := o.TLS.ECH; ech != nil && ech.Enabled {
 			t.ECH = &sagernet.ECHSpec{Config: ech.Config, QueryServerName: ech.QueryServerName}
 		}
@@ -1238,4 +1238,11 @@ func ssPluginSpec(p *model.SSPlugin) *sagernet.SSPluginSpec {
 		}
 	}
 	return out
+}
+
+func tlsCarrierSpec(c *model.TLSCarrier) *sagernet.TLSCarrierSpec {
+	if c == nil {
+		return nil
+	}
+	return &sagernet.TLSCarrierSpec{Type: c.Type, Username: c.Username, Password: c.Password, Version: c.Version, VersionHint: c.VersionHint, Script: c.Script}
 }

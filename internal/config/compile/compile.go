@@ -97,16 +97,17 @@ type Outbound struct {
 
 // TLS is validated client TLS.
 type TLS struct {
-	ECH            *model.ECH `json:"ech,omitempty"`
-	CertificatePin string     `json:"certificate-sha256,omitempty"`
-	VerifyName     string     `json:"verify-name,omitempty"`
-	Certificate    string     `json:"-"`
-	PrivateKey     string     `json:"-"`
-	ServerName     string     `json:"server-name,omitempty"`
-	Insecure       bool       `json:"insecure,omitempty"`
-	Fingerprint    string     `json:"fingerprint,omitempty"`
-	ALPN           []string   `json:"alpn,omitempty"`
-	Reality        *Reality   `json:"reality,omitempty"`
+	Carrier        *model.TLSCarrier `json:"-"`
+	ECH            *model.ECH        `json:"ech,omitempty"`
+	CertificatePin string            `json:"certificate-sha256,omitempty"`
+	VerifyName     string            `json:"verify-name,omitempty"`
+	Certificate    string            `json:"-"`
+	PrivateKey     string            `json:"-"`
+	ServerName     string            `json:"server-name,omitempty"`
+	Insecure       bool              `json:"insecure,omitempty"`
+	Fingerprint    string            `json:"fingerprint,omitempty"`
+	ALPN           []string          `json:"alpn,omitempty"`
+	Reality        *Reality          `json:"reality,omitempty"`
 }
 
 // Reality is validated REALITY client configuration.
@@ -577,7 +578,8 @@ func (c *compiler) outbounds(eff *Effective) {
 		headers, _ := json.Marshal(identity.Headers)
 		tlsSecrets := ""
 		if identity.TLS != nil {
-			tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey
+			carrier, _ := json.Marshal(identity.TLS.Carrier)
+			tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey + "\x00" + string(carrier)
 		}
 		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(plugin), string(params), string(transport), string(headers), tlsSecrets)
 	}
@@ -600,7 +602,7 @@ func isIP(s string) bool {
 func (c *compiler) tls(path string, ob model.Outbound) *TLS {
 	const doc = model.DocProfile
 	t := ob.TLS
-	out := &TLS{ECH: t.ECH, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: c.resolveSecret(path+"/certificate", t.Certificate), PrivateKey: c.resolveSecret(path+"/private-key", t.PrivateKey), ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
+	out := &TLS{Carrier: c.tlsCarrier(path+"/carrier", ob), ECH: t.ECH, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: c.resolveSecret(path+"/certificate", t.Certificate), PrivateKey: c.resolveSecret(path+"/private-key", t.PrivateKey), ServerName: t.ServerName, Insecure: t.Insecure, Fingerprint: t.Fingerprint, ALPN: t.ALPN}
 	if ech := t.ECH; ech != nil && ech.Enabled {
 		if ech.Config != "" {
 			data, err := base64.StdEncoding.DecodeString(ech.Config)
@@ -638,7 +640,7 @@ func (c *compiler) tls(path string, ob model.Outbound) *TLS {
 	if strings.ContainsAny(t.VerifyName, " /\\\r\n\x00") {
 		c.errorf(doc, path+"/verify-name", "tls.verify-name", "invalid certificate verification name")
 	}
-	if t.Fingerprint != "" && !slices.Contains(Fingerprints, t.Fingerprint) {
+	if t.Fingerprint != "" && (t.Carrier == nil || t.Carrier.Type == "shadow-tls") && !slices.Contains(Fingerprints, t.Fingerprint) {
 		c.errorf(doc, path+"/fingerprint", "tls.fingerprint", "unknown fingerprint %q (supported: %s)", t.Fingerprint, strings.Join(Fingerprints, ", "))
 	}
 	if t.Reality == nil {

@@ -131,7 +131,8 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if s.Type == "socks" {
 		values["version"] = "5"
 	}
-	ctx, configured := configureTLSContext(configureECHContext(detourContext(b.ctx, s.Detour), s.TLS), s.TLS)
+	ctx, carrierConfigured := configureTLSCarrierContext(detourContext(b.ctx, s.Detour), s.TLS)
+	ctx, configured := configureTLSContext(configureECHContext(ctx, s.TLS), s.TLS)
 	if s.Type == "hysteria2" && (s.UpBPS != nil || s.DownBPS != nil) {
 		bandwidthConfigured = &atomic.Bool{}
 		ctx = context.WithValue(ctx, "reka.hysteria.bandwidth.v1", func(up, down *uint64) {
@@ -152,6 +153,11 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		values["detour"] = "reka-detour"
 	}
 	defer func() {
+		if returnErr == nil && carrierConfigured != nil && !carrierConfigured.Load() {
+			common.Close(result)
+			result = nil
+			returnErr = fmt.Errorf("required security carrier overlay is unavailable")
+		}
 		if returnErr == nil && bandwidthConfigured != nil && !bandwidthConfigured.Load() {
 			common.Close(result)
 			result = nil

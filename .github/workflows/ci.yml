@@ -33,7 +33,7 @@ jobs:
       - name: Native SS plugins against reference peers
         run: |
           python3 tools/build-overlay.py
-          CGO_ENABLED=1 REKA_REFERENCE_PEER="$GITHUB_WORKSPACE/bin/referencepeer" go test -modfile bin/build.mod -overlay bin/build-overlay.json -race -tags "$TAGS" -ldflags "$LDFLAGS" ./internal/backend/sagernet -run '^TestSSPluginsAgainstPinnedReference$' -count=3
+          CGO_ENABLED=1 REKA_REFERENCE_PEER="$GITHUB_WORKSPACE/bin/referencepeer" go test -modfile bin/build.mod -overlay bin/build-overlay.json -race -tags "$TAGS" -ldflags "$LDFLAGS" ./internal/backend/sagernet -run '^Test(SSPlugins|TLSCarriers)AgainstPinnedReference$' -count=3
 
   # Jobs named "test" run the tests on that platform; jobs named "build"
   # only compile.

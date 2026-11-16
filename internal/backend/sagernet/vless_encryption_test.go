@@ -64,6 +64,7 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 			{"", "", "", false}, {"", "", "xtls-rprx-vision", false}, {"ws", "", "xtls-rprx-vision", false}, {"httpupgrade", "", "xtls-rprx-vision", false}, {"grpc", "", "xtls-rprx-vision", false}, {"h2", "tls", "xtls-rprx-vision", false}, {"", "tls", "xtls-rprx-vision", false}, {"", "reality", "xtls-rprx-vision", false},
 			{"http", "", "xtls-rprx-vision", false}, {"http", "tls", "xtls-rprx-vision", false}, {"http", "reality", "xtls-rprx-vision", false}, {"ws", "reality", "xtls-rprx-vision", false}, {"h2", "reality", "xtls-rprx-vision", false},
 			{"", "tls", "xtls-rprx-vision", true}, {"", "reality", "xtls-rprx-vision", true}, {"ws", "reality", "xtls-rprx-vision", true},
+			{"", "shadow-tls", "xtls-rprx-vision", true}, {"ws", "restls", "xtls-rprx-vision", false}, {"h2", "jls", "xtls-rprx-vision", true},
 		} {
 			t.Run(fmt.Sprintf("%s/%s/%s/%s/mux%v", mode, tc.transport, tc.tlsMode, tc.flow, tc.mux), func(t *testing.T) {
 				private, public, _, err := VE.GenX25519("")
@@ -135,6 +136,17 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer server.Close()
+				if tc.tlsMode == "shadow-tls" || tc.tlsMode == "restls" || tc.tlsMode == "jls" {
+					carrier := SSPluginSpec{Type: tc.tlsMode, Host: "plugin.test", Version: 3, Password: "outer-secret", Username: "outer-user", VersionHint: "tls13", ClientFingerprint: "chrome"}
+					external, tls := pluginTestPeer(t, carrier, loopback(port))
+					port = external
+					clientTLS = tls
+					if clientTLS == nil {
+						clientTLS = &TLSSpec{ServerName: "plugin.test"}
+					}
+					clientTLS.Fingerprint = "chrome"
+					clientTLS.Carrier = &TLSCarrierSpec{Type: carrier.Type, Version: carrier.Version, Password: carrier.Password, Username: carrier.Username, VersionHint: carrier.VersionHint}
+				}
 				b := New(Options{Logger: testLogger(t)})
 				defer b.Close()
 				raw, _ := json.Marshal(clientOptions)

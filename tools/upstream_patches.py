@@ -500,12 +500,14 @@ def shadowtls_record_writes(source):
     if receiver=='shadowConn':
         source=replace(source,'"net"','"net"\n"sync"')
     source=replace(source,'type '+receiver+' struct {','type '+receiver+' struct {\n writeAccess sync.Mutex')
-    source=replace(source,'func (c *'+receiver+') Write(p []byte) (n int, err error) {','func (c *'+receiver+') Write(p []byte) (n int, err error) {\n c.writeAccess.Lock();defer c.writeAccess.Unlock()')
+    source=replace(source,'func (c *'+receiver+') Write(p []byte) (n int, err error) {','func (c *'+receiver+') Write(p []byte) (n int, err error) {\n c.writeAccess.Lock();defer c.writeAccess.Unlock();return c.writeRecords(p)\n}\nfunc(c *'+receiver+')writeRecords(p []byte)(n int,err error){')
     if receiver=='verifiedConn':
         start=source.index('func (c *verifiedConn) Write(p []byte)')
         end=source.index('\nfunc (c *verifiedConn) write(',start)
         source=source[:start]+'''func(c *verifiedConn)Write(p []byte)(n int,err error){
- c.writeAccess.Lock();defer c.writeAccess.Unlock()
+ c.writeAccess.Lock();defer c.writeAccess.Unlock();return c.writeRecords(p)
+}
+func(c *verifiedConn)writeRecords(p []byte)(n int,err error){
  for len(p)>0{
   size:=len(p);if size>16384{size=16384}
   written,err:=c.write(p[:size]);n+=written
@@ -526,9 +528,11 @@ def shadowtls_record_writes(source):
     replacement='''func(c *'''+receiver+''')WriteVectorised(buffers []*buf.Buffer)error{
  // A vector can exceed the TLS record length. The ordinary writer already
  // splits records, maintains the correct rolling HMAC, and reports errors.
+ // Hold the lock across the entire logical vector, including v2 authentication.
+ c.writeAccess.Lock();defer c.writeAccess.Unlock()
  defer buf.ReleaseMulti(buffers)
  for _,buffer:=range buffers{
-  written,err:=c.Write(buffer.Bytes());if err!=nil{return err}
+  written,err:=c.writeRecords(buffer.Bytes());if err!=nil{return err}
   if written!=buffer.Len(){return io.ErrShortWrite}
  }
  return nil
@@ -657,3 +661,24 @@ def restls_disabled_debug_reads(source):
 MODULES['github.com/metacubex/restls-client-go'] = ('v0.1.9', {
     'conn.go': ('2f9ed3be4dd2499288f08093cceeb8721dd3b8075fa7f5b03d07e4a7a2aa3325',restls_disabled_debug_reads),
 })
+
+
+def security_carrier_factory(source):
+    return replace(source, 'func NewClientWithOptions(options ClientOptions) (Config, error) {\n\tif !options.Options.Enabled {\n\t\treturn nil, nil\n\t}', '''func NewClientWithOptions(options ClientOptions) (Config, error) {
+ if !options.Options.Enabled { return nil,nil }
+ if factory,ok:=options.Context.Value("reka.tls.client.v1").(func(context.Context,logger.ContextLogger,string,option.OutboundTLSOptions)(Config,error));ok{
+  return factory(options.Context,options.Logger,options.ServerAddress,options.Options)
+ }''')
+
+MODULES['github.com/sagernet/sing-box'][1]['common/tls/client.go'] = ('c251099384a473024e96e81efba8a8ab60fd8666f50e2ab299d75f7f2aaa1030', security_carrier_factory)
+
+
+def shadowtls_v2_auth_publication(source):
+    source=replace(source,'import (','import (\n"sync"')
+    source=replace(source,'type clientConn struct {','type clientConn struct {\n clientAccess sync.Mutex')
+    source=replace(source,'return &clientConn{newConn(hashConn.Conn), hashConn}','return &clientConn{shadowConn:newConn(hashConn.Conn),hashConn:hashConn}')
+    for signature in ['Write(p []byte) (n int, err error)','WriteVectorised(buffers []*buf.Buffer) error']:
+        source=replace(source,'func (c *clientConn) '+signature+' {','func (c *clientConn) '+signature+' {\n c.clientAccess.Lock();defer c.clientAccess.Unlock()')
+    return source
+
+MODULES['github.com/sagernet/sing-shadowtls'][1]['v2_client.go'] = ('cfd360330e85fc9cc002fede7334e6fcaea75704115fa2ef20203a34753d9172',shadowtls_v2_auth_publication)

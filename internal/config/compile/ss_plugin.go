@@ -116,6 +116,9 @@ func (c *compiler) ssPlugin(path string, value *model.SSPlugin) *model.SSPlugin 
 		}
 	}
 	if p.TLS != nil {
+		if p.TLS.Carrier != nil {
+			fail("tls/carrier", "SS plugins already select their own carrier")
+		}
 		if p.TLS.Reality != nil {
 			fail("tls/reality", "plugin TLS does not use REALITY")
 		}

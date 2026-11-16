@@ -130,6 +130,7 @@ func legacyPluginPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, 
 	var handshake func(context.Context, net.Conn) (net.Conn, error)
 	var clientTLS *TLSSpec
 	target := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	target.EnableHTTP2 = true
 	if s.Type == "restls" {
 		version := uint16(tls.VersionTLS13)
 		if s.VersionHint == "tls12" {

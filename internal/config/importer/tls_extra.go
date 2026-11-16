@@ -9,7 +9,11 @@ import (
 func tlsExtraKeys(typ string) []string {
 	switch typ {
 	case "http", "socks5", "vless", "vmess", "trojan", "hysteria2", "hy2", "tuic":
-		return []string{"fingerprint", "name-cert-verify", "certificate", "private-key", "ech-opts"}
+		keys := []string{"fingerprint", "name-cert-verify", "certificate", "private-key", "ech-opts"}
+		if typ == "vmess" || typ == "vless" || typ == "trojan" {
+			keys = append(keys, "shadow-tls-opts", "restls-opts", "jls-opts")
+		}
+		return keys
 	}
 	return nil
 }
@@ -21,6 +25,10 @@ func permitTLSExtras(typ string, allowed map[string]bool) {
 func (c *converter) convertTLSExtras(r *proxyReader, typ string, out object) {
 	for _, key := range tlsExtraKeys(typ) {
 		if get(r.n, key) == nil {
+			continue
+		}
+		if key == "shadow-tls-opts" || key == "restls-opts" || key == "jls-opts" {
+			c.convertTLSCarrier(r, key, out)
 			continue
 		}
 		if key == "ech-opts" {

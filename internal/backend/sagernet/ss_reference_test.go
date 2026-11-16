@@ -123,3 +123,52 @@ func TestSSPluginsAgainstPinnedReference(t *testing.T) {
 		})
 	}
 }
+
+func startPinnedCarrierPeer(t *testing.T, configuration map[string]any) (string, string) {
+	t.Helper()
+	program := os.Getenv("REKA_REFERENCE_PEER")
+	if program == "" {
+		t.Skip("pinned original peer runs in the compatibility-reference job")
+	}
+	encoded, _ := json.Marshal(configuration)
+	command := exec.Command(program)
+	command.Stdin = bytes.NewReader(encoded)
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logFile, err := os.Create(filepath.Join(t.TempDir(), "peer.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logFile.Close() })
+	command.Stderr = logFile
+	if err = command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { command.Process.Kill(); command.Wait() })
+	type response struct{ Address, Pin string }
+	ready := make(chan response, 1)
+	failed := make(chan error, 1)
+	go func() {
+		var info response
+		if err := json.NewDecoder(io.LimitReader(output, 8192)).Decode(&info); err != nil {
+			failed <- err
+		} else {
+			ready <- info
+		}
+	}()
+	select {
+	case info := <-ready:
+		address, err := netip.ParseAddrPort(info.Address)
+		if err != nil || !address.Addr().IsLoopback() {
+			t.Fatal("invalid reference listener", info.Address)
+		}
+		return info.Address, info.Pin
+	case err := <-failed:
+		t.Fatal("reference startup", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("reference startup timed out")
+	}
+	return "", ""
+}

@@ -146,6 +146,9 @@ func (d *pluginHandshakeDialer) DialContext(ctx context.Context, network string,
 }
 
 func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, dst M.Socksaddr, s SSPluginSpec) (*ssPlugin, error) {
+	if s.TLS != nil && s.TLS.Carrier != nil {
+		return nil, errors.New("SS plugin already selects its security carrier")
+	}
 	base = &pluginHandshakeDialer{base}
 	p := &ssPlugin{}
 	var tlsConfig S.Config

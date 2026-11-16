@@ -78,7 +78,17 @@ type Outbound struct {
 }
 
 // TLS is client TLS for an outbound.
+type TLSCarrier struct {
+	Type        string `yaml:"type"`
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
+	Version     int    `yaml:"version"`
+	VersionHint string `yaml:"version-hint"`
+	Script      string `yaml:"script"`
+}
 type TLS struct {
+	Carrier *TLSCarrier `yaml:"carrier"`
+
 	ECH            *ECH   `yaml:"ech"`
 	CertificatePin string `yaml:"certificate-sha256"`
 	VerifyName     string `yaml:"verify-name"`

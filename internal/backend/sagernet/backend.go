@@ -266,6 +266,7 @@ type VLESSSpec struct {
 
 // TLSSpec is client TLS. Fingerprint enables uTLS (for example "chrome").
 type TLSSpec struct {
+	Carrier                                             *TLSCarrierSpec
 	ECH                                                 *ECHSpec
 	CertificatePin, VerifyName, Certificate, PrivateKey string
 	ServerName                                          string

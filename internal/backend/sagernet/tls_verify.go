@@ -16,7 +16,7 @@ import (
 )
 
 func configureTLSContext(ctx context.Context, s *TLSSpec) (context.Context, *atomic.Bool) {
-	if s == nil || s.CertificatePin == "" && s.VerifyName == "" {
+	if s == nil || s.Carrier != nil || s.CertificatePin == "" && s.VerifyName == "" {
 		return ctx, nil
 	}
 	configured := &atomic.Bool{}

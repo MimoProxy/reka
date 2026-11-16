@@ -173,7 +173,10 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		case "packet", "packetaddr":
 			addr = true
 			xudp = false
-		case "", "xudp":
+		case "", "xudp", "none":
+			if encoding == "none" {
+				c.diag(get(n, "packet-encoding"), path+"/packet-encoding", "import.ignored-field", "the pinned reference treats none as its default packet selection; native raw UDP is selected separately", false)
+			}
 			if !addr {
 				xudp = true
 			}
@@ -237,6 +240,10 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 						if key != "public-key" && key != "short-id" && key != "support-x25519mlkem768" {
 							rr.fail(key, "import.unsupported-field", "unknown REALITY option")
 						}
+					}
+					if tls["insecure"] == true {
+						tls["insecure"] = false
+						c.diag(get(n, "skip-cert-verify"), path+"/skip-cert-verify", "import.ignored-field", "REALITY authenticates its configured public key; this certificate flag has no effect", false)
 					}
 					tls["reality"] = object{"public-key": rr.str("public-key"), "short-id": rr.str("short-id"), "x25519mlkem768": rr.boolean("support-x25519mlkem768", false)}
 					r.bad = r.bad || rr.bad

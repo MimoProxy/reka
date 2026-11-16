@@ -5,6 +5,7 @@ import "testing"
 func TestClashVLESSPacketSelection(t *testing.T) {
 	for _, tc := range []struct{ fields, want string }{
 		{"", "xudp"}, {", xudp: false", "xudp"}, {", packet-addr: true", "packetaddr"},
+		{", packet-encoding: none", "xudp"}, {", packet-encoding: none, packet-addr: true", "packetaddr"},
 		{", packet-addr: true, xudp: true", "xudp"},
 		{", packet-encoding: packetaddr, xudp: true", "packetaddr"},
 		{", packet-encoding: packet", "packetaddr"},

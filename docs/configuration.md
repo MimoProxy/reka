@@ -310,3 +310,20 @@ Automatic groups accept `expected-status`, such as `204/300-399` or `200,204`.
 Clash imports explicitly select `*` when omitted, matching the reference. Provider
 health checks propagate their own ranges to generated health groups. Group
 filters use bounded .NET regular expressions and backtick-separated priority.
+
+VMess, VLESS and Trojan can select `tls.carrier` as an alternative stream
+security handshake. Its `type` is `shadow-tls` (`version`, `password`), `restls`
+(`password`, `version-hint`, `script`) or `jls` (`username`, `password`). Other
+TLS fields choose the camouflage name, ALPN and ClientHello. Restls and
+ShadowTLS use the ordinary certificate verification options; JLS authenticates
+its credentials. Modes are mutually exclusive with REALITY/ECH. Secrets are
+resolved and fingerprinted but omitted from effective-state JSON.
+
+Clash imports map `shadow-tls-opts`, `restls-opts` and `jls-opts` on these three
+protocols. Active options require TLS. Inert empty options preserve a plaintext
+node. ECH and ordinary certificate options that the reference ignores for the
+selected carrier are diagnosed explicitly. REALITY's `skip-cert-verify` flag is
+also reported as inert; public-key authentication remains required. Vision over
+Restls/ShadowTLS or native JLS requires VLESS encryption, matching the reference's
+supported TLS connection types. The tested encrypted combinations include
+stream transports and generic multiplexing.

@@ -38,3 +38,30 @@ outbounds:
 		t.Fatal("plugin credential rotation replaced the wrong transports")
 	}
 }
+
+func TestSecurityCarrierSecretsFingerprintAndMaskedEffective(t *testing.T) {
+	secrets := store(t)
+	secrets.Set("carrier/user", "private-user")
+	secrets.Set("carrier/password", "private-password")
+	input := `schema-version: 1
+outbounds: [{id: a, type: vless, server: node.test, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: {server-name: camo.test, carrier: {type: jls, username: 'secret://carrier/user', password: 'secret://carrier/password'}}}]`
+	first, ds := Compile([]byte(input), nil, Options{Secrets: secrets})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if first.Outbounds[0].TLS.Carrier.Username != "private-user" {
+		t.Fatal("username unresolved")
+	}
+	raw, _ := json.Marshal(first)
+	if strings.Contains(string(raw), "private-") {
+		t.Fatal("effective state leaked carrier credentials")
+	}
+	secrets.Set("carrier/password", "private-password-rotated")
+	second, ds := Compile([]byte(input), nil, Options{Secrets: secrets})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if second.Outbounds[0].Fingerprint == first.Outbounds[0].Fingerprint {
+		t.Fatal("security credential rotation reused old transport")
+	}
+}
