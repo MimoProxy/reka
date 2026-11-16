@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
+	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/resource"
 	"go.yaml.in/yaml/v3"
 )
@@ -330,8 +331,7 @@ func (c *compiler) layers(profile []byte) {
 							n.Value = "rule-set:" + from.Value + "/" + strings.TrimPrefix(n.Value, "rule-set:")
 						}
 						if strings.Contains(n.Value, "#") {
-							v, ref, _ := strings.Cut(n.Value, "#")
-							n.Value = v + "#" + scoped(from.Value, ref)
+							n.Value = RD.RemapEndpointTarget(n.Value, func(ref string) string { return scoped(from.Value, ref) })
 						}
 					}
 					if n.Kind == yaml.MappingNode {

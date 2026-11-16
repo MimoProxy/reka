@@ -319,6 +319,12 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 	primaryCancel()
 	fallback := err != nil || m != nil && m.Rcode != D.RcodeSuccess
 	if useFallback {
+		for _, p := range s.cfg.Filter.GeoSite {
+			if !strings.HasPrefix(p, "rule-set:") && !strings.HasPrefix(p, "geosite:") {
+				p = "geosite:" + strings.ToLower(p)
+			}
+			fallback = fallback || s.Match(p, domain, netip.Addr{})
+		}
 		for _, p := range s.cfg.Filter.Domain {
 			fallback = fallback || s.Match(p, domain, netip.Addr{})
 		}
@@ -395,6 +401,11 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 			return nil, err
 		}
 		ep.PreferH3 = s.cfg.PreferH3 && ep.Scheme == "https"
+		if ep.Disabled(q.Question[0].Qtype) {
+			m := new(D.Msg)
+			m.SetReply(q)
+			return m, nil
+		}
 		if ep.Scheme == "system" {
 			if s.opts.System == nil {
 				last = errors.New("system resolver unavailable")
@@ -428,7 +439,7 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 		if s.opts.Exchange == nil {
 			return nil, errors.New("DNS exchange unavailable")
 		}
-		m, err := s.opts.Exchange(ctx, ep, q, func(ctx context.Context, d string) ([]netip.Addr, error) {
+		m, err := s.opts.Exchange(ctx, ep, ep.Request(q), func(ctx context.Context, d string) ([]netip.Addr, error) {
 			if scope == "bootstrap" {
 				return nil, errors.New("DNS bootstrap cycle")
 			}

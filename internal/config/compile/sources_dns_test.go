@@ -74,3 +74,19 @@ func TestTransportHeaderSecretRotation(t *testing.T) {
 		t.Fatal("secret rotation did not replace outbound")
 	}
 }
+
+func TestDNSEndpointOptionsKeepSourceScope(t *testing.T) {
+	source := `sources:
+ - id: airport
+   outbounds: [{id: proxy, type: direct}]
+   dns:
+    nameserver: ['https://1.1.1.1/dns-query#h3=true&proxy&ecs=192.0.2.1/24']
+`
+	eff, ds := Compile([]byte("schema-version: 1\nimports: [{source: airport, outbounds: true}]\ndns: {from: airport}\n"), nil, Options{Sources: []byte(source)})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if eff.DNS.Nameservers[0] != "https://1.1.1.1/dns-query#h3=true&airport/proxy&ecs=192.0.2.1/24" {
+		t.Fatal(eff.DNS.Nameservers)
+	}
+}

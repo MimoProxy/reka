@@ -71,6 +71,11 @@ func ImportBundle(req Request, payloads, geodata map[string][]byte) Result {
 		}
 		if fallback := get(cfg, "fallback"); fallback != nil && len(fallback.Content) > 0 {
 			filter := get(cfg, "fallback-filter")
+			if sites := get(filter, "geosite"); sites != nil {
+				for _, v := range sites.Content {
+					refs["geosite:"+strings.ToLower(text(v))] = true
+				}
+			}
 			if get(filter, "geoip") == nil || text(get(filter, "geoip")) == "true" {
 				code := strings.ToLower(text(get(filter, "geoip-code")))
 				if code == "" {

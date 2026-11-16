@@ -135,6 +135,16 @@ func TestDoQAndHTTP3DNS(t *testing.T) {
 		if _, e := ExchangeDNS(ctx, ep, q, nil, dial); e == nil {
 			t.Fatal("untrusted QUIC DNS certificate accepted")
 		}
+		wrong.Store(false)
+		ep.Params = map[string]string{"skip-cert-verify": "true"}
+		if _, e := ExchangeDNS(ctx, ep, q, nil, dial); e != nil {
+			t.Fatal("explicit QUIC DNS verification skip", e)
+		}
+		ep.Params = map[string]string{"skip-cert-verify": "true", "name-cert-verify": "wrong.invalid"}
+		if _, e := exchangeDNS(ctx, ep, q, nil, dial, roots); e == nil {
+			t.Fatal("QUIC DNS ignored certificate verification name")
+		}
+
 	}
 	wrong.Store(false)
 	ep, _ := RD.ParseEndpoint("https://" + packet.LocalAddr().String() + "/dns-query#proxy")
@@ -148,7 +158,7 @@ func TestDoQAndHTTP3DNS(t *testing.T) {
 	if e != nil || len(m.Answer) != 1 {
 		t.Fatal("prefer-h3 did not select the available QUIC transport", m, e)
 	}
-	if calls.Load() != 5 {
+	if calls.Load() != 7 {
 		t.Fatal("unexpected exchange count", calls.Load())
 	}
 }

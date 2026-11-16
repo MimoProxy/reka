@@ -41,6 +41,14 @@ javac --release 11 -nowarn -classpath "$PLATFORM/android.jar:$BUILD/classes:$KOT
 	--min-sdk-version $MIN_API --target-sdk-version 35
 (cd "$BUILD/apk" && zip -q -r "$BUILD/base.apk" classes.dex lib)
 "$BT/zipalign" -f -p 4 "$BUILD/base.apk" "$BUILD/aligned.apk"
-"$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android \
+TEST_KEY=${REKA_ANDROID_TEST_KEYSTORE:-$HOME/.android/debug.keystore}
+if [ ! -f "$TEST_KEY" ]; then
+    TEST_KEY="$OUT/test-debug.keystore"
+    if [ ! -f "$TEST_KEY" ]; then
+        keytool -genkeypair -noprompt -keystore "$TEST_KEY" -storepass android -keypass android \
+            -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -validity 3650
+    fi
+fi
+"$BT/apksigner" sign --ks "$TEST_KEY" --ks-pass pass:android --key-pass pass:android \
 	--out "$OUT/reka-libtest.apk" "$BUILD/aligned.apk"
 ls -l "$OUT/libreka.so" "$OUT/reka-libtest.apk"

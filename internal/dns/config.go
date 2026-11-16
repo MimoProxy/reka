@@ -45,6 +45,7 @@ type Host struct {
 	Addresses []string `yaml:"addresses" json:"addresses"`
 }
 type FallbackFilter struct {
+	GeoSite  []string `yaml:"geosite" json:"geosite,omitempty"`
 	GeoIPSet string   `yaml:"geoip-set" json:"geoip-set,omitempty"`
 	GeoIP    *bool    `yaml:"geoip" json:"geoip,omitempty"`
 	Code     string   `yaml:"geoip-code" json:"geoip-code,omitempty"`
@@ -54,10 +55,11 @@ type FallbackFilter struct {
 type Endpoint struct {
 	Scheme, Host, Port, Path, Via string
 	PreferH3                      bool
+	Params                        map[string]string
 }
 
 func ParseEndpoint(raw string) (Endpoint, error) {
-	if raw == "system" {
+	if raw == "system" || raw == "system://" || raw == "dhcp://system" {
 		return Endpoint{Scheme: "system"}, nil
 	}
 	if !strings.Contains(raw, "://") {
@@ -68,7 +70,7 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 		return Endpoint{}, fmt.Errorf("invalid DNS endpoint")
 	}
 	switch u.Scheme {
-	case "udp", "tcp", "tls", "https", "quic", "h3":
+	case "udp", "tcp", "tls", "https", "http", "quic", "h3":
 	default:
 		return Endpoint{}, fmt.Errorf("unsupported DNS transport %q", u.Scheme)
 	}
@@ -79,6 +81,8 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 			port = "853"
 		case "https", "h3":
 			port = "443"
+		case "http":
+			port = "80"
 		default:
 			port = "53"
 		}
@@ -86,14 +90,18 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 	if _, err := net.LookupPort("tcp", port); err != nil {
 		return Endpoint{}, fmt.Errorf("invalid DNS port")
 	}
-	if u.Scheme != "https" && u.Scheme != "h3" && (u.Path != "" || u.RawQuery != "") {
+	if u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "h3" && (u.Path != "" || u.RawQuery != "") {
 		return Endpoint{}, fmt.Errorf("DNS path is only valid for HTTPS")
 	}
 	path := u.RequestURI()
-	if path == "/" && (u.Scheme == "https" || u.Scheme == "h3") {
+	if path == "/" && (u.Scheme == "https" || u.Scheme == "h3" || u.Scheme == "http") {
 		path = "/dns-query"
 	}
-	return Endpoint{Scheme: u.Scheme, Host: u.Hostname(), Port: port, Path: path, Via: u.Fragment}, nil
+	ep := Endpoint{Scheme: u.Scheme, Host: u.Hostname(), Port: port, Path: path}
+	if err := endpointOptions(&ep, u.Fragment); err != nil {
+		return Endpoint{}, err
+	}
+	return ep, nil
 }
 func Validate(c *Config) error {
 	if c == nil {

@@ -106,6 +106,25 @@ func TestEncryptedDNS(t *testing.T) {
 		if _, err = ExchangeDNS(ctx, ep, q, nil, dial); err == nil {
 			t.Fatal("untrusted TLS certificate accepted")
 		}
+		ep.Params = map[string]string{"skip-cert-verify": "true"}
+		if _, err = ExchangeDNS(ctx, ep, q, nil, dial); err != nil {
+			t.Fatal("explicit TLS verification skip", err)
+		}
+		name := "example.com"
+		if len(root.DNSNames) > 0 {
+			name = root.DNSNames[0]
+		} else if len(root.IPAddresses) > 0 {
+			name = root.IPAddresses[0].String()
+		}
+		ep.Params = map[string]string{"name-cert-verify": name}
+		if _, err = exchangeDNS(ctx, ep, q, nil, dial, roots); err != nil {
+			t.Fatal("explicit certificate name", err)
+		}
+		ep.Params = map[string]string{"skip-cert-verify": "true", "name-cert-verify": "wrong.invalid"}
+		if _, err = exchangeDNS(ctx, ep, q, nil, dial, roots); err == nil {
+			t.Fatal("verification name was ignored")
+		}
+
 		cancel()
 	}
 	invalid.Store(true)

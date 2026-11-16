@@ -30,6 +30,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
       - run: make android
       - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --output bin/android/loopback.json
       - run: python3 tools/android-runtime.py --serial "$ANDROID_SERIAL" --skip-install --kotlin --output bin/android/kotlin.json

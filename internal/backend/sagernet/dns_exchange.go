@@ -91,6 +91,21 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 	// Certificates are checked against the configured name, not the
 	// bootstrap address.
 	tlsConfig := &tls.Config{ServerName: ep.Host, MinVersion: tls.VersionTLS12, RootCAs: roots}
+	tlsConfig.InsecureSkipVerify = ep.Params["skip-cert-verify"] == "true"
+	if name := ep.Params["name-cert-verify"]; name != "" {
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return errors.New("DNS peer did not present a certificate")
+			}
+			intermediates := x509.NewCertPool()
+			for _, cert := range state.PeerCertificates[1:] {
+				intermediates.AddCert(cert)
+			}
+			_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: name, Roots: roots, Intermediates: intermediates})
+			return err
+		}
+	}
 
 	var (
 		m   *D.Msg
@@ -104,7 +119,7 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 		}
 	case "quic", "h3":
 		m, err = exchangeQUICDNS(ctx, ep, q, open, tlsConfig, address)
-	case "https":
+	case "https", "http":
 		h3 := false
 		if ep.PreferH3 {
 			h3, err = preferHTTP3(ctx, open, tlsConfig, address)
@@ -214,7 +229,11 @@ func exchangeDoHTransport(ctx context.Context, ep RD.Endpoint, q *D.Msg, transpo
 			return errors.New("DNS redirect forbidden")
 		},
 	}
-	url := "https://" + net.JoinHostPort(ep.Host, ep.Port) + ep.Path
+	scheme := "https"
+	if ep.Scheme == "http" {
+		scheme = "http"
+	}
+	url := scheme + "://" + net.JoinHostPort(ep.Host, ep.Port) + ep.Path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
 	if err != nil {
 		return nil, err

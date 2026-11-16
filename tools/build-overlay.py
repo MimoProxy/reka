@@ -13,6 +13,7 @@ prints the overlay path for the Makefile.
 """
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,14 +37,18 @@ def tree_hashes(root):
 
 
 def main():
+    # Inspect the root lockfile, even when called from a build already using
+    # the generated modfile/overlay. Otherwise our own replacements look like
+    # unreviewed changes to the source dependency pins.
+    module_env = dict(os.environ, GOFLAGS='')
     info = json.loads(subprocess.check_output(
-        ['go', 'list', '-m', '-json', 'github.com/sagernet/sing-box'], cwd=ROOT))
+        ['go', 'list', '-m', '-json', 'github.com/sagernet/sing-box'], cwd=ROOT, env=module_env))
     if info.get('Version') != PINNED_VERSION or info.get('Replace'):
         raise SystemExit('Review the Reka ECH overlay before changing the pinned sing-box version')
     if 'Dir' not in info:
         # A fresh checkout (CI) has not downloaded the module yet.
         info = json.loads(subprocess.check_output(
-            ['go', 'mod', 'download', '-json', 'github.com/sagernet/sing-box@' + PINNED_VERSION], cwd=ROOT))
+            ['go', 'mod', 'download', '-json', 'github.com/sagernet/sing-box@' + PINNED_VERSION], cwd=ROOT, env=module_env))
     original = Path(info['Dir'])
     if sha256(original / ECH_FILE) != PINNED_ECH_SHA256:
         raise SystemExit('Pinned ECH source changed; review the overlay before building')
@@ -65,11 +70,11 @@ def main():
     patches = ROOT / 'bin/upstream-patches'
     patches.mkdir(exist_ok=True)
     for name, (version, files) in MODULES.items():
-        module = json.loads(subprocess.check_output(['go', 'list', '-m', '-json', name], cwd=ROOT))
+        module = json.loads(subprocess.check_output(['go', 'list', '-m', '-json', name], cwd=ROOT, env=module_env))
         if module.get('Version') != version or module.get('Replace'):
             raise SystemExit('Review pinned component patches before changing ' + name)
         if 'Dir' not in module:
-            module = json.loads(subprocess.check_output(['go', 'mod', 'download', '-json', name + '@' + version], cwd=ROOT))
+            module = json.loads(subprocess.check_output(['go', 'mod', 'download', '-json', name + '@' + version], cwd=ROOT, env=module_env))
         module_root = Path(module['Dir'])
         module_copy = ROOT / 'bin/upstream' / name.rsplit('/', 1)[1]
         if not module_copy.exists():

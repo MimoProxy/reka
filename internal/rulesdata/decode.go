@@ -22,7 +22,9 @@ func Decode(behavior, format, code string, data []byte) ([]router.RuleSpec, erro
 		return nil, errors.New("resource size outside limit")
 	}
 	if behavior == "geoip" || behavior == "geosite" {
-		if behavior == "geoip" && format == "mmdb" { return decodeMMDB(code,data) }
+		if behavior == "geoip" && format == "mmdb" {
+			return decodeMMDB(code, data)
+		}
 		if format != "dat" {
 			return nil, errors.New("geodata format must be dat (or mmdb for GEOIP)")
 		}

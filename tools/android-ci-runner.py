@@ -39,11 +39,14 @@ def main():
         parser.error('invalid adb serial')
     adb = args.sdk / 'platform-tools/adb'
     live = subprocess.run([str(adb), '-s', args.serial, 'shell', 'cat', '/sdcard/Android/data/org.mimoproxy.reka.test/files/power-report.json'], capture_output=True, text=True, timeout=30)
+    running = subprocess.run([str(adb), '-s', args.serial, 'shell', 'pidof', 'org.mimoproxy.reka.test'], capture_output=True, text=True, timeout=30).stdout.split()
     try:
-        if json.loads(live.stdout).get('state') in ('baseline', 'vpn', 'waiting_for_unplug', 'waiting_for_screen_off'):
+        receipt=json.loads(live.stdout)
+        if str(receipt.get('pid')) in running and receipt.get('state') in ('baseline', 'vpn', 'waiting_for_unplug', 'waiting_for_screen_off'):
             raise SystemExit('Power measurement is active; device CI must wait')
     except ValueError:
-        raise SystemExit('Cannot verify the device power-test state; inspect the device before CI')
+        if running:
+            raise SystemExit('Cannot verify the running device app power-test state; inspect the device before CI')
     archive = ROOT / 'bin/toolchains' / ('actions-runner-osx-arm64-' + VERSION + '.tar.gz')
     if hashlib.sha256(archive.read_bytes()).hexdigest() != SHA256:
         raise SystemExit('Official runner archive checksum mismatch')
@@ -80,7 +83,7 @@ def main():
         if run_id is None:
             raise RuntimeError('Cannot identify the dispatched device workflow')
         with (home / 'runner.log').open('w') as log:
-            process = subprocess.Popen([str(home / 'run.sh'), '--once'], cwd=home, env=env, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(home / 'run.sh')], cwd=home, env=env, stdout=log, stderr=subprocess.STDOUT)
             try:
                 report['runner_exit'] = process.wait(timeout=1200)
             except subprocess.TimeoutExpired:

@@ -13,3 +13,15 @@ func TestDNSAliasAndExplicitZeroTTL(t *testing.T) {
 	}
 	compileImport(t, r)
 }
+
+func TestDNSEndpointOptionsRemapOnlyOutbound(t *testing.T) {
+	r := Import(request("proxies: [{name: Proxy, type: direct}]\ndns: {enable: true, nameserver: ['https://1.1.1.1/dns-query#h3=true&Proxy&ecs=192.0.2.1/24']}\n"))
+	if !r.Report.CanApply {
+		t.Fatal(r.Report)
+	}
+	want := "https://1.1.1.1/dns-query#h3=true&" + StableID("p", "Proxy") + "&ecs=192.0.2.1/24"
+	if snapshot(t, r).DNS.Nameservers[0] != want {
+		t.Fatal(snapshot(t, r).DNS.Nameservers)
+	}
+	compileImport(t, r)
+}
