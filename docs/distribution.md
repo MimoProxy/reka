@@ -93,3 +93,10 @@ pinning. Runtime version and reflected field-layout checks fail closed before
 the internal calls. Real Windows TCP tests exercise TFO, MPTCP and both together;
 socket protection remains active. The default dialer also enables MPTCP on both
 IPv4 and IPv6 dialers.
+
+The SS2022 overlays publish an immutable request salt before the first physical
+write, serialize client read/write state, and close the socket before releasing
+the cipher buffers. The test-node server applies the same close/read/write
+ownership discipline. A deterministic fast-response test holds the first
+write's return until the response has been read; repeated two-hop TCP/UDP and
+parent-rotation tests also run under the ordinary race detector.

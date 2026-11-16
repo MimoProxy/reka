@@ -300,6 +300,9 @@ func (c *converter) clash(data []byte) {
 		groups = c.items(root, "proxy-groups")
 		rules = c.items(root, "rules")
 	}
+	if c.req.NodesOnly {
+		groups = detourOnlyGroups(root, proxies)
+	}
 	if !c.req.NodesOnly {
 		groups = ensureGlobalGroup(root, proxies, groups)
 	}
@@ -318,8 +321,11 @@ func (c *converter) clash(data []byte) {
 	for i, p := range proxies {
 		c.convertProxy(p, fmt.Sprintf("/proxies/#%d", i))
 	}
-	if !c.req.NodesOnly {
+	if len(groups) > 0 {
 		c.convertGroups(groups)
+	}
+	c.validateDetourGraph()
+	if !c.req.NodesOnly {
 		c.convertRuleBlocks(root, rules)
 		c.convertDNS(root)
 	}

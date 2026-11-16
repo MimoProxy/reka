@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/http"
@@ -21,6 +22,7 @@ import (
 )
 
 type ProxySpec struct {
+	Detour                                         *DetourSpec
 	Type, Server, UUID, Password, Username, Method string
 	Port                                           uint16
 	TLS                                            *TLSSpec
@@ -69,7 +71,10 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if s.Type == "socks" {
 		values["version"] = "5"
 	}
-	ctx, configured := configureTLSContext(b.ctx, s.TLS)
+	ctx, configured := configureTLSContext(detourContext(b.ctx, s.Detour), s.TLS)
+	if s.Detour != nil {
+		values["detour"] = "reka-detour"
+	}
 	defer func() {
 		if returnErr == nil && configured != nil && !configured.Load() {
 			common.Close(result)
@@ -93,6 +98,9 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	logger := b.componentLogger("outbound", s.Type, tag)
 	switch s.Type {
 	case "direct":
+		if s.Detour != nil {
+			return &nativeDetour{Adapter: outbound.NewAdapter("direct", tag, []string{"tcp", "udp"}, nil), spec: s.Detour}, nil
+		}
 		var o option.DirectOutboundOptions
 		if err = json.Unmarshal(data, &o); err != nil {
 			return nil, err

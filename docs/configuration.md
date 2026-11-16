@@ -211,3 +211,14 @@ must validate the leaf's chain and name. `verify-name` verifies a different
 certificate name while retaining the configured SNI. `certificate` and
 `private-key` are a matching inline PEM client identity or secret references;
 these values are masked and participate in transport replacement.
+
+`dialer: {proxy: parent-id}` routes a node's connection through another node
+or group. Clash's `dialer-proxy` imports by exact original name. The combined
+node/group graph must be acyclic, including unselected members. All possible
+parent transports are retained for the child's lifetime; replacing a parent
+also replaces its dependent children while existing streams drain. A rule-only
+change reuses transports and reads the active group's observed choice. Rejected
+or unavailable parents never fall back to a direct socket. UDP requires an
+enabled parent and group. Put physical socket options on the parent: as in the
+reference, a dialer proxy takes precedence over the child's interface, routing
+mark, IP version, TFO and MPTCP settings; the compiler reports that precedence.

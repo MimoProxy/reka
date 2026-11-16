@@ -269,7 +269,7 @@ func (c *converter) validateOutbound(out object, n *yaml.Node, path string) bool
 	_, diags := compile.Compile(b, nil, compile.Options{ProcessLookup: true})
 	valid := true
 	for _, d := range diags {
-		if d.Severity != model.SeverityError || strings.HasPrefix(d.Code, "secret.") {
+		if d.Severity != model.SeverityError || strings.HasPrefix(d.Code, "secret.") || d.Code == "outbound.detour" {
 			continue
 		}
 		if d.Code == "outbound.auth" {

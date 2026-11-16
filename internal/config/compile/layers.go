@@ -213,6 +213,8 @@ func (c *compiler) layers(profile []byte) {
 					}
 				case "call", "to":
 					val.Value = srcID + "/" + val.Value
+				case "proxy":
+					val.Value = scoped(srcID, val.Value)
 				case "outbound":
 					val.Value = scoped(srcID, val.Value)
 				default:
@@ -232,6 +234,12 @@ func (c *compiler) layers(profile []byte) {
 		put(n, "id", scalar(id))
 		c.scopedIDs[id] = true
 		switch kind {
+		case "outbounds":
+			if dialer := field(n, "dialer"); dialer != nil {
+				if proxy := field(dialer, "proxy"); proxy != nil {
+					proxy.Value = scoped(srcID, proxy.Value)
+				}
+			}
 		case "groups":
 			if members := field(n, "members"); members != nil {
 				for _, m := range members.Content {

@@ -130,7 +130,7 @@ func TestImportUnsupportedIsExplicitAndAtomic(t *testing.T) {
 		{"group", strings.Replace(sample, "type: select", "type: relay", 1), "import.group-type"},
 		{"filter", strings.Replace(sample, "type: select", "type: select, made-up: HK", 1), "import.unsupported-field"},
 		{"unknown target", strings.Replace(sample, "DOMAIN-SUFFIX,example.org,Choice", "DOMAIN-SUFFIX,example.org,missing", 1), "import.rule-target"},
-		{"unknown node field", strings.Replace(sample, "port: 8388", "port: 8388, dialer-proxy: Choice", 1), "import.unsupported-field"},
+		{"unknown node field", strings.Replace(sample, "port: 8388", "port: 8388, made-up-node-field: Choice", 1), "import.unsupported-field"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

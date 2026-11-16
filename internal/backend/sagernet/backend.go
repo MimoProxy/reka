@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -188,12 +189,14 @@ func (b *Backend) start(name string, component any, logger log.ContextLogger) (*
 // Outbound is one upstream outbound instance. Every relay through it holds
 // one lease on it; see Lease.
 type Outbound struct {
-	tag   string
-	typ   string
-	out   adapter.Outbound
-	scope *adapter.Scope
-	lease *lease.Lease
-	once  sync.Once
+	dependencyPins   atomic.Int64
+	dependencyCloser *DetourSpec
+	tag              string
+	typ              string
+	out              adapter.Outbound
+	scope            *adapter.Scope
+	lease            *lease.Lease
+	once             sync.Once
 }
 
 func (o *Outbound) Tag() string  { return o.tag }
@@ -205,7 +208,7 @@ func (o *Outbound) Type() string { return o.typ }
 func (o *Outbound) Lease() *lease.Lease { return o.lease }
 
 // Active reports how many relayed connections currently use this instance.
-func (o *Outbound) Active() int64 { return o.lease.Active() }
+func (o *Outbound) Active() int64 { return max(0, o.lease.Active()-o.dependencyPins.Load()) }
 
 // Close retires and closes this instance and whatever its scope opened. It
 // does not wait for connections still relaying through it: without
@@ -215,7 +218,7 @@ func (o *Outbound) Close() error {
 	var err error
 	o.once.Do(func() {
 		o.lease.Retire()
-		err = errors.Join(common.Close(o.out), o.scope.Close())
+		err = errors.Join(common.Close(o.out), o.scope.Close(), o.dependencyCloser.Close())
 	})
 	return err
 }
@@ -250,6 +253,7 @@ type SOCKSSpec struct {
 
 // VLESSSpec is a VLESS client. Flow is "" or "xtls-rprx-vision".
 type VLESSSpec struct {
+	Detour  *DetourSpec
 	Options json.RawMessage
 	Server  string
 	Port    uint16
@@ -282,12 +286,14 @@ type RealitySpec struct {
 // DirectSpec, HTTPSpec, SOCKSSpec, ShadowsocksSpec or VLESSSpec.
 func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	var (
-		typ string
-		out adapter.Outbound
-		err error
+		typ        string
+		out        adapter.Outbound
+		err        error
+		dependency *DetourSpec
 	)
 	switch s := spec.(type) {
 	case ProxySpec:
+		dependency = s.Detour
 		typ = s.Type
 		out, err = b.newProtocol(tag, s)
 	case DropSpec:
@@ -320,14 +326,31 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 			Password:      s.Password,
 		})
 	case VLESSSpec:
+		dependency = s.Detour
+		ctx := detourContext(b.ctx, s.Detour)
+		if s.Detour != nil {
+			var values map[string]any
+			_ = json.Unmarshal(s.Options, &values)
+			if values == nil {
+				values = map[string]any{}
+			}
+			values["detour"] = "reka-detour"
+			s.Options, _ = json.Marshal(values)
+		}
 		typ = "vless"
 		if s.TLS != nil && s.TLS.Reality != nil {
 			// Reka's own REALITY client; see vless.go.
-			out, err = newVLESSRealityOutbound(b.ctx, b.componentLogger("outbound", typ, tag), tag, s)
+			out, err = newVLESSRealityOutbound(ctx, b.componentLogger("outbound", typ, tag), tag, s)
 			break
 		}
-		out, err = vless.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.VLESSOutboundOptions{
-			ServerOptions:               option.ServerOptions{Server: s.Server, ServerPort: s.Port},
+		out, err = vless.NewOutbound(ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.VLESSOutboundOptions{
+			ServerOptions: option.ServerOptions{Server: s.Server, ServerPort: s.Port},
+			DialerOptions: func() option.DialerOptions {
+				if s.Detour != nil {
+					return option.DialerOptions{Detour: "reka-detour"}
+				}
+				return option.DialerOptions{}
+			}(),
 			UUID:                        s.UUID,
 			Flow:                        s.Flow,
 			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: s.TLS.build()},
@@ -336,9 +359,16 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		return nil, fmt.Errorf("reka: unsupported outbound spec %T", spec)
 	}
 	if err != nil {
+		dependency.Close()
 		return nil, fmt.Errorf("create outbound/%s[%s]: %w", typ, tag, err)
 	}
-	return b.adoptOutbound(tag, typ, out)
+	wrapped, err := b.adoptOutbound(tag, typ, out)
+	if err != nil {
+		dependency.Close()
+		return nil, err
+	}
+	wrapped.dependencyCloser = dependency
+	return wrapped, nil
 }
 
 // adoptOutbound starts an already constructed upstream outbound in its own

@@ -282,6 +282,7 @@ func (c *compiler) compose() *Effective {
 
 	c.outbounds(eff)
 	c.groups(eff)
+	c.detours(eff)
 	c.rules(eff)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
@@ -516,6 +517,11 @@ func (c *compiler) outbounds(eff *Effective) {
 			continue
 		}
 		needed := false
+		for _, node := range c.profile.Outbounds {
+			if node.Dialer != nil && node.Dialer.Proxy == action {
+				needed = true
+			}
+		}
 		for _, g := range c.profile.Groups {
 			if slices.Contains(g.Members, action) {
 				needed = true

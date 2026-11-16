@@ -214,3 +214,83 @@ def multipath_both_families(source):
     return replace(source, 'dialer4.SetMultipathTCP(true)', 'dialer4.SetMultipathTCP(true)\n\t\tdialer6.SetMultipathTCP(true)')
 
 MODULES['github.com/sagernet/sing-box'][1]['common/dialer/default.go'] = ('69dd2b689d80c2ab1e8793eb19037c91eed91f2399f57b3829e510d49f50586d', multipath_both_families)
+
+
+def shadowsocks2022_client(source):
+    source = replace(source, '"context"', '"context"\n"errors"\n"sync"\n"sync/atomic"')
+    source = replace(source, 'type clientConn struct {', 'type clientConn struct {\n readAccess sync.Mutex\n writeAccess sync.Mutex\n closeOnce sync.Once\n closeErr error')
+    source = replace(source, 'requestSalt     []byte', 'requestSalt     atomic.Pointer[[]byte]')
+    source = replace(source, '\t_, err = c.Conn.Write(requestBuffer.Bytes())', '\tc.requestSalt.Store(&requestSalt)\n\t_, err = c.Conn.Write(requestBuffer.Bytes())')
+    source = replace(source, '\tc.requestSalt = requestSalt\n', '')
+    source = replace(source, 'if !bytes.Equal(responseSalt, c.requestSalt) {', 'requestSalt:=c.requestSalt.Load()\n\tif requestSalt==nil || !bytes.Equal(responseSalt, *requestSalt) {')
+    for signature in ['Read(p []byte) (n int, err error)', 'ReadBuffer(buffer *buf.Buffer) error']:
+        source = replace(source, 'func (c *clientConn) ' + signature + ' {', 'func (c *clientConn) ' + signature + ' {\n c.readAccess.Lock();defer c.readAccess.Unlock()')
+    for signature in ['Write(p []byte) (n int, err error)', 'WriteBuffer(buffer *buf.Buffer) error', 'NeedHandshake() bool']:
+        source = replace(source, 'func (c *clientConn) ' + signature + ' {', 'func (c *clientConn) ' + signature + ' {\n c.writeAccess.Lock();defer c.writeAccess.Unlock()')
+    return replace(source, '''func (c *clientConn) Close() error {
+	return common.Close(
+		c.Conn,
+		common.PtrOrNil(c.reader),
+		common.PtrOrNil(c.writer),
+	)
+}''', '''func (c *clientConn) Close() error {
+ c.closeOnce.Do(func(){
+  err:=c.Conn.Close()
+  c.readAccess.Lock();defer c.readAccess.Unlock()
+  c.writeAccess.Lock();defer c.writeAccess.Unlock()
+  c.closeErr=errors.Join(err,common.Close(common.PtrOrNil(c.reader),common.PtrOrNil(c.writer)))
+ })
+ return c.closeErr
+}''')
+
+
+def shadowsocks2022_wait(source):
+    for signature in ['InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool)', 'WaitReadBuffer() (buffer *buf.Buffer, err error)']:
+        source = replace(source, 'func (c *clientConn) ' + signature + ' {', 'func (c *clientConn) ' + signature + ' {\n c.readAccess.Lock();defer c.readAccess.Unlock()')
+    return source
+
+MODULES['github.com/sagernet/sing-shadowsocks2'] = ('v0.2.2-0.20260929152114-a69d1086332b', {
+'shadowaead_2022/method.go': ('c1000a3459014e4708cc5713133457924a1d795e651e5c1dac52038f675c7272',shadowsocks2022_client),
+'shadowaead_2022/method_wait.go': ('f080b9f6da06c9349b28db37b00cf2ca687676b329077743fa2b2be455183804',shadowsocks2022_wait),
+})
+
+
+def shadowsocks2022_server(source):
+    import re
+    source = replace(source, '"context"', '"context"\n"errors"')
+    source = replace(source, 'type serverConn struct {', 'type serverConn struct {\n readAccess sync.Mutex\n closeOnce sync.Once\n closeErr error')
+    source = replace(source, 'func (c *serverConn) Read(b []byte) (n int, err error) {', 'func (c *serverConn) Read(b []byte) (n int, err error) {\n c.readAccess.Lock();defer c.readAccess.Unlock()')
+    bodies = {
+        'Write': '''func (c *serverConn) Write(p []byte) (n int, err error) {
+ c.access.Lock();defer c.access.Unlock()
+ if c.writer!=nil{return c.writer.Write(p)}
+ return c.writeResponse(p)
+}''',
+        'WriteVectorised': '''func (c *serverConn) WriteVectorised(buffers []*buf.Buffer) error {
+ c.access.Lock();defer c.access.Unlock()
+ if c.writer!=nil{return c.writer.WriteVectorised(buffers)}
+ if len(buffers)==0{return nil}
+ _,err:=c.writeResponse(buffers[0].Bytes())
+ if err!=nil{buf.ReleaseMulti(buffers);return err}
+ buffers[0].Release();return c.writer.WriteVectorised(buffers[1:])
+}''',
+        'Close': '''func (c *serverConn) Close() error {
+ c.closeOnce.Do(func(){
+  err:=c.Conn.Close()
+  c.readAccess.Lock();defer c.readAccess.Unlock()
+  c.access.Lock();defer c.access.Unlock()
+  c.closeErr=errors.Join(err,common.Close(common.PtrOrNil(c.reader),common.PtrOrNil(c.writer)))
+ })
+ return c.closeErr
+}'''
+    }
+    for method, body in bodies.items():
+        pattern = r'func \(c \*serverConn\) ' + method + r'\([^\n]*\n.*?\n}'
+        source, count = re.subn(pattern, lambda _: body, source, count=1, flags=re.S)
+        if count != 1:
+            raise SystemExit('SS2022 server patch no longer matches ' + method)
+    return source
+
+MODULES['github.com/sagernet/sing-shadowsocks'] = ('v0.2.9-0.20260929204512-65740e0f0e3e', {
+'shadowaead_2022/service.go': ('b3fbe6500639625a99f2c685253cae586c3ca2b30e484e0bb38a9c8acab1462d',shadowsocks2022_server),
+})

@@ -323,6 +323,7 @@ func (e *Engine) listenerChanges(eff *compile.Effective) []listenerChange {
 // Prepared holds instances built for a configuration that is not active
 // yet. Pass it to Activate or Abort exactly once.
 type Prepared struct {
+	detours     []*outboundDetour
 	policies    *policy.Manager
 	dns         *RD.Service
 	dnsListener *sagernet.DNSListener
@@ -383,17 +384,35 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 			p.outbounds[o.ID] = old
 			continue
 		}
-		out, err := e.backend.NewOutbound(o.ID, specFor(o))
+		spec := specFor(o)
+		var detour *outboundDetour
+		if o.Dialer != nil && o.Dialer.Proxy != "" {
+			detour = e.newDetour(p, o)
+			spec = setSpecDetour(spec, detour.spec())
+		}
+		out, err := e.backend.NewOutbound(o.ID, spec)
 		if err != nil {
 			return fail(&PrepareError{Path: "/outbounds/" + o.ID, Err: err})
 		}
+		if detour != nil {
+			detour.owner.Store(out)
+			p.detours = append(p.detours, detour)
+		}
 		p.created = append(p.created, out)
 		p.outbounds[o.ID] = out
+	}
+	for _, detour := range p.detours {
+		if err := detour.attach(); err != nil {
+			return fail(&PrepareError{Path: "/outbounds/" + detour.node + "/dialer/proxy", Err: err})
+		}
 	}
 	if err := e.prepareDNS(p); err != nil {
 		return fail(&PrepareError{Path: "/dns", Err: err})
 	}
 	e.preparePolicies(p)
+	for _, detour := range p.detours {
+		detour.ready.Store(true)
+	}
 	p.changes = e.listenerChanges(eff)
 	for _, ch := range p.changes {
 		if ch.Action != ActionCreate && ch.Action != ActionRebind {
