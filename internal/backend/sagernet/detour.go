@@ -57,6 +57,7 @@ type PinnedOutbound struct {
 	mu         sync.Mutex
 	references int
 	closed     bool
+	flow       bool
 }
 
 func (o *Outbound) Pin() (*PinnedOutbound, error) {
@@ -79,11 +80,28 @@ func (p *PinnedOutbound) release() {
 	p.mu.Lock()
 	p.references--
 	last := p.references == 0
+	flow := p.flow
 	p.mu.Unlock()
 	if last {
-		p.out.dependencyPins.Add(-1)
+		if !flow {
+			p.out.dependencyPins.Add(-1)
+		}
 		p.out.lease.Release()
 	}
+}
+
+// TransferToFlow transfers this pin's owner reference to one routed flow. It
+// then counts as an active connection instead of a hidden dependency pin.
+// The returned release function must be called when that flow finishes.
+func (p *PinnedOutbound) TransferToFlow() (func(), bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.flow {
+		return nil, false
+	}
+	p.flow = true
+	p.out.dependencyPins.Add(-1)
+	return func() { _ = p.Close() }, true
 }
 func (p *PinnedOutbound) Close() error {
 	p.mu.Lock()

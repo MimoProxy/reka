@@ -24,9 +24,11 @@ const MaxFrame = 16 << 20
 
 // Request is a client call.
 type Request struct {
-	ID     uint64          `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params,omitempty"`
+	ProfileID    string          `json:"profile_id,omitempty"`
+	ProfileEpoch uint64          `json:"profile_epoch,omitempty"`
+	ID           uint64          `json:"id"`
+	Method       string          `json:"method"`
+	Params       json.RawMessage `json:"params,omitempty"`
 }
 
 // Response answers the request with the same ID.

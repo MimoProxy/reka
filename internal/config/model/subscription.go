@@ -45,8 +45,8 @@ func ValidSubscription(s *Subscription) error {
 	}
 	assets := map[string]bool{}
 	for _, a := range s.Geodata {
-		if (a.ID != "geoip" && a.ID != "geosite") || assets[a.ID] {
-			return errors.New("geodata IDs must be unique geoip or geosite")
+		if (a.ID != "geoip" && a.ID != "geosite" && a.ID != "asn") || assets[a.ID] {
+			return errors.New("geodata IDs must be unique geoip, geosite or asn")
 		}
 		assets[a.ID] = true
 		if err := ValidSubscription(&Subscription{URL: a.URL}); err != nil {

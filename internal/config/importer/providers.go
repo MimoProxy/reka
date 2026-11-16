@@ -97,7 +97,7 @@ func Providers(req Request) ([]Provider, error) {
 		}
 		var collect func(router.RuleSpec)
 		collect = func(r router.RuleSpec) {
-			if r.Kind == router.KindRuleSet && len(r.Values) == 1 && !strings.HasPrefix(r.Values[0], "geoip:") && !strings.HasPrefix(r.Values[0], "geosite:") {
+			if r.Kind == router.KindRuleSet && len(r.Values) == 1 && !strings.HasPrefix(r.Values[0], "geoip:") && !strings.HasPrefix(r.Values[0], "geosite:") && !strings.HasPrefix(r.Values[0], "asn:") {
 				usedRule[r.Values[0]] = true
 			}
 			for _, ch := range r.Children {

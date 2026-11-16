@@ -92,9 +92,12 @@ func (rs *RuleSet) NeedsProcess() bool { return rs.hasProcess }
 
 // Metadata describes a connection for matching.
 type Metadata struct {
-	Inbound string
-	Network string // "tcp" or "udp"
-	Source  netip.AddrPort
+	Inbound     string
+	InboundType string
+	InboundUser string
+	InboundPort uint16
+	Network     string // "tcp" or "udp"
+	Source      netip.AddrPort
 	// Domain is set when the destination is a name. Use NormalizeDomain.
 	Domain string
 	// Addr is set when the destination is an address.
@@ -123,15 +126,17 @@ type evaluation struct {
 	md        *Metadata
 	env       Env
 
-	resolved    bool
-	addrs       []netip.Addr
-	dialAddr    netip.Addr
-	resolveErr  error
-	processDone bool
-	process     string
-	processOK   bool
-	stopped     bool // a lookup returned ErrNoLookup
-	stoppedAt   int
+	resolved        bool
+	addrs           []netip.Addr
+	dialAddr        netip.Addr
+	resolveErr      error
+	processDone     bool
+	process         string
+	processOK       bool
+	processUID      uint32
+	processUIDKnown bool
+	stopped         bool // a lookup returned ErrNoLookup
+	stoppedAt       int
 }
 
 func (e *evaluation) destinationAddr(index int) (netip.Addr, bool) {
@@ -175,7 +180,13 @@ func (e *evaluation) processName(index int) (string, bool) {
 	if !e.processDone {
 		e.processDone = true
 		if e.env != nil {
-			e.process, e.processOK = e.env.Process(e.ctx)
+			if env, ok := e.env.(ProcessInfoEnv); ok {
+				info, found := env.ProcessInfo(e.ctx)
+				e.process, e.processOK = info.Path, found && info.Path != ""
+				e.processUID, e.processUIDKnown = info.UID, found && info.UIDKnown
+			} else {
+				e.process, e.processOK = e.env.Process(e.ctx)
+			}
 		}
 	}
 	return e.process, e.processOK
@@ -269,26 +280,55 @@ func (e *evaluation) match(index int, r *rule) bool {
 		return matchPorts(r.ports, md.Source.Port())
 	case KindNetwork:
 		return slices.Contains(r.strs, md.Network)
-	case KindProcessName:
+	case KindProcessName, KindProcessPath, KindProcessNameWildcard, KindProcessPathWildcard:
 		p, ok := e.processName(index)
 		if !ok {
 			return false
 		}
-		name := processBase(p)
+		name := p
+		if r.spec.Kind == KindProcessName || r.spec.Kind == KindProcessNameWildcard {
+			name = processBase(p)
+		}
 		for _, s := range r.strs {
-			if strings.EqualFold(name, s) {
+			if r.spec.Kind == KindProcessNameWildcard || r.spec.Kind == KindProcessPathWildcard {
+				if matchProcessWildcard(s, name) {
+					return true
+				}
+			} else if strings.EqualFold(name, s) {
 				return true
 			}
 		}
 		return false
-	case KindProcessNameRegex:
+	case KindProcessNameRegex, KindProcessPathRegex:
 		p, ok := e.processName(index)
 		if !ok {
 			return false
 		}
-		name := processBase(p)
+		name := p
+		if r.spec.Kind == KindProcessNameRegex {
+			name = processBase(p)
+		}
 		for _, re := range r.processRegexps {
 			if matched, err := re.MatchString(name); err == nil && matched {
+				return true
+			}
+		}
+		return false
+	case KindInboundName:
+		return md.Inbound != "" && slices.Contains(r.strs, md.Inbound)
+	case KindInboundUser:
+		return md.InboundUser != "" && slices.Contains(r.strs, md.InboundUser)
+	case KindInboundType:
+		return md.InboundType != "" && slices.Contains(r.strs, strings.ToUpper(md.InboundType))
+	case KindInboundPort:
+		return md.InboundPort != 0 && matchPorts(r.ports, md.InboundPort)
+	case KindUID:
+		e.processName(index)
+		if !e.processUIDKnown || e.processUID == 0 {
+			return false
+		}
+		for _, bounds := range r.uidRanges {
+			if e.processUID >= bounds.lo && e.processUID <= bounds.hi {
 				return true
 			}
 		}
@@ -584,7 +624,7 @@ func (r *Router) ExplainWithResolver(ctx context.Context, md Metadata, env Env, 
 }
 
 func needsProcess(r *rule) bool {
-	if r.spec.Kind == KindProcessName || r.spec.Kind == KindProcessNameRegex || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
+	if isProcessKind(r.spec.Kind) || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
 		return true
 	}
 	for _, ch := range r.children {

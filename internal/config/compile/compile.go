@@ -119,11 +119,12 @@ type Reality struct {
 
 // Listener is a validated local listener.
 type Listener struct {
-	ID          string         `json:"id"`
-	Type        string         `json:"type"`
-	Listen      netip.AddrPort `json:"listen"`
-	UDP         bool           `json:"udp"`
-	Fingerprint string         `json:"fingerprint"`
+	Users       []model.ListenerUser `json:"-"`
+	ID          string               `json:"id"`
+	Type        string               `json:"type"`
+	Listen      netip.AddrPort       `json:"listen"`
+	UDP         bool                 `json:"udp"`
+	Fingerprint string               `json:"fingerprint"`
 }
 
 // GroupMetadata contains display fields that do not affect routing or instances.
@@ -134,6 +135,10 @@ type GroupMetadata struct {
 
 // Effective is the immutable configuration used by the runtime.
 type Effective struct {
+	Process          model.Process             `json:"process"`
+	Routing          model.Routing             `json:"routing"`
+	ActiveRouter     *router.Router            `json:"-"`
+	Sniff            model.Sniff               `json:"sniff"`
 	Network          platform.Network          `json:"network"`
 	GroupUDPDisabled map[string]bool           `json:"group-udp-disabled,omitempty"`
 	AutoGroups       []policy.Group            `json:"automatic-groups,omitempty"`
@@ -187,15 +192,16 @@ func (e *Effective) Outbound(id string) (Outbound, bool) {
 }
 
 type compiler struct {
-	origins      map[string]Origin
-	scopedIDs    map[string]bool
-	sourceHashes map[string]string
-	opts         Options
-	diags        model.Diagnostics
-	ppos         model.Positions
-	lpos         model.Positions
-	profile      *model.Profile
-	local        *model.LocalSettings
+	ruleResources *ruleCompiler
+	origins       map[string]Origin
+	scopedIDs     map[string]bool
+	sourceHashes  map[string]string
+	opts          Options
+	diags         model.Diagnostics
+	ppos          model.Positions
+	lpos          model.Positions
+	profile       *model.Profile
+	local         *model.LocalSettings
 }
 
 func (c *compiler) add(sev model.Severity, doc, path, code, format string, args ...any) {
@@ -292,7 +298,10 @@ func (c *compiler) compose() *Effective {
 	c.rules(eff)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
+	c.process(eff)
+	c.sniff(eff)
 	c.network(eff)
+	c.routing(eff)
 	if c.diags.HasErrors() {
 		return eff
 	}
@@ -312,6 +321,18 @@ func (c *compiler) compose() *Effective {
 		return eff
 	}
 	eff.Router = r
+	eff.ActiveRouter = r
+	if eff.Routing.Mode != "rule" {
+		target := eff.Routing.Global
+		if eff.Routing.Mode == "direct" {
+			target = model.OutboundDirect
+		}
+		activeRules, _ := router.CompileRules([]router.RuleSpec{{ID: "routing-mode-" + eff.Routing.Mode, Kind: router.KindMatch, Target: target}})
+		eff.ActiveRouter, err = router.New(activeRules, router.Options{Outbounds: ids, Groups: eff.Groups, Final: target})
+		if err != nil {
+			c.errorf(model.DocProfile, "/routing", "routing.target", "%v", err)
+		}
+	}
 	return eff
 }
 
@@ -521,10 +542,10 @@ func (c *compiler) outbounds(eff *Effective) {
 				c.errorf(doc, base+"/flow", "outbound.flow", "xtls-rprx-vision needs TLS or VLESS encryption")
 			}
 		}
-		c.protocol(base, ob, &out)
 		if ob.TLS != nil {
 			out.TLS = c.tls(base+"/tls", ob)
 		}
+		c.protocol(base, ob, &out)
 		eff.Outbounds = append(eff.Outbounds, out)
 	}
 	for _, b := range []string{model.OutboundDirect, model.OutboundReject} {
@@ -986,11 +1007,13 @@ func (c *compiler) listenersAndLocal(eff *Effective) {
 			c.errorf(doc, base+"/udp", "listener.udp", "http listeners do not carry UDP")
 		}
 		udp := (l.UDP == nil || *l.UDP) && l.Type != model.ListenerHTTP
-		lst := Listener{ID: l.ID, Type: l.Type, Listen: ap, UDP: udp}
+		users := c.listenerUsers(doc, base+"/users", l.Users)
+		lst := Listener{ID: l.ID, Type: l.Type, Listen: ap, UDP: udp, Users: users}
 		lst.Fingerprint = fingerprint(struct {
-			Type string
-			UDP  bool
-		}{l.Type, udp})
+			Type  string
+			UDP   bool
+			Users []model.ListenerUser
+		}{l.Type, udp, users})
 		eff.Listeners = append(eff.Listeners, lst)
 	}
 	if listeners == nil {

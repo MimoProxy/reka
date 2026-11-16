@@ -694,7 +694,12 @@ func cmdExplain(args []string) error {
 	network := fs.String("network", "tcp", "tcp or udp")
 	source := fs.String("source", "", "source address:port")
 	resolve := fs.Bool("resolve", false, "allow a DNS lookup for ip rules")
-	process := fs.String("process", "", "process name to assume")
+	process := fs.String("process", "", "process executable name or full path to assume")
+	inbound := fs.String("inbound", "", "inbound stable ID to assume")
+	inboundType := fs.String("in-type", "", "actual inbound protocol to assume, for example SOCKS5")
+	inboundUser := fs.String("in-user", "", "authenticated inbound user to assume")
+	inboundPort := fs.Int("in-port", 0, "inbound listening port to assume")
+	uid := fs.Int64("uid", -1, "owning UID to assume (-1 is unknown)")
 	var addrs multi
 	fs.Var(&addrs, "addr", "destination address to assume for ip rules (repeatable)")
 	parse(fs, args)
@@ -702,6 +707,14 @@ func cmdExplain(args []string) error {
 		return errors.New("usage: explain HOST:PORT [flags]")
 	}
 	req := api.ExplainRequest{Destination: fs.Arg(0), Network: *network, Source: *source, Resolve: *resolve, Addresses: addrs, Process: *process}
+	if *inboundPort < 0 || *inboundPort > 65535 || *uid < -1 || *uid > 4294967295 {
+		return errors.New("invalid inbound port or UID")
+	}
+	req.Inbound, req.InboundType, req.InboundUser, req.InboundPort = *inbound, *inboundType, *inboundUser, uint16(*inboundPort)
+	if *uid >= 0 {
+		value := uint32(*uid)
+		req.ProcessUID = &value
+	}
 	var x api.Explanation
 	if err := call("ExplainRoute", req, &x); err != nil || *jsonFlag {
 		return err

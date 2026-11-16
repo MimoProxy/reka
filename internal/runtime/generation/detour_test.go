@@ -42,14 +42,14 @@ rules: [{id: final, match: {all: true}, outbound: child}]
 	}
 	p1 := activate("a", 1)
 	bridge := p1.detours[0]
-	if pin, err := bridge.parent("tcp", "target.test:443"); err != nil || pin != bridge.pins["a"] {
+	if pin, err := bridge.parent(context.Background(), "tcp", "target.test:443"); err != nil || pin != bridge.pins["a"] {
 		t.Fatal("first policy", err)
 	}
 	p2 := activate("b", 2)
 	if p1.outbounds["child"] != p2.outbounds["child"] {
 		t.Fatal("equal transport rebuilt")
 	}
-	if pin, err := bridge.parent("tcp", "target.test:443"); err != nil || pin != bridge.pins["b"] {
+	if pin, err := bridge.parent(context.Background(), "tcp", "target.test:443"); err != nil || pin != bridge.pins["b"] {
 		t.Fatal("reused child kept a retired policy manager", err)
 	}
 }

@@ -143,6 +143,9 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	if v, err := child(root, "dns", false, 0); err == nil {
 		dnsSecrets(v, "/dns", nil)
 	}
+	if v, err := child(root, "listeners", false, 0); err == nil {
+		nested(v, "/listeners")
+	}
 	var groupSecrets func(*yaml.Node, string)
 	groupSecrets = func(n *yaml.Node, prefix string) {
 		n = unalias(n)
@@ -159,6 +162,17 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	}
 	if groups, err := child(root, "groups", false, 0); err == nil {
 		groupSecrets(groups, "/groups")
+	}
+	for _, collection := range []string{"rule-sets", "geodata"} {
+		if values, e := child(root, collection, false, 0); e == nil && unalias(values).Kind == yaml.SequenceNode {
+			for i, item := range unalias(values).Content {
+				if download, e := child(item, "download", false, 0); e == nil {
+					if u, e := child(download, "url", false, 0); e == nil {
+						urlValue(u, JoinPath("/"+collection, ElementSegment(item, i), "download", "url"), false)
+					}
+				}
+			}
+		}
 	}
 	obs, _ := child(root, "outbounds", false, 0)
 	list(obs, "/outbounds")
@@ -219,6 +233,16 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				continue
 			}
 			path, value = unalias(path), unalias(value)
+			if path.Value == "/listeners" || strings.HasPrefix(path.Value, "/listeners/") {
+				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
+				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/username") || strings.HasSuffix(path.Value, "/password")) {
+					if !strings.HasPrefix(value.Value, SecretPrefix) {
+						fn(prefix, value)
+					}
+				} else {
+					nested(value, prefix)
+				}
+			}
 			if strings.Contains(path.Value, "/protocol") || strings.Contains(path.Value, "/transport") || strings.Contains(path.Value, "/headers") || strings.Contains(path.Value, "/tls") || strings.Contains(path.Value, "/plugin") {
 				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
 				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/password") || strings.HasSuffix(path.Value, "/username") || strings.HasSuffix(path.Value, "/key") || strings.HasSuffix(path.Value, "/user-key") || strings.HasSuffix(path.Value, "/token") || strings.HasSuffix(path.Value, "/value") || strings.HasSuffix(path.Value, "/certificate") || strings.HasSuffix(path.Value, "/private-key")) {
@@ -324,6 +348,14 @@ func (d *Doc) UnmaskSecrets(base *Doc) error {
 		if base != nil {
 			old = unalias(base.Get(path))
 			parts, _ := SplitPath(path)
+			if len(parts) >= 5 && parts[0] == "listeners" && parts[len(parts)-3] == "users" && parts[len(parts)-1] == "password" {
+				prefix := JoinPath("", parts[:len(parts)-1]...)
+				a, b := unalias(d.Get(prefix+"/username")), unalias(base.Get(prefix+"/username"))
+				if a == nil || b == nil || a.Value != Mask && a.Value != b.Value {
+					err = fmt.Errorf("%s: masked authentication user changed identity; supply its password again", path)
+					return
+				}
+			}
 			if len(parts) > 0 && parts[len(parts)-1] == "value" {
 				prefix := JoinPath("", parts[:len(parts)-1]...)
 				a, b := unalias(d.Get(prefix+"/name")), unalias(base.Get(prefix+"/name"))

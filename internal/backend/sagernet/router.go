@@ -30,11 +30,17 @@ func (d Destination) String() string {
 
 // Metadata is the part of a connection Reka's router decides on.
 type Metadata struct {
-	Inbound     string
-	InboundType string
-	Network     string // "tcp" or "udp"
-	Source      netip.AddrPort
-	Destination Destination
+	InboundUser     string
+	InboundPort     uint16
+	InboundProtocol string
+	Inbound         string
+	InboundType     string
+	Network         string // "tcp" or "udp"
+	Source          netip.AddrPort
+	Destination     Destination
+	// SniffedDomain is a routing hint; Destination retains the original target.
+	SniffedDomain string
+	Protocol      string
 	// Local is the listener address the client connected to, used to find
 	// the owning process. It may be invalid.
 	Local netip.AddrPort
@@ -42,6 +48,10 @@ type Metadata struct {
 
 // Route is the routing decision for one connection.
 type Route struct {
+	Owner ProcessInfo
+	// Context attaches generation-owned dependencies without replacing the
+	// caller's cancellation or deadline.
+	Context     func(context.Context) context.Context
 	Lookup      LookupFunc
 	Destination *Destination
 	// Outbound carries the connection, with a lease already taken (see
@@ -76,8 +86,11 @@ var errRejected = errors.New("reka: connection rejected by route")
 // rest of the interface is stubbed. Rule matching happens in Reka's RouteFunc,
 // which can be swapped while inbounds keep running.
 type router struct {
-	backend *Backend
-	route   atomic.Pointer[RouteFunc]
+	backend    *Backend
+	route      atomic.Pointer[RouteFunc]
+	prepare    atomic.Pointer[PrepareFlowFunc]
+	sniffOnce  sync.Once
+	sniffSlots chan struct{}
 }
 
 var _ adapter.Router = (*router)(nil)
@@ -91,7 +104,10 @@ func (r *router) pick(ctx context.Context, md Metadata) Route {
 	if fn == nil || *fn == nil {
 		return Route{}
 	}
-	rt := (*fn)(ctx, md)
+	return normalizeRoute((*fn)(ctx, md))
+}
+
+func normalizeRoute(rt Route) Route {
 	if rt.Outbound == nil {
 		if rt.Release != nil {
 			rt.Release()
@@ -109,10 +125,13 @@ func (r *router) pick(ctx context.Context, md Metadata) Route {
 
 func toMetadata(m adapter.InboundContext) Metadata {
 	md := Metadata{
-		Inbound:     m.Inbound,
-		InboundType: m.InboundType,
-		Network:     m.Network,
-		Source:      m.Source.AddrPort(),
+		InboundUser:   m.User,
+		Inbound:       m.Inbound,
+		InboundType:   m.InboundType,
+		Network:       m.Network,
+		Source:        m.Source.AddrPort(),
+		SniffedDomain: m.Domain,
+		Protocol:      m.Protocol,
 	}
 	if m.OriginDestination.IsIP() {
 		md.Local = m.OriginDestination.AddrPort()
@@ -133,12 +152,31 @@ func toDestination(d M.Socksaddr) Destination {
 
 func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Network = N.NetworkTCP
-	rt := r.pick(ctx, toMetadata(metadata))
+	md := toMetadata(metadata)
+	md.InboundProtocol = inboundProtocol(ctx, md.InboundType)
+	if md.InboundType != "tun" && conn.LocalAddr() != nil {
+		if address, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
+			md.InboundPort = address.Port()
+		}
+	}
+	prepared := r.prepareFlow(ctx, md)
+	defer prepared.Release()
+	if prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
+		conn, md = sniffStream(ctx, conn, md, prepared.Sniff)
+		r.releaseSniffSlot()
+	}
+	rt := prepared.pick(ctx, md)
+	prepared.Release()
 	if rt.Outbound == nil {
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
 		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
 		return
 	}
+	if prepared.Sniff.OverrideDestination && md.SniffedDomain != "" {
+		destination := Destination{Domain: md.SniffedDomain, Port: md.Destination.Port}
+		rt.Destination = &destination
+	}
+	metadata.Domain, metadata.Protocol = md.SniffedDomain, md.Protocol
 	r.backend.relayTCP(ctx, rt, conn, metadata, onClose)
 }
 

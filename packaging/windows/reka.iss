@@ -7,11 +7,15 @@
 #ifndef TargetArch
   #define TargetArch "x64compatible"
 #endif
+#define VersionDash Pos("-", AppVersion)
+#define VersionPlus Pos("+", AppVersion)
+#define VersionEnd ((VersionDash > 0) && ((VersionPlus == 0) || (VersionDash < VersionPlus))) ? VersionDash - 1 : ((VersionPlus > 0) ? VersionPlus - 1 : Len(AppVersion))
+#define NumericVersion Copy(AppVersion, 1, VersionEnd)
 [Setup]
 AppId={{B57C2E8B-C29B-4E5D-89B7-64EC8EB53C0A}
 AppName=Reka proxy core
 AppVersion={#AppVersion}
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion={#NumericVersion}.0
 DefaultDirName={autopf}\Reka
 ArchitecturesAllowed={#TargetArch}
 ArchitecturesInstallIn64BitMode={#TargetArch}

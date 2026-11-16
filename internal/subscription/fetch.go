@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
+
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
 )
@@ -101,13 +103,14 @@ func HTTPClientWithControl(control func(string, string, syscall.RawConn) error, 
 }
 
 type Entry struct {
-	Fallback bool      `json:"fallback,omitempty"`
-	Checked  time.Time `json:"checked,omitempty"`
-	Request  string    `json:"request"`
-	Hash     string    `json:"hash"`
-	ETag     string    `json:"etag,omitempty"`
-	Modified string    `json:"modified,omitempty"`
-	Next     time.Time `json:"next"`
+	Usage    *api.SubscriptionUsage `json:"usage,omitempty"`
+	Fallback bool                   `json:"fallback,omitempty"`
+	Checked  time.Time              `json:"checked,omitempty"`
+	Request  string                 `json:"request"`
+	Hash     string                 `json:"hash"`
+	ETag     string                 `json:"etag,omitempty"`
+	Modified string                 `json:"modified,omitempty"`
+	Next     time.Time              `json:"next"`
 }
 type Fetcher struct {
 	Client *http.Client
@@ -129,6 +132,10 @@ func (f *Fetcher) Batch(previous map[string]Entry, force bool) *Batch {
 func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers http.Header, interval int) ([]byte, error) {
 	if !ValidURL(raw) {
 		return nil, failure("invalid_url")
+	}
+	limit := resource.MaxSize
+	if kind == "subscription" || kind == "proxy" {
+		limit = model.MaxDocumentSize
 	}
 	now := time.Now().UTC()
 	if b.f.Now != nil {
@@ -185,14 +192,14 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			}
 			data = cached
 		case http.StatusOK:
-			if response.ContentLength > resource.MaxSize {
+			if response.ContentLength > int64(limit) {
 				return nil, failure("body_too_large")
 			}
-			data, err = io.ReadAll(io.LimitReader(response.Body, resource.MaxSize+1))
+			data, err = io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 			if err != nil {
 				return nil, failure("body_read_failed")
 			}
-			if len(data) > resource.MaxSize {
+			if len(data) > limit {
 				return nil, failure("body_too_large")
 			}
 			if len(data) == 0 {
@@ -202,6 +209,9 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			return nil, failure(fmt.Sprintf("http_status_%d", response.StatusCode))
 		}
 		entry = Entry{Checked: now, Request: request, ETag: response.Header.Get("ETag"), Modified: response.Header.Get("Last-Modified"), Next: now.Add(time.Duration(interval) * time.Second)}
+		if id == "root" && kind == "subscription" {
+			entry.Usage = responseUsage(response.Header.Values("Subscription-Userinfo"), old.Usage, response.StatusCode == http.StatusNotModified, now)
+		}
 		if response.StatusCode == http.StatusNotModified {
 			if entry.ETag == "" {
 				entry.ETag = old.ETag
@@ -218,7 +228,7 @@ func (b *Batch) Inline(id, kind, name string, data []byte) ([]byte, error) {
 }
 func (b *Batch) record(id, kind, name string, data []byte, entry Entry) ([]byte, error) {
 	b.Bytes += len(data)
-	if b.Bytes > 32<<20 {
+	if b.Bytes > 384<<20 {
 		return nil, failure("bundle_too_large")
 	}
 	hash, err := b.f.Blobs.Put(data)

@@ -34,6 +34,8 @@ type Config struct {
 	IPv6           bool           `yaml:"ipv6" json:"ipv6"`
 	TTL            *int           `yaml:"fake-ip-ttl" json:"fake-ip-ttl,omitempty"`
 	CacheSize      int            `yaml:"cache-size" json:"cache-size,omitempty"`
+	StaleTTL       int            `yaml:"cache-stale-ttl" json:"cache-stale-ttl,omitempty"`
+	Concurrency    int            `yaml:"max-concurrent-upstreams" json:"max-concurrent-upstreams,omitempty"`
 }
 type Policy struct {
 	ID      string   `yaml:"id" json:"id"`
@@ -54,6 +56,7 @@ type FallbackFilter struct {
 }
 type Endpoint struct {
 	Scheme, Host, Port, Path, Via string
+	Scope                         string
 	PreferH3                      bool
 	Params                        map[string]string
 }
@@ -121,6 +124,12 @@ func Validate(c *Config) error {
 	}
 	if c.TTL != nil && (*c.TTL < 0 || *c.TTL > 86400) {
 		return fmt.Errorf("fake-ip-ttl must be 0–86400")
+	}
+	if c.StaleTTL < 0 || c.StaleTTL > 86400 {
+		return fmt.Errorf("cache-stale-ttl must be 0..86400 seconds")
+	}
+	if c.Concurrency < 0 || c.Concurrency > 16 {
+		return fmt.Errorf("max-concurrent-upstreams must be 0..16")
 	}
 	if c.CacheSize < 0 || c.CacheSize > 1_000_000 {
 		return fmt.Errorf("invalid DNS cache size")

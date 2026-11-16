@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/MimoProxy/reka/internal/api"
 	goruntime "runtime"
 	"slices"
 	"sync"
@@ -32,13 +33,15 @@ func NewHandler(svc *service.Service) *Handler { return &Handler{svc: svc} }
 // Session is one client connection's state. send writes one message
 // frame; it must be safe for concurrent use.
 type Session struct {
-	h     *Handler
-	send  func([]byte) error
-	ctx   context.Context
-	stop  context.CancelFunc
-	mu    sync.Mutex
-	hello bool
-	sub   *service.Subscription
+	h            *Handler
+	send         func([]byte) error
+	ctx          context.Context
+	stop         context.CancelFunc
+	mu           sync.Mutex
+	profileID    string
+	profileEpoch uint64
+	hello        bool
+	sub          *service.Subscription
 }
 
 // NewSession starts a session that replies through send.
@@ -108,6 +111,9 @@ func decode[T any](raw json.RawMessage) (T, error) {
 
 // Methods lists the API methods of this version.
 var Methods = []string{
+	"ExportProfileArchive", "GetProfileState", "SwitchProfile", "GetProfileSwitchOperation", "InstallProfile", "DeleteInactiveProfile",
+	"GetProcessTraffic", "ExportManifest", "ReadResource",
+	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
 	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
@@ -116,7 +122,154 @@ var Methods = []string{
 
 func (s *Session) dispatch(req Request) (any, error) {
 	svc := s.h.svc
+	if req.Method == "SwitchProfile" {
+		p, err := decode[api.SwitchProfileRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if req.ProfileID != "" && (req.ProfileID != p.BaseProfile || req.ProfileEpoch != p.BaseEpoch) {
+			return nil, &service.Error{Code: service.CodeConflict, Message: "switch context does not match its base profile"}
+		}
+		result, err := svc.SwitchProfile(s.ctx, p)
+		if err == nil && result.State == "committed" {
+			s.profileID = result.ProfileID
+			s.profileEpoch = result.Epoch
+		}
+		return result, err
+	}
+	if req.Method == "DeleteInactiveProfile" {
+		p, err := decode[struct {
+			ProfileID   string `json:"profile_id"`
+			BaseProfile string `json:"base_profile"`
+			BaseEpoch   uint64 `json:"base_epoch"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		// Delete has its own writer gate. An explicit active context is mandatory.
+		state, err := svc.ProfileState("")
+		if err != nil {
+			return nil, err
+		}
+		if p.BaseProfile != state.ProfileID || p.BaseEpoch != state.Epoch {
+			return nil, &service.Error{Code: service.CodeConflict, Message: "profile changed"}
+		}
+		return map[string]bool{"deleted": true}, svc.DeleteInactiveProfile(p.ProfileID, p.BaseProfile, p.BaseEpoch)
+	}
+	id, epoch := req.ProfileID, req.ProfileEpoch
+	if id == "" {
+		id, epoch = s.profileID, s.profileEpoch
+	}
+	if req.Method == "Hello" || req.Method == "GetProfileState" || req.Method == "GetProfileSwitchOperation" {
+		id, epoch = "", 0
+	}
+	release, err := svc.AcquireProfileCall(id, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if req.Method == "Hello" {
+		state, err := svc.ProfileState("")
+		if err != nil {
+			return nil, err
+		}
+		s.profileID, s.profileEpoch = state.ProfileID, state.Epoch
+	}
 	switch req.Method {
+	case "ExportProfileArchive":
+		p, err := decode[api.ExportManifestRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ExportProfileArchive(p)
+	case "GetProfileState":
+		p, err := decode[struct {
+			ProfileID string `json:"profile_id"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ProfileState(p.ProfileID)
+	case "GetProfileSwitchOperation":
+		p, err := decode[struct {
+			OperationID string `json:"operation_id"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ProfileSwitchOperation(p.OperationID)
+	case "InstallProfile":
+		p, err := decode[api.InstallProfileRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.InstallProfile(p)
+	case "GetProcessTraffic":
+		p, err := decode[struct {
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		value := svc.Engine().ProcessTraffic(p.Offset, p.Limit)
+		value.Epoch = svc.Events().Epoch()
+		return value, nil
+	case "ExportManifest":
+		p, err := decode[api.ExportManifestRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ExportManifest(p)
+	case "ReadResource":
+		p, err := decode[api.ReadResourceRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.ReadResource(p)
+	case "GetLogs":
+		p, err := decode[struct {
+			Limit int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"events": svc.Events().Recent(service.EventLog, p.Limit)}, nil
+	case "GetRules":
+		p, err := decode[struct {
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().RulesPage(p.Offset, p.Limit), nil
+	case "StageResource":
+		p, err := decode[api.StageResourceRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.StageResource(p)
+	case "ProbeOutbound":
+		p, err := decode[api.ProbeRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().ProbeOutbound(s.ctx, p)
+	case "GetTraffic":
+		value := svc.Engine().Traffic()
+		value.Epoch = svc.Events().Epoch()
+		return value, nil
+	case "QueryDNS":
+		p, err := decode[api.DNSQueryRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().QueryDNS(s.ctx, p)
+	case "FlushDNSCache":
+		return map[string]any{"cleared": svc.Engine().FlushDNSCache()}, nil
+	case "ResetNetwork":
+		return map[string]any{"cleared": svc.Engine().ResetNetwork()}, nil
 	case "Hello":
 		p, err := decode[HelloParams](req.Params)
 		if err != nil {
@@ -362,6 +515,8 @@ func (s *Session) subscribe(types []string, epoch string, after uint64) {
 
 // Capabilities describes what this build supports.
 type Capabilities struct {
+	ProcessModes        []string           `json:"process_modes,omitempty"`
+	SniffProtocols      []string           `json:"sniff_protocols,omitempty"`
 	NetworkModes        []string           `json:"network_modes"`
 	TUNStacks           []string           `json:"tun_stacks,omitempty"`
 	ConfigurationLayers []string           `json:"configuration_layers"`
@@ -385,6 +540,7 @@ func capabilities(svc *service.Service) Capabilities {
 	for _, k := range router.Kinds() {
 		conds = append(conds, k.String())
 	}
+	conds = append(conds, "geosite", "ip-asn")
 	modes := []string{"off"}
 	var stacks []string
 	switch goruntime.GOOS {
@@ -395,7 +551,7 @@ func capabilities(svc *service.Service) Capabilities {
 		modes = append(modes, "tun")
 		stacks = svc.Engine().TUNStacks()
 	}
-	return Capabilities{NetworkModes: modes, TUNStacks: stacks,
+	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"}, ProcessModes: []string{"off", "rule", "always"},
 		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
 		SourceFormats:       []string{"native", "clash", "links"},
 		ImportSupport:       importer.SupportMatrix(),

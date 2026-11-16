@@ -48,10 +48,13 @@ import (
 
 // Options configure a Service.
 type Options struct {
-	StateRoot string
-	Secrets   secret.Store
-	Engine    *generation.Engine
-	Logger    *slog.Logger
+	DeferNetwork     bool
+	ProfileSecrets   func(string) (secret.Store, error)
+	RuntimeStateRoot string
+	StateRoot        string
+	Secrets          secret.Store
+	Engine           *generation.Engine
+	Logger           *slog.Logger
 	// InitialProfile and InitialLocal become revision 1 when the state
 	// root is empty. Without them revision 1 is an empty profile.
 	InitialProfile []byte
@@ -86,14 +89,18 @@ func errf(code, format string, args ...any) *Error {
 
 // Service is the ConfigService.
 type Service struct {
-	refreshMu sync.Mutex
-	refresh   *RefreshManager
-	closed    bool
-	opts      Options
-	store     *store.Store
-	engine    *generation.Engine
-	events    *Broker
-	log       *slog.Logger
+	profileArchives map[string]map[string]bool
+	profiles        *ProfileWorkspace
+	uploadMu        sync.Mutex
+	uploads         map[string]*resourceUpload
+	refreshMu       sync.Mutex
+	refresh         *RefreshManager
+	closed          bool
+	opts            Options
+	store           *store.Store
+	engine          *generation.Engine
+	events          *Broker
+	log             *slog.Logger
 
 	mu       sync.Mutex
 	active   uint64
@@ -120,7 +127,11 @@ func Open(opts Options) (*Service, error) {
 	if opts.Engine == nil {
 		return nil, fmt.Errorf("runtime engine required")
 	}
-	if err := s.engine.DNSState(filepath.Join(opts.StateRoot, "cache", "fake-ip.json")); err != nil {
+	runtimeRoot := opts.RuntimeStateRoot
+	if runtimeRoot == "" {
+		runtimeRoot = opts.StateRoot
+	}
+	if err := s.engine.DNSState(filepath.Join(runtimeRoot, "cache", "fake-ip.json")); err != nil {
 		return nil, fmt.Errorf("restore fake-IP state: %w", err)
 	}
 	if s.log == nil {
@@ -135,6 +146,13 @@ func Open(opts Options) (*Service, error) {
 	}
 	if a == nil {
 		profile, local := opts.InitialProfile, opts.InitialLocal
+		if opts.DeferNetwork {
+			var err error
+			local, _, err = networkOffDocument(local)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if profile == nil {
 			profile = []byte(DefaultProfile)
 		}
@@ -162,6 +180,16 @@ func Open(opts Options) (*Service, error) {
 		return s, nil
 	}
 	if err := s.startActive(a); err != nil {
+		if opts.DeferNetwork {
+			// A loaded, already-off document is safe to expose for repair even
+			// when its profile cannot compile (for example a missing secret).
+			// Never turn a failed standby conversion or unreadable local state
+			// into a control-only success: its takeover intent is unconfirmed.
+			_, changed, localErr := networkOffDocument(s.local)
+			if s.active == 0 || s.active != a.Revision || localErr != nil || changed {
+				return nil, fmt.Errorf("defer network takeover: %w", err)
+			}
+		}
 		s.startErr = err
 		s.log.Error("active configuration did not start; fix it with a new commit", "revision", a.Revision, "err", err)
 	}
@@ -215,6 +243,7 @@ func (s *Service) storeUnstarted(profile, local, sources, overlay []byte, diags 
 	s.mu.Lock()
 	s.active, s.profile, s.local, s.warnings = 1, profile, local, diags
 	s.sources, s.overlay = sources, overlay
+
 	s.startErr = diags.Errors()
 	s.mu.Unlock()
 	return nil
@@ -292,6 +321,23 @@ func (s *Service) startActive(a *store.Active) error {
 	}
 	s.active, s.profile, s.local = a.Revision, profile, local
 	s.sources, s.overlay = sources, overlay
+	if s.opts.DeferNetwork {
+		off, changed, err := networkOffDocument(local)
+		if err != nil {
+			return err
+		}
+		if changed {
+			text := string(off)
+			result, err := s.Commit(context.Background(), CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: a.Revision, Local: &text}, OperationID: newOperationID(), Source: "defer-network", Message: "start in standby before client handoff"})
+			if err != nil {
+				return err
+			}
+			if result.State != store.OpCommitted {
+				return fmt.Errorf("standby transaction: %s", describe(result))
+			}
+			return nil
+		}
+	}
 	eff, diags := compile.Compile(profile, local, s.compileOpts(sources, overlay))
 	s.warnings = diags
 	if eff == nil {
@@ -344,7 +390,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay
 		if whole != nil {
 			base = []byte(*whole)
 		}
-		masked := name != model.DocLocal && containsMask(base)
+		masked := containsMask(base)
 		if len(patch) == 0 && !masked {
 			return base, nil
 		}
@@ -359,7 +405,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay
 		if err := doc.Apply(patch...); err != nil {
 			return nil, errf(CodeBadRequest, "%s patch: %v", name, err)
 		}
-		if name != model.DocLocal {
+		{
 			activeDoc, _ := model.LoadDoc(name, active)
 			if err := doc.UnmaskSecrets(activeDoc); err != nil {
 				return nil, errf(CodeBadRequest, "%v", err)
@@ -380,7 +426,7 @@ func (s *Service) candidate(req ChangeRequest) (profile, local, sources, overlay
 		return nil, nil, nil, nil, err
 	}
 	if req.Import != nil {
-		if sources, err = mergeImport(sources, req.Import); err != nil {
+		if sources, err = s.mergeImport(sources, req.Import); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}
@@ -415,9 +461,7 @@ func diffDocs(name, prefix string, a, b []byte) []FieldChange {
 		if diags.HasErrors() {
 			return map[string]any{}
 		}
-		if name != model.DocLocal {
-			doc.MaskSecrets()
-		}
+		doc.MaskSecrets()
 		return model.Flatten(doc.Mapping())
 	}
 	fa, fb := flat(a), flat(b)
@@ -751,6 +795,10 @@ func (s *Service) GetConfiguration(reveal bool) Configuration {
 		Effective:   s.eff,
 		Diagnostics: s.warnings,
 	}
+	if s.profiles != nil {
+		c.ProfileID = s.profiles.cursor.ProfileID
+		c.ProfileEpoch = s.profiles.cursor.Epoch
+	}
 	if s.startErr != nil {
 		c.StartError = s.startErr.Error()
 	}
@@ -760,7 +808,7 @@ func (s *Service) GetConfiguration(reveal bool) Configuration {
 			data []byte
 			dest *string
 		}{
-			{model.DocProfile, s.profile, &c.Profile}, {model.DocSources, s.sources, &c.Sources}, {model.DocOverlay, s.overlay, &c.Overlay},
+			{model.DocProfile, s.profile, &c.Profile}, {model.DocLocal, s.local, &c.Local}, {model.DocSources, s.sources, &c.Sources}, {model.DocOverlay, s.overlay, &c.Overlay},
 		} {
 			if doc, diags := model.LoadDoc(item.name, item.data); !diags.HasErrors() {
 				if n := doc.MaskSecrets(); n > 0 {
@@ -812,6 +860,10 @@ func (s *Service) RestoreRevision(ctx context.Context, req RestoreRequest) (Resu
 
 // Close stops the runtime.
 func (s *Service) Close() {
+	if s.profiles != nil {
+		s.profiles.gate.Lock()
+		defer s.profiles.gate.Unlock()
+	}
 	s.refreshMu.Lock()
 	s.closed = true
 	m := s.refresh
@@ -820,6 +872,9 @@ func (s *Service) Close() {
 		m.Close()
 	}
 	s.engine.Close()
+	if s.profiles != nil {
+		s.profiles.Close()
+	}
 }
 
 // sameInstances reports whether two compilations of the same documents

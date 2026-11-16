@@ -105,6 +105,20 @@ func newVLESSRealityOutbound(ctx context.Context, logger log.ContextLogger, tag 
 		h.encryption = encryptionHandshake(encrypted)
 	}
 
+	var customValues map[string]any
+	if len(s.Options) > 0 {
+		if err = json.Unmarshal(s.Options, &customValues); err != nil {
+			return nil, err
+		}
+	}
+	if customValues["reka_xhttp"] != nil {
+		client, err := buildXHTTPStream(ctx, logger, customValues, s.Server, s.Port, s.TLS)
+		if err != nil {
+			return nil, err
+		}
+		h.transport = &xhttpV2RayTransport{Client: client}
+		return h, nil
+	}
 	if extra.Transport != nil && extra.Transport.Type == "http" {
 		h.h2 = &extra.Transport.HTTPOptions
 	} else if extra.Transport != nil {
@@ -239,17 +253,17 @@ func (d *realityTransportDialer) ListenPacket(context.Context, M.Socksaddr) (net
 }
 
 func (h *vlessRealityOutbound) InterfaceUpdated(context.Context) {
-	if h.transport != nil {
-		h.transport.Close()
+	if resource, ok := h.transport.(interface{ Reset() }); ok {
+		resource.Reset()
 	}
 }
 func (h *vlessRealityOutbound) SetKeepIdleConnections(keep bool) {
-	if transport, ok := h.transport.(adapter.IdleConnectionKeeper); ok {
-		transport.SetKeepIdleConnections(keep)
+	if resource, ok := h.transport.(adapter.IdleConnectionKeeper); ok {
+		resource.SetKeepIdleConnections(keep)
 	}
 }
 func (h *vlessRealityOutbound) CloseIdleConnections() {
-	if transport, ok := h.transport.(adapter.IdleConnectionKeeper); ok {
-		transport.CloseIdleConnections()
+	if resource, ok := h.transport.(adapter.IdleConnectionKeeper); ok {
+		resource.CloseIdleConnections()
 	}
 }

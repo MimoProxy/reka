@@ -413,7 +413,8 @@ func structFields(t reflect.Type) map[string]int {
 // MatchKeys are the rule condition keys, in documentation order.
 var MatchKeys = []string{
 	"domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern",
-	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "rule-set", "geoip", "and", "or", "not", "all",
+	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "rule-set", "geoip", "geosite", "ip-asn", "and", "or", "not", "all",
+	"process-path", "process-path-regex", "process-name-wildcard", "process-path-wildcard", "in-name", "in-type", "in-port", "in-user", "uid",
 }
 
 func isMatchKey(k string) bool {

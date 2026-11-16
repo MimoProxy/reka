@@ -13,7 +13,7 @@ static JavaVM *g_vm;
 
 typedef struct {
 	jobject host;
-	jmethodID protect, seal, open, onMessage, findProcess;
+	jmethodID protect, seal, open, onMessage, findProcess, findProcessInfo;
 } host_t;
 
 static int init_vm(JNIEnv *env) {
@@ -29,6 +29,8 @@ static host_t *new_host(JNIEnv *env, jobject host) {
 	h->open = (*env)->GetMethodID(env, cls, "open", "([B)[B");
 	h->findProcess = (*env)->GetMethodID(env, cls, "findProcess", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
  if (!h->findProcess) (*env)->ExceptionClear(env);
+ h->findProcessInfo = (*env)->GetMethodID(env, cls, "findProcessInfo", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+ if (!h->findProcessInfo) (*env)->ExceptionClear(env);
  h->onMessage = (*env)->GetMethodID(env, cls, "onMessage", "(Ljava/lang/String;)V");
 	(*env)->DeleteLocalRef(env, cls);
 	if (!h->protect || !h->seal || !h->open || !h->onMessage) {
@@ -116,6 +118,37 @@ static char *host_find_process(host_t *h, const char *network, const char *sourc
  (*env)->DeleteLocalRef(env,n);(*env)->DeleteLocalRef(env,s);(*env)->DeleteLocalRef(env,d);detach(attached);return out;
 }
 
+static char *host_find_process_info(host_t *h, const char *network, const char *source, const char *destination) {
+	if (!h->findProcessInfo) return NULL; // Optional method absent: legacy host.
+	int attached;
+	JNIEnv *env = attach(&attached);
+	if (!env) return strdup("{}");
+	jstring n = (*env)->NewStringUTF(env, network);
+	jstring s = (*env)->NewStringUTF(env, source);
+	jstring d = (*env)->NewStringUTF(env, destination);
+	jstring result = NULL;
+	char *out = strdup("{}"); // A failing implemented callback means unknown.
+	if (!(*env)->ExceptionCheck(env)) {
+		result = (*env)->CallObjectMethod(env, h->host, h->findProcessInfo, n, s, d);
+	}
+	if (!(*env)->ExceptionCheck(env) && result) {
+		const char *value = (*env)->GetStringUTFChars(env, result, NULL);
+		if (value) {
+			free(out);
+			out = strdup(value);
+			(*env)->ReleaseStringUTFChars(env, result, value);
+		}
+	}
+	if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+	if (result) (*env)->DeleteLocalRef(env, result);
+	(*env)->DeleteLocalRef(env, n);
+	(*env)->DeleteLocalRef(env, s);
+	(*env)->DeleteLocalRef(env, d);
+	detach(attached);
+	return out;
+}
+
+
 static const char *get_utf(JNIEnv *env, jstring s) { return s ? (*env)->GetStringUTFChars(env, s, NULL) : NULL; }
 static void release_utf(JNIEnv *env, jstring s, const char *c) { if (s) (*env)->ReleaseStringUTFChars(env, s, c); }
 static jstring new_utf(JNIEnv *env, const char *c) { return (*env)->NewStringUTF(env, c); }
@@ -161,6 +194,24 @@ func (j *jniHost) FindProcess(network, source, destination string) string {
 	defer C.free(unsafe.Pointer(s))
 	defer C.free(unsafe.Pointer(d))
 	v := C.host_find_process(j.h, n, s, d)
+	if v == nil {
+		return ""
+	}
+	defer C.free(unsafe.Pointer(v))
+	return C.GoString(v)
+}
+
+func (j *jniHost) FindProcessInfo(network, source, destination string) string {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if j.closed {
+		return ""
+	}
+	n, s, d := C.CString(network), C.CString(source), C.CString(destination)
+	defer C.free(unsafe.Pointer(n))
+	defer C.free(unsafe.Pointer(s))
+	defer C.free(unsafe.Pointer(d))
+	v := C.host_find_process_info(j.h, n, s, d)
 	if v == nil {
 		return ""
 	}
@@ -235,14 +286,19 @@ func jstr(env *C.JNIEnv, s string) C.jstring {
 
 //export Java_org_mimoproxy_reka_Native_start
 func Java_org_mimoproxy_reka_Native_start(env *C.JNIEnv, _ C.jclass, jroot, jprofile, jlocal C.jstring, jhost C.jobject) C.jlong {
-	return startJNI(env, jroot, jprofile, jlocal, jhost, 0)
+	return startJNI(env, jroot, jprofile, jlocal, jhost, 0, false)
+}
+
+//export Java_org_mimoproxy_reka_Native_startOff
+func Java_org_mimoproxy_reka_Native_startOff(env *C.JNIEnv, _ C.jclass, jroot, jprofile, jlocal C.jstring, jhost C.jobject) C.jlong {
+	return startJNI(env, jroot, jprofile, jlocal, jhost, 0, true)
 }
 
 //export Java_org_mimoproxy_reka_Native_startVPN
 func Java_org_mimoproxy_reka_Native_startVPN(env *C.JNIEnv, _ C.jclass, jroot, jprofile, jlocal C.jstring, jhost C.jobject, fd C.jint) C.jlong {
-	return startJNI(env, jroot, jprofile, jlocal, jhost, int(fd))
+	return startJNI(env, jroot, jprofile, jlocal, jhost, int(fd), false)
 }
-func startJNI(env *C.JNIEnv, jroot, jprofile, jlocal C.jstring, jhost C.jobject, fd int) C.jlong {
+func startJNI(env *C.JNIEnv, jroot, jprofile, jlocal C.jstring, jhost C.jobject, fd int, deferNetwork bool) C.jlong {
 	fail := func(err error) C.jlong {
 		mu.Lock()
 		lastErr = err.Error()
@@ -256,7 +312,7 @@ func startJNI(env *C.JNIEnv, jroot, jprofile, jlocal C.jstring, jhost C.jobject,
 	if h == nil {
 		return fail(errors.New("host object lacks protect, seal, open or onMessage"))
 	}
-	opts := core.Options{TUNFD: fd, StateRoot: goString(env, jroot)}
+	opts := core.Options{TUNFD: fd, StateRoot: goString(env, jroot), DeferNetwork: deferNetwork}
 	if p := goString(env, jprofile); p != "" {
 		opts.InitialProfile = []byte(p)
 	}
