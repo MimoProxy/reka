@@ -1,0 +1,51 @@
+import SwiftUI
+
+@MainActor
+struct ConnectionsView: View {
+    let store: AppStore
+    var search: String
+    @State private var selection: String?
+    @State private var closeAll = false
+
+    private var rows: [ConnectionRow] {
+        store.connections.filter { search.isEmpty || [$0.destination, $0.source, $0.outbound, $0.rule].contains { $0.localizedCaseInsensitiveContains(search) } }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("\(store.connectionCount) 个活动连接").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("关闭所选") { if let selection { Task { await store.closeConnection(selection) } } }
+                    .disabled(selection == nil || store.isBusy || !store.isOnline)
+                Button("关闭全部", role: .destructive) { closeAll = true }
+                    .disabled(store.connections.isEmpty || store.isBusy || !store.isOnline)
+            }
+            Table(rows, selection: $selection) {
+                TableColumn("目标", value: \.destination).width(min: 160, ideal: 250)
+                TableColumn("协议", value: \.network).width(55)
+                TableColumn("出口") { row in Text(store.displayName(row.outbound)) }.width(min: 90, ideal: 130)
+                TableColumn("上传") { row in Text(DisplayFormat.bytes(row.uploaded)).monospacedDigit() }.width(75)
+                TableColumn("下载") { row in Text(DisplayFormat.bytes(row.downloaded)).monospacedDigit() }.width(75)
+                TableColumn("来源", value: \.source).width(min: 90, ideal: 130)
+            }.overlay {
+                if rows.isEmpty { EmptyState(title: search.isEmpty ? "暂无活动连接" : "没有匹配的连接", symbol: "network") }
+            }.pageCardInset()
+            if let selected = rows.first(where: { $0.id == selection }) {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("路由规则").font(.caption).foregroundStyle(.tertiary)
+                        Text(selected.rule.isEmpty ? "—" : selected.rule).font(.callout).textSelection(.enabled)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Text("出口链").font(.caption).foregroundStyle(.tertiary)
+                        Text(selected.chain.map(store.displayName).joined(separator: " → ")).font(.callout).textSelection(.enabled)
+                    }
+                }.panel()
+            }
+        }.padding(.horizontal, 20).padding(.top, Theme.pageTopInset).padding(.bottom, 20)
+            .confirmationDialog("关闭所有活动连接？", isPresented: $closeAll) {
+                Button("关闭全部连接", role: .destructive) { Task { await store.closeConnections() } }
+            } message: { Text("正在进行的请求会中断，应用可以重新建立连接。") }
+    }
+}
