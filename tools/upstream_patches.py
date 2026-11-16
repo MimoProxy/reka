@@ -733,3 +733,32 @@ func (c *hashReadConn) dataConn() net.Conn {
 
 
 MODULES['github.com/sagernet/sing-shadowtls'][1]['v2_hash.go'] = ('6ec0e04900cc75dbb26c9247dd25846956dc8fa0252a5ebb3f22bc0d34038666', shadowtls_v2_post_handshake)
+
+
+# Preserve the actual protocol on mixed listeners and keep failed credentials
+# out of logs. The callback context survives upstream user authentication.
+def inbound_socks_metadata(source):
+    source = replace(source, '\tswitch version {\n\tcase socks4.Version:', '\tctx = context.WithValue(ctx, "reka.inbound.protocol.v1", map[byte]string{4:"SOCKS4", 5:"SOCKS5"}[version])\n\tswitch version {\n\tcase socks4.Version:')
+    return replace(source, 'E.New("socks5: authentication failed, username=", usernamePasswordAuthRequest.Username, ", password=", usernamePasswordAuthRequest.Password)', 'E.New("socks5: authentication failed")')
+
+
+def inbound_http_metadata(source):
+    source = replace(source, ') error {\n\tfor {', ') error {\n\tctx = context.WithValue(ctx, "reka.inbound.protocol.v1", "HTTP")\n\tfor {')
+    source = replace(source, 'E.New("http: authentication failed, username=", username, ", password=", password)', 'E.New("http: authentication failed")')
+    return replace(source, 'E.New("http: authentication failed, Proxy-Authorization=", authorization)', 'E.New("http: authentication failed")')
+
+MODULES['github.com/sagernet/sing'][1]['protocol/socks/handshake.go'] = ('519634a01cba3041477aac4c5a767424b9167708a96af90bdf746a970aad3be3', inbound_socks_metadata)
+MODULES['github.com/sagernet/sing'][1]['protocol/http/handshake.go'] = ('fa5cf907d7a50a29ee9292cf56d6aa9fb1a4b3a82de2bc233b43653cb9cbb7e9', inbound_http_metadata)
+
+
+# Keep Reka's strict response identity contract when the upstream multiplexer
+# is still probing stream reuse. Bind detached reuse probes to pool lifetime.
+def dns_multiplexer_identity_lifetime(source):
+    source = replace(source, '\toptions    queryMultiplexerOptions', '\tprobeContext context.Context\n\tcancelProbe context.CancelFunc\n\toptions    queryMultiplexerOptions')
+    source = replace(source, '\tmultiplexer := &queryMultiplexer{', '\tprobeContext, cancelProbe := context.WithCancel(context.Background())\n\tmultiplexer := &queryMultiplexer{\n\t\tprobeContext: probeContext, cancelProbe: cancelProbe,')
+    source = replace(source, 'func (m *queryMultiplexer) Close() error {', 'func (m *queryMultiplexer) Close() error {\n\tm.cancelProbe()')
+    source = replace(source, '\t\tresponse.Id = message.Id\n\t\tcallback(response, nil)', '\t\tif response.Id != message.Id { callback(nil, E.New("invalid DNS response identity")); return }\n\t\tresponse.Id = message.Id\n\t\tcallback(response, nil)')
+    source = replace(source, '\tprobeCtx, cancel := context.WithTimeout(ctx, reuseProbeTimeout)', '\tprobeCtx, cancel := context.WithTimeout(ctx, reuseProbeTimeout)\n\tstopPool := context.AfterFunc(m.probeContext, cancel)\n\tdefer stopPool()')
+    return source
+
+MODULES['github.com/sagernet/sing-box'][1]['dns/transport/multiplexer.go'] = ('39983a6e841e82246c73cec45c9256f9647d58ad0c338747687d0fc6c36f4702', dns_multiplexer_identity_lifetime)

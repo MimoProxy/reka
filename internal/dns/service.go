@@ -24,18 +24,27 @@ type Options struct {
 	Pool       *FakePool
 	Generation uint64
 	Route      func(context.Context, Endpoint) string
+	Background func(context.Context) (context.Context, func(), error)
+	Retire     func()
+	ResetIdle  func()
 }
 type cached struct {
 	msg       *D.Msg
 	at, until time.Time
 }
 type Service struct {
-	systemHosts  []Host
-	cfg          Config
-	opts         Options
-	mu           sync.Mutex
-	cache        map[string]cached
-	hits, misses atomic.Uint64
+	systemHosts    []Host
+	cfg            Config
+	opts           Options
+	mu             sync.Mutex
+	cache          map[string]cached
+	flights        map[string]*queryFlight
+	cacheEpoch     uint64
+	retired        bool
+	background     context.Context
+	stopBackground context.CancelFunc
+	refreshSlots   chan struct{}
+	hits, misses   atomic.Uint64
 }
 
 func New(c Config, o Options) (*Service, error) {
@@ -83,7 +92,8 @@ func New(c Config, o Options) (*Service, error) {
 	if c.FakeRange6 == "" {
 		c.FakeRange6 = "fc00::/18"
 	}
-	return &Service{systemHosts: systemHosts, cfg: c, opts: o, cache: map[string]cached{}}, nil
+	background, stop := context.WithCancel(context.Background())
+	return &Service{systemHosts: systemHosts, cfg: c, opts: o, cache: map[string]cached{}, flights: map[string]*queryFlight{}, background: background, stopBackground: stop, refreshSlots: make(chan struct{}, 16)}, nil
 }
 func (s *Service) Config() Config { return s.cfg }
 func (s *Service) Match(pattern, domain string, a netip.Addr) bool {
@@ -249,32 +259,12 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 		return nil, e
 	}
 	key := scope + "\x00" + string(wire)
-	now := time.Now()
-	s.mu.Lock()
-	entry, ok := s.cache[key]
-	if ok && !now.Before(entry.until) {
-		delete(s.cache, key)
-		ok = false
-	}
-	s.mu.Unlock()
-	if ok {
-		s.hits.Add(1)
-		m := entry.msg.Copy()
-		m.Id = q.Id
-		age := uint32(now.Sub(entry.at) / time.Second)
-		for _, rr := range append(append(m.Answer, m.Ns...), m.Extra...) {
-			if rr.Header().Rrtype != D.TypeOPT {
-				if rr.Header().Ttl > age {
-					rr.Header().Ttl -= age
-				} else {
-					rr.Header().Ttl = 0
-				}
-			}
-		}
-		return m, nil
-	}
-	s.misses.Add(1)
+	return s.cachedExchange(ctx, q, scope, key)
+}
+
+func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string) (*D.Msg, error) {
 	servers := s.cfg.Nameservers
+	domain := strings.ToLower(strings.TrimSuffix(q.Question[0].Name, "."))
 	policy := scope == "normal" || scope == "direct" && s.cfg.DirectPolicy
 	switch scope {
 	case "bootstrap":
@@ -368,38 +358,17 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 	if m == nil {
 		return nil, errors.New("empty DNS response")
 	}
-	m = m.Copy()
-	m.Id = q.Id
-	ttl := uint32(3600)
-	hasTTL := false
-	for _, rr := range append(append([]D.RR{}, m.Answer...), m.Ns...) {
-		v := rr.Header().Ttl
-		if soa, ok := rr.(*D.SOA); ok {
-			v = min(v, soa.Minttl)
-		}
-		ttl = min(ttl, v)
-		hasTTL = true
-	}
-	if hasTTL && ttl > 0 && (m.Rcode == D.RcodeSuccess || m.Rcode == D.RcodeNameError) && !m.Truncated {
-		s.mu.Lock()
-		if len(s.cache) >= s.cfg.CacheSize {
-			for k := range s.cache {
-				delete(s.cache, k)
-				break
-			}
-		}
-		s.cache[key] = cached{m.Copy(), time.Now(), time.Now().Add(time.Duration(ttl) * time.Second)}
-		s.mu.Unlock()
-	}
 	return m, nil
 }
-func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope string) (*D.Msg, error) {
+
+func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scope string) (*D.Msg, error) {
 	var last error
 	for _, raw := range servers {
 		ep, err := ParseEndpoint(raw)
 		if err != nil {
 			return nil, err
 		}
+		ep.Scope = scope
 		ep.PreferH3 = s.cfg.PreferH3 && ep.Scheme == "https"
 		if ep.Disabled(q.Question[0].Qtype) {
 			m := new(D.Msg)

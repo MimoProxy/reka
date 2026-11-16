@@ -75,7 +75,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
 	allowed := map[string]bool{"name": true, "type": true}
-	for _, key := range []string{"server", "port", "udp", "username", "password", "cipher", "uuid", "flow", "packet-encoding", "network", "tls", "servername", "sni", "client-fingerprint", "skip-cert-verify", "alpn", "reality-opts", "encryption", "xudp", "packet-addr", "ws-opts", "grpc-opts", "http-upgrade-opts", "h2-opts", "http-opts", "smux"} {
+	for _, key := range []string{"server", "port", "udp", "username", "password", "cipher", "uuid", "flow", "packet-encoding", "network", "tls", "servername", "sni", "client-fingerprint", "skip-cert-verify", "alpn", "reality-opts", "encryption", "xudp", "packet-addr", "ws-opts", "grpc-opts", "http-upgrade-opts", "h2-opts", "http-opts", "xhttp-opts", "smux"} {
 		switch key {
 		case "server", "port":
 			allowed[key] = typ != "direct" && typ != "reject"
@@ -258,10 +258,10 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 			}
 		}
 	}
+	c.convertTLSExtras(&r, typ, out)
 	if typ == "vless" {
 		c.convertTransport(&r, out)
 	}
-	c.convertTLSExtras(&r, typ, out)
 	c.convertMultiplex(&r, out)
 	if !r.bad {
 		r.bad = !c.validateOutbound(out, n, path)

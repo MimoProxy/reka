@@ -32,6 +32,7 @@ type Host interface {
 
 // Options for Start.
 type Options struct {
+	DeferNetwork   bool
 	TUNFD          int
 	StateRoot      string
 	InitialProfile []byte
@@ -72,22 +73,11 @@ func Start(opts Options, host Host) (*Instance, error) {
 	level := new(slog.LevelVar)
 	logger := opts.Logger
 	k, err := daemon.Start(daemon.Options{
-		TUNFD: opts.TUNFD, ProcessLookup: func(ctx context.Context, md sagernet.Metadata) (string, bool) {
-			if h, ok := host.(interface {
-				FindProcess(network, source, destination string) string
-			}); ok {
-				// Ownership belongs to the original socket tuple. Fake IP routing
-				// can replace Destination with a domain before process rules run;
-				// Local retains the packet destination (or loopback listener).
-				destination := md.Destination.String()
-				if md.Local.IsValid() {
-					destination = md.Local.String()
-				}
-				s := h.FindProcess(md.Network, md.Source.String(), destination)
-				return s, s != ""
-			}
-			return "", false
+		DeferNetwork: opts.DeferNetwork,
+		ProcessInfoLookup: func(ctx context.Context, md sagernet.Metadata) (sagernet.ProcessInfo, bool) {
+			return processOwnerForHost(host, md)
 		},
+		TUNFD:     opts.TUNFD,
 		StateRoot: opts.StateRoot, Secrets: sec, Logger: logger, LogLevel: level,
 		ControlAddress: addr, InitialProfile: opts.InitialProfile, InitialLocal: opts.InitialLocal, InitialSources: opts.InitialSources, InitialOverlay: opts.InitialOverlay,
 		Protect: func(fd int) error {

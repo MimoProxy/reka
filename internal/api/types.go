@@ -172,6 +172,8 @@ type GroupChange struct {
 // Plan describes what activating a configuration changes. Nothing in it
 // has happened yet.
 type Plan struct {
+	RoutingChanged         bool             `json:"routing_changed"`
+	SniffChanged           bool             `json:"sniff_changed"`
 	NetworkChanged         bool             `json:"network_changed"`
 	NetworkNote            string           `json:"network_note,omitempty"`
 	DNSChanged             bool             `json:"dns_changed"`
@@ -194,21 +196,29 @@ type Plan struct {
 
 // FlowInfo is attached to every routed connection.
 type FlowInfo struct {
-	Generation  uint64   `json:"generation"`
-	Revision    uint64   `json:"revision"`
-	RuleIndex   int      `json:"rule_index"`
-	RuleID      string   `json:"rule_id,omitempty"`
-	Rule        string   `json:"rule,omitempty"`
-	Chain       []string `json:"chain,omitempty"`
-	Outbound    string   `json:"outbound"`
-	Fingerprint string   `json:"fingerprint"`
+	ProcessPath   string   `json:"process_path,omitempty"`
+	ProcessUID    *uint32  `json:"process_uid,omitempty"`
+	SniffedDomain string   `json:"sniffed_domain,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	Generation    uint64   `json:"generation"`
+	Revision      uint64   `json:"revision"`
+	RuleIndex     int      `json:"rule_index"`
+	RuleID        string   `json:"rule_id,omitempty"`
+	Rule          string   `json:"rule,omitempty"`
+	Chain         []string `json:"chain,omitempty"`
+	Outbound      string   `json:"outbound"`
+	Fingerprint   string   `json:"fingerprint"`
 }
 
 // ExplainRequest describes a hypothetical connection.
 type ExplainRequest struct {
-	Inbound string `json:"inbound,omitempty"`
-	Network string `json:"network,omitempty"`
-	Source  string `json:"source,omitempty"`
+	InboundType string  `json:"inbound_type,omitempty"`
+	InboundPort uint16  `json:"inbound_port,omitempty"`
+	InboundUser string  `json:"inbound_user,omitempty"`
+	ProcessUID  *uint32 `json:"process_uid,omitempty"`
+	Inbound     string  `json:"inbound,omitempty"`
+	Network     string  `json:"network,omitempty"`
+	Source      string  `json:"source,omitempty"`
 	// Destination is "host:port" or "address:port".
 	Destination string `json:"destination"`
 	// Addresses are used for ip rules instead of resolving the domain.

@@ -13,10 +13,10 @@ import java.util.*;
 import javax.net.ssl.*;
 /** Isolated, short-lived production library VPN acceptance. */
 public final class VpnTestService extends VpnService {
- private long handle; private int protectCalls; private long id; private boolean full,networkCycle; private int processCalls,processMatches; private final StringBuilder report=new StringBuilder();
+ private long handle; private int protectCalls; private long id; private boolean full,networkCycle; private final java.util.concurrent.atomic.AtomicInteger processCalls=new java.util.concurrent.atomic.AtomicInteger(),processMatches=new java.util.concurrent.atomic.AtomicInteger(),legacyProcessCalls=new java.util.concurrent.atomic.AtomicInteger(); private ConnectionOwner connectionOwner; private final StringBuilder report=new StringBuilder();
  private void log(String s){Log.i("RekaVPNTest",s);report.append(s).append('\n');}
  private JSONObject call(String method,JSONObject params)throws Exception{JSONObject req=new JSONObject().put("id",++id).put("method",method);if(params!=null)req.put("params",params);JSONObject r=new JSONObject(Native.call(handle,req.toString()));if(r.has("error"))throw new Exception(r.toString());return r.getJSONObject("result");}
- private Native.Host host=new Native.Host(){public boolean protect(int fd){protectCalls++;return VpnTestService.this.protect(fd);}public String findProcess(String network,String source,String destination){processCalls++;String found=new ConnectionOwner(VpnTestService.this).find(network,source,destination);if(found.equals(getPackageName()))processMatches++;return found;}public byte[] seal(byte[]p){return p;}public byte[] open(byte[]p){return p;}public void onMessage(String s){}};
+ private Native.Host host=new Native.Host(){public boolean protect(int fd){protectCalls++;return VpnTestService.this.protect(fd);}public String findProcessInfo(String network,String source,String destination){processCalls.incrementAndGet();if(connectionOwner==null)connectionOwner=new ConnectionOwner(VpnTestService.this);String found=connectionOwner.findProcessInfo(network,source,destination);try{JSONObject info=new JSONObject(found);if(info.optString("path").equals(getPackageName()) && info.has("uid") && info.getLong("uid")==android.os.Process.myUid())processMatches.incrementAndGet();}catch(JSONException unavailable){}return found;}public String findProcess(String network,String source,String destination){legacyProcessCalls.incrementAndGet();return "";}public byte[] seal(byte[]p){return p;}public byte[] open(byte[]p){return p;}public void onMessage(String s){}};
  @Override public int onStartCommand(Intent intent,int flags,int startId){
   full=intent!=null && intent.getBooleanExtra("full",false);
   networkCycle=intent!=null && intent.getBooleanExtra("network-cycle",false);
@@ -48,11 +48,16 @@ public final class VpnTestService extends VpnService {
     // A deliberately different package must not reject our socket. Then the
     // actual UID lookup must select this package's reject rule over final direct.
     processRule("org.mimoproxy.reka.not-installed");https("223.5.5.5");
+    // Correct package with the wrong UID must fall through, with one rich owner lookup.
+    processRule(getPackageName(),android.os.Process.myUid()+1);
+    int beforeWrongUID=processCalls.get();https("223.5.5.5");
+    if(processCalls.get()!=beforeWrongUID+1)throw new Exception("wrong UID AND package queried owner more than once");
     processRule(getPackageName());
+    int beforeMatchedOwner=processCalls.get();
     boolean processRejected=false;try{https("223.5.5.5");}catch(IOException expected){processRejected=true;}
-    if(!processRejected || processMatches==0)throw new Exception("UID/package rule did not reject own connection");
+    if(!processRejected || processMatches.get()==0 || processCalls.get()!=beforeMatchedOwner+1 || legacyProcessCalls.get()!=0)throw new Exception("rich UID AND package rule did not reject own connection with exactly one query");
     processRule("org.mimoproxy.reka.not-installed");https("223.5.5.5");
-    log(mode+" real UID -> package process rule PASS; callbacks="+processCalls+" matches="+processMatches);
+    log(mode+" real UID AND package path process rule PASS; one rich callback per connection; callbacks="+processCalls+" matches="+processMatches);
     fakeProcessRule("org.mimoproxy.reka.not-installed");
     String fakeAddress=fakeAddress();https(fakeAddress);
     fakeProcessRule(getPackageName());
@@ -91,13 +96,14 @@ public final class VpnTestService extends VpnService {
   byte[] q=new byte[]{0x12,0x34,1,0,0,1,0,0,0,0,0,0,7,'f','i','x','t','u','r','e',4,'r','e','k','a',4,'t','e','s','t',0,0,1,0,1};
   try(DatagramSocket s=new DatagramSocket()){s.setSoTimeout(4000);s.send(new DatagramPacket(q,q.length,InetAddress.getByName(host),53));byte[] a=new byte[4096];DatagramPacket p=new DatagramPacket(a,a.length);s.receive(p);int n=p.getLength();return n>=4 && a[n-4]==(byte)192 && a[n-3]==0 && a[n-2]==2 && a[n-1]==7;}catch(SocketTimeoutException e){return false;}
  }
- private void processRule(String name)throws Exception{
-  String rules="schema-version: 1\ndns:\n nameserver: [223.5.5.5]\n default-nameserver: [223.5.5.5]\n hosts: [{id: fixture.reka.test, addresses: [192.0.2.7]}]\n use-hosts: true\nrules:\n - {id: process, match: {and: [{ip-cidr: 223.5.5.5/32}, {dst-port: '443'}, {process-name: '"+name+"'}]}, outbound: reject}\n - {id: probe, match: {and: [{ip-cidr: 223.5.5.5/32}, {dst-port: '443'}, {network: tcp}]}, outbound: direct}\n - {id: final, match: {all: true}, outbound: direct}\n";
+ private void processRule(String name)throws Exception{processRule(name,android.os.Process.myUid());}
+ private void processRule(String name,int uid)throws Exception{
+  String rules="schema-version: 1\ndns:\n nameserver: [223.5.5.5]\n default-nameserver: [223.5.5.5]\n hosts: [{id: fixture.reka.test, addresses: [192.0.2.7]}]\n use-hosts: true\nrules:\n - {id: process, match: {and: [{ip-cidr: 223.5.5.5/32}, {dst-port: '443'}, {process-path: '"+name+"'}, {uid: '"+uid+"'}]}, outbound: reject}\n - {id: probe, match: {and: [{ip-cidr: 223.5.5.5/32}, {dst-port: '443'}, {network: tcp}]}, outbound: direct}\n - {id: final, match: {all: true}, outbound: direct}\n";
   JSONObject result=call("CommitConfiguration",new JSONObject().put("base_revision",call("GetStatus",null).getLong("revision")).put("profile",rules));
   if(!result.getString("state").equals("committed"))throw new Exception(result.toString());
  }
  private void fakeProcessRule(String name)throws Exception{
-  String profile="schema-version: 1\ndns:\n nameserver: [223.5.5.5]\n default-nameserver: [223.5.5.5]\n enhanced-mode: fake-ip\n fake-ip-range: 198.18.0.0/16\n fake-ip-filter-mode: whitelist\n fake-ip-filter: [dns.alidns.com]\nrules:\n - {id: process, match: {and: [{dst-port: '443'}, {process-name: '"+name+"'}]}, outbound: reject}\n - {id: final, match: {all: true}, outbound: direct}\n";
+  String profile="schema-version: 1\ndns:\n nameserver: [223.5.5.5]\n default-nameserver: [223.5.5.5]\n enhanced-mode: fake-ip\n fake-ip-range: 198.18.0.0/16\n fake-ip-filter-mode: whitelist\n fake-ip-filter: [dns.alidns.com]\nrules:\n - {id: process, match: {and: [{dst-port: '443'}, {process-path: '"+name+"'}, {uid: '"+android.os.Process.myUid()+"'}]}, outbound: reject}\n - {id: final, match: {all: true}, outbound: direct}\n";
   JSONObject result=call("CommitConfiguration",new JSONObject().put("base_revision",call("GetStatus",null).getLong("revision")).put("profile",profile));
   if(!result.getString("state").equals("committed"))throw new Exception(result.toString());
  }

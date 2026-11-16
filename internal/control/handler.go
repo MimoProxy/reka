@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/MimoProxy/reka/internal/api"
 	goruntime "runtime"
 	"slices"
 	"sync"
@@ -108,6 +109,7 @@ func decode[T any](raw json.RawMessage) (T, error) {
 
 // Methods lists the API methods of this version.
 var Methods = []string{
+	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
 	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
@@ -117,6 +119,49 @@ var Methods = []string{
 func (s *Session) dispatch(req Request) (any, error) {
 	svc := s.h.svc
 	switch req.Method {
+	case "GetLogs":
+		p, err := decode[struct {
+			Limit int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"events": svc.Events().Recent(service.EventLog, p.Limit)}, nil
+	case "GetRules":
+		p, err := decode[struct {
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().RulesPage(p.Offset, p.Limit), nil
+	case "StageResource":
+		p, err := decode[api.StageResourceRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.StageResource(p)
+	case "ProbeOutbound":
+		p, err := decode[api.ProbeRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().ProbeOutbound(s.ctx, p)
+	case "GetTraffic":
+		value := svc.Engine().Traffic()
+		value.Epoch = svc.Events().Epoch()
+		return value, nil
+	case "QueryDNS":
+		p, err := decode[api.DNSQueryRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().QueryDNS(s.ctx, p)
+	case "FlushDNSCache":
+		return map[string]any{"cleared": svc.Engine().FlushDNSCache()}, nil
+	case "ResetNetwork":
+		return map[string]any{"cleared": svc.Engine().ResetNetwork()}, nil
 	case "Hello":
 		p, err := decode[HelloParams](req.Params)
 		if err != nil {
@@ -362,6 +407,7 @@ func (s *Session) subscribe(types []string, epoch string, after uint64) {
 
 // Capabilities describes what this build supports.
 type Capabilities struct {
+	SniffProtocols      []string           `json:"sniff_protocols,omitempty"`
 	NetworkModes        []string           `json:"network_modes"`
 	TUNStacks           []string           `json:"tun_stacks,omitempty"`
 	ConfigurationLayers []string           `json:"configuration_layers"`
@@ -395,7 +441,7 @@ func capabilities(svc *service.Service) Capabilities {
 		modes = append(modes, "tun")
 		stacks = svc.Engine().TUNStacks()
 	}
-	return Capabilities{NetworkModes: modes, TUNStacks: stacks,
+	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"},
 		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
 		SourceFormats:       []string{"native", "clash", "links"},
 		ImportSupport:       importer.SupportMatrix(),

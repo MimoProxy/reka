@@ -41,22 +41,40 @@ const (
 	KindGeoIP
 	KindDomainPattern
 	KindProcessNameRegex
+	KindProcessPath
+	KindProcessPathRegex
+	KindProcessNameWildcard
+	KindProcessPathWildcard
+	KindInboundName
+	KindInboundType
+	KindInboundPort
+	KindInboundUser
+	KindUID
 )
 
 var kindNames = map[Kind]string{
-	KindDomain:           "domain",
-	KindDomainSuffix:     "domain-suffix",
-	KindDomainKeyword:    "domain-keyword",
-	KindDomainRegex:      "domain-regex",
-	KindIPCIDR:           "ip-cidr",
-	KindSrcIPCIDR:        "src-ip-cidr",
-	KindDstPort:          "dst-port",
-	KindSrcPort:          "src-port",
-	KindNetwork:          "network",
-	KindProcessName:      "process-name",
-	KindProcessNameRegex: "process-name-regex",
-	KindMatch:            "all",
-	KindAnd:              "and", KindOr: "or", KindNot: "not", KindRuleSet: "rule-set", KindGeoIP: "geoip", KindDomainPattern: "domain-pattern",
+	KindDomain:              "domain",
+	KindDomainSuffix:        "domain-suffix",
+	KindDomainKeyword:       "domain-keyword",
+	KindDomainRegex:         "domain-regex",
+	KindIPCIDR:              "ip-cidr",
+	KindSrcIPCIDR:           "src-ip-cidr",
+	KindDstPort:             "dst-port",
+	KindSrcPort:             "src-port",
+	KindNetwork:             "network",
+	KindProcessName:         "process-name",
+	KindProcessNameRegex:    "process-name-regex",
+	KindProcessPath:         "process-path",
+	KindProcessPathRegex:    "process-path-regex",
+	KindProcessNameWildcard: "process-name-wildcard",
+	KindProcessPathWildcard: "process-path-wildcard",
+	KindInboundName:         "in-name",
+	KindInboundType:         "in-type",
+	KindInboundPort:         "in-port",
+	KindInboundUser:         "in-user",
+	KindUID:                 "uid",
+	KindMatch:               "all",
+	KindAnd:                 "and", KindOr: "or", KindNot: "not", KindRuleSet: "rule-set", KindGeoIP: "geoip", KindDomainPattern: "domain-pattern",
 }
 
 // String returns the native condition key, for example "domain-suffix".
@@ -80,7 +98,8 @@ func ParseKind(s string) (Kind, bool) {
 // Kinds lists every condition key in a stable order.
 func Kinds() []Kind {
 	return []Kind{KindDomain, KindDomainSuffix, KindDomainKeyword, KindDomainRegex,
-		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch, KindAnd, KindOr, KindNot, KindRuleSet, KindGeoIP, KindDomainPattern, KindProcessNameRegex}
+		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch, KindAnd, KindOr, KindNot, KindRuleSet, KindGeoIP, KindDomainPattern, KindProcessNameRegex,
+		KindProcessPath, KindProcessPathRegex, KindProcessNameWildcard, KindProcessPathWildcard, KindInboundName, KindInboundType, KindInboundPort, KindInboundUser, KindUID}
 }
 
 // usesDestinationIP reports whether a kind matches on the destination
@@ -140,6 +159,7 @@ type rule struct {
 	ports          []portRange
 	regexps        []*regexp.Regexp
 	processRegexps []*regexp2.Regexp
+	uidRanges      []uidRange
 	strs           []string // keywords, process names, networks (normalized)
 }
 
@@ -280,18 +300,22 @@ func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 				return nil, fail(v, fmt.Errorf("network must be tcp or udp"))
 			}
 			r.strs = append(r.strs, n)
-		case KindProcessName:
+		case KindProcessName, KindProcessPath, KindProcessNameWildcard, KindProcessPathWildcard:
 			if v == "" {
 				return nil, fail(v, fmt.Errorf("empty process name"))
 			}
 			r.strs = append(r.strs, v)
-		case KindProcessNameRegex:
+		case KindProcessNameRegex, KindProcessPathRegex:
 			re, err := regexp2.Compile(v, regexp2.IgnoreCase)
 			if err != nil {
 				return nil, fail(v, err)
 			}
 			re.MatchTimeout = 50 * time.Millisecond
 			r.processRegexps = append(r.processRegexps, re)
+		case KindInboundName, KindInboundType, KindInboundPort, KindInboundUser, KindUID:
+			if err := compileAdvancedRule(r, v); err != nil {
+				return nil, fail(v, err)
+			}
 		default:
 			return nil, fail("", fmt.Errorf("unknown rule kind %d", spec.Kind))
 		}

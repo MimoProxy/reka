@@ -97,7 +97,11 @@ func SystemSettings(c Network, proxy string) (map[string]string, error) {
 		}
 	}
 	out := map[string]string{}
-	for k, v := range map[string]regValue{"ProxyEnable": {true, 1, "", registry.DWORD}, "ProxyServer": {true, 0, "http=" + proxy + ";https=" + proxy + ";socks=" + proxy, registry.SZ}, "ProxyOverride": {true, 0, "<local>", registry.SZ}} {
+	bypass := c.ProxyBypass
+	if bypass == "" {
+		bypass = "<local>"
+	}
+	for k, v := range map[string]regValue{"ProxyEnable": {true, 1, "", registry.DWORD}, "ProxyServer": {true, 0, "http=" + proxy + ";https=" + proxy + ";socks=" + proxy, registry.SZ}, "ProxyOverride": {true, 0, bypass, registry.SZ}} {
 		b, _ := json.Marshal(v)
 		out[k] = string(b)
 	}

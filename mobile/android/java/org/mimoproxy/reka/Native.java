@@ -18,6 +18,11 @@ public final class Native {
         /** Host resolves connection UID to a package name; empty means unknown. */
         default String findProcess(String network, String source, String destination) { return ""; }
 
+        /** Optional JSON ownership: {"path":"package.or.executable","uid":12345}.
+         * Omit uid when unknown and path for shared UIDs. An empty object means
+         * unknown ownership; only an empty string uses the legacy callback. */
+        default String findProcessInfo(String network, String source, String destination) { return ""; }
+
         /** Encrypt a secret at rest (for example with an Android Keystore key). */
         byte[] seal(byte[] plain);
 
@@ -34,6 +39,9 @@ public final class Native {
      * Returns a handle, or 0 with the reason in lastError().
      */
     public static native long start(String stateRoot, String profile, String local, Host host);
+
+    /** Starts in durable standby before any persisted VPN intent is prepared. */
+    public static native long startOff(String stateRoot, String profile, String local, Host host);
 
     /** Borrows fd during this call; the library duplicates it. The host closes its original after return. */
     public static native long startVPN(String stateRoot, String profile, String local, Host host, int fd);

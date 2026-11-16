@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime"
+	"strings"
 )
 
 // Network is local, durable intent. Descriptors and observed OS state never
@@ -11,6 +12,7 @@ import (
 type Network struct {
 	Mode          string    `yaml:"mode" json:"mode"`
 	ProxyListener string    `yaml:"proxy-listener" json:"proxy-listener,omitempty"`
+	ProxyBypass   string    `yaml:"proxy-bypass" json:"proxy-bypass,omitempty"`
 	Service       string    `yaml:"service" json:"service,omitempty"`
 	TUN           TUNConfig `yaml:"tun" json:"tun"`
 }
@@ -43,6 +45,17 @@ func Normalize(n *Network) (Network, error) {
 		return Network{Mode: "off"}, nil
 	}
 	if c.Mode == "system-proxy" {
+		if len(c.ProxyBypass) > 8192 || strings.ContainsAny(c.ProxyBypass, "\r\n\x00") {
+			return c, fmt.Errorf("proxy-bypass must be at most 8192 bytes without control characters")
+		}
+		for _, char := range c.ProxyBypass {
+			if char < 32 || char == 127 {
+				return c, fmt.Errorf("proxy-bypass cannot contain control characters")
+			}
+		}
+		if runtime.GOOS != "windows" && c.ProxyBypass != "" {
+			return c, fmt.Errorf("proxy-bypass is currently Windows-only")
+		}
 		if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 			return c, fmt.Errorf("system proxy is unavailable on %s", runtime.GOOS)
 		}

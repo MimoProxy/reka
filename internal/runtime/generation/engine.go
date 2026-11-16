@@ -78,6 +78,8 @@ type generation struct {
 // switches atomically. Commits are serialized by the caller (ConfigService)
 // and additionally by an internal lock.
 type Engine struct {
+	probeOnce   sync.Once
+	probeSlots  chan struct{}
 	tunSerial   uint64
 	takeover    *platform.Takeover
 	networkErr  error
@@ -155,6 +157,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		},
 	})
 	e.backend.SetRoute(e.route)
+	e.backend.SetPrepareFlow(e.prepareFlow)
 	return e
 }
 
@@ -187,6 +190,8 @@ func (e *Engine) Plan(eff *compile.Effective) Plan {
 func (e *Engine) plan(eff *compile.Effective) Plan {
 	snap, gen := e.current()
 	p := Plan{Rules: len(eff.Rules)}
+	p.RoutingChanged = gen.eff == nil && eff.Routing.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Routing, eff.Routing)
+	p.SniffChanged = gen.eff == nil && eff.Sniff.Enabled || gen.eff != nil && !reflect.DeepEqual(gen.eff.Sniff, eff.Sniff)
 	oldNetwork := platform.Network{Mode: "off"}
 	if gen.eff != nil {
 		oldNetwork = gen.eff.Network
@@ -390,31 +395,38 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		spec := specFor(o)
 		var owner atomic.Pointer[sagernet.Outbound]
 
+		lookupECH := func(ctx context.Context, name string) ([]byte, error) {
+			if !p.ready.Load() {
+				return nil, errors.New("ECH resolver is not prepared")
+			}
+			resolver := p.dns
+			current, g := e.current()
+			if current.Resources[o.ID] == owner.Load() {
+				resolver = g.dns
+			}
+			if resolver == nil {
+				return nil, errors.New("automatic ECH requires configured proxy-server DNS")
+			}
+			return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
+		}
 		if proxy, ok := spec.(sagernet.ProxySpec); ok {
+			proxy.ECHLookup = lookupECH
 			tlsSpecs := []*sagernet.TLSSpec{proxy.TLS}
 			if proxy.Plugin != nil {
 				tlsSpecs = append(tlsSpecs, proxy.Plugin.TLS)
 			}
 			for _, tlsSpec := range tlsSpecs {
-				if tlsSpec == nil || tlsSpec.ECH == nil {
-					continue
-				}
-				tlsSpec.ECH.Lookup = func(ctx context.Context, name string) ([]byte, error) {
-					if !p.ready.Load() {
-						return nil, errors.New("ECH resolver is not prepared")
-					}
-					resolver := p.dns
-					current, g := e.current()
-					if current.Resources[o.ID] == owner.Load() {
-						resolver = g.dns
-					}
-					if resolver == nil {
-						return nil, errors.New("automatic ECH requires configured proxy-server DNS")
-					}
-					return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
+				if tlsSpec != nil && tlsSpec.ECH != nil {
+					tlsSpec.ECH.Lookup = lookupECH
 				}
 			}
 			spec = proxy
+		} else if vless, ok := spec.(sagernet.VLESSSpec); ok {
+			vless.ECHLookup = lookupECH
+			if vless.TLS != nil && vless.TLS.ECH != nil {
+				vless.TLS.ECH.Lookup = lookupECH
+			}
+			spec = vless
 		}
 
 		var detour *outboundDetour
@@ -452,7 +464,7 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		if ch.Action != ActionCreate && ch.Action != ActionRebind {
 			continue
 		}
-		in, err := e.backend.NewInbound(ch.cfg.ID, ch.cfg.Type, ch.cfg.Listen)
+		in, err := e.newInbound(ch.cfg)
 		if err != nil {
 			return fail(&PrepareError{Path: "/listeners/" + ch.cfg.ID + "/listen", Err: err})
 		}
@@ -462,6 +474,9 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 }
 
 func (e *Engine) release(p *Prepared) {
+	if p.dns != nil {
+		p.dns.Retire()
+	}
 	if p.dnsBound {
 		p.dnsListener.Close()
 	}
@@ -505,7 +520,7 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	p.done = true
 	eff := p.eff
 	_, previousGeneration := e.current()
-	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.Router, outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
+	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
@@ -521,6 +536,9 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 		for _, in := range p.bound {
 			in.Close()
 		}
+		if p.dns != nil {
+			p.dns.Retire()
+		}
 		return 0, &ActivateError{Err: err}
 	}
 	if e.dnsListener != nil && e.dnsListener != p.dnsListener {
@@ -533,6 +551,9 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	}
 	if previousGeneration.policies != nil {
 		previousGeneration.policies.Close()
+	}
+	if previousGeneration.dns != nil {
+		previousGeneration.dns.Retire()
 	}
 	if g.policies != nil {
 		g.policies.Start()
@@ -563,12 +584,12 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 			ch.old.in.Close()
 			delete(e.listeners, ch.old.cfg.ID)
 		}
-		in, err := e.backend.NewInbound(ch.cfg.ID, ch.cfg.Type, ch.cfg.Listen)
+		in, err := e.newInbound(ch.cfg)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("listener %s: %w", ch.ID, err))
 			// Put the previous listener back if we can.
 			if ch.old != nil {
-				if back, err2 := e.backend.NewInbound(ch.old.cfg.ID, ch.old.cfg.Type, ch.old.cfg.Listen); err2 == nil {
+				if back, err2 := e.newInbound(ch.old.cfg); err2 == nil {
 					e.listeners[ch.old.cfg.ID] = &listener{cfg: ch.old.cfg, in: back}
 				} else {
 					degraded = true
@@ -694,6 +715,7 @@ type lookupEnv struct {
 	procDone bool
 	proc     string
 	procOK   bool
+	owner    router.ProcessInfo
 }
 
 func (l *lookupEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, error) {
@@ -711,25 +733,45 @@ func (l *lookupEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, e
 }
 
 func (l *lookupEnv) Process(ctx context.Context) (string, bool) {
+	info, ok := l.ProcessInfo(ctx)
+	return info.Path, ok && info.Path != ""
+}
+
+func (l *lookupEnv) ProcessInfo(ctx context.Context) (router.ProcessInfo, bool) {
 	if !l.procDone {
 		l.procDone = true
-		l.proc, l.procOK = l.e.backend.FindProcess(ctx, l.md)
+		info, ok := l.e.backend.FindProcessInfo(ctx, l.md)
+		l.owner = router.ProcessInfo{Path: info.Path, UID: info.UID, UIDKnown: info.UIDKnown}
+		l.proc, l.procOK = info.Path, ok
 	}
-	return l.proc, l.procOK
+	return l.owner, l.procOK
 }
 
 func routerMetadata(md sagernet.Metadata) router.Metadata {
+	domain := md.Destination.Domain
+	if domain == "" {
+		domain = md.SniffedDomain
+	}
 	return router.Metadata{
-		Inbound: md.Inbound,
-		Network: md.Network,
-		Source:  md.Source,
-		Domain:  router.NormalizeDomain(md.Destination.Domain),
-		Addr:    md.Destination.Addr,
-		Port:    md.Destination.Port,
+		InboundType: md.InboundProtocol,
+		InboundUser: md.InboundUser,
+		InboundPort: md.InboundPort,
+		Inbound:     md.Inbound,
+		Network:     md.Network,
+		Source:      md.Source,
+		Domain:      router.NormalizeDomain(domain),
+		Addr:        md.Destination.Addr,
+		Port:        md.Destination.Port,
 	}
 }
 
 func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route {
+	return e.routeWithAcquire(ctx, md, e.rt.Acquire, nil)
+}
+
+type snapshotAcquirer func(func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error)
+
+func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound]) sagernet.Route {
 	var fakeRelease func()
 	if md.Destination.Addr.IsValid() {
 		if domain, release, ok := e.fake.Acquire(md.Destination.Addr); ok {
@@ -739,6 +781,9 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 		} else {
 			unknown := e.fake.Contains(md.Destination.Addr)
 			_, active := e.current()
+			if fixed != nil {
+				active = fixed.Value.(*generation)
+			}
 			if active.dns != nil {
 				cfg := active.dns.Config()
 				if cfg.Mode == "fake-ip" {
@@ -760,7 +805,7 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 		dec router.Decision
 		g   *generation
 	)
-	genNo, out, release, ok, err := e.rt.Acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
+	genNo, out, release, ok, err := acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
 		g = s.Value.(*generation)
 		if g.router == nil {
 			return nil, false
@@ -774,7 +819,16 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 			return nil, false
 		}
 		env.dns = g.dns
-		dec = g.router.RouteWithResolver(ctx, routerMetadata(md), env, func(dec *router.Decision) { g.resolveObserved(dec, routerMetadata(md), true) })
+		routeMD := routerMetadata(md)
+		if routeMD.InboundPort == 0 && md.InboundType != "tun" {
+			for _, listener := range g.eff.Listeners {
+				if listener.ID == md.Inbound {
+					routeMD.InboundPort = listener.Listen.Port()
+					break
+				}
+			}
+		}
+		dec = g.router.RouteWithResolver(ctx, routeMD, env, func(dec *router.Decision) { g.resolveObserved(dec, routeMD, true) })
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
 		}
@@ -794,7 +848,14 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 	if err != nil {
 		slog.Error("route", "err", err)
 	}
-	info := &FlowInfo{Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound}
+	info := &FlowInfo{Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol}
+	if env.procDone && env.procOK {
+		info.ProcessPath = env.owner.Path
+		if env.owner.UIDKnown {
+			uid := env.owner.UID
+			info.ProcessUID = &uid
+		}
+	}
 	if g != nil {
 		info.Revision = g.revision
 		info.Fingerprint = fingerprintOf(g, dec.Outbound)
@@ -856,6 +917,7 @@ type explainEnv struct {
 	resolve bool
 	l       *lookupEnv
 	process string
+	uid     *uint32
 }
 
 func (x *explainEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, error) {
@@ -870,6 +932,14 @@ func (x *explainEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, 
 
 func (x *explainEnv) Process(context.Context) (string, bool) { return x.process, x.process != "" }
 
+func (x *explainEnv) ProcessInfo(context.Context) (router.ProcessInfo, bool) {
+	info := router.ProcessInfo{Path: x.process}
+	if x.uid != nil {
+		info.UID, info.UIDKnown = *x.uid, true
+	}
+	return info, info.Path != "" || info.UIDKnown
+}
+
 // Explain routes a hypothetical connection against the active generation
 // without making a connection (and without DNS unless allowed).
 func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, error) {
@@ -877,7 +947,7 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 	if g.router == nil {
 		return Explanation{}, errors.New("no active configuration")
 	}
-	md := router.Metadata{Inbound: req.Inbound, Network: req.Network}
+	md := router.Metadata{Inbound: req.Inbound, Network: req.Network, InboundType: req.InboundType, InboundPort: req.InboundPort, InboundUser: req.InboundUser}
 	if md.Network == "" {
 		md.Network = "tcp"
 	}
@@ -903,7 +973,7 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 			return Explanation{}, fmt.Errorf("source: %w", err)
 		}
 	}
-	env := &explainEnv{resolve: req.Resolve, l: &lookupEnv{e: e, dns: g.dns}, process: req.Process}
+	env := &explainEnv{resolve: req.Resolve, l: &lookupEnv{e: e, dns: g.dns}, process: req.Process, uid: req.ProcessUID}
 	for _, s := range req.Addresses {
 		a, err := netip.ParseAddr(s)
 		if err != nil {
@@ -998,6 +1068,9 @@ func (e *Engine) Close() {
 	_, g := e.current()
 	if g.policies != nil {
 		g.policies.Close()
+	}
+	if g.dns != nil {
+		g.dns.Retire()
 	}
 	if e.dnsListener != nil {
 		e.dnsListener.Close()
@@ -1126,6 +1199,8 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		}
 		transport := map[string]any{"type": t.Type}
 		switch t.Type {
+		case "xhttp":
+			values["reka_xhttp"] = xhttpOptions(o)
 		case "http":
 			values["reka_http"] = map[string]any{"method": t.Method, "paths": t.Paths, "host": t.Host, "headers": headers}
 		case "h2":
@@ -1141,7 +1216,7 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			}
 			transport["host"], transport["path"], transport["headers"] = host, t.Path, headers
 		}
-		if t.Type != "http" {
+		if t.Type != "http" && t.Type != "xhttp" {
 			values["transport"] = transport
 		}
 	}
