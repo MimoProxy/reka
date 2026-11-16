@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"golang.org/x/net/http/httpguts"
+	"math"
 	"slices"
 	"strings"
 )
@@ -32,7 +33,7 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	if ob.Protocol != nil {
 		p := *ob.Protocol
 		p.ServerPorts = slices.Clone(p.ServerPorts)
-		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
+		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
 		for _, field := range c.present(base + "/protocol") {
 			if !slices.Contains(allowed[ob.Type], field) {
 				fail("protocol/"+field, "option does not apply to protocol")
@@ -45,6 +46,13 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 			fail("protocol/security", "unsupported VMess cipher")
 		}
 		if ob.Type == "hysteria2" {
+			if p.UpMbps > math.MaxInt/125000 || p.DownMbps > math.MaxInt/125000 {
+				fail("protocol", "legacy Mbps rate overflows; use exact bytes/s")
+			}
+			if p.UpBPS != nil && p.UpMbps != 0 || p.DownBPS != nil && p.DownMbps != 0 {
+				fail("protocol", "choose bytes/s or legacy Mbps for each direction")
+			}
+			c.realm(base+"/protocol/realm", &p)
 			if len(p.ServerPorts) > 1024 {
 				fail("protocol/server-ports", "too many port ranges")
 			}
@@ -91,10 +99,27 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 				if p.Obfs.Host != "" {
 					fail("protocol/obfs/host", "obfs host only applies to Snell")
 				}
-				if p.Obfs.Type != "salamander" || p.Obfs.Password == "" && !c.hasErrorAt(base+"/protocol/obfs/password") {
-					fail("protocol/obfs", "HY2 obfs requires salamander and password")
+				if !slices.Contains([]string{"salamander", "gecko"}, p.Obfs.Type) || p.Obfs.Password == "" && !c.hasErrorAt(base+"/protocol/obfs/password") {
+					fail("protocol/obfs", "HY2 obfs requires salamander or gecko and password")
+				}
+				if p.Obfs.Type == "gecko" {
+					lo, hi := p.Obfs.MinPacketSize, p.Obfs.MaxPacketSize
+					if lo == 0 {
+						lo = 512
+					}
+					if hi == 0 {
+						hi = 1200
+					}
+					if lo < 1 || lo > hi || hi > 2048 {
+						fail("protocol/obfs", "gecko packet sizes must satisfy 1 <= min <= max <= 2048")
+					}
+				} else if p.Obfs.MinPacketSize != 0 || p.Obfs.MaxPacketSize != 0 {
+					fail("protocol/obfs", "packet size options require gecko")
 				}
 			} else if ob.Type == "snell" {
+				if p.Obfs.MinPacketSize != 0 || p.Obfs.MaxPacketSize != 0 {
+					fail("protocol/obfs", "packet size options only apply to HY2 gecko")
+				}
 				if p.Obfs.Password != "" {
 					fail("protocol/obfs/password", "Snell obfs does not accept a password")
 				}

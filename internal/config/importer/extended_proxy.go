@@ -33,7 +33,8 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	port := 0
-	if nativeType != "hysteria2" || empty(get(n, "ports")) || (!empty(get(n, "port")) && text(get(n, "port")) != "0") {
+	realmEnabled := nativeType == "hysteria2" && text(get(get(n, "realm-opts"), "enable")) == "true"
+	if !realmEnabled && (nativeType != "hysteria2" || empty(get(n, "ports")) || (!empty(get(n, "port")) && text(get(n, "port")) != "0")) {
 		port = r.port()
 	}
 	out := object{"id": id, "name": name, "type": nativeType, "server": r.str("server"), "port": port, "udp": r.boolean("udp", false)}
@@ -63,7 +64,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		permit("password", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux")
 		out["password"] = r.str("password")
 	case "hysteria2":
-		permit("password", "up", "down", "obfs", "obfs-password", "ports", "hop-interval")
+		permit("password", "up", "down", "obfs", "obfs-password", "ports", "hop-interval", "realm-opts", "obfs-min-packet-size", "obfs-max-packet-size")
 		if ports := r.str("ports"); ports != "" {
 			ranges, err := model.PortHops(ports)
 			if err != nil {
@@ -81,9 +82,21 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 			c.report.Ignored = append(c.report.Ignored, path+"/hop-interval")
 		}
 		out["password"] = r.str("password")
-		p["up-mbps"], p["down-mbps"] = r.number("up", 0), r.number("down", 0)
+		for _, key := range []string{"up", "down"} {
+			rate, err := model.BandwidthBytes(r.str(key))
+			if err != nil {
+				r.fail(key, "import.bandwidth", err.Error())
+			} else {
+				p[key+"-bps"] = rate
+			}
+		}
+		if value := get(n, "realm-opts"); value != nil {
+			c.convertRealm(&r, value, p)
+		}
 		if obfs := r.str("obfs"); obfs != "" {
-			p["obfs"] = object{"type": obfs, "password": r.str("obfs-password")}
+			p["obfs"] = object{"type": obfs, "password": r.str("obfs-password"), "min-packet-size": r.number("obfs-min-packet-size", 0), "max-packet-size": r.number("obfs-max-packet-size", 0)}
+		} else if get(n, "obfs-min-packet-size") != nil || get(n, "obfs-max-packet-size") != nil {
+			r.fail("obfs", "import.obfs", "packet sizes require gecko obfs")
 		}
 	case "tuic":
 		permit("uuid", "password", "congestion-controller", "udp-relay-mode", "reduce-rtt", "heartbeat-interval")

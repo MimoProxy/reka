@@ -113,3 +113,18 @@ dns:
 		}
 	}
 }
+
+func TestRealmTokenMaskAndRestore(t *testing.T) {
+	const source = "schema-version: 1\noutbounds: [{id: realm, type: hysteria2, protocol: {realm: {enabled: true, token: private-realm-token}}}]\n"
+	doc, ds := LoadDoc(DocProfile, []byte(source))
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	masked, _ := LoadDoc(DocProfile, []byte(source))
+	if masked.MaskSecrets() != 1 || strings.Contains(string(masked.Bytes()), "private-realm-token") {
+		t.Fatal("Realm token leaked")
+	}
+	if err := masked.UnmaskSecrets(doc); err != nil || !strings.Contains(string(masked.Bytes()), "private-realm-token") {
+		t.Fatal("Realm token retention failed", err)
+	}
+}

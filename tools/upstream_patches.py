@@ -482,3 +482,13 @@ def smux_frame_ownership(source):
 MODULES['github.com/sagernet/smux'] = ('v1.5.50-sing-box-mod.1', {
 'session.go': ('b66f8161fa3e9a7614679d17904b4fb71107ec5baff49338ccf141ab684c8a19',smux_frame_ownership),
 })
+
+
+def hysteria_exact_bandwidth(source):
+    source=replace(source,'client, err := hysteria2.NewClient(hysteria2.ClientOptions{','clientOptions:=hysteria2.ClientOptions{')
+    return replace(source,'RealmOptions: realmOptions,\n\t})','''RealmOptions: realmOptions,
+ }
+ if override,ok:=ctx.Value("reka.hysteria.bandwidth.v1").(func(*uint64,*uint64));ok{override(&clientOptions.SendBPS,&clientOptions.ReceiveBPS)}
+ client,err:=hysteria2.NewClient(clientOptions)''')
+
+MODULES['github.com/sagernet/sing-box'][1]['protocol/hysteria2/outbound.go'] = ('25b9c083a39a7d47be9fac675a8672e68654179858f7589ae60398ece0c48d80',hysteria_exact_bandwidth)

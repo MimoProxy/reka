@@ -274,28 +274,42 @@ type RuleReference struct {
 	To   string `yaml:"to"`
 }
 
+type HysteriaRealm struct {
+	Enabled     bool     `yaml:"enabled"`
+	ServerURL   string   `yaml:"server-url"`
+	Token       string   `yaml:"token"`
+	RealmID     string   `yaml:"realm-id"`
+	STUNServers []string `yaml:"stun-servers"`
+	TLS         *TLS     `yaml:"tls"`
+}
+
 type Protocol struct {
-	ServerPorts    []string `yaml:"server-ports"`
-	HopInterval    int      `yaml:"hop-interval-seconds"`
-	HopIntervalMax int      `yaml:"hop-interval-max-seconds"`
-	Security       string   `yaml:"security"`
-	AlterID        int      `yaml:"alter-id"`
-	Version        int      `yaml:"version"`
-	UserKey        string   `yaml:"user-key"`
-	Mode           string   `yaml:"mode"`
-	Reuse          bool     `yaml:"reuse"`
-	UpMbps         int      `yaml:"up-mbps"`
-	DownMbps       int      `yaml:"down-mbps"`
-	Congestion     string   `yaml:"congestion-control"`
-	UDPMode        string   `yaml:"udp-relay-mode"`
-	ZeroRTT        bool     `yaml:"zero-rtt"`
-	Heartbeat      int      `yaml:"heartbeat"`
-	Obfs           *Obfs    `yaml:"obfs"`
+	Realm          *HysteriaRealm `yaml:"realm"`
+	UpBPS          *uint64        `yaml:"up-bps"`
+	DownBPS        *uint64        `yaml:"down-bps"`
+	ServerPorts    []string       `yaml:"server-ports"`
+	HopInterval    int            `yaml:"hop-interval-seconds"`
+	HopIntervalMax int            `yaml:"hop-interval-max-seconds"`
+	Security       string         `yaml:"security"`
+	AlterID        int            `yaml:"alter-id"`
+	Version        int            `yaml:"version"`
+	UserKey        string         `yaml:"user-key"`
+	Mode           string         `yaml:"mode"`
+	Reuse          bool           `yaml:"reuse"`
+	UpMbps         int            `yaml:"up-mbps"`
+	DownMbps       int            `yaml:"down-mbps"`
+	Congestion     string         `yaml:"congestion-control"`
+	UDPMode        string         `yaml:"udp-relay-mode"`
+	ZeroRTT        bool           `yaml:"zero-rtt"`
+	Heartbeat      int            `yaml:"heartbeat"`
+	Obfs           *Obfs          `yaml:"obfs"`
 }
 type Obfs struct {
-	Type     string `yaml:"type"`
-	Password string `yaml:"password"`
-	Host     string `yaml:"host"`
+	MinPacketSize int    `yaml:"min-packet-size"`
+	MaxPacketSize int    `yaml:"max-packet-size"`
+	Type          string `yaml:"type"`
+	Password      string `yaml:"password"`
+	Host          string `yaml:"host"`
 }
 type Transport struct {
 	Method      string               `yaml:"method"`

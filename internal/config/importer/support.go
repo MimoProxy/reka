@@ -80,7 +80,9 @@ func SupportMatrix() []Support {
 	add("vmess", "partial", "cipher packet-encoding", "auto/none/zero/aes-128-gcm/chacha20-poly1305; empty/xudp/packetaddr packet encoding")
 	add("trojan", "supported", "password sni servername", "TLS required; TCP and UDP")
 	add("vmess/trojan/vless", "supported", "ws-opts grpc-opts http-upgrade-opts", "Explicit path/Host/header/service-name and WS early-data fields; unknown options rejected")
-	add("hysteria2", "partial", "password up down obfs obfs-password", "Integer Mbps values and optional salamander; QUIC TLS, TCP/UDP; port hopping and interval ranges supported; realm options remain unavailable")
+	add("hysteria2", "supported", "password up down obfs obfs-password obfs-min-packet-size obfs-max-packet-size", "Integer K/M/G/T bps/Bps (unitless Mbps), checked conversion without rounding; salamander or gecko (bounded packet sizes); QUIC TLS and TCP/UDP. Actual hopping across multiple destination ports is tested with the five-second minimum.")
+	add("hysteria2", "supported", "ports hop-interval", "Port lists/ranges and interval ranges; at least five seconds; mutually exclusive with Realm")
+	add("hysteria2", "supported", "realm-opts", "enable/server-url/token/realm-id/stun-servers; separate control TLS sni/skip-cert-verify/name-cert-verify/fingerprint/certificate/private-key/alpn, explicit PEM file attachments; protected control and STUN/punch sockets, token masking and transport rotation; real punch TCP/UDP plus certificate/token negatives")
 	add("tuic", "supported", "uuid password congestion-controller udp-relay-mode reduce-rtt heartbeat-interval", "TUIC v5; cubic/new_reno/bbr; native/quic UDP; heartbeat milliseconds")
 	add("snell", "supported", "psk version userkey mode reuse obfs-opts", "v5/v6 servers; v5 uses upstream v4-compatible client framing verified against v5 server; v6 modes; native protocol lifetime owns reuse")
 	return entries

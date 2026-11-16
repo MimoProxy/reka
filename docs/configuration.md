@@ -77,7 +77,7 @@ Outbounds, groups and listeners need an `id`; rules may have one. IDs start with
 - `reality` (vless only): `public-key`, `short-id` (even number of hex digits, at most 16), `x25519mlkem768` (keep the hybrid post-quantum key share; newer Xray servers may require it). REALITY needs `server-name` and uses `fingerprint: chrome` when none is set.
 - Without VLESS encryption, Vision requires raw TCP. VLESS, including REALITY, supports `transport: {type: ws, path: /reka, host: front.example}` (also `grpc` with `service-name`, `httpupgrade` with `path`/`host`). WS accepts `headers: [{name: X-Key, value: ...}]`, `max-early-data` and `early-data-header`.
 - `multiplex: {enabled: true, protocol: smux}` also accepts `h2mux`/`yamux`, `padding`, `max-connections`, `min-streams`, `max-streams`; `only-tcp`, `statistic` and `brutal: {enabled: true, up-bps: 1250000, down-bps: 2000000}` (bytes/s). All dialing protocols support this wrapper. Full multiplexing carries UDP over the TCP carrier even when native UDP is disabled; `only-tcp` preserves native UDP behavior. The instance owns and drains its pool. `statistic` is retained as metadata: Reka always reports native per-flow traffic. Brutal requires a compatible Linux server and the TCP Brutal kernel module; a server that does not enable Brutal fails negotiation. Local kernel rate control is attempted where available. Limits alone do not demonstrate a measured throughput guarantee.
-- HY2 obfs is `{type: salamander, password: ...}`. Snell v5 obfs is `{type: http|tls, host: ...}`; Snell v6 uses `mode: default|unshaped|unsafe-raw`. Snell v5 uses the pinned component’s v4-compatible wire client, verified against a v5 server.
+- HY2 obfs is `{type: salamander|gecko, password: ...}`. Gecko additionally accepts `min-packet-size`/`max-packet-size` (defaults 512/1200; 1 <= min <= max <= 2048). Snell v5 obfs is `{type: http|tls, host: ...}`; Snell v6 uses `mode: default|unshaped|unsafe-raw`. Snell v5 uses the pinned component’s v4-compatible wire client, verified against a v5 server.
 
 ### Groups
 
@@ -243,3 +243,26 @@ bytes. Handshake cancellation interrupts padding waits. A wrong key fails the
 connection. Vision can use this encryption layer with or without outer TLS,
 including WS, gRPC, HTTPUpgrade and H2 (H2 still requires TLS). Its transition
 uses typed decrypted-buffer references while retaining the underlying carrier.
+
+Hysteria2 `protocol` accepts `up-bps`/`down-bps` for exact bytes/s; the legacy
+`up-mbps`/`down-mbps` remain available, but choose one representation per
+direction. Clash `up`/`down` accept integer K/M/G/T `bps` or `Bps`; unitless
+values mean Mbps. Invalid/overflowing rates are rejected rather than silently
+becoming automatic bandwidth. Runtime authentication transmits the exact rate.
+
+`protocol.realm` accepts `enabled`, `server-url`, `token`, `realm-id`,
+`stun-servers` and a separate `tls` configuration for its HTTP(S) control peer.
+The proxy's outer `tls` still verifies the QUIC peer. Realm control TLS supports
+SNI, certificate pin/verification name, ALPN and client PEM identity, without a
+TCP ClientHello preset, ECH or REALITY. Tokens and identities support secrets,
+are masked, and replace their owning transport on edits. The node owns the
+control connection pool; network reset clears idle control connections. All
+physical control/STUN/punch sockets retain VPN protection and dialer settings.
+Realm replaces the static server address and cannot combine with port hopping.
+Controlled tests exercise actual STUN discovery, punching and TCP/UDP, including
+wrong token, wrong independent TLS pins and missing control client identity.
+
+Hysteria2 `server-ports` uses explicit `start:end` ranges, with
+`hop-interval-seconds`/`hop-interval-max-seconds` (minimum five seconds). Tests
+observe several destination ports during continuous TCP and UDP traffic; this
+does not assert reachability through every NAT or third-party Realm service.

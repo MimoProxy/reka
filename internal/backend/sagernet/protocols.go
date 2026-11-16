@@ -2,6 +2,7 @@ package sagernet
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/sagernet/sing-box/adapter"
@@ -21,9 +22,12 @@ import (
 	"github.com/sagernet/sing/service"
 	"io"
 	"strings"
+	"sync/atomic"
 )
 
 type ProxySpec struct {
+	Realm                                          *RealmSpec
+	UpBPS, DownBPS                                 *uint64
 	Encryption                                     string
 	Detour                                         *DetourSpec
 	Type, Server, UUID, Password, Username, Method string
@@ -57,17 +61,31 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if err != nil {
 		return nil, err
 	}
+	if values["realm"] != nil && s.Realm == nil {
+		return nil, fmt.Errorf("Realm requires a scoped RealmSpec")
+	}
+	if s.Realm != nil && s.Type != "hysteria2" {
+		return nil, fmt.Errorf("Realm applies only to Hysteria2")
+	}
+	var realmTransport *realmHTTPTransport
+	var bandwidthConfigured *atomic.Bool
 	multiplex, err := popMultiplex(values)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if returnErr == nil && result != nil {
+			if realmTransport != nil {
+				result = &realmOwnedOutbound{Outbound: result, transport: realmTransport}
+			}
 			base := result
 			result, returnErr = wrapMultiplex(base, multiplex, b.componentLogger("multiplex", s.Type, tag))
 			if returnErr != nil {
 				common.Close(base)
 			}
+		}
+		if returnErr != nil && realmTransport != nil {
+			realmTransport.CloseIdleConnections()
 		}
 	}()
 	values["server"], values["server_port"] = s.Server, s.Port
@@ -103,6 +121,18 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		values["version"] = "5"
 	}
 	ctx, configured := configureTLSContext(configureECHContext(detourContext(b.ctx, s.Detour), s.TLS), s.TLS)
+	if s.Type == "hysteria2" && (s.UpBPS != nil || s.DownBPS != nil) {
+		bandwidthConfigured = &atomic.Bool{}
+		ctx = context.WithValue(ctx, "reka.hysteria.bandwidth.v1", func(up, down *uint64) {
+			if s.UpBPS != nil {
+				*up = *s.UpBPS
+			}
+			if s.DownBPS != nil {
+				*down = *s.DownBPS
+			}
+			bandwidthConfigured.Store(true)
+		})
+	}
 	ctx, encryptionConfigured, err := configureEncryptionContext(ctx, s.Encryption)
 	if err != nil {
 		return nil, err
@@ -111,6 +141,11 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		values["detour"] = "reka-detour"
 	}
 	defer func() {
+		if returnErr == nil && bandwidthConfigured != nil && !bandwidthConfigured.Load() {
+			common.Close(result)
+			result = nil
+			returnErr = fmt.Errorf("required Hysteria bandwidth overlay is unavailable")
+		}
 		if returnErr == nil && encryptionConfigured != nil && !encryptionConfigured.Load() {
 			common.Close(result)
 			result = nil
@@ -127,6 +162,10 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: b.protect, explicitProtect: true})
 	}
 	ctx, err = streamContext(ctx, b.componentLogger("outbound", s.Type, tag), values, s.Server, s.Port)
+	if err != nil {
+		return nil, err
+	}
+	ctx, realmTransport, err = configureRealmContext(ctx, b.componentLogger("realm", s.Type, tag), values, s.Realm)
 	if err != nil {
 		return nil, err
 	}

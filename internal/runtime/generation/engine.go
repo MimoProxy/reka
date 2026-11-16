@@ -637,7 +637,19 @@ func specFor(o compile.Outbound) any {
 		return t
 	}
 	if usesUpstreamOutbound(o) {
+		var up, down *uint64
+		var realm *sagernet.RealmSpec
+		if p := o.Protocol; p != nil && o.Type == "hysteria2" {
+			up, down = p.UpBPS, p.DownBPS
+			if r := p.Realm; r != nil && r.Enabled {
+				realm = &sagernet.RealmSpec{ServerURL: r.ServerURL, Token: r.Token, RealmID: r.RealmID, STUNServers: r.STUNServers}
+				if t := r.TLS; t != nil {
+					realm.TLS = &sagernet.TLSSpec{ServerName: t.ServerName, Insecure: t.Insecure, ALPN: t.ALPN, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: t.Certificate, PrivateKey: t.PrivateKey}
+				}
+			}
+		}
 		return sagernet.ProxySpec{
+			Realm: realm, UpBPS: up, DownBPS: down,
 			Encryption: o.Encryption,
 			Type:       o.Type, Server: o.Server, Port: o.Port, UUID: o.UUID, Password: o.Password, Username: o.Username, Method: o.Method,
 			TLS: tls(), Options: protocolOptions(o),
@@ -1065,7 +1077,7 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			}
 			values["up_mbps"], values["down_mbps"] = p.UpMbps, p.DownMbps
 			if p.Obfs != nil {
-				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password}
+				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password, "min_packet_size": p.Obfs.MinPacketSize, "max_packet_size": p.Obfs.MaxPacketSize}
 			}
 		case "tuic":
 			values["congestion_control"], values["udp_relay_mode"], values["zero_rtt_handshake"] = p.Congestion, p.UDPMode, p.ZeroRTT

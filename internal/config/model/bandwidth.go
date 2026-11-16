@@ -17,8 +17,8 @@ func BandwidthBytes(value string) (uint64, error) {
 	if value == "" {
 		return 0, nil
 	}
-	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
-		value += " Mbps"
+	if n, err := strconv.ParseInt(value, 10, 64); err == nil && n >= 0 {
+		value = strconv.FormatInt(n, 10) + " Mbps"
 	}
 	parts := bandwidthPattern.FindStringSubmatch(value)
 	if parts == nil {

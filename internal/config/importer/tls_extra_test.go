@@ -61,6 +61,25 @@ func TestClashTLSFileAttachmentsAreExplicitMaskedAndValidated(t *testing.T) {
 	if preview := r.Preview(false); strings.Contains(preview.Sources, "BEGIN ") || preview.Masked != 2 {
 		t.Fatal("attached identity exposed in preview")
 	}
+	realmRequest := req
+	realmRequest.Data = `proxies: [{name: node, type: hysteria2, password: test, realm-opts: {enable: true, server-url: https://control.test, realm-id: room, stun-servers: [stun.test], certificate: /foreign/client.pem, private-key: /foreign/client.key}}]`
+	realmRequest.CertificateFiles = nil
+	if Import(realmRequest).Report.CanApply {
+		t.Fatal("unattached Realm identity accepted")
+	}
+	realmRequest.CertificateFiles = req.CertificateFiles
+	realmResult := Import(realmRequest)
+	if !realmResult.Report.CanApply {
+		t.Fatal(realmResult.Report)
+	}
+	realmTLS := compileImport(t, realmResult).Outbounds[0].Protocol.Realm.TLS
+	if realmTLS.Certificate != certPEM || realmTLS.PrivateKey != keyPEM {
+		t.Fatal("Realm attachments changed")
+	}
+	if strings.Contains(realmResult.Preview(false).Sources, "BEGIN ") {
+		t.Fatal("Realm identity exposed")
+	}
+
 	req.CertificateFiles["/foreign/client.key"] = certPEM
 	if Import(req).Report.CanApply {
 		t.Fatal("invalid key attachment accepted")
