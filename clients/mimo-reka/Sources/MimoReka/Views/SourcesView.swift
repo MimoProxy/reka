@@ -4,6 +4,9 @@ import SwiftUI
 struct SourcesView: View {
     let store: AppStore
     var search: String
+    @State private var confirmingDelete = false
+    @State private var deletingSource: SourceRow? = nil
+    @State private var deletionRevision = 0
 
     var body: some View {
         ScrollView {
@@ -28,6 +31,14 @@ struct SourcesView: View {
                 }.padding(.horizontal, 4)
             }.padding(.horizontal, 20).padding(.top, Theme.pageTopInset).padding(.bottom, 32)
         }
+        .confirmationDialog("删除此来源？", isPresented: $confirmingDelete, presenting: deletingSource) { source in
+            Button("删除来源", role: .destructive) {
+                Task { await store.deleteSource(source, baseRevision: deletionRevision) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { source in
+            Text("将删除“\(source.name)”的 \(source.nodeCount) 个节点、\(source.groupCount) 个策略组及导入规则，并移除对应覆盖和刷新任务。选中的节点若被删除，会改用策略组内剩余的首个成员；没有剩余成员时使用直连。仍被自定义规则或 DNS 引用时会拒绝删除。")
+        }
     }
 
     private func sourceCard(_ source: SourceRow) -> some View {
@@ -42,6 +53,12 @@ struct SourcesView: View {
                 if source.hasSubscription {
                     Text(status(source)).font(.caption).foregroundStyle(source.errorCode == nil ? Color.secondary : Color.orange)
                 } else { Text("本地导入").font(.caption).foregroundStyle(.secondary) }
+                Button(role: .destructive) {
+                    deletingSource = source; deletionRevision = store.revision; confirmingDelete = true
+                } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless).help("删除来源“\(source.name)”")
+                    .accessibilityLabel("删除来源“\(source.name)”")
+                    .disabled(!store.isOnline || store.isBusy)
             }
             if source.hasSubscription {
                 Divider()
@@ -65,7 +82,7 @@ struct SourcesView: View {
                 }.disabled(!store.isOnline || store.isBusy)
                 usagePanel(source)
                 if let error = source.errorCode, !error.isEmpty {
-                    Label("刷新失败：\(error)。继续使用上次成功的内容。", systemImage: "exclamationmark.triangle")
+                    Label(source.lastSuccess == nil ? "刷新失败：\(error)。尚无成功快照，可重试或删除此来源。" : "刷新失败：\(error)。继续使用上次成功的内容。", systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                 }
             }

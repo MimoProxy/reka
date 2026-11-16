@@ -187,6 +187,18 @@ final class AppStore {
         }
     }
 
+    @discardableResult
+    func deleteSource(_ source: SourceRow, baseRevision: Int) async -> Bool {
+        await perform {
+            self.preparedChange = nil; self.pendingSourceName = nil
+            let prepared = try await self.configurationService.prepareSourceDeletion(sourceID: source.id, baseRevision: baseRevision)
+            _ = try await self.configurationService.commit(prepared)
+            self.catalog.sourceNames[self.activeProfileID.uuidString]?.removeValue(forKey: source.id)
+            try self.catalog.save(to: self.homeURL)
+            self.notice = "已删除来源“\(source.name)”及对应的导入引用。"
+        }
+    }
+
     func refreshSubscription(_ source: SourceRow) async {
         await perform {
             _ = try await self.configurationService.refreshSubscription(sourceID: source.id)

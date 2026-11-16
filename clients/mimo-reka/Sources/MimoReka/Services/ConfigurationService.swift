@@ -154,6 +154,16 @@ actor ConfigurationService {
                                  summary: "激活订阅来源")
     }
 
+    func prepareSourceDeletion(sourceID: String, baseRevision: Int) async throws -> PreparedChange {
+        try Self.validateSourceID(sourceID)
+        try await recoverPending()
+        let config = try await configuration()
+        let documents = Dictionary(uniqueKeysWithValues: ConfigurationLayer.allCases.map { ($0, config[$0.rawValue].stringValue ?? "") })
+        let change = try SourceDeletionService.change(sourceID: sourceID, revision: baseRevision, documents: documents, effective: config["effective"])
+        do { return try await prepare(change, summary: "删除来源 · " + sourceID) }
+        catch { throw ConfigurationError.message("来源未删除。请检查仍引用此来源的自定义规则、DNS 或路由设置。\n" + error.localizedDescription) }
+    }
+
     @discardableResult
     func configureSubscription(sourceID: String, url: String, interval: Int,
                                nodesOnly: Bool, format: String = "auto") async throws -> JSONValue {
