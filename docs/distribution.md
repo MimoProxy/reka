@@ -86,3 +86,10 @@ prefix buffers without holding a lock during underlying network reads. Closing
 a connection cannot release a buffer while it is being consumed. `WriteTo`
 also consumes its cached prefix once. Repeated real protocol shutdown and
 read/close ownership tests run with the race detector and checkptr enabled.
+
+Windows TFO uses a pinned `tfo-go/v2` overlay for Go 1.27's `net.newFD`
+single return value, current poll FD layout and variadic `execIO` pointer
+pinning. Runtime version and reflected field-layout checks fail closed before
+the internal calls. Real Windows TCP tests exercise TFO, MPTCP and both together;
+socket protection remains active. The default dialer also enables MPTCP on both
+IPv4 and IPv6 dialers.

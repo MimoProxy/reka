@@ -60,3 +60,23 @@ unlocked diagnostic cannot establish that locked phase switching works. A screen
 activation or charger reconnect invalidates the formal run. The host observer
 polls every 30 seconds by default, equally in both phases; record this observer
 traffic when interpreting battery results.
+
+After a formal uncharged idle A/B run completes, summarize its raw report:
+
+```sh
+python3 tools/android-power-analyze.py bin/android/power.json \
+  --output bin/android/power-analysis.json
+```
+
+The analyzer checks real unplug/locked-screen conditions and monotonic phase
+lengths, reports charge-counter resolution, whole-phone average current,
+process CPU and Go/PSS memory separately. New harness reports record phase
+start/deadline/end timestamps; older completed reports explicitly identify any
+small sample-timestamp shortfall because samples are timestamped before PSS/JNI
+work. JNI memory sampling forces GC and `FreeOSMemory`, and host polling runs in
+both phases. A single sequential A/B can be affected by radio/background work
+and temperature. Endpoint counter rounding is not a statistical confidence
+interval. A power pass/fail stays unset unless an explicit
+`--max-additional-ma` budget is supplied; the installed APK provenance must be
+retained when evaluating later source changes. Restore any temporary exact-alarm
+or OEM background permissions after collection.

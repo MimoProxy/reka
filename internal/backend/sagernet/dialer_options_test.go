@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -100,7 +101,8 @@ func TestTFOAndMPTCPOptionsPreserveTCP(t *testing.T) {
 	target := echoServer(t)
 	for _, options := range []string{`{"tcp_fast_open":true}`, `{"tcp_multi_path":true}`, `{"tcp_fast_open":true,"tcp_multi_path":true}`} {
 		t.Run(options, func(t *testing.T) {
-			b := New(Options{Logger: testLogger(t)})
+			var protected atomic.Int32
+			b := New(Options{Logger: testLogger(t), ProtectFD: func(int) error { protected.Add(1); return nil }})
 			defer b.Close()
 			out, e := b.NewOutbound("dial", ProxySpec{Type: "direct", Options: json.RawMessage(options)})
 			if e != nil {
@@ -115,11 +117,12 @@ func TestTFOAndMPTCPOptionsPreserveTCP(t *testing.T) {
 			}
 			defer c.Close()
 			c.SetDeadline(time.Now().Add(3 * time.Second))
-			if _, e = c.Write([]byte("tcp")); e != nil {
+			payload := strings.Repeat("tcp", 1024)
+			if _, e = c.Write([]byte(payload)); e != nil {
 				t.Fatal(e)
 			}
-			reply := make([]byte, 3)
-			if _, e = io.ReadFull(c, reply); e != nil || string(reply) != "tcp" {
+			reply := make([]byte, len(payload))
+			if _, e = io.ReadFull(c, reply); e != nil || string(reply) != payload || protected.Load() != 1 {
 				t.Fatal(e, string(reply))
 			}
 		})

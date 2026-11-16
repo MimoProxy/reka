@@ -139,6 +139,7 @@ public final class PowerTestService extends VpnService {
         phases.put(phase);
         long start = SystemClock.elapsedRealtime();
         long deadline = start + phaseSeconds * 1000L;
+        phase.put("start_elapsed_ms", start).put("deadline_elapsed_ms", deadline);
         AlarmManager alarms = getSystemService(AlarmManager.class);
         PendingIntent alarm = PendingIntent.getBroadcast(this, 19,
                 new Intent(this, PowerBoundaryReceiver.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -159,6 +160,7 @@ public final class PowerTestService extends VpnService {
             }
         } while (true);
         } finally { alarms.cancel(alarm); alarm.cancel(); }
+        phase.put("end_elapsed_ms", SystemClock.elapsedRealtime());
         JSONObject first = samples.getJSONObject(0), last = samples.getJSONObject(samples.length() - 1);
         long elapsed = last.getLong("elapsed_ms") - first.getLong("elapsed_ms");
         phase.put("actual_elapsed_ms", elapsed);

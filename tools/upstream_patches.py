@@ -176,3 +176,41 @@ def cached_buffers(source):
     return source
 
 MODULES['github.com/sagernet/sing'][1]['common/bufio/cache.go'] = ('0ecef13bca92ca3c5b6688471e3562e1010a5596193859537cdea517cdb1c3fb', cached_buffers)
+
+
+def windows_tfo_fd(source):
+    source = replace(source, '"time"', '"time"\n"reflect"\n"runtime"\n"strings"\n"errors"')
+    source = replace(source, '//go:linkname newFD net.newFD\nfunc newFD(sysfd windows.Handle, family, sotype int, net string) (*netFD, error)', '''//go:linkname newFDInternal net.newFD
+func newFDInternal(sysfd windows.Handle, family, sotype int, net string) *netFD
+
+func newFD(sysfd windows.Handle, family, sotype int, network string) (*netFD,error) {
+ if !strings.HasPrefix(runtime.Version(),"go1.27.") && runtime.Version()!="go1.27" {return nil,errors.New("TFO requires reviewed Go 1.27 Windows ABI")}
+ tcp:=reflect.TypeFor[net.TCPConn]()
+ conn,ok:=tcp.FieldByName("conn");if !ok{return nil,errors.New("unrecognized TCPConn layout")}
+ descriptor,ok:=conn.Type.FieldByName("fd");if !ok || descriptor.Type.Kind()!=reflect.Pointer{return nil,errors.New("unrecognized netFD layout")}
+ actual,expected:=descriptor.Type.Elem(),reflect.TypeFor[netFD]()
+ if actual.Size()!=expected.Size(){return nil,errors.New("unrecognized netFD size")}
+ for i:=0;i<expected.NumField();i++{field:=expected.Field(i);other,ok:=actual.FieldByName(field.Name);if !ok || other.Offset!=field.Offset || other.Type.Size()!=field.Type.Size(){return nil,errors.New("unrecognized netFD field layout")}}
+ physical,_:=actual.FieldByName("pfd");ours:=reflect.TypeFor[pFD]()
+ mutex,ok:=physical.Type.FieldByName("fdmu");if !ok || mutex.Offset!=0 || mutex.Type.Size()!=16{return nil,errors.New("unrecognized poll FD mutex layout")}
+ for i:=3;i<ours.NumField();i++{field:=ours.Field(i);other,ok:=physical.Type.FieldByName(field.Name);if !ok || other.Offset!=field.Offset || other.Type.Size()!=field.Type.Size(){return nil,errors.New("unrecognized poll FD field layout")}}
+ return newFDInternal(sysfd,family,sotype,network),nil
+}''')
+    return source
+
+
+def windows_tfo_poll(source):
+    source = replace(source, '\tZeroReadIsEOF bool', '\tZeroReadIsEOF bool\n\tKeepFileCompletionModes bool')
+    source = replace(source, 'submit func(o *operation) (uint32, error), buf []byte)', 'submit func(o *operation) (uint32, error), pinPtrs ...any)')
+    return replace(source, '}, b)', '}, unsafe.SliceData(b))')
+
+MODULES['github.com/database64128/tfo-go/v2'] = ('v2.3.2', {
+'netpoll_windows_checklinkname0.go': ('ac0367d3354c382761e264bd19aa5dc705a1421577b2a575c6ea76f224f348bd',windows_tfo_fd),
+'netpoll_windows_go127_checklinkname0.go': ('612ccecc8e755a8330889f05c0b91092329848f54bc2c815d5c595e6c565326c',windows_tfo_poll),
+})
+
+
+def multipath_both_families(source):
+    return replace(source, 'dialer4.SetMultipathTCP(true)', 'dialer4.SetMultipathTCP(true)\n\t\tdialer6.SetMultipathTCP(true)')
+
+MODULES['github.com/sagernet/sing-box'][1]['common/dialer/default.go'] = ('69dd2b689d80c2ab1e8793eb19037c91eed91f2399f57b3829e510d49f50586d', multipath_both_families)
