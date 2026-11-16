@@ -23,11 +23,14 @@ The replacement entry duplicates the fd, applies the configuration through Confi
 
 The binding takes one JSON document per call, without the socket transport's length prefix. Call `Hello` first. Subscribe for events through `Host.onMessage`; do not block the callback while waiting for another native call. All blocking calls belong off the UI thread.
 
+The build compiles the shipped Java and Kotlin sources with a SHA-256-pinned Kotlin compiler. The Kotlin device mode verifies Hello, callbacks, Keystore encryption/decryption across restart, events, an intact connection across commit and idempotent retry.
+
 Build and acceptance:
 
 ```sh
 ANDROID_HOME=/path/to/sdk make android
 python3 tools/android-runtime.py --serial YOUR_TEST_DEVICE
+python3 tools/android-runtime.py --serial YOUR_TEST_DEVICE --skip-install --kotlin
 python3 tools/android-runtime.py --serial YOUR_TEST_DEVICE --skip-install --vpn
 # Authorized test device, connected over USB, with Wi-Fi initially on:
 python3 tools/android-runtime.py --serial YOUR_USB_DEVICE --skip-install --vpn --full --network-cycle
@@ -48,3 +51,12 @@ python3 tools/android-power-runtime.py --serial YOUR_DEVICE --start --minutes 30
 The diagnostic permits charging and screen-on and never counts as power acceptance. A normal run first verifies the JNI handshake, actual dual-stack traffic and stop path, then waits for real charger removal and screen-off. It observes idle baseline and full VPN phases with the same target duration, then stops. It uses no wake lock or simulated battery unplug. An inexact idle wakeup alarm marks each phase boundary; Android can delay it, so reserve more than an hour for two 30-minute targets. JSON records actual durations, charge-counter readings, screen/charging state, CPU time, PSS and Go memory. Reconnecting a charger fails the measurement.
 
 The ADB-only report URI is `content://org.mimoproxy.reka.test.reports/power`; an app-specific external copy at `/sdcard/Android/data/org.mimoproxy.reka.test/files/power-report.json` also permits retrieval on ROMs that block the provider while locked. The helper checks the current app PID to reject stale reports. A completed measurement does not automatically establish a power budget; retain both raw phases and note that wireless ADB can affect the baseline. Do not install a replacement APK during a measurement.
+
+The uncharged idle A/B harness requires the Android **Alarms & reminders**
+special access for the test APK (`SCHEDULE_EXACT_ALARM`). It checks this before
+starting a formal measurement and schedules only the two phase-boundary wakeups;
+it holds no wake lock. Some OEM ROMs defer inexact alarms for days, so a short
+unlocked diagnostic cannot establish that locked phase switching works. A screen
+activation or charger reconnect invalidates the formal run. The host observer
+polls every 30 seconds by default, equally in both phases; record this observer
+traffic when interpreting battery results.

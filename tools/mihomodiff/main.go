@@ -53,10 +53,11 @@ func main() {
 		Pass                    bool
 	}
 	out := struct {
-		Version string
-		Cases   []result
-		Passed  int
-		Groups  []map[string]any
+		Version   string
+		Cases     []result
+		Passed    int
+		Groups    []map[string]any
+		Processes []map[string]any
 	}{Version: "mihomo v1.19.34"}
 	for _, tc := range cases {
 		var native []router.RuleSpec
@@ -113,8 +114,9 @@ func main() {
 		out.Cases = append(out.Cases, result{tc.Name, decision.Outbound, target, en.calls, count, pass})
 	}
 	out.Groups = groupDiff()
+	out.Processes = processDiff()
 	groupsPass := true
-	for _, g := range out.Groups {
+	for _, g := range append(out.Groups, out.Processes...) {
 		groupsPass = groupsPass && g["pass"].(bool)
 	}
 	encoder := json.NewEncoder(os.Stdout)

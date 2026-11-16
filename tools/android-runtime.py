@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--apk', default='bin/android/reka-libtest.apk')
     parser.add_argument('--skip-install', action='store_true', help='use the already installed acceptance APK')
     parser.add_argument('--vpn', action='store_true')
+    parser.add_argument('--kotlin', action='store_true', help='exercise the compiled public Kotlin wrapper and JNI host callbacks')
     parser.add_argument('--full', action='store_true', help='VPN test: use both default routes; requires explicit host authorization')
     parser.add_argument('--network-cycle', action='store_true', help='VPN test: cycle initially enabled Wi-Fi for 8 seconds over USB, then restore it')
     parser.add_argument('--grant-vpn', action='store_true', help='test devices only: grant this test package VPN appop')
@@ -23,6 +24,8 @@ def main():
         parser.error('--full requires --vpn')
     if args.network_cycle and not args.vpn:
         parser.error('--network-cycle requires --vpn')
+    if args.kotlin and args.vpn:
+        parser.error('--kotlin and --vpn are separate acceptance modes')
     adb = [args.adb, '-s', args.serial]
     def run(*command):
         return subprocess.check_output(adb + list(command), text=True, stderr=subprocess.STDOUT, timeout=30)
@@ -41,6 +44,8 @@ def main():
     command = ['shell', 'am', 'start', '-W', '-n', package + '/.MainActivity']
     if args.vpn:
         command += ['--ez', 'vpn', 'true']
+    if args.kotlin:
+        command += ['--ez', 'kotlin', 'true']
     if args.full:
         command += ['--ez', 'full', 'true']
     if args.network_cycle:
@@ -71,7 +76,7 @@ def main():
         if 'RESULT PASS' in log or 'RESULT FAIL' in log:
             break
         time.sleep(1)
-    result = dict(mode='vpn' if args.vpn else 'loopback', full_default_routes=args.full, wifi_cycled=cycled, api=run('shell', 'getprop', 'ro.build.version.sdk').strip(), abi=run('shell', 'getprop', 'ro.product.cpu.abi').strip(), model=run('shell', 'getprop', 'ro.product.model').strip(), emulator=run('shell', 'getprop', 'ro.kernel.qemu').strip() == '1', passed='RESULT PASS' in log and (not args.network_cycle or cycled), launch=launch, pid=pid, log=log)
+    result = dict(mode='vpn' if args.vpn else ('kotlin' if args.kotlin else 'loopback'), full_default_routes=args.full, wifi_cycled=cycled, api=run('shell', 'getprop', 'ro.build.version.sdk').strip(), abi=run('shell', 'getprop', 'ro.product.cpu.abi').strip(), model=run('shell', 'getprop', 'ro.product.model').strip(), emulator=run('shell', 'getprop', 'ro.kernel.qemu').strip() == '1', passed='RESULT PASS' in log and (not args.network_cycle or cycled), launch=launch, pid=pid, log=log)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + '\n')

@@ -11,12 +11,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--adb', default='adb')
     parser.add_argument('--serial', required=True)
+    parser.add_argument('--poll-seconds', type=int, default=30, help='observer interval, identical in both phases (minimum 2 seconds)')
     parser.add_argument('--start', action='store_true')
     parser.add_argument('--minutes', type=int, default=30)
     parser.add_argument('--diagnostic', action='store_true', help='15-second phases; permits charging, never counts as power acceptance')
     parser.add_argument('--wait', type=int, default=0, help='maximum seconds to observe; zero reads once')
     parser.add_argument('--output', default='bin/android/power.json')
     args = parser.parse_args()
+    if args.poll_seconds < 2:
+        parser.error('--poll-seconds must be at least 2')
     adb = [args.adb, '-s', args.serial]
 
     def run(*command):
@@ -42,7 +45,7 @@ def main():
             if time.monotonic() >= deadline:
                 print('report unavailable: ' + str(type(error).__name__), flush=True)
                 return 2
-            time.sleep(2)
+            time.sleep(args.poll_seconds)
             continue
         if str(result.get('pid')) == pid:
             path = Path(args.output)
@@ -58,7 +61,7 @@ def main():
                 return 0 if state == 'complete' else 1
         if time.monotonic() >= deadline:
             return 2
-        time.sleep(2)
+        time.sleep(args.poll_seconds)
 
 
 if __name__ == '__main__':

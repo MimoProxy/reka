@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from upstream_patches import MODULES
 
 ROOT = Path(__file__).resolve().parents[1]
 PINNED_VERSION = 'v1.14.4'
@@ -59,9 +60,33 @@ def main():
     if sha256(source) != PINNED_ECH_SHA256:
         raise SystemExit('Generated upstream copy changed; remove bin/upstream and retry')
 
+    replacements = {'github.com/sagernet/sing-box': './bin/upstream/sing-box'}
+    extra_overlays = {}
+    patches = ROOT / 'bin/upstream-patches'
+    patches.mkdir(exist_ok=True)
+    for name, (version, files) in MODULES.items():
+        module = json.loads(subprocess.check_output(['go', 'list', '-m', '-json', name], cwd=ROOT))
+        if module.get('Version') != version or module.get('Replace'):
+            raise SystemExit('Review pinned component patches before changing ' + name)
+        if 'Dir' not in module:
+            module = json.loads(subprocess.check_output(['go', 'mod', 'download', '-json', name + '@' + version], cwd=ROOT))
+        module_root = Path(module['Dir'])
+        module_copy = ROOT / 'bin/upstream' / name.rsplit('/', 1)[1]
+        if not module_copy.exists():
+            shutil.copytree(module_root, module_copy)
+        if tree_hashes(module_root) != tree_hashes(module_copy):
+            raise SystemExit('Generated upstream copy differs from locked ' + name)
+        for filename, (digest, transform) in files.items():
+            source_file = module_copy / filename
+            if sha256(source_file) != digest:
+                raise SystemExit('Pinned source changed; review patch for ' + name + '/' + filename)
+            patched_file = patches / (name.rsplit('/', 1)[1] + '-' + filename.replace('/', '-') + '.txt')
+            patched_file.write_text(transform(source_file.read_text()))
+            subprocess.check_call(['gofmt', '-w', str(patched_file)])
+            extra_overlays[str(source_file)] = str(patched_file)
+        replacements[name] = './bin/upstream/' + name.rsplit('/', 1)[1]
     modfile = ROOT / 'bin/build.mod'
-    modfile.write_text((ROOT / 'go.mod').read_text()
-                       + '\nreplace github.com/sagernet/sing-box => ' + json.dumps('./bin/upstream/sing-box') + '\n')
+    modfile.write_text((ROOT / 'go.mod').read_text() + ''.join('\nreplace ' + name + ' => ' + json.dumps(path) + '\n' for name, path in replacements.items()))
     shutil.copyfile(ROOT / 'go.sum', ROOT / 'bin/build.sum')
 
     target = ROOT / 'bin/build-overlay.json'
@@ -74,7 +99,7 @@ def main():
     trojan = trojan.replace('n, err := conn.Read(key[:])', 'n, err := io.ReadFull(conn, key[:])', 1)
     patched = ROOT / 'bin/trojan-service-overlay.go.txt'
     patched.write_text(trojan)
-    target.write_text(json.dumps({'Replace': {str(source): str(REPLACEMENT), str(copy / TROJAN_FILE): str(patched)}}) + '\n')
+    target.write_text(json.dumps({'Replace': {str(source): str(REPLACEMENT), str(copy / TROJAN_FILE): str(patched), **extra_overlays}}) + '\n')
     print(target)
 
 

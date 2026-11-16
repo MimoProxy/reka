@@ -44,6 +44,18 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
+      - name: Cross-UID filesystem and peer credential rejection
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d /tmp/reka-peer-ci.XXXXXX)
+          trap 'sudo rm -rf "$stage"' EXIT
+          chmod 755 "$stage"
+          go build -tags "$TAGS" -ldflags "$LDFLAGS" -o "$stage/peersmoke" ./tools/peersmoke
+          chmod 755 "$stage/peersmoke"
+          sudo "$stage/peersmoke" -owner "$(id -u)" -negative 65534 -output "$stage/result.json"
+          mkdir -p bin
+          sudo cat "$stage/result.json" | tee bin/peer-credentials.json
 
   race:
     name: test (race, ubuntu-latest)
@@ -58,14 +70,12 @@ jobs:
           python3 tools/build-overlay.py
           echo 'GOFLAGS=-modfile=bin/build.mod -overlay=bin/build-overlay.json' >> "$GITHUB_ENV"
       - name: race
-        # sing-vmess's Vision races between its read and write goroutines
-        # (upstream); Vision tests skip themselves under -race. checkptr is
-        # off because Vision reads TLS internals through unsafe offsets.
+        # Pinned overlays cover Vision and SOCKS UDP without race exemptions.
         env:
           CGO_ENABLED: "1"
         run: |
           PKGS=$(go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
-          go test -race -gcflags=all=-d=checkptr=0 -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
+          go test -race -tags "$TAGS" -ldflags "$LDFLAGS" $PKGS
 
   build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -117,3 +127,5 @@ jobs:
           CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$CC" go build -trimpath -buildmode=c-shared \
             -tags "$TAGS" -ldflags "$LDFLAGS -s -w" -o out/libreka.so ./mobile/jni
           ls -l out/libreka.so
+      - name: Compile public Kotlin wrapper and acceptance app
+        run: mobile/android/build.sh

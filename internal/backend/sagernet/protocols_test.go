@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -183,6 +184,39 @@ func TestProtocolInteroperability(t *testing.T) {
 			if !bytes.Equal(reply, payload) {
 				t.Fatal("payload mismatch")
 			}
+			inner, err := out.Dial(ctx, "tcp", tlsEchoServer(t).String())
+			if err != nil {
+				t.Fatal("inner TLS dial", err)
+			}
+			secure := tls.Client(inner, &tls.Config{InsecureSkipVerify: true})
+			defer secure.Close()
+			secure.SetDeadline(time.Now().Add(5 * time.Second))
+			if err := secure.HandshakeContext(ctx); err != nil {
+				t.Fatal("inner TLS handshake", err)
+			}
+			if _, err = secure.Write(payload); err != nil {
+				t.Fatal("inner TLS write", err)
+			}
+			if _, err = io.ReadFull(secure, reply); err != nil {
+				t.Fatal("inner TLS read", err)
+			}
+			if !bytes.Equal(reply, payload) {
+				t.Fatal("inner TLS payload mismatch")
+			}
+			web := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+			defer web.Close()
+			tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: out.Dial, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+			defer tr.CloseIdleConnections()
+			client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+			res, err := client.Get(web.URL)
+			if err != nil {
+				t.Fatal("HTTPS over protocol", err)
+			}
+			res.Body.Close()
+			if res.StatusCode != 204 {
+				t.Fatal(res.StatusCode)
+			}
+
 			udp, err := net.ListenPacket("udp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)

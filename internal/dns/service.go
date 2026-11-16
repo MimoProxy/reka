@@ -74,9 +74,6 @@ func New(c Config, o Options) (*Service, error) {
 			}
 		}
 	}
-	if c.TTL == 0 {
-		c.TTL = 60
-	}
 	if o.Pool == nil {
 		o.Pool = NewFakePool(65536)
 	}
@@ -147,6 +144,12 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	return addrs, nil
 }
 func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
+	return s.exchange(ctx, q, scope, fake, true)
+}
+func (s *Service) exchangeWithoutHosts(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
+	return s.exchange(ctx, q, scope, fake, false)
+}
+func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, hosts bool) (*D.Msg, error) {
 	if len(q.Question) != 1 || q.Opcode != D.OpcodeQuery || q.IsTsig() != nil {
 		return nil, errors.New("unsupported DNS query shape")
 	}
@@ -160,18 +163,40 @@ func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake boo
 	if typ == D.TypeAAAA && !s.cfg.IPv6 {
 		return reply(), nil
 	}
-	if s.cfg.UseHosts {
-		for _, h := range s.cfg.Hosts {
-			if s.Match(h.ID, domain, netip.Addr{}) {
-				m := reply()
-				for _, text := range h.Addresses {
+	if hosts && s.cfg.UseHosts && (typ == D.TypeA || typ == D.TypeAAAA || typ == D.TypeCNAME) {
+		host, alias, err := s.resolveHost(domain, typ)
+		if err != nil {
+			return nil, err
+		}
+		if host != nil {
+			m := reply()
+			m.Authoritative = true
+			if typ == D.TypeCNAME {
+				if alias != "" {
+					m.Answer = []D.RR{hostCNAME(question.Name, alias)}
+				}
+			} else {
+				for _, text := range host.Addresses {
 					a, _ := netip.ParseAddr(text)
-					if rr := addressRR(question.Name, typ, a, 60); rr != nil {
+					if rr := addressRR(question.Name, typ, a, 10); rr != nil {
 						m.Answer = append(m.Answer, rr)
 					}
 				}
-				return m, nil
 			}
+			return m, nil
+		}
+		if alias != "" {
+			request := q.Copy()
+			request.Question[0].Name = D.Fqdn(alias)
+			// The alias chain has already been resolved. Skip the host table
+			// for this exchange so wildcard aliases cannot recurse forever.
+			m, err := s.exchangeWithoutHosts(ctx, request, scope, fake)
+			if err != nil {
+				return nil, err
+			}
+			m.Question = q.Question
+			m.Answer = append([]D.RR{hostCNAME(question.Name, alias)}, m.Answer...)
+			return m, nil
 		}
 	}
 	for _, h := range s.systemHosts {
@@ -204,12 +229,16 @@ func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake boo
 				r = s.cfg.FakeRange6
 			}
 			prefix, _ := netip.ParsePrefix(r)
-			ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix, time.Duration(s.cfg.TTL)*time.Second)
+			leaseTTL := s.cfg.FakeTTL()
+			if leaseTTL == 0 {
+				leaseTTL = 60
+			}
+			ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix, time.Duration(leaseTTL)*time.Second)
 			if err != nil {
 				return nil, err
 			}
 			m := reply()
-			m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(s.cfg.TTL))}
+			m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(s.cfg.FakeTTL()))}
 			return m, nil
 		}
 	}
@@ -365,6 +394,7 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 		if err != nil {
 			return nil, err
 		}
+		ep.PreferH3 = s.cfg.PreferH3 && ep.Scheme == "https"
 		if ep.Scheme == "system" {
 			if s.opts.System == nil {
 				last = errors.New("system resolver unavailable")
@@ -442,4 +472,46 @@ func (s *Service) InheritCache(old *Service) {
 	}
 	s.hits.Store(old.hits.Load())
 	s.misses.Store(old.misses.Load())
+}
+
+func hostCNAME(name, alias string) D.RR {
+	return &D.CNAME{Hdr: D.RR_Header{Name: name, Rrtype: D.TypeCNAME, Class: D.ClassINET, Ttl: 10}, Target: D.Fqdn(alias)}
+}
+
+// As in Clash, aliases ending in a hosts IP entry produce IP answers under
+// the original question; unresolved aliases rewrite the upstream question.
+func (s *Service) resolveHost(domain string, typ uint16) (*Host, string, error) {
+	seen := map[string]bool{}
+	alias := ""
+	for depth := 0; depth < 32; depth++ {
+		if seen[domain] {
+			return nil, "", errors.New("hosts alias cycle")
+		}
+		seen[domain] = true
+		var found *Host
+		for i := range s.cfg.Hosts {
+			if s.Match(s.cfg.Hosts[i].ID, domain, netip.Addr{}) {
+				found = &s.cfg.Hosts[i]
+				break
+			}
+		}
+		if found == nil {
+			return nil, alias, nil
+		}
+		if len(found.Addresses) == 1 {
+			if _, err := netip.ParseAddr(found.Addresses[0]); err != nil {
+				alias = strings.ToLower(strings.Trim(found.Addresses[0], "."))
+				if typ == D.TypeCNAME {
+					return found, alias, nil
+				}
+				domain = alias
+				continue
+			}
+		}
+		if typ == D.TypeCNAME {
+			return nil, "", nil
+		}
+		return found, "", nil
+	}
+	return nil, "", errors.New("hosts alias depth exceeded")
 }

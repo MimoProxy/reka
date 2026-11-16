@@ -58,10 +58,14 @@ public final class PowerTestService extends VpnService {
                     .put("pid", android.os.Process.myPid())
                     .put("phase_target_seconds", phaseSeconds).put("diagnostic", diagnostic)
                     .put("measurement_kind", diagnostic ? "harness_diagnostic" : "uncharged_ab")
-                    .put("timing", "inexact wakeup boundary alarms; actual duration can exceed target")
+                    .put("timing", diagnostic ? "diagnostic inexact boundary alarms" : "two exact phase-boundary wakeups; no held wake lock")
                     .put("wake_lock", false).put("artificial_unplug", false)
                     .put("version", BuildVersion.VERSION).put("state", "waiting_for_unplug");
             save();
+            AlarmManager alarms = getSystemService(AlarmManager.class);
+            boolean exact = android.os.Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms();
+            report.put("exact_alarm_permission", exact); save();
+            if (!diagnostic && !exact) throw new Exception("Enable Alarms & reminders for Reka library test before uncharged measurement");
             // Exercise the full JNI handshake and stop path before asking the
             // user to wait through either measurement phase.
             startKernel(); Native.stop(handle); handle = 0;
@@ -138,12 +142,15 @@ public final class PowerTestService extends VpnService {
         AlarmManager alarms = getSystemService(AlarmManager.class);
         PendingIntent alarm = PendingIntent.getBroadcast(this, 19,
                 new Intent(this, PowerBoundaryReceiver.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, deadline, alarm);
+        if (diagnostic) alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, deadline, alarm);
+        else alarms.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, deadline, alarm);
         try {
         do {
             if (cancelled) throw new Exception("VPN revoked or service cancelled");
             if (!diagnostic && plugged() != 0) throw new Exception("charger reconnected during measurement");
-            samples.put(sample()); save();
+            JSONObject observed = sample();
+            if (!diagnostic && observed.getBoolean("screen_interactive")) throw new Exception("screen activated during measurement");
+            samples.put(observed); save();
             long remaining = deadline - SystemClock.elapsedRealtime();
             if (remaining <= 0) break;
             synchronized (boundary) {

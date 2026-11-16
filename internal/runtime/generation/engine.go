@@ -963,6 +963,17 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			}
 			values["alter_id"] = p.AlterID
 		case "hysteria2":
+			if len(p.ServerPorts) > 0 {
+				values["server_ports"] = p.ServerPorts
+				interval := p.HopInterval
+				if interval == 0 {
+					interval = 30
+				} else if interval < 5 {
+					interval = 5
+				}
+				maximum := max(p.HopIntervalMax, interval)
+				values["hop_interval"], values["hop_interval_max"] = fmt.Sprintf("%ds", interval), fmt.Sprintf("%ds", maximum)
+			}
 			values["up_mbps"], values["down_mbps"] = p.UpMbps, p.DownMbps
 			if p.Obfs != nil {
 				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password}

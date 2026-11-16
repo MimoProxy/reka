@@ -164,3 +164,24 @@ The kernel exports the active documents to `<state-root>/edit/`: `profile.yaml`,
 ## Local network takeover
 
 `local.network` is the durable OS takeover intent. It is not permitted in imported sources or the shared profile. See [network takeover](network-takeover.md) for schema, modes, platform limits and interruption/recovery behavior.
+
+`process-name-regex` matches the owning process basename using case-insensitive .NET-compatible expressions (including lookaround), with a 50 ms match budget. Unknown owners do not match. Clash regex payloads retain commas, escaped parentheses and character classes.
+
+DNS hosts values accept IP lists or one domain alias. Alias chains ending in a
+hosts IP entry return addresses under the original question; an external alias
+rewrites the upstream question and prepends a CNAME with TTL 10. Cycles fail
+closed. An explicit `fake-ip-ttl: 0` emits zero TTL while retaining a separate
+60-second connection mapping lease; omission keeps the native 60-second default.
+
+DNS endpoints also accept `quic://host:853` (DoQ) and `h3://host/dns-query`
+(DoH3). Both use the configured bootstrap, certificate validation and selected
+outbound, including UDP socket protection on Android. `prefer-h3: true` enables
+TLS/QUIC handshake selection for HTTPS resolvers, sending the DNS message only
+on the selected transport. Explicit `h3://` endpoints require HTTP/3.
+
+Hysteria2 imports accept comma-separated `ports` and closed ranges, plus
+`hop-interval` in seconds or a closed interval range. The pinned Clash defaults
+are 30 seconds and a 5-second minimum. An omitted/zero `port` is allowed when
+`ports` supplies the remote ports. Native profiles use `protocol.server-ports`
+with explicit `start:end` ranges and `hop-interval-seconds` /
+`hop-interval-max-seconds`.

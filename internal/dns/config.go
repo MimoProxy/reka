@@ -11,6 +11,7 @@ import (
 )
 
 type Config struct {
+	PreferH3       bool           `yaml:"prefer-h3" json:"prefer-h3,omitempty"`
 	From           string         `yaml:"from" json:"from,omitempty"`
 	Listen         string         `yaml:"listen" json:"listen,omitempty"`
 	Nameservers    []string       `yaml:"nameserver" json:"nameserver,omitempty"`
@@ -31,7 +32,7 @@ type Config struct {
 	FakeFilterMode string         `yaml:"fake-ip-filter-mode" json:"fake-ip-filter-mode,omitempty"`
 	RespectRules   bool           `yaml:"respect-rules" json:"respect-rules,omitempty"`
 	IPv6           bool           `yaml:"ipv6" json:"ipv6"`
-	TTL            int            `yaml:"fake-ip-ttl" json:"fake-ip-ttl,omitempty"`
+	TTL            *int           `yaml:"fake-ip-ttl" json:"fake-ip-ttl,omitempty"`
 	CacheSize      int            `yaml:"cache-size" json:"cache-size,omitempty"`
 }
 type Policy struct {
@@ -50,7 +51,10 @@ type FallbackFilter struct {
 	IPCIDR   []string `yaml:"ipcidr" json:"ipcidr,omitempty"`
 	Domain   []string `yaml:"domain" json:"domain,omitempty"`
 }
-type Endpoint struct{ Scheme, Host, Port, Path, Via string }
+type Endpoint struct {
+	Scheme, Host, Port, Path, Via string
+	PreferH3                      bool
+}
 
 func ParseEndpoint(raw string) (Endpoint, error) {
 	if raw == "system" {
@@ -64,16 +68,16 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 		return Endpoint{}, fmt.Errorf("invalid DNS endpoint")
 	}
 	switch u.Scheme {
-	case "udp", "tcp", "tls", "https":
+	case "udp", "tcp", "tls", "https", "quic", "h3":
 	default:
 		return Endpoint{}, fmt.Errorf("unsupported DNS transport %q", u.Scheme)
 	}
 	port := u.Port()
 	if port == "" {
 		switch u.Scheme {
-		case "tls":
+		case "tls", "quic":
 			port = "853"
-		case "https":
+		case "https", "h3":
 			port = "443"
 		default:
 			port = "53"
@@ -82,14 +86,14 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 	if _, err := net.LookupPort("tcp", port); err != nil {
 		return Endpoint{}, fmt.Errorf("invalid DNS port")
 	}
-	if u.Scheme != "https" && (u.Path != "" || u.RawQuery != "") {
+	if u.Scheme != "https" && u.Scheme != "h3" && (u.Path != "" || u.RawQuery != "") {
 		return Endpoint{}, fmt.Errorf("DNS path is only valid for HTTPS")
 	}
 	path := u.RequestURI()
-	if path == "/" && u.Scheme == "https" {
+	if path == "/" && (u.Scheme == "https" || u.Scheme == "h3") {
 		path = "/dns-query"
 	}
-	return Endpoint{u.Scheme, u.Hostname(), port, path, u.Fragment}, nil
+	return Endpoint{Scheme: u.Scheme, Host: u.Hostname(), Port: port, Path: path, Via: u.Fragment}, nil
 }
 func Validate(c *Config) error {
 	if c == nil {
@@ -107,7 +111,7 @@ func Validate(c *Config) error {
 	if c.FakeFilterMode != "" && c.FakeFilterMode != "blacklist" && c.FakeFilterMode != "whitelist" {
 		return fmt.Errorf("invalid fake-ip-filter-mode")
 	}
-	if c.TTL < 0 || c.TTL > 86400 {
+	if c.TTL != nil && (*c.TTL < 0 || *c.TTL > 86400) {
 		return fmt.Errorf("fake-ip-ttl must be 0–86400")
 	}
 	if c.CacheSize < 0 || c.CacheSize > 1_000_000 {
@@ -165,7 +169,9 @@ func Validate(c *Config) error {
 		}
 		for _, a := range h.Addresses {
 			if _, err := netip.ParseAddr(a); err != nil {
-				return err
+				if len(h.Addresses) != 1 || !validHostAlias(a) {
+					return fmt.Errorf("hosts value must contain IP addresses or one domain alias")
+				}
 			}
 		}
 	}
@@ -185,4 +191,29 @@ func Validate(c *Config) error {
 		}
 	}
 	return nil
+}
+
+// FakeTTL distinguishes an omitted value from an explicit zero response TTL.
+func (c Config) FakeTTL() int {
+	if c.TTL == nil {
+		return 60
+	}
+	return *c.TTL
+}
+func validHostAlias(s string) bool {
+	s = strings.Trim(s, ".")
+	if !strings.Contains(s, ".") || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }

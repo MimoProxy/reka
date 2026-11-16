@@ -52,6 +52,7 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         view = new TextView(this);
         setContentView(view);
+        if(getIntent().getBooleanExtra("kotlin",false)){new Thread(()->{try{log(KotlinAcceptance.run(this));log("RESULT PASS");}catch(Throwable error){Log.e(TAG,"Kotlin acceptance",error);log("FAIL "+error);log("RESULT FAIL");}},"reka-kotlin-test").start();return;}
         if(getIntent().getBooleanExtra("vpn",false) || getIntent().getIntExtra("battery-minutes",0)>0){android.content.Intent permission=android.net.VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,17);else startVPNTest();}else new Thread(this::runTest).start();
     }
 

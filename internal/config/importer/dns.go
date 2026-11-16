@@ -39,9 +39,6 @@ func (c *converter) convertDNS(root *yaml.Node) {
 	}
 	if get(normalized, "fake-ip-ttl") == nil {
 		putField(normalized, "fake-ip-ttl", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "1"})
-	} else if text(get(normalized, "fake-ip-ttl")) == "0" {
-		c.unsupported(n, "/dns/fake-ip-ttl", "import.dns", "zero fake-IP TTL is unavailable")
-		return
 	}
 	if get(normalized, "fake-ip-filter") == nil {
 		filters := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}

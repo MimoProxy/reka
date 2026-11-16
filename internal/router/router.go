@@ -281,6 +281,18 @@ func (e *evaluation) match(index int, r *rule) bool {
 			}
 		}
 		return false
+	case KindProcessNameRegex:
+		p, ok := e.processName(index)
+		if !ok {
+			return false
+		}
+		name := processBase(p)
+		for _, re := range r.processRegexps {
+			if matched, err := re.MatchString(name); err == nil && matched {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
@@ -537,7 +549,7 @@ func (r *Router) Explain(ctx context.Context, md Metadata, env Env) Explanation 
 }
 
 func needsProcess(r *rule) bool {
-	if r.spec.Kind == KindProcessName || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
+	if r.spec.Kind == KindProcessName || r.spec.Kind == KindProcessNameRegex || r.spec.Set != nil && r.spec.Set.NeedsProcess() {
 		return true
 	}
 	for _, ch := range r.children {

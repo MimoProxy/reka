@@ -2,8 +2,7 @@
 # Builds libreka.so (Go c-shared, arm64) with the NDK, and the device test
 # app around it, without Gradle: javac, d8, aapt2, zipalign, apksigner.
 # Output (repo root): bin/android/libreka.so, bin/android/reka-libtest.apk.
-# The Kotlin wrapper (kotlin/) is source for host apps; it is not compiled
-# here.
+# The published Kotlin wrapper is compiled and exercised by the test app.
 set -eu
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
@@ -11,6 +10,7 @@ SDK=${ANDROID_HOME:?set ANDROID_HOME}
 NDK=${ANDROID_NDK_HOME:-$(ls -d "$SDK"/ndk/* | sort -V | tail -1)}
 BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
 PLATFORM=$(ls -d "$SDK"/platforms/android-* | sort -V | tail -1)
+KOTLIN=${REKA_KOTLIN_HOME:-$(python3 "$ROOT/tools/kotlin-toolchain.py")}
 MIN_API=26
 VERSION=${REKA_VERSION:-dev}
 case "$VERSION" in ''|*[!A-Za-z0-9.+_-]*) echo 'Invalid REKA_VERSION' >&2; exit 1;; esac
@@ -33,8 +33,10 @@ package org.mimoproxy.reka.test;
 public final class BuildVersion { public static final String VERSION = "$VERSION"; }
 EOF
 
-javac --release 11 -nowarn -classpath "$PLATFORM/android.jar" -d "$BUILD/classes" $(find java testapp/java -name '*.java') "$BUILD/BuildVersion.java"
-"$BT/d8" --release --min-api $MIN_API --lib "$PLATFORM/android.jar" --output "$BUILD/apk" $(find "$BUILD/classes" -name '*.class')
+javac --release 11 -nowarn -classpath "$PLATFORM/android.jar" -d "$BUILD/classes" $(find java -name '*.java') "$BUILD/BuildVersion.java"
+"$KOTLIN/bin/kotlinc" -jvm-target 11 -classpath "$PLATFORM/android.jar:$BUILD/classes" -d "$BUILD/classes" $(find kotlin testapp/kotlin -name '*.kt')
+javac --release 11 -nowarn -classpath "$PLATFORM/android.jar:$BUILD/classes:$KOTLIN/lib/kotlin-stdlib.jar" -d "$BUILD/classes" $(find testapp/java -name '*.java')
+"$BT/d8" --release --min-api $MIN_API --lib "$PLATFORM/android.jar" --output "$BUILD/apk" $(find "$BUILD/classes" -name '*.class') "$KOTLIN/lib/kotlin-stdlib.jar"
 "$BT/aapt2" link -o "$BUILD/base.apk" --manifest testapp/AndroidManifest.xml -I "$PLATFORM/android.jar" \
 	--min-sdk-version $MIN_API --target-sdk-version 35
 (cd "$BUILD/apk" && zip -q -r "$BUILD/base.apk" classes.dex lib)

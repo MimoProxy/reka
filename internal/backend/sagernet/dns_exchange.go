@@ -102,8 +102,21 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 		if err == nil && ep.Scheme == "udp" && m.Truncated {
 			m, err = exchangePlainDNS(ctx, "tcp", open, q)
 		}
+	case "quic", "h3":
+		m, err = exchangeQUICDNS(ctx, ep, q, open, tlsConfig, address)
 	case "https":
-		m, err = exchangeDoH(ctx, ep, open, tlsConfig, q)
+		h3 := false
+		if ep.PreferH3 {
+			h3, err = preferHTTP3(ctx, open, tlsConfig, address)
+		}
+		if err == nil {
+			if h3 {
+				ep.Scheme = "h3"
+				m, err = exchangeQUICDNS(ctx, ep, q, open, tlsConfig, address)
+			} else {
+				m, err = exchangeDoH(ctx, ep, open, tlsConfig, q)
+			}
+		}
 	case "tls":
 		m, err = exchangeDoT(ctx, open, tlsConfig, q)
 	default:
@@ -177,19 +190,23 @@ func exchangePlainDNS(ctx context.Context, network string, open func(context.Con
 // exchangeDoH posts one query to a DNS-over-HTTPS endpoint. Redirects are
 // refused, and the reply must be a DNS message of at most 64 KiB.
 func exchangeDoH(ctx context.Context, ep RD.Endpoint, open func(context.Context, string) (net.Conn, error), tlsConfig *tls.Config, q *D.Msg) (*D.Msg, error) {
-	wire, err := q.Pack()
-	if err != nil {
-		return nil, err
-	}
 	transport := &http.Transport{
 		Proxy:             nil,
 		DisableKeepAlives: true,
+		ForceAttemptHTTP2: true,
 		TLSClientConfig:   tlsConfig,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return open(ctx, "tcp")
 		},
 	}
 	defer transport.CloseIdleConnections()
+	return exchangeDoHTransport(ctx, ep, q, transport)
+}
+func exchangeDoHTransport(ctx context.Context, ep RD.Endpoint, q *D.Msg, transport http.RoundTripper) (*D.Msg, error) {
+	wire, err := q.Pack()
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   dnsTimeout,

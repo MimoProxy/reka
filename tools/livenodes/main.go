@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,8 +17,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -33,6 +36,7 @@ type result struct {
 func main() {
 	path := flag.String("config", "", "local configuration path")
 	workspace := flag.String("workspace", "", "Mimo workspace containing stored subscription YAML")
+	diagnostic := flag.Bool("diagnostic", false, "write credential-redacted TCP diagnostics to stderr")
 	perType := flag.Int("per-type", 2, "maximum samples for each protocol")
 	flag.Parse()
 	var documents []string
@@ -124,11 +128,32 @@ func main() {
 			continue
 		}
 		out := engine.OutboundInstance(id)
-		tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: out.Dial}
+		tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, ForceAttemptHTTP2: true, DialContext: out.Dial}
 		client := &http.Client{Transport: tr, Timeout: 12 * time.Second}
-		response, err := client.Get("https://www.gstatic.com/generate_204")
+		request, _ := http.NewRequest("GET", "https://www.gstatic.com/generate_204", nil)
+		if *diagnostic {
+			trace := &httptrace.ClientTrace{
+				TLSHandshakeDone: func(_ tls.ConnectionState, e error) { fmt.Fprintf(os.Stderr, "%s inner_TLS_done: %v\n", typ, e) },
+				WroteRequest:     func(w httptrace.WroteRequestInfo) { fmt.Fprintf(os.Stderr, "%s request_written: %v\n", typ, w.Err) },
+			}
+			request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+		}
+		response, err := client.Do(request)
 		if err != nil {
 			r.TCP = "http-request-failed"
+			if *diagnostic {
+				message := err.Error()
+				for i := 0; i+1 < len(node.Content); i += 2 {
+					switch node.Content[i].Value {
+					case "password", "psk", "uuid", "username", "userkey":
+						value := node.Content[i+1].Value
+						if value != "" {
+							message = strings.ReplaceAll(message, value, "[redacted]")
+						}
+					}
+				}
+				fmt.Fprintf(os.Stderr, "%s TCP: %s\n", typ, message)
+			}
 		} else {
 			r.HTTP = response.StatusCode
 			r.TCP = "passed"

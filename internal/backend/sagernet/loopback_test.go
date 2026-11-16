@@ -344,9 +344,6 @@ func TestRealityWrongKey(t *testing.T) {
 }
 
 func TestLoopbackVLESSRealityVision(t *testing.T) {
-	if raceEnabled {
-		t.Skip("sing-vmess Vision has an upstream data race between Read and Write")
-	}
 	const flow = "xtls-rprx-vision"
 	server, pub, sid := realityServer(t, testUUID, flow)
 	socks, out := startClient(t, realitySpec(server, testUUID, flow, pub, sid))

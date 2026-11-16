@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"github.com/MimoProxy/reka/internal/config/model"
 	"go.yaml.in/yaml/v3"
 	"strconv"
 	"strings"
@@ -26,7 +27,11 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	}
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
-	out := object{"id": id, "name": name, "type": nativeType, "server": r.str("server"), "port": r.port(), "udp": r.boolean("udp", false)}
+	port := 0
+	if nativeType != "hysteria2" || empty(get(n, "ports")) || (!empty(get(n, "port")) && text(get(n, "port")) != "0") {
+		port = r.port()
+	}
+	out := object{"id": id, "name": name, "type": nativeType, "server": r.str("server"), "port": port, "udp": r.boolean("udp", false)}
 	allowed := map[string]bool{}
 	for _, k := range []string{"name", "type", "server", "port", "udp", "tls", "servername", "sni", "skip-cert-verify", "client-fingerprint", "alpn"} {
 		allowed[k] = true
@@ -53,7 +58,23 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		permit("password", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux")
 		out["password"] = r.str("password")
 	case "hysteria2":
-		permit("password", "up", "down", "obfs", "obfs-password")
+		permit("password", "up", "down", "obfs", "obfs-password", "ports", "hop-interval")
+		if ports := r.str("ports"); ports != "" {
+			ranges, err := model.PortHops(ports)
+			if err != nil {
+				r.fail("ports", "import.ports", err.Error())
+			} else {
+				p["server-ports"] = ranges
+			}
+			lo, hi, err := model.HopSeconds(r.str("hop-interval"))
+			if err != nil {
+				r.fail("hop-interval", "import.ports", err.Error())
+			} else {
+				p["hop-interval-seconds"], p["hop-interval-max-seconds"] = lo, hi
+			}
+		} else if get(n, "hop-interval") != nil {
+			c.report.Ignored = append(c.report.Ignored, path+"/hop-interval")
+		}
 		out["password"] = r.str("password")
 		p["up-mbps"], p["down-mbps"] = r.number("up", 0), r.number("down", 0)
 		if obfs := r.str("obfs"); obfs != "" {

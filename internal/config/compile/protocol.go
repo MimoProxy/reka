@@ -30,7 +30,8 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	}
 	if ob.Protocol != nil {
 		p := *ob.Protocol
-		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
+		p.ServerPorts = slices.Clone(p.ServerPorts)
+		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
 		for _, field := range c.present(base + "/protocol") {
 			if !slices.Contains(allowed[ob.Type], field) {
 				fail("protocol/"+field, "option does not apply to protocol")
@@ -41,6 +42,25 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		}
 		if ob.Type == "vmess" && !slices.Contains([]string{"", "auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"}, p.Security) {
 			fail("protocol/security", "unsupported VMess cipher")
+		}
+		if ob.Type == "hysteria2" {
+			if len(p.ServerPorts) > 1024 {
+				fail("protocol/server-ports", "too many port ranges")
+			}
+			for _, v := range p.ServerPorts {
+				parts := strings.Split(v, ":")
+				if len(parts) != 2 {
+					fail("protocol/server-ports", "expected explicit start:end port range")
+					continue
+				}
+				ranges, err := model.PortHops(strings.Join(parts, "-"))
+				if err != nil || len(ranges) != 1 || ranges[0] != v {
+					fail("protocol/server-ports", "invalid port range")
+				}
+			}
+			if p.HopInterval < 0 || p.HopInterval > 86400 || p.HopIntervalMax < 0 || p.HopIntervalMax > 86400 || p.HopIntervalMax != 0 && p.HopIntervalMax < p.HopInterval {
+				fail("protocol/hop-interval-seconds", "invalid hop interval")
+			}
 		}
 		if ob.Type == "tuic" {
 			if !slices.Contains([]string{"", "cubic", "new_reno", "bbr"}, p.Congestion) {

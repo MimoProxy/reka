@@ -52,7 +52,7 @@ Pure local import resolves inline providers. HTTP resources require [background 
 
 ## GeoIP and GeoSite
 
-`GEOIP,LAN` is built in: private, unspecified, loopback, multicast and link-local-unicast addresses. Other GEOIP and GEOSITE selectors use explicitly configured protobuf `.dat` assets, not `geox-url`, implicit global files or default download URLs:
+`GEOIP,LAN` is built in: private, unspecified, loopback, multicast and link-local-unicast addresses. Other GEOIP and GEOSITE selectors use explicitly configured assets. GEOIP accepts country MMDB and protobuf DAT; GEOSITE uses DAT. Downloads remain explicit and SHA-locked:
 
 ```sh
 ./bin/rekactl subscription set airport secret://subscriptions/airport/url \
@@ -73,7 +73,7 @@ subscription:
 
 Each URL also accepts a `secret://` reference. Inline URLs are masked and restored by asset ID. Root headers are not inherited by geodata downloads. Configured assets use the subscription interval and the existing conditional cache, bundle limits and atomic commit. Their hashes are included in the source lock; history and restart use those bytes without redownloading.
 
-GeoIP selects a country code, supports both address families and protobuf `reverse_match`. GeoSite supports keyword, regex, suffix and full-name domain types, and `list@attribute@attribute` selectors. Attribute matching uses key presence, as in the pinned reference. Missing codes or empty attribute results reject the candidate. MMDB and automatic geodata discovery are currently unavailable. Large public databases may exceed the existing 16 MiB per-resource / 32 MiB per-refresh limits; provide a smaller selected database rather than expecting an implicit limit increase.
+GeoIP selects a country code, supports both address families and protobuf `reverse_match`. MMDB assets are detected when importing a supplied GEOIP bundle; native rule sets can explicitly use `format: mmdb`. GeoIP2 country records and sing-geoip scalar country records are supported, and the database is verified before compiling its immutable IP index. GeoSite supports keyword, regex, suffix and full-name domain types, and `list@attribute@attribute` selectors. Attribute matching uses key presence, as in the pinned reference. Missing codes or empty attribute results reject the candidate. Large public databases may exceed the existing 16 MiB per-resource / 32 MiB per-refresh limits; provide a smaller selected database rather than expecting an implicit limit increase.
 
 ## Bounds and validation
 

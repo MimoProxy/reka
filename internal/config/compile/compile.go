@@ -412,7 +412,7 @@ func (c *compiler) outbounds(eff *Effective) {
 			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
 				c.errorf(doc, base+"/server", "outbound.server", "server must be a host name or an IP address")
 			}
-			if ob.Port < 1 || ob.Port > 65535 {
+			if (ob.Port < 1 || ob.Port > 65535) && !(ob.Type == "hysteria2" && ob.Port == 0 && ob.Protocol != nil && len(ob.Protocol.ServerPorts) > 0) {
 				c.errorf(doc, base+"/port", "outbound.port", "port must be between 1 and 65535")
 			}
 			out.Server, out.Port = strings.Trim(ob.Server, "[]"), uint16(ob.Port)

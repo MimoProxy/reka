@@ -103,12 +103,13 @@ func ImportBundle(req Request, payloads, geodata map[string][]byte) Result {
 		if len(data) == 0 {
 			return invalidBundle(req, fmt.Errorf("missing explicit %s resource", kind))
 		}
-		if _, err := rulesdata.Decode(kind, "dat", code, data); err != nil {
+		format := rulesdata.GeodataFormat(kind, data)
+		if _, err := rulesdata.Decode(kind, format, code, data); err != nil {
 			return invalidBundle(req, err)
 		}
 		id := StableID(kind, code)
 		req.resourceNames[ref] = id
-		req.ruleSets = append(req.ruleSets, object{"id": id, "behavior": kind, "format": "dat", "code": code, "hash": resource.Hash(data)})
+		req.ruleSets = append(req.ruleSets, object{"id": id, "behavior": kind, "format": format, "code": code, "hash": resource.Hash(data)})
 	}
 	return ImportProviders(req, payloads)
 }
