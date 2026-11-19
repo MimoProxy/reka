@@ -18,6 +18,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 
 	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/history"
 )
 
 // dnsTimeout bounds one upstream exchange when the context allows longer.
@@ -118,6 +119,7 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 	case "udp", "tcp":
 		m, err = exchangePlainDNS(ctx, ep.Scheme, open, q)
 		if err == nil && ep.Scheme == "udp" && m.Truncated {
+			RD.ReportUpstream(ctx, "", "tcp")
 			m, err = exchangePlainDNS(ctx, "tcp", open, q)
 		}
 	case "quic", "h3":
@@ -130,6 +132,7 @@ func exchangeDNS(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(cont
 		if err == nil {
 			if h3 {
 				ep.Scheme = "h3"
+				RD.ReportUpstream(ctx, "", "h3")
 				m, err = exchangeQUICDNS(ctx, ep, q, open, tlsConfig, address)
 			} else {
 				m, err = exchangeDoH(ctx, ep, open, tlsConfig, q)
@@ -335,7 +338,8 @@ func NewDNSListener(address string, exchange func(context.Context, *D.Msg) (*D.M
 	handler := D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout+time.Second)
 		defer cancel()
-		m, err := exchange(ctx, q)
+		origin := history.DNSOrigin{Kind: "listener", Network: w.RemoteAddr().Network(), Client: w.RemoteAddr().String(), Requested: w.LocalAddr().String()}
+		m, err := exchange(history.WithDNSOrigin(ctx, origin), q)
 		if err != nil {
 			m = new(D.Msg)
 			m.SetRcode(q, D.RcodeServerFailure)

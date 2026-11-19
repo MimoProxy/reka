@@ -136,7 +136,11 @@ func Start(opts Options) (*Kernel, error) {
 	bopts.ProtectFD = opts.Protect
 	bopts.ProcessLookup = opts.ProcessLookup
 	bopts.ProcessInfoLookup = opts.ProcessInfoLookup
-	eng := generation.NewEngine(generation.EngineOptions{Backend: bopts, LogLevel: opts.LogLevel, StateRoot: runtimeRoot, TUNFD: opts.TUNFD})
+	var profileID string
+	if workspace != nil {
+		profileID = workspace.InitialProfileID()
+	}
+	eng := generation.NewEngine(generation.EngineOptions{ProfileID: profileID, Backend: bopts, LogLevel: opts.LogLevel, StateRoot: runtimeRoot, TUNFD: opts.TUNFD})
 	if opts.InitialArchiveHash != "" {
 		if err := service.InstallInitialProfileArchive(opts.StateRoot, opts.InitialArchiveHash, eng.ProcessLookup()); err != nil {
 			eng.Close()

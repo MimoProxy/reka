@@ -745,7 +745,21 @@ def inbound_socks_metadata(source):
 def inbound_http_metadata(source):
     source = replace(source, ') error {\n\tfor {', ') error {\n\tctx = context.WithValue(ctx, "reka.inbound.protocol.v1", "HTTP")\n\tfor {')
     source = replace(source, 'E.New("http: authentication failed, username=", username, ", password=", password)', 'E.New("http: authentication failed")')
-    return replace(source, 'E.New("http: authentication failed, Proxy-Authorization=", authorization)', 'E.New("http: authentication failed")')
+    source = replace(source, 'E.New("http: authentication failed, Proxy-Authorization=", authorization)', 'E.New("http: authentication failed")')
+    # Attach diagnostics at the existing parse/forward boundary without
+    # duplicating the parser, authentication, or CONNECT tunnel handling.
+    source = replace(source, 'request *http.Request, source M.Socksaddr,\n) error {', '''request *http.Request, source M.Socksaddr,
+) (observedErr error) {
+    var observeResponse func(*http.Response)
+    var proxyStatus int
+    if begin, ok := ctx.Value("reka.inbound.http-observation.v1").(func(context.Context, *http.Request, string) (context.Context, func(*http.Response), func(int, error))); ok {
+        var complete func(int, error)
+        ctx, observeResponse, complete = begin(ctx, request, conn.RemoteAddr().String())
+        defer func() { complete(proxyStatus, observedErr) }()
+    }''')
+    source = replace(source, 'return responseWith(request, http.StatusBadRequest).Write(conn)', 'proxyStatus = http.StatusBadRequest\n\t\treturn responseWith(request, proxyStatus).Write(conn)')
+    source = replace(source, 'return E.Errors(innerErr.Load(), err, responseWith(request, http.StatusBadGateway).Write(conn))', 'proxyStatus = http.StatusBadGateway\n\t\treturn E.Errors(innerErr.Load(), err, responseWith(request, proxyStatus).Write(conn))')
+    return replace(source, 'removeHopByHopHeaders(response.Header)', 'if observeResponse != nil { observeResponse(response) }\n\tremoveHopByHopHeaders(response.Header)')
 
 MODULES['github.com/sagernet/sing'][1]['protocol/socks/handshake.go'] = ('519634a01cba3041477aac4c5a767424b9167708a96af90bdf746a970aad3be3', inbound_socks_metadata)
 MODULES['github.com/sagernet/sing'][1]['protocol/http/handshake.go'] = ('fa5cf907d7a50a29ee9292cf56d6aa9fb1a4b3a82de2bc233b43653cb9cbb7e9', inbound_http_metadata)

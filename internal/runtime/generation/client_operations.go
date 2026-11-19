@@ -15,6 +15,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/router"
 	D "github.com/miekg/dns"
 )
@@ -152,7 +153,7 @@ func (e *Engine) QueryDNS(ctx context.Context, request api.DNSQueryRequest) (api
 	defer release()
 	q := new(D.Msg)
 	q.SetQuestion(D.Fqdn(request.Name), qtype)
-	response, err := resolver.Exchange(ctx, q, request.Scope, request.Fake)
+	response, err := resolver.Exchange(history.WithDNSOrigin(ctx, history.DNSOrigin{Kind: "control"}), q, request.Scope, request.Fake)
 	if err != nil {
 		return result, err
 	}

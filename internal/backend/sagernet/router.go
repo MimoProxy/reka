@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/sing-box/adapter"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -48,6 +49,7 @@ type Metadata struct {
 
 // Route is the routing decision for one connection.
 type Route struct {
+	Scope history.Scope
 	Owner ProcessInfo
 	// Context attaches generation-owned dependencies without replacing the
 	// caller's cancellation or deadline.
@@ -112,7 +114,7 @@ func normalizeRoute(rt Route) Route {
 		if rt.Release != nil {
 			rt.Release()
 		}
-		return Route{Info: rt.Info}
+		return Route{Info: rt.Info, Scope: rt.Scope}
 	}
 	release := rt.Release
 	if release == nil {
@@ -159,15 +161,20 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 			md.InboundPort = address.Port()
 		}
 	}
+	attempt := r.backend.beginConnection(md)
+	ctx = history.WithFlow(ctx, attempt.ID)
 	prepared := r.prepareFlow(ctx, md)
 	defer prepared.Release()
-	if prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
+	if _, debugBridge := conn.(*debugBridge); !debugBridge && prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
 		conn, md = sniffStream(ctx, conn, md, prepared.Sniff)
 		r.releaseSniffSlot()
 	}
 	rt := prepared.pick(ctx, md)
 	prepared.Release()
 	if rt.Outbound == nil {
+		attempt.setRoute(rt)
+		bindRequestConnection(ctx, attempt)
+		attempt.complete(connectionReason(ctx.Err(), "rejected"), "route", 0, 0)
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
 		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
 		return
@@ -177,7 +184,9 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 		rt.Destination = &destination
 	}
 	metadata.Domain, metadata.Protocol = md.SniffedDomain, md.Protocol
-	r.backend.relayTCP(ctx, rt, conn, metadata, onClose)
+	attempt.setRoute(rt)
+	bindRequestConnection(ctx, attempt)
+	r.backend.relayTCP(ctx, rt, conn, metadata, onClose, attempt)
 }
 
 func (r *router) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {

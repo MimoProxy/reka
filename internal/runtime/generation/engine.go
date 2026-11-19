@@ -21,10 +21,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
@@ -44,6 +46,7 @@ const (
 
 // EngineOptions configure an Engine.
 type EngineOptions struct {
+	ProfileID    string
 	StateRoot    string
 	TUNFD        int
 	NetworkHooks *platform.NetworkHooks
@@ -63,14 +66,15 @@ type EngineOptions struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
-	policies   *policy.Manager
-	dns        *RD.Service
-	revision   uint64
-	eff        *compile.Effective
-	router     *router.Router
-	outUDP     map[string]bool
-	packetAddr map[string]bool
-	inUDP      map[string]bool
+	historyScope history.Scope
+	policies     *policy.Manager
+	dns          *RD.Service
+	revision     uint64
+	eff          *compile.Effective
+	router       *router.Router
+	outUDP       map[string]bool
+	packetAddr   map[string]bool
+	inUDP        map[string]bool
 }
 
 // Engine turns effective configurations into running generations: it
@@ -78,6 +82,7 @@ type generation struct {
 // switches atomically. Commits are serialized by the caller (ConfigService)
 // and additionally by an internal lock.
 type Engine struct {
+	history     *history.Store
 	probeOnce   sync.Once
 	probeSlots  chan struct{}
 	tunSerial   uint64
@@ -111,7 +116,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		opts.MaxRetiring = DefaultMaxRetiring
 	}
 
-	e := &Engine{fake: RD.NewFakePool(65536), opts: opts, listeners: map[string]*listener{}}
+	e := &Engine{history: history.New(), fake: RD.NewFakePool(65536), opts: opts, listeners: map[string]*listener{}}
 	e.guard = sagernet.NewSocketGuard(opts.Backend.ProtectFD)
 	oldProtect := opts.Backend.Protect
 	opts.Backend.Protect = func(n, a string, c syscall.RawConn) error {
@@ -123,6 +128,11 @@ func NewEngine(opts EngineOptions) *Engine {
 		return e.guard.Control(n, a, c)
 	}
 	opts.Backend.ProtectFD = nil
+	opts.Backend.History = e.history
+	opts.Backend.HistoryScope = func() history.Scope {
+		_, active := e.current()
+		return active.historyScope
+	}
 	e.backend = sagernet.New(opts.Backend)
 	if opts.StateRoot != "" {
 		hooks := platform.NetworkHooks{Settings: platform.NativeSettings{}, SettingsFor: platform.SystemSettings, Bypass: e.guard.Set, StartTUN: func(c platform.TUNConfig) (io.Closer, string, error) {
@@ -140,7 +150,7 @@ func NewEngine(opts EngineOptions) *Engine {
 	if e.opts.Resolver == nil {
 		e.opts.Resolver = e.backend.Resolver()
 	}
-	e.rt = runtime.NewValue[*sagernet.Outbound](nil, &generation{}, runtime.Options{
+	e.rt = runtime.NewValue[*sagernet.Outbound](nil, &generation{historyScope: history.Scope{ProfileID: opts.ProfileID}}, runtime.Options{
 		DrainTimeout: opts.DrainTimeout,
 		MaxRetiring:  opts.MaxRetiring,
 		OnClosed: func(id string, gen uint64, forced int64, err error) {
@@ -514,14 +524,24 @@ func (e *ActivateError) Unwrap() error { return e.Err }
 // published (new connections use it), dropped instances start draining,
 // and listeners are swapped. It returns the new generation number.
 func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
+	_, previous := e.current()
+	return e.ActivateProfile(p, revision, previous.historyScope.ProfileID)
+}
+
+// ActivateProfile tags the new generation before it can receive traffic.
+func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string) (uint64, error) {
 	if p.done {
 		return 0, errors.New("preparation already used")
 	}
 	defer e.mu.Unlock()
 	p.done = true
 	eff := p.eff
-	_, previousGeneration := e.current()
-	g := &generation{policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
+	previousSnapshot, previousGeneration := e.current()
+	scope := history.Scope{ProfileID: profileID, Generation: previousSnapshot.Generation + 1, Revision: revision}
+	if p.dns != nil {
+		p.dns.SetHistoryScope(scope)
+	}
+	g := &generation{historyScope: scope, policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
@@ -541,6 +561,9 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 			p.dns.Retire()
 		}
 		return 0, &ActivateError{Err: err}
+	}
+	if profileID != previousGeneration.historyScope.ProfileID {
+		e.backend.StopHTTPSDebug()
 	}
 	if e.dnsListener != nil && e.dnsListener != p.dnsListener {
 		e.dnsListener.Close()
@@ -770,6 +793,23 @@ func routerMetadata(md sagernet.Metadata) router.Metadata {
 	}
 }
 
+func (e *Engine) StartHTTPSDebug(request api.HTTPSDebugRequest) (api.HTTPSDebugStatus, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return api.HTTPSDebugStatus{}, errors.New("engine closed")
+	}
+	return e.backend.StartHTTPSDebug(request)
+}
+
+func (e *Engine) HTTPSDebugStatus() api.HTTPSDebugStatus { return e.backend.HTTPSDebugStatus() }
+func (e *Engine) StopHTTPSDebug()                        { e.backend.StopHTTPSDebug() }
+
+func (e *Engine) History() (*history.Store, history.Scope) {
+	_, active := e.current()
+	return e.history, active.historyScope
+}
+
 func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route {
 	return e.routeWithAcquire(ctx, md, e.rt.Acquire, nil)
 }
@@ -801,7 +841,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 				}
 			}
 			if unknown {
-				return sagernet.Route{}
+				return sagernet.Route{Scope: active.historyScope}
 			}
 		}
 	}
@@ -874,11 +914,15 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			info.Rule = dec.Rule.String()
 		}
 	}
+	scope := history.Scope{}
+	if g != nil {
+		scope = g.historyScope
+	}
 	if !ok {
 		if fakeRelease != nil {
 			fakeRelease()
 		}
-		return sagernet.Route{Info: info}
+		return sagernet.Route{Info: info, Scope: scope}
 	}
 	baseRelease := release
 	release = func() {
@@ -887,7 +931,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			fakeRelease()
 		}
 	}
-	result := sagernet.Route{Outbound: out, Release: release, Info: info}
+	result := sagernet.Route{Outbound: out, Release: release, Info: info, Scope: scope}
 	if !env.processOff && env.procDone && env.procOK {
 		result.Owner = sagernet.ProcessInfo{PID: env.owner.PID, Path: env.owner.Path, UID: env.owner.UID, UIDKnown: env.owner.UIDKnown}
 	}
@@ -895,7 +939,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		addresses, err := env.Resolve(ctx, md.Destination.Domain)
 		if err != nil || len(addresses) == 0 {
 			release()
-			return sagernet.Route{Info: info}
+			return sagernet.Route{Info: info, Scope: scope}
 		}
 		addr := addresses[0]
 		for _, a := range addresses {

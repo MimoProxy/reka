@@ -17,6 +17,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/lease"
 
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/process"
 	"github.com/sagernet/sing-box/log"
@@ -35,6 +36,8 @@ import (
 
 // Options configures a Backend.
 type Options struct {
+	History           *history.Store
+	HistoryScope      func() history.Scope
 	ProcessInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)
 	ProcessLookup     func(context.Context, Metadata) (string, bool)
 	// Logger receives all upstream logs. Defaults to slog.Default().
@@ -62,6 +65,10 @@ const defaultHalfCloseTimeout = 2 * time.Second
 // from it are independent instances: each has its own lifecycle scope and can
 // be closed without touching the others.
 type Backend struct {
+	debugMu           sync.Mutex
+	httpsDebug        *httpsDebug
+	history           *history.Store
+	historyScope      func() history.Scope
 	processTraffic    processTrafficTable
 	trafficUpload     atomic.Uint64
 	trafficDownload   atomic.Uint64
@@ -88,6 +95,8 @@ func New(opts Options) *Backend {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = service.ContextWithDefaultRegistry(ctx)
 	b := &Backend{
+		history:           opts.History,
+		historyScope:      opts.HistoryScope,
 		processInfoLookup: opts.ProcessInfoLookup,
 		processLookup:     opts.ProcessLookup,
 		ctx:               ctx,
@@ -146,6 +155,7 @@ func (b *Backend) SetRoute(fn RouteFunc) {
 // outbounds first.
 func (b *Backend) Close() error {
 	b.cancel()
+	b.StopHTTPSDebug()
 	if b.searcher != nil {
 		b.searcher.Close()
 	}
@@ -481,11 +491,11 @@ func (b *Backend) NewInboundWithUsers(tag, typ string, listen netip.AddrPort, us
 	)
 	switch typ {
 	case "mixed":
-		in, err = mixed.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo, Users: credentials})
+		in, err = mixed.NewInbound(b.observeHTTP(tag), b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo, Users: credentials})
 	case "socks":
 		in, err = socks.NewInbound(b.ctx, b.router, logger, tag, option.SocksInboundOptions{ListenOptions: lo, Users: credentials})
 	case "http":
-		in, err = http.NewInbound(b.ctx, b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo, Users: credentials})
+		in, err = http.NewInbound(b.observeHTTP(tag), b.router, logger, tag, option.HTTPMixedInboundOptions{ListenOptions: lo, Users: credentials})
 	default:
 		return nil, fmt.Errorf("reka: unsupported inbound type %q", typ)
 	}

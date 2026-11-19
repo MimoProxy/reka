@@ -13,11 +13,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/history"
 )
 
 type ExchangeFunc func(context.Context, Endpoint, *D.Msg, func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error)
 type MatchFunc func(pattern, domain string, addr netip.Addr) bool
 type Options struct {
+	History    *history.Store
 	Exchange   ExchangeFunc
 	System     func(context.Context, string) ([]netip.Addr, error)
 	Match      MatchFunc
@@ -33,6 +36,7 @@ type cached struct {
 	at, until time.Time
 }
 type Service struct {
+	historyScope   history.Scope
 	systemHosts    []Host
 	cfg            Config
 	opts           Options
@@ -122,7 +126,7 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	for _, typ := range types {
 		q := new(D.Msg)
 		q.SetQuestion(D.Fqdn(domain), typ)
-		m, err := s.Exchange(ctx, q, scope, false)
+		m, err := s.Exchange(history.WithDNSOrigin(ctx, history.DNSOrigin{Kind: "resolver"}), q, scope, false)
 		if err != nil {
 			last = err
 			continue
@@ -154,12 +158,14 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	return addrs, nil
 }
 func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
-	return s.exchange(ctx, q, scope, fake, true)
+	id, start := queryID.Add(1), time.Now()
+	var outcome resolutionHistory
+	m, err := s.exchange(ctx, q, scope, fake, true, id, &outcome)
+	s.record(ctx, id, 0, start, scope, q, m, outcome, err)
+	return m, err
 }
-func (s *Service) exchangeWithoutHosts(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
-	return s.exchange(ctx, q, scope, fake, false)
-}
-func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, hosts bool) (*D.Msg, error) {
+
+func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, hosts bool, id uint64, outcome *resolutionHistory) (*D.Msg, error) {
 	if len(q.Question) != 1 || q.Opcode != D.OpcodeQuery || q.IsTsig() != nil {
 		return nil, errors.New("unsupported DNS query shape")
 	}
@@ -171,6 +177,7 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 	}
 	reply := func() *D.Msg { m := new(D.Msg); m.SetReply(q); m.RecursionAvailable = true; return m }
 	if typ == D.TypeAAAA && !s.cfg.IPv6 {
+		outcome.ResultSource = "filtered"
 		return reply(), nil
 	}
 	if hosts && s.cfg.UseHosts && (typ == D.TypeA || typ == D.TypeAAAA || typ == D.TypeCNAME) {
@@ -179,6 +186,7 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 			return nil, err
 		}
 		if host != nil {
+			outcome.ResultSource = "hosts"
 			m := reply()
 			m.Authoritative = true
 			if typ == D.TypeCNAME {
@@ -200,7 +208,7 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 			request.Question[0].Name = D.Fqdn(alias)
 			// The alias chain has already been resolved. Skip the host table
 			// for this exchange so wildcard aliases cannot recurse forever.
-			m, err := s.exchangeWithoutHosts(ctx, request, scope, fake)
+			m, err := s.exchange(ctx, request, scope, fake, false, id, outcome)
 			if err != nil {
 				return nil, err
 			}
@@ -211,6 +219,7 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 	}
 	for _, h := range s.systemHosts {
 		if h.ID == domain {
+			outcome.ResultSource = "system_hosts"
 			m := reply()
 			for _, text := range h.Addresses {
 				a, _ := netip.ParseAddr(text)
@@ -234,6 +243,7 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 			useFake = matched
 		}
 		if useFake {
+			outcome.ResultSource = "fake_ip"
 			r := s.cfg.FakeRange
 			if typ == D.TypeAAAA {
 				r = s.cfg.FakeRange6
@@ -259,10 +269,10 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 		return nil, e
 	}
 	key := scope + "\x00" + string(wire)
-	return s.cachedExchange(ctx, q, scope, key)
+	return s.cachedExchange(ctx, q, scope, key, id, outcome)
 }
 
-func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string) (*D.Msg, error) {
+func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string, outcome *resolutionHistory) (*D.Msg, error) {
 	servers := s.cfg.Nameservers
 	domain := strings.ToLower(strings.TrimSuffix(q.Question[0].Name, "."))
 	policy := scope == "normal" || scope == "direct" && s.cfg.DirectPolicy
@@ -305,7 +315,7 @@ func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string) (*D.Msg, 
 		deadline, _ := ctx.Deadline()
 		primaryCtx, primaryCancel = context.WithTimeout(ctx, time.Until(deadline)/2)
 	}
-	m, err := s.query(primaryCtx, servers, q, scope)
+	m, err := s.query(primaryCtx, servers, q, scope, outcome)
 	primaryCancel()
 	fallback := err != nil || m != nil && m.Rcode != D.RcodeSuccess
 	if useFallback {
@@ -349,7 +359,8 @@ func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string) (*D.Msg, 
 			}
 		}
 		if fallback {
-			m, err = s.query(ctx, s.cfg.Fallback, q, scope)
+			m, err = s.query(ctx, s.cfg.Fallback, q, scope, outcome)
+			outcome.Fallback = true
 		}
 	}
 	if err != nil {
@@ -361,7 +372,7 @@ func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string) (*D.Msg, 
 	return m, nil
 }
 
-func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scope string) (*D.Msg, error) {
+func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scope string, outcome *resolutionHistory) (*D.Msg, error) {
 	var last error
 	for _, raw := range servers {
 		ep, err := ParseEndpoint(raw)
@@ -371,11 +382,13 @@ func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scop
 		ep.Scope = scope
 		ep.PreferH3 = s.cfg.PreferH3 && ep.Scheme == "https"
 		if ep.Disabled(q.Question[0].Qtype) {
+			outcome.ResultSource = "filtered"
 			m := new(D.Msg)
 			m.SetReply(q)
 			return m, nil
 		}
 		if ep.Scheme == "system" {
+			outcome.ResultSource = "system"
 			if s.opts.System == nil {
 				last = errors.New("system resolver unavailable")
 				continue
@@ -408,7 +421,9 @@ func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scop
 		if s.opts.Exchange == nil {
 			return nil, errors.New("DNS exchange unavailable")
 		}
-		m, err := s.opts.Exchange(ctx, ep, ep.Request(q), func(ctx context.Context, d string) ([]netip.Addr, error) {
+		attempt, upstream := attemptContext(ctx, ep)
+		outcome.ResultSource, outcome.Upstream = "upstream", upstream
+		m, err := s.opts.Exchange(attempt, ep, ep.Request(q), func(ctx context.Context, d string) ([]netip.Addr, error) {
 			if scope == "bootstrap" {
 				return nil, errors.New("DNS bootstrap cycle")
 			}

@@ -89,7 +89,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 		sequence = old.dns.Generation()
 	}
 	pool := sagernet.NewDNSPool()
-	resolver, err = RD.New(*cfg, RD.Options{Generation: sequence, Pool: e.fake, Match: match, Retire: pool.Retire, ResetIdle: pool.ResetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
+	resolver, err = RD.New(*cfg, RD.Options{History: e.history, Generation: sequence, Pool: e.fake, Match: match, Retire: pool.Retire, ResetIdle: pool.ResetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
 		retained, release, active, err := e.retainCurrentDNS(ctx)
 		if err == nil && active != resolver {
 			release()
@@ -104,6 +104,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 			return nil, err
 		}
 		ep.Via = id
+		RD.ReportUpstream(ctx, id, "")
 		return pool.Exchange(ctx, ep, q, lookup, dial)
 	}})
 	if err != nil {

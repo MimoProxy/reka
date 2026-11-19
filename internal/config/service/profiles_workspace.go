@@ -95,6 +95,8 @@ func OpenProfileWorkspace(root, initialID string, nested, resume bool) (*Profile
 }
 func (w *ProfileWorkspace) LockRuntime() error { _, err := w.acquire(w.cursor.RuntimeID); return err }
 
+func (w *ProfileWorkspace) InitialProfileID() string { return w.cursor.ProfileID }
+
 func (w *ProfileWorkspace) StateRoot() (string, error)   { return w.path(w.cursor.ProfileID) }
 func (w *ProfileWorkspace) RuntimeRoot() (string, error) { return w.path(w.cursor.RuntimeID) }
 func (w *ProfileWorkspace) cursorPath() string {
