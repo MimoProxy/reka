@@ -1,0 +1,23 @@
+# 先将订阅或本地 Clash/分享链接以 airport 为 source ID 导入（-nodes-only）。
+# 至少有一个节点后再提交本文件，详见 docs/configuration.md 第 4 节。
+schema-version: 1
+
+imports:
+  - source: airport
+    outbounds: true
+
+groups:
+  - id: proxy
+    type: select
+    include-all: true
+
+rules:
+  - id: local-domains
+    match: {domain-suffix: [lan, local]}
+    outbound: direct
+  - id: private-addresses
+    match: {ip-cidr: [127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16], no-resolve: true}
+    outbound: direct
+  - id: final
+    match: {all: true}
+    outbound: proxy

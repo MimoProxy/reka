@@ -1,0 +1,12 @@
+# 先执行 rekactl secret set listeners/mixed/alice，从 stdin 保存真实密码。
+listeners:
+  - id: mixed
+    type: mixed
+    listen: "127.0.0.1:17890"
+    users:
+      - username: Alice
+        password: secret://listeners/mixed/alice
+log:
+  level: info
+network:
+  mode: off

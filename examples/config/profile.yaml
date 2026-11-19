@@ -1,0 +1,14 @@
+# 无需远端节点即可运行：本地代理请求通过 direct 出站。
+# 用法见 docs/configuration.md。
+schema-version: 1
+
+groups:
+  - id: proxy
+    type: select
+    members: [direct, reject]
+    selected: direct
+
+rules:
+  - id: final
+    match: {all: true}
+    outbound: proxy

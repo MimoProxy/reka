@@ -1,0 +1,25 @@
+# 可运行的原生 profile：嗅探、路由模式、入口和进程规则。
+# 与 local.yaml 一起使用；默认 direct，无需远端节点。
+schema-version: 1
+routing:
+  mode: rule
+sniff:
+  enabled: true
+  protocols: [http, tls, quic]
+  timeout-ms: 300
+  max-bytes: 65536
+  max-packets: 8
+  override-destination: false
+rules:
+  - id: authenticated-user
+    match: {in-user: Alice}
+    outbound: direct
+  - id: shell-client
+    match: {process-name-wildcard: "curl*"}
+    outbound: direct
+  - id: mixed-http
+    match: {and: [{in-name: mixed}, {in-type: HTTP}]}
+    outbound: direct
+  - id: final
+    match: {all: true}
+    outbound: direct

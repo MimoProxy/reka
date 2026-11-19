@@ -113,7 +113,7 @@ override string; empty uses `<local>`. Nonempty bypass is currently Windows-only
 Desktop `-defer-network` and Android `Native.startOff` persist an ordinary
 transaction setting takeover off before starting restored state. Adapters
 import the candidate, restore selections, verify readiness and then explicitly
-enable takeover. Standby validation failure stops startup. Unsupported client
+enable takeover. Standby conversion failure stops startup. As of `a986b1d`, a loaded revision whose local takeover is confirmed off may remain control-only with `start_error` when its profile cannot start, allowing repair. The macOS client starts every session in standby and waits for the user to enable takeover explicitly. Unsupported client
 extensions must be rejected before stopping the running core.
 
 ## DNS concurrency and lifetime

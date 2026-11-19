@@ -36,6 +36,7 @@ Clash-style cores read one flat configuration file. GUIs regenerate it, API chan
 - **Protocols**: mixed, SOCKS5 and HTTP listeners, including per-destination UDP; DIRECT, REJECT, HTTP, SOCKS5, Shadowsocks, VLESS + REALITY + Vision + XUDP, VMess, Trojan, Hysteria2, TUIC v5 and Snell v5/v6 outbounds; VLESS encryption also carries Vision over the documented stream transports; VMess/VLESS/Trojan support WS, gRPC, HTTPUpgrade and H2, with generic multiplex and ShadowTLS/Restls/JLS security carriers. Shadowsocks includes all seven documented plugin families. The REALITY client is Reka's own and supports X25519MLKEM768.
 - **DNS and groups**: scoped DNS policy/bootstrap/fallback/hosts caches, DoT/DoH/DoQ/DoH3, hosts aliases and generation-aware persisted Fake IP; select/url-test/fallback/load-balance with bounded health probes and separate observed state.
 - **Secrets**: `secret://` references stored in the macOS Keychain, Windows DPAPI, an Android Keystore callback, or a 0600 file.
+- **Recent additions**: bounded HTTP/TLS/QUIC sniffing, VLESS XHTTP with independent download settings, listener authentication, process/UID/inbound rules and DNS concurrency/stale caching; see [feature expansion](docs/feature-expansion.md).
 - **Control API**: length-prefixed JSON over a Unix socket or a Windows named pipe, restricted to the current user, with an event stream; `rekactl` on the command line.
 - **System takeover**: local network intent, production TUN routing/DNS hijack, conditional OS-setting recovery, and launchd/SCM installation. Rule-only updates retain the device; runtime verification scope is documented.
 - **Android**: JNI/Kotlin binding, borrowed/duplicated VpnService descriptors, protect callbacks, app routing and explicit host VPN rebuilds.
@@ -102,7 +103,8 @@ The state lives in `~/Library/Application Support/Reka` (macOS), `%LOCALAPPDATA%
 - [System takeover](docs/network-takeover.md)
 - [GUI integration and native example](docs/gui-integration.md)
 - [Android integration](docs/android-integration.md)
-- [Configuration reference](docs/configuration.md)
+- [Configuration and usage guide (中文)](docs/configuration.md)
+- [Configuration field reference (中文)](docs/configuration-reference.md)
 - [Background subscriptions and providers](docs/subscriptions.md)
 - [DNS and Fake IP](docs/dns.md)
 - [Automatic groups and health checks](docs/automatic-groups.md)
@@ -110,7 +112,7 @@ The state lives in `~/Library/Application Support/Reka` (macOS), `%LOCALAPPDATA%
 - [Clash import and limits](docs/clash-import.md)
 - [Field support table](docs/clash-support.md)
 - [Sources and overlays](docs/source-overlays.md)
-- [Control API](docs/control-api.md)
+- [Control API and Python client (中文)](docs/control-api.md)
 
 ## License
 

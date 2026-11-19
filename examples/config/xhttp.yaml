@@ -1,0 +1,29 @@
+# VLESS + TLS + XHTTP：替换 server / server-name，保存真实 UUID 后提交。
+schema-version: 1
+outbounds:
+  - id: my-xhttp
+    type: vless
+    server: proxy.example.com
+    port: 443
+    uuid: secret://outbounds/my-xhttp/uuid
+    tls:
+      server-name: proxy.example.com
+      alpn: [h2]
+    transport:
+      type: xhttp
+      host: proxy.example.com
+      path: /tunnel
+      xhttp:
+        mode: auto
+        x-padding-bytes: "100-1000"
+        xmux:
+          max-connections: "2"
+groups:
+  - id: proxy
+    type: select
+    members: [my-xhttp, direct]
+    selected: my-xhttp
+rules:
+  - id: final
+    match: {all: true}
+    outbound: proxy

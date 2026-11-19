@@ -1,0 +1,11 @@
+# 本机监听端口与网络设置；不修改操作系统代理、路由或 DNS。
+listeners:
+  - id: mixed
+    type: mixed
+    listen: "127.0.0.1:17890"
+
+log:
+  level: info
+
+network:
+  mode: off

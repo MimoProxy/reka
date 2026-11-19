@@ -1,0 +1,32 @@
+# 替换 server / TLS server-name，并用 rekactl secret set 保存真实密码。
+# 此文件作为完整 profile 提交；local.yaml 保持本机监听设置。
+schema-version: 1
+
+outbounds:
+  - id: my-trojan
+    name: 我的节点
+    type: trojan
+    server: proxy.example.com
+    port: 443
+    password: secret://outbounds/my-trojan/password
+    tls:
+      server-name: proxy.example.com
+
+groups:
+  - id: proxy
+    type: select
+    members: [my-trojan, direct]
+    selected: my-trojan
+
+rules:
+  - id: local-domains
+    match: {domain-suffix: [lan, local]}
+    outbound: direct
+  - id: private-addresses
+    match:
+      ip-cidr: [127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "::1/128", "fc00::/7", "fe80::/10"]
+      no-resolve: true
+    outbound: direct
+  - id: final
+    match: {all: true}
+    outbound: proxy

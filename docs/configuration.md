@@ -1,329 +1,496 @@
-# Reka configuration (schema version 1, draft)
+# Reka 配置与使用指南
 
-Reka keeps four documents in each configuration revision:
+本文介绍 schema 1 / 控制 API 1 的启动、订阅、配置修改和排查。通过 `GetCapabilities` 查询当前内核支持的功能。
 
-- the **profile**: outbounds, groups and rules, the part you share between machines;
-- the **local settings**: listeners, log level and the control endpoint of this machine;
-- **sources**: normalized snapshots of nodes, groups, rules and DNS;
-- the **overlay**: explicit user edits applied to the composed resources.
+- 查 YAML 字段：[配置字段参考](configuration-reference.md)。
+- 开发脚本或 GUI：[控制 API 手册](control-api.md)，附可运行的 Python 客户端。
+- 已有订阅：[第 4 节](#4-使用订阅clash-配置或分享链接)。
+- 配置 TUN / 系统代理：[第 7 节](#7-系统代理与-tun)。
 
-The effective configuration is composed in a fixed order: built-in defaults → explicitly imported source resources → profile → overlay → local settings. See [Sources and overlays](source-overlays.md) for the format and examples. Every effective field records where it came from (`rekactl origin /listeners/mixed/listen`). A key set in local settings replaces the same key from the profile; the profile file itself is never rewritten for that.
+## 1. 先跑通一个本地代理
 
-All four documents are YAML. Parsing is strict: unknown fields, duplicate keys, wrong types, more than one document, nesting deeper than 32 levels and runaway alias expansion are errors. Every diagnostic carries the document, line, column and a field path built from stable IDs, for example `/outbounds/my-vps/port` (list entries without an ID are addressed by position, `/rules/#3`).
+### 准备与启动
 
-## Profile
+从源码运行需要 Go 1.27+、Python 3 和 make。在仓库根目录执行：
+
+```sh
+make build
+```
+
+得到 `bin/reka`（内核）和 `bin/rekactl`（控制工具）。推荐使用这个入口，它带上本项目需要的构建标签、组件修正和链接参数。已有发行包时可直接使用其中的两个可执行文件；下文的 `./bin/` 相应替换为解压位置，示例 YAML 可从仓库的 [examples/config](../examples/config/) 复制。
+
+下面使用独立的 `.reka-demo` 状态目录和 `127.0.0.1:17890` 代理端口，`network.mode` 为 `off`。示例通过本地代理接收请求，随后从本机直连目标。换成真实代理节点见第 3 节。
+
+终端一，在仓库根目录执行并保持运行：
+
+```sh
+./bin/reka -state-root "$PWD/.reka-demo" \
+  -profile examples/config/profile.yaml \
+  -local examples/config/local.yaml
+```
+
+终端二，同样进入仓库根目录：
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" status
+./bin/rekactl -state-root "$PWD/.reka-demo" get effective
+
+# HTTP 代理
+curl --proxy http://127.0.0.1:17890 https://example.com/
+
+# SOCKS5；h 表示把目标域名交给内核解析
+curl --proxy socks5h://127.0.0.1:17890 https://example.com/
+```
+
+外网请求是否成功还取决于本机到目标的连通性。应用里填写 HTTP 或 SOCKS5 代理 `127.0.0.1:17890` 即可使用；启动监听器后，应用需要主动使用该代理。`mixed` 端口同时接受 HTTP 和 SOCKS。
+
+停止前台内核：在终端一按 `Ctrl+C`。下次使用同一个状态目录启动即可恢复配置：
+
+```sh
+./bin/reka -state-root "$PWD/.reka-demo"
+```
+
+**`-profile`、`-local`、`-sources`、`-overlay` 只在状态目录首次初始化时导入。** 后续修改使用 `rekactl commit`、API 或 `<state-root>/edit/`，见第 5 节。重复传入初始文件不会覆盖已保存的配置。
+
+### 最小配置
+
+[profile.yaml](../examples/config/profile.yaml)：
 
 ```yaml
 schema-version: 1
 
-outbounds:
-  - id: my-vps
-    name: My VPS            # display only
-    type: vless
-    server: vps.example
-    port: 443
-    uuid: secret://outbounds/my-vps/uuid
-    flow: xtls-rprx-vision
-    tls:
-      server-name: www.example.com
-      fingerprint: chrome
-      reality:
-        public-key: "<base64url X25519 public key>"
-        short-id: "ab12"
-        x25519mlkem768: true
-
 groups:
   - id: proxy
     type: select
-    members: [my-vps, direct]
-    selected: my-vps
+    members: [direct, reject]
+    selected: direct
 
 rules:
-  - id: lan
-    match: {ip-cidr: [192.168.0.0/16, 10.0.0.0/8], no-resolve: true}
-    outbound: direct
-  - match: {domain-suffix: example.org}
-    outbound: proxy
   - id: final
     match: {all: true}
     outbound: proxy
 ```
 
-### IDs
-
-Outbounds, groups and listeners need an `id`; rules may have one. IDs start with a letter or digit and use letters, digits, `.`, `_` and `-` (at most 64). Imported resources use `source/id`; escape the slash as `~1` in API paths, for example `/groups/airport~1proxy/selected`. They are the stable names used by patches, diagnostics, connection listings and history, so renaming the display `name` never replaces anything.
-
-### Outbounds
-
-`direct` and `reject` exist without being declared. Fields that do not apply to a type are errors.
-
-| type | fields |
-| --- | --- |
-| `direct` | `udp` |
-| `reject` | none |
-| `http` | `server`, `port`, `username`, `password`, `tls` (no `reality`) |
-| `socks` | `server`, `port`, `username`, `password`, `udp` (SOCKS5) |
-| `shadowsocks` | `server`, `port`, `method`, `password`, `udp` |
-| `vless` | `server`, `port`, `uuid`, `flow` (`xtls-rprx-vision`), `packet-encoding` (`xudp`, `packetaddr`, `none`), `tls`, `udp`, `transport`, `multiplex` |
-| `vmess` | `server`, `port`, `uuid`, `tls`, `udp`, `protocol` (`security`, `alter-id`), `packet-encoding`, `transport`, `multiplex` |
-| `trojan` | `server`, `port`, `password`, `tls` (required), `udp`, `transport`, `multiplex` |
-| `hysteria2` | `server`, `port`, `password`, `tls` (required), `udp`, `protocol` (`up-mbps`, `down-mbps`, `obfs`) |
-| `tuic` | `server`, `port`, `uuid`, `password`, `tls` (required), `udp`, `protocol` (`congestion-control`, `udp-relay-mode`, `zero-rtt`, `heartbeat` in ms) |
-| `snell` | `server`, `port`, `password` (PSK), `udp`, `protocol` (`version` 5/6, `user-key`, `mode`, `reuse`, `obfs`) |
-
-- `udp` defaults to `true` where the protocol carries UDP. UDP connections routed to an outbound with `udp: false` are rejected.
-- Shadowsocks methods: `2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, `2022-blake3-chacha20-poly1305`, `aes-128-gcm`, `aes-192-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, `xchacha20-ietf-poly1305`.
-- `tls`: `server-name` (defaults to `server` when it is a name), `insecure`, `fingerprint` (uTLS preset: `chrome`, `firefox`, `edge`, `safari`, `360`, `qq`, `ios`, `android`, `random`, `randomized`), `alpn`, `reality`.
-- `reality` (vless only): `public-key`, `short-id` (even number of hex digits, at most 16), `x25519mlkem768` (keep the hybrid post-quantum key share; newer Xray servers may require it). REALITY needs `server-name` and uses `fingerprint: chrome` when none is set.
-- Without VLESS encryption, Vision requires raw TCP. VLESS, including REALITY, supports `transport: {type: ws, path: /reka, host: front.example}` (also `grpc` with `service-name`, `httpupgrade` with `path`/`host`). WS accepts `headers: [{name: X-Key, value: ...}]`, `max-early-data` and `early-data-header`.
-- `multiplex: {enabled: true, protocol: smux}` also accepts `h2mux`/`yamux`, `padding`, `max-connections`, `min-streams`, `max-streams`; `only-tcp`, `statistic` and `brutal: {enabled: true, up-bps: 1250000, down-bps: 2000000}` (bytes/s). All dialing protocols support this wrapper. Full multiplexing carries UDP over the TCP carrier even when native UDP is disabled; `only-tcp` preserves native UDP behavior. The instance owns and drains its pool. `statistic` is retained as metadata: Reka always reports native per-flow traffic. Brutal requires a compatible Linux server and the TCP Brutal kernel module; a server that does not enable Brutal fails negotiation. Local kernel rate control is attempted where available. Limits alone do not demonstrate a measured throughput guarantee.
-- HY2 obfs is `{type: salamander|gecko, password: ...}`. Gecko additionally accepts `min-packet-size`/`max-packet-size` (defaults 512/1200; 1 <= min <= max <= 2048). Snell v5 obfs is `{type: http|tls, host: ...}`; Snell v6 uses `mode: default|unshaped|unsafe-raw`. Snell v5 uses the pinned component’s v4-compatible wire client, verified against a v5 server.
-
-### Groups
-
-`select`, `url-test`, `fallback` and `load-balance` accept `members` (outbounds or groups). A select group’s `selected` value is configuration and survives restarts. Health observations and automatic choices are separate runtime state. Cycles through any member are errors. See [automatic groups](automatic-groups.md) for filters, timings, hashing and API.
-
-### DNS
-
-`dns` is optional. Configure a native resolver or explicitly choose source settings with `dns: {from: airport, listen: "127.0.0.1:5353"}`. See [DNS/Fake IP](dns.md) for policy, transports, lifetimes and defaults.
-
-### Rules
-
-Rules are matched in order and the first match wins. Each rule has exactly one condition in `match`; a list of values matches when any value does.
-
-| condition | matches |
-| --- | --- |
-| `domain` | the destination name exactly (case-insensitive) |
-| `domain-suffix` | the name or any subdomain of it |
-| `domain-keyword` | names containing the keyword |
-| `domain-regex` | names matching an RE2 expression |
-| `ip-cidr` | the destination address (IPv4 or IPv6 prefix) |
-| `src-ip-cidr` | the client address |
-| `dst-port`, `src-port` | a port or a range, `"1000-2000"` |
-| `network` | `tcp` or `udp` |
-| `process-name` | the client process file name, on platforms that can tell (macOS, Windows, Linux); elsewhere the rule never matches and validation warns |
-| `rule-set` | an immutable named set of conditions |
-| `geoip: LAN` | built-in local/private address classification |
-| `domain-pattern` | Clash provider label wildcard syntax |
-| `and`, `or`, `not` | recursively composed conditions (a list of operands) |
-| `all: true` | everything |
-
-`ip-cidr` rules resolve a name destination with the configured generation DNS (system resolver when DNS is absent) unless `no-resolve: true` is set; they then see the first IPv4 answer (else the first IPv6 one). A failed lookup makes ip rules not match; it never sends the connection anywhere by itself. Rules after a match-all rule are reported as unreachable. Without a match-all rule, unmatched connections go to `direct` and validation warns.
-
-Domain and domain-suffix rules are indexed, so thousands of them cost about as much as a few; the index only finds candidates, and the first matching position still wins.
-
-Named `rule-sets`, `sub-rules`, resource hashes and explicit GeoIP/GeoSite assets are documented in [Rule resources](rule-resources.md). Rule-set and sub-rule definitions use stable IDs; references and cycles are validated before activation.
-
-### Secrets
-
-Any `password`, `uuid`, `username`, TLS client `certificate`/`private-key`, protocol `user-key`/obfs password or HTTP/transport header value may be `secret://<name>`. Secrets live in the platform store (macOS Keychain, Windows DPAPI, the host's cipher on Android, a 0600 file on Linux) and are set with `rekactl secret set NAME` (value on stdin), which also re-applies the configuration. A first import (`reka -profile`) whose only problem is a secret that is not stored yet is kept as revision 1 and starts once the secret is set. Credentials written inline are masked as `********` when the configuration is read through the API; sending `********` back keeps the stored value.
-
-## Local settings
+[local.yaml](../examples/config/local.yaml)：
 
 ```yaml
 listeners:
-  - {id: mixed, type: mixed, listen: "127.0.0.1:7890"}
-  - {id: socks, type: socks, listen: "[::1]:1080", udp: false}
+  - id: mixed
+    type: mixed
+    listen: "127.0.0.1:17890"
 log:
   level: info
-control:
-  listen: unix:///Users/me/Library/Application Support/Reka/control.sock
+network:
+  mode: off
 ```
 
-- Listener types: `mixed` (SOCKS4/4a/5 and HTTP on one port), `socks`, `http`. `listen` is an IP address and port. `udp` (default true) enables SOCKS5 UDP ASSOCIATE.
-- `log.level`: `debug`, `info`, `warn`, `error`.
-- `control.listen` is read when the kernel starts; changing it is reported as needing a restart.
+`direct` 和 `reject` 是内置出站，无需声明。规则按顺序匹配，第一条命中就生效；没有匹配时默认直连，所以建议总是写最后的 `all: true`。裸启动内核不会自动创建代理监听端口。
 
-`schema-version: 1` is required in the profile and optional in the other documents.
+### Windows 命令
 
-## Changes and history
+在仓库根目录的 PowerShell 中：
 
-All writes, whether from `rekactl`, the API, a GUI or a hand-edited file, go through one transaction:
+```powershell
+$rekaDemoRoot = Join-Path (Get-Location) '.reka-demo'
+.\bin\reka.exe -state-root $rekaDemoRoot -profile .\examples\config\profile.yaml -local .\examples\config\local.yaml
+```
 
-1. validate (no side effects), 2. plan, 3. prepare (build new instances, bind new ports), 4. store the revision, 5. switch, 6. record it as active.
+另开 PowerShell，进入同一目录：
 
-A commit names the revision it was based on; if another commit landed first it is refused with the field differences. Each commit has an operation ID, so a client that lost the response can look the result up or retry without applying the change twice. Old revisions can be restored, which commits their content as a new revision.
+```powershell
+$rekaDemoRoot = Join-Path (Get-Location) '.reka-demo'
+.\bin\rekactl.exe -state-root $rekaDemoRoot status
+curl.exe --proxy http://127.0.0.1:17890 https://example.com/
+```
 
-What a commit does to running connections:
+后续示例使用 macOS/Linux shell；Windows 将路径和可执行文件后缀相应替换，API 内容和 YAML 格式相同。
 
-| change | new connections | existing connections |
+## 2. 配置保存在哪里
+
+Reka 自己保存配置历史。每个版本有四份 YAML：
+
+| 文件 | 用途 | 通常由谁维护 |
 | --- | --- | --- |
-| rules, group selection | follow the change | keep their outbound |
-| outbound address or credentials | use a new instance | stay on the old instance, which closes once they end (forced after 30 s) |
-| new or removed outbound | follow the change | removed outbound's connections run to completion |
-| listener address | new address | already accepted connections continue; the new port is bound before the old one stops |
-| listener protocol on the same address | brief refusal while it rebinds (shown in the plan) | continue |
-| a port already in use | the commit is refused in preparation; nothing changes | unaffected |
+| `profile.yaml` | 节点、策略组、路由规则、DNS、来源引用 | 你或 GUI |
+| `local.yaml` | 本机监听端口、日志、控制地址、系统代理/TUN | 你或 GUI |
+| `sources.yaml` | 订阅和导入产生的原生资源快照 | 导入器、订阅刷新 |
+| `overlay.yaml` | 对导入资源的持久修改、导入组的手动选择 | 你、CLI 或 GUI |
 
-UDP is split by destination: in one SOCKS5 association each destination is routed separately, keeps the configuration it started with, and is closed after 60 s idle.
+生效顺序：内置默认值 → profile 显式引用的来源 → profile → overlay → local。本机设置覆盖 profile 中对应的设置。`sources` 中存在节点后，还需通过 profile 的 `imports` 将它引入。
 
-### Hand editing
+| 平台 | 用户态默认状态目录 |
+| --- | --- |
+| macOS | `~/Library/Application Support/Reka` |
+| Windows | `%LOCALAPPDATA%\Reka` |
+| Linux | `$XDG_STATE_HOME/reka`，未设置时 `~/.local/state/reka` |
+| Android | 宿主应用传入的私有目录，见 [Android 接入](android-integration.md) |
 
-The kernel exports the active documents to `<state-root>/edit/`: `profile.yaml`, `local.yaml`, `sources.yaml`, and `overlay.yaml`. Each saved file is a separate transaction; submit a single API request when several documents must change atomically. Saving a change commits it. If the file is invalid or conflicts with a newer revision, the active configuration keeps running and the reasons are written to `<file>.errors`. When the kernel writes a document itself (a GUI change, `rekactl set`), it keeps your comments and uses a canonical layout: two-space indentation and a blank line between top-level sections.
+本文一直显式传入 `-state-root "$PWD/.reka-demo"`，操作的是演示实例。已安装的系统服务另有状态目录和控制地址，见[安装文档](distribution.md)。
 
-## Local network takeover
+## 3. 添加自己的代理节点
 
-`local.network` is the durable OS takeover intent. It is not permitted in imported sources or the shared profile. See [network takeover](network-takeover.md) for schema, modes, platform limits and interruption/recovery behavior.
+### Trojan 完整示例
 
-`process-name-regex` matches the owning process basename using case-insensitive .NET-compatible expressions (including lookaround), with a 50 ms match budget. Unknown owners do not match. Clash regex payloads retain commas, escaped parentheses and character classes.
+复制 [proxy.yaml](../examples/config/proxy.yaml)，将 `server` 和 TLS `server-name` 改成服务端提供的值。主要内容如下：
 
-DNS hosts values accept IP lists or one domain alias. Alias chains ending in a
-hosts IP entry return addresses under the original question; an external alias
-rewrites the upstream question and prepends a CNAME with TTL 10. Cycles fail
-closed. An explicit `fake-ip-ttl: 0` emits zero TTL while retaining a separate
-60-second connection mapping lease; omission keeps the native 60-second default.
+```yaml
+schema-version: 1
 
-DNS endpoints also accept `quic://host:853` (DoQ) and `h3://host/dns-query`
-(DoH3). Both use the configured bootstrap, certificate validation and selected
-outbound, including UDP socket protection on Android. `prefer-h3: true` enables
-TLS/QUIC handshake selection for HTTPS resolvers, sending the DNS message only
-on the selected transport. Explicit `h3://` endpoints require HTTP/3.
+outbounds:
+  - id: my-trojan
+    name: 我的节点
+    type: trojan
+    server: proxy.example.com
+    port: 443
+    password: secret://outbounds/my-trojan/password
+    tls:
+      server-name: proxy.example.com
 
-Hysteria2 imports accept comma-separated `ports` and closed ranges, plus
-`hop-interval` in seconds or a closed interval range. The pinned Clash defaults
-are 30 seconds and a 5-second minimum. An omitted/zero `port` is allowed when
-`ports` supplies the remote ports. Native profiles use `protocol.server-ports`
-with explicit `start:end` ranges and `hop-interval-seconds` /
-`hop-interval-max-seconds`.
+groups:
+  - id: proxy
+    type: select
+    members: [my-trojan, direct]
+    selected: my-trojan
 
-Per-node `dialer` accepts `interface-name`, uint32 `routing-mark`, `ip-version`
-(`dual`, `ipv4`, `ipv6`, `ipv4-prefer`, `ipv6-prefer`), `tfo`, and `mptcp`.
-These describe the physical socket, including its mandatory VPN protection.
-Unsupported host socket options return an error.
+rules:
+  - id: local-domains
+    match: {domain-suffix: [lan, local]}
+    outbound: direct
+  - id: private-addresses
+    match:
+      ip-cidr: [127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "::1/128", "fc00::/7", "fe80::/10"]
+      no-resolve: true
+    outbound: direct
+  - id: final
+    match: {all: true}
+    outbound: proxy
+```
 
-Native HTTP CONNECT outbounds accept `headers: [{name: X-Key, value: ...}]`;
-configured username/password take precedence over `Proxy-Authorization`.
-Shadowsocks supports `udp-over-tcp: true` and `udp-over-tcp-version: 1|2`
-(default 1, matching Clash). VLESS `packetaddr` destinations use normal DNS,
-while proxy server addresses continue to use the proxy DNS scope.
+内核保持第 1 节的演示配置运行时，先保存密码，再提交修改后的文件：
 
-VLESS/VMess additionally accept `transport: {type: http, method: POST,
-paths: [/one, /two], headers: [{name: Host, value: front.example}]}` and
-`transport: {type: h2, hosts: [front.example], path: /tunnel}`. HTTP selects one
-path and one value per header per connection; H2 requires TLS. The Clash
-importer enables TLS for `network: h2` even when `tls` is omitted. REALITY
-supports these non-Vision transports too.
+```sh
+# private-password.txt 是你自己准备的密码文件，内容为节点密码
+./bin/rekactl -state-root "$PWD/.reka-demo" secret set outbounds/my-trojan/password < /path/to/private-password.txt
+./bin/rekactl -state-root "$PWD/.reka-demo" validate /path/to/my-proxy.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" plan /path/to/my-proxy.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" commit /path/to/my-proxy.yaml -m "添加代理节点"
+```
 
-TLS `certificate-sha256` is a SHA256 hex digest of the full DER certificate,
-with optional colon separators; it is separate from the uTLS ClientHello
-`fingerprint`. A pinned leaf is trusted directly; a pinned intermediate/root
-must validate the leaf's chain and name. `verify-name` verifies a different
-certificate name while retaining the configured SNI. `certificate` and
-`private-key` are a matching inline PEM client identity or secret references;
-these values are masked and participate in transport replacement.
+`validate` 和 `plan` 会解析、检查配置，不建立远端代理连接。提交成功后再用 `curl --proxy` 验证服务端连通性。
 
-`dialer: {proxy: parent-id}` routes a node's connection through another node
-or group. Clash's `dialer-proxy` imports by exact original name. The combined
-node/group graph must be acyclic, including unselected members. All possible
-parent transports are retained for the child's lifetime; replacing a parent
-also replaces its dependent children while existing streams drain. A rule-only
-change reuses transports and reads the active group's observed choice. Rejected
-or unavailable parents never fall back to a direct socket. UDP requires an
-enabled parent and group. Put physical socket options on the parent: as in the
-reference, a dialer proxy takes precedence over the child's interface, routing
-mark, IP version, TFO and MPTCP settings; the compiler reports that precedence.
+`secret set` 从标准输入读取并去掉末尾换行，避免把密码写在命令参数里。也可以在 YAML 的 `password` / `uuid` 中填写真实值；API 默认显示 `********`。已有配置中的掩码可原样提交来保留值。首次启动若唯一问题是秘密尚未设置，内核会保存第 1 版并等待你用 `secret set` 补齐。
 
-TLS `ech: {enabled: true, config: BASE64_ECHCONFIGLIST}` enables Encrypted
-ClientHello. Omitting `config` queries HTTPS records using the active native
-DNS configuration's proxy-server scope; `query-server-name` can override the
-query name. Configure native DNS (or activate imported DNS with `dns.from`)
-for this automatic mode. Missing ECH data or authentication failure is an
-error; it does not silently send clear SNI. TLS/uTLS and Hysteria2/TUIC QUIC
-are exercised by real TCP/UDP tests. REALITY uses its own handshake and cannot
-be combined with ECH. The matching Clash field is `ech-opts` with `enable`,
-`config` and `query-server-name`.
+### 其他常用节点
 
-VLESS `encryption` accepts `none` or the pinned reference's
-`mlkem768x25519plus.MODE.RTT.KEY...` form. Modes are `native`, `xorpub`,
-`random`; RTT is `1rtt` or `0rtt`; relay keys are X25519 or ML-KEM-768 public
-keys. It accepts inline configuration or a secret reference, is masked in
-source reads, and participates in transport replacement. At most 32 relay
-keys and 32 padding phases are allowed; total padding remains at most 65553
-bytes. Handshake cancellation interrupts padding waits. A wrong key fails the
-connection. Vision can use this encryption layer with or without outer TLS,
-including WS, gRPC, HTTPUpgrade and H2 (H2 still requires TLS). Its transition
-uses typed decrypted-buffer references while retaining the underlying carrier.
+以下是 `outbounds` 的单个条目，替换上面节点后，也要同步调整组的 `members` 和 `selected`。域名、端口、凭据及协议参数以服务端为准。
 
-Hysteria2 `protocol` accepts `up-bps`/`down-bps` for exact bytes/s; the legacy
-`up-mbps`/`down-mbps` remain available, but choose one representation per
-direction. Clash `up`/`down` accept integer K/M/G/T `bps` or `Bps`; unitless
-values mean Mbps. Invalid/overflowing rates are rejected rather than silently
-becoming automatic bandwidth. Runtime authentication transmits the exact rate.
+Shadowsocks：
 
-`protocol.realm` accepts `enabled`, `server-url`, `token`, `realm-id`,
-`stun-servers` and a separate `tls` configuration for its HTTP(S) control peer.
-The proxy's outer `tls` still verifies the QUIC peer. Realm control TLS supports
-SNI, certificate pin/verification name, ALPN and client PEM identity, without a
-TCP ClientHello preset, ECH or REALITY. Tokens and identities support secrets,
-are masked, and replace their owning transport on edits. The node owns the
-control connection pool; network reset clears idle control connections. All
-physical control/STUN/punch sockets retain VPN protection and dialer settings.
-Realm replaces the static server address and cannot combine with port hopping.
-Controlled tests exercise actual STUN discovery, punching and TCP/UDP, including
-wrong token, wrong independent TLS pins and missing control client identity.
+```yaml
+- id: my-ss
+  type: shadowsocks
+  server: ss.example.com
+  port: 8388
+  method: chacha20-ietf-poly1305
+  password: secret://outbounds/my-ss/password
+```
 
-Hysteria2 `server-ports` uses explicit `start:end` ranges, with
-`hop-interval-seconds`/`hop-interval-max-seconds` (minimum five seconds). Tests
-observe several destination ports during continuous TCP and UDP traffic; this
-does not assert reachability through every NAT or third-party Realm service.
+VLESS + REALITY + Vision：
 
-Shadowsocks accepts a `plugin` mapping. Implemented carriers currently include
-`{type: obfs, mode: http|tls, host: front.example}`,
-`{type: v2ray-plugin|gost-plugin, mode: websocket, host: front.example,
-path: /tunnel, mux: true, tls: {...}, headers: [{name: X-Key, value: ...}]}`,
-and `{type: shadow-tls, version: 1|2|3, host: front.example, password: ...,
-tls: {...}}`. ShadowTLS defaults to version 2; websocket plugin mux defaults
-to true. V2ray-plugin additionally supports `http-upgrade` and `fast-open`.
-Fast-open sends the encrypted payload before the upgrade response; the response
-is still checked before any reply is accepted. These are built-in Go carriers.
+```yaml
+- id: my-vless
+  type: vless
+  server: vless.example.com
+  port: 443
+  uuid: secret://outbounds/my-vless/uuid
+  flow: xtls-rprx-vision
+  packet-encoding: xudp
+  tls:
+    server-name: camouflage.example.com
+    fingerprint: chrome
+    reality:
+      public-key: "替换为服务端提供的无填充base64url公钥"
+      short-id: "ab12"
+```
 
-Plugin TLS is independent of the node's Shadowsocks cipher. Websocket carriers
-support certificate pins, verification names, client PEM identities and scoped
-ECH; ShadowTLS supports ordinary certificate options and ClientHello presets.
-An explicit websocket Host header also sets SNI. Plugin passwords, TLS identities
-and header values are masked and participate in transport replacement. Physical
-sockets retain the node dialer/VPN protection. Native SS UDP bypasses the TCP
-carrier; enabling UoT sends UDP through it instead. SIP002 `plugin` query values
-support escaped SIP003 obfs-local/simple-obfs and v2ray-plugin options; unknown
-options are rejected, and `uot=1` takes precedence over a false UoT alias.
+Hysteria2：
 
-Restls plugins use `type: restls`, `host`, `password`, `version-hint: tls12|tls13`,
-optional `restls-script`, `force-tls12` and `client-fingerprint`. TLS verification
-options remain under `tls`. JLS uses `type: jls`, `host`, `username`, `password`,
-optional `alpn` and `client-fingerprint`; authentication uses the JLS credentials.
-The SS Clash importer accepts the reference's plugin option names.
+```yaml
+- id: my-hy2
+  type: hysteria2
+  server: hy2.example.com
+  port: 443
+  password: secret://outbounds/my-hy2/password
+  tls:
+    server-name: hy2.example.com
+```
 
-kcptun uses `plugin: {type: kcptun, kcp: {...}}`; `kcp` uses the reference's JSON
-names (`key`, `crypt`, `mode`, `conn`, `autoexpire`, `scavengettl`, `mtu`,
-`ratelimit`, `sndwnd`, `rcvwnd`, `datashard`, `parityshard`, `dscp`, `nocomp`,
-`acknodelay`, `nodelay`, `interval`, `resend`, `nc`, `sockbuf`, `smuxver`,
-`smuxbuf`, `framesize`, `streambuf`, `keepalive`). Its defaults and key expansion
-match the pinned reference, including its historical default key. Explicit keys
-or secret references are recommended. kcptun enables UDP over TCP automatically;
-its UDP carrier uses the node's protected physical dialer or configured detour.
-The pool reuses carriers, drains retired streams and releases sockets on network
-reset and close. Allocation budgets cap active slots at 64, retired carriers at
-256 and each configured buffer at 64 MiB.
+VMess、TUIC、Snell、HTTP/SOCKS、TLS、WS/gRPC/H2、插件、链式代理等见[配置字段参考](configuration-reference.md)。原生类型名是 `shadowsocks` / `socks`；Clash 的 `ss` / `socks5` 等写法应走导入。
 
-Automatic groups accept `expected-status`, such as `204/300-399` or `200,204`.
-`*` accepts any HTTP response; omitted native values retain the 200–399 default.
-Clash imports explicitly select `*` when omitted, matching the reference. Provider
-health checks propagate their own ranges to generated health groups. Group
-filters use bounded .NET regular expressions and backtick-separated priority.
+### 手动切换与自动选择
 
-VMess, VLESS and Trojan can select `tls.carrier` as an alternative stream
-security handshake. Its `type` is `shadow-tls` (`version`, `password`), `restls`
-(`password`, `version-hint`, `script`) or `jls` (`username`, `password`). Other
-TLS fields choose the camouflage name, ALPN and ClientHello. Restls and
-ShadowTLS use the ordinary certificate verification options; JLS authenticates
-its credentials. Modes are mutually exclusive with REALITY/ECH. Secrets are
-resolved and fingerprinted but omitted from effective-state JSON.
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" select proxy direct
+./bin/rekactl -state-root "$PWD/.reka-demo" select proxy my-trojan
+./bin/rekactl -state-root "$PWD/.reka-demo" group-status
+```
 
-Clash imports map `shadow-tls-opts`, `restls-opts` and `jls-opts` on these three
-protocols. Active options require TLS. Inert empty options preserve a plaintext
-node. ECH and ordinary certificate options that the reference ignores for the
-selected carrier are diagnosed explicitly. REALITY's `skip-cert-verify` flag is
-also reported as inert; public-key authentication remains required. Vision over
-Restls/ShadowTLS or native JLS requires VLESS encryption, matching the reference's
-supported TLS connection types. The tested encrypted combinations include
-stream transports and generic multiplexing.
+`select` 使用稳定 ID，选择会保存并在重启后保留。`name` 只负责显示。自动选最快节点使用 `url-test`，按顺序故障切换使用 `fallback`，分配连接使用 `load-balance`。详见[字段参考](configuration-reference.md)及[自动组专题](automatic-groups.md)。
+
+## 4. 使用订阅、Clash 配置或分享链接
+
+导入分两步：先把资源放入 `sources`，再让 profile 使用这些资源。这里采用“只导入节点、由自己管理分流规则”的路径。
+
+### 在线订阅
+
+内核运行时，先保存订阅地址，再添加刷新任务：
+
+```sh
+# private-url.txt 内容为完整订阅 URL
+./bin/rekactl -state-root "$PWD/.reka-demo" secret set subscriptions/airport/url < /path/to/private-url.txt
+./bin/rekactl -state-root "$PWD/.reka-demo" subscription set airport secret://subscriptions/airport/url -nodes-only -interval 3600
+./bin/rekactl -state-root "$PWD/.reka-demo" subscription refresh airport
+./bin/rekactl -state-root "$PWD/.reka-demo" subscription list
+./bin/rekactl -state-root "$PWD/.reka-demo" get sources
+```
+
+`airport` 是你给来源起的稳定 ID。显式 `refresh` 会等待结果，自动任务也会按间隔运行。失败保留上一次可用快照。`pause` 暂停自动刷新，`resume` 恢复，`remove` 删除刷新定义并保留已下载快照。
+
+首次刷新成功后，提交 [subscription.yaml](../examples/config/subscription.yaml)：
+
+```yaml
+schema-version: 1
+
+imports:
+  - source: airport
+    outbounds: true
+
+groups:
+  - id: proxy
+    type: select
+    include-all: true
+
+rules:
+  - id: local-domains
+    match: {domain-suffix: [lan, local]}
+    outbound: direct
+  - id: private-addresses
+    match: {ip-cidr: [127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16], no-resolve: true}
+    outbound: direct
+  - id: final
+    match: {all: true}
+    outbound: proxy
+```
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" validate examples/config/subscription.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" plan examples/config/subscription.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" commit examples/config/subscription.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" get effective
+```
+
+`include-all: true` 将已引入的非内置节点加入组。未指定 `selected` 时使用首个成员；在 `get effective` 中查出节点的完整 ID 后，可执行 `select proxy airport/p-实际ID`。导入器生成的 ID 不是节点显示名称，不要直接用订阅里的中文名称当 ID。也可改用显式 `members: [airport/p-实际ID]`。
+
+### 本地 Clash 文件或分享链接
+
+```sh
+# 先预览转换报告，不修改配置
+./bin/rekactl -state-root "$PWD/.reka-demo" import -source airport -nodes-only /path/to/clash.yaml
+
+# 再导入节点
+./bin/rekactl -state-root "$PWD/.reka-demo" import -source airport -nodes-only -apply /path/to/clash.yaml
+
+# 分享链接列表也可以使用相同来源 ID
+./bin/rekactl -state-root "$PWD/.reka-demo" import -source airport -format links -nodes-only -apply /path/to/links.txt
+```
+
+随后提交上面的 `subscription.yaml` 即可使用这些节点；本地文件导入无需在线刷新任务。使用同一 `source` ID 会替换该来源快照。
+
+要保留订阅原来的组、规则和 DNS，省略 `-nodes-only` 并阅读[来源与覆盖层](source-overlays.md)中的引用方式：`imports` 显式开启 `groups` / `rule-sets` 等，`rules` 中用 `{source: airport}` 插入来源规则，DNS 用 `dns: {from: airport, listen: "127.0.0.1:5353"}` 启用。仅导入不会自动采用这些设置。
+
+原生配置严格检查未知字段，Clash 转换也会报告兼容问题。完整转换默认拒绝含不支持内容的输入；`-allow-partial` 明确允许丢弃部分资源或选项，使用前先读报告。详见[Clash 导入](clash-import.md)、[字段支持表](clash-support.md)及[订阅/provider](subscriptions.md)。
+
+## 5. 日常修改、保存与恢复
+
+所有 `rekactl` 命令都连接运行中的内核，包括 `validate` 和导入预览。全局参数 `-state-root`、`-c`、`-json` 放在子命令之前。
+
+### 修改一两个字段
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" set -local /log/level '"debug"'
+./bin/rekactl -state-root "$PWD/.reka-demo" set -local /listeners/mixed/listen '"127.0.0.1:17891"'
+./bin/rekactl -state-root "$PWD/.reka-demo" origin /listeners/mixed/listen
+```
+
+`set` 的值采用 JSON；字符串可加 JSON 双引号。修改端口后，应用代理地址也要调整为 `17891`。
+
+### 编辑完整文件后提交
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" get profile > /tmp/my-profile.yaml
+# 编辑 /tmp/my-profile.yaml 后：
+./bin/rekactl -state-root "$PWD/.reka-demo" validate /tmp/my-profile.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" plan /tmp/my-profile.yaml
+./bin/rekactl -state-root "$PWD/.reka-demo" commit /tmp/my-profile.yaml -m "调整分流规则"
+```
+
+修改本机设置用 `get local` 和 `validate/plan/commit -local FILE`。来源、覆盖层分别使用 `-sources` / `-overlay`。默认提交基于当时的活动版本；多个编辑器同时工作时，记录读取时的版本号并传 `commit FILE -base 版本号`，过期版本会返回冲突。
+
+事务依次校验、规划、准备资源、保存版本和切换运行状态。新端口已被占用等准备错误会拒绝修改。规则和选组只影响新连接；替换节点时已有连接继续使用旧实例并排空，强制排空超时为 30 秒。相同地址切换监听协议或重建 TUN 可能中断，先看 `plan` 的 `interrupts` / 网络变更说明。
+
+### 直接编辑导出的文件
+
+内核把四份文档导出到 `<state-root>/edit/`，本例为 `.reka-demo/edit/`。在这里保存会自动提交，默认约每 500 ms 检测一次。错误写入同名的 `.errors` 文件，原配置继续运行；修好后重新保存即可。停机期间的编辑也会在下次启动时被检查并提交。
+
+如果 `.errors` 提示 `conflict`，先把编辑内容另存到目录外，读取最新配置并合并，再用 `commit FILE -base 最新版本号` 显式提交。其他 CLI/API 操作提交后，应等导出的文件更新再开始编辑。
+
+每个文件单独形成一次事务。要同时删除节点并修改其他文档中的引用，使用单个 API 请求一起提交，见[配置事务 API](control-api.md)。初次传给 `-profile` 的原始文件不会被持续监测。
+
+### 历史与恢复
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" revisions
+./bin/rekactl -state-root "$PWD/.reka-demo" restore 1
+```
+
+`restore` 会先要求确认；自动化脚本可显式加 `-yes`。恢复把旧的四份文档一起作为新版本提交，仍会检查端口和依赖。秘密值保存在独立秘密存储中，版本恢复不会把已修改的秘密值恢复成旧值。
+
+## 6. DNS 与规则写法
+
+省略 `dns` 时使用系统解析。下面的原生 DNS 配置放在 profile 顶层；`listen` 提供 UDP/TCP DNS 服务，可按需要省略：
+
+```yaml
+dns:
+  listen: "127.0.0.1:5353"
+  nameserver: ["https://1.1.1.1/dns-query"]
+  default-nameserver: ["223.5.5.5"]
+  proxy-server-nameserver: ["223.5.5.5"]
+  enhanced-mode: redir-host
+  ipv6: false
+```
+
+`nameserver` 解析一般目标，`default-nameserver` 引导解析 DNS 上游主机名，`proxy-server-nameserver` 解析代理服务器地址。应选择当前网络能访问的上游。配置监听地址不会自动改变系统 DNS。Fake IP、按域名选上游、hosts、DoQ/DoH3、DNS 路由等见[字段参考](configuration-reference.md)和[DNS 专题](dns.md)。
+
+常用规则示例（放在 `rules` 内，并置于最终规则之前）：
+
+```yaml
+- id: block-one
+  match: {domain: ads.example.com}
+  outbound: reject
+- id: work
+  match: {domain-suffix: corp.example.com}
+  outbound: direct
+- id: proxy-web
+  match: {dst-port: ["80", "443"]}
+  outbound: proxy
+```
+
+每个 `match` 选择一个主条件，多个值表示任意一个匹配；`no-resolve` 是 IP 条件修饰项。组合条件使用 `and` / `or` / `not`。IP 规则默认可以为域名目标发起解析，`no-resolve: true` 跳过这一步。原生 `nameserver-policy` / `hosts` 使用带 `id` 的列表，格式与 Clash 的映射写法不同；已有 Clash 文档请通过导入转换。
+
+资源 `id` 是引用、修改和历史追踪使用的标识。普通 ID 最多 64 字符，以字母或数字开头，可含字母、数字、`.`、`_`、`-`。导入资源完整 ID 为 `来源/资源`。YAML 的组成员用 `airport/node`，API/CLI 字段路径用 `/groups/airport~1proxy/selected`，其中 `~1` 转义 `/`。推荐给每条规则也设置 ID。
+
+## 7. 系统代理与 TUN
+
+第 1 节的 `network.mode: off` 可以先验证节点与规则。macOS / Windows 系统代理在 local 中配置；macOS 必须将 `service` 填为实际网络服务名称（可用 `networksetup -listallnetworkservices` 查看），Windows 可省略此行：
+
+```yaml
+network:
+  mode: system-proxy
+  proxy-listener: mixed
+  service: Wi-Fi     # macOS 必填，按实际网络服务名称修改；Windows 可省略
+```
+
+TUN 需要相应平台权限或已安装的系统服务。完整接管前先在 profile 配置明确的 DNS 上游及 bootstrap，避免 DNS 回环。local 示例：
+
+```yaml
+network:
+  mode: tun
+  service: Wi-Fi     # macOS 完整接管必填；Windows 可省略
+  tun:
+    stack: mixed
+    mtu: 1500
+    address4: 172.19.0.1/30
+    dns-hijack: true
+```
+
+先 `plan -local FILE` 再 `commit -local FILE`。IPv6 接管需要另外配置 `address6`；仅有 IPv4 地址时不会接管 IPv6。macOS/Windows 支持上述模式，Android 通过宿主 VpnService 接入，Linux 当前只支持 `off`。安装服务、权限、DNS 设置、退出恢复及接管限制见[系统接管](network-takeover.md)和[分发安装](distribution.md)。退出接管可提交 `network: {mode: off}`。
+
+## 8. 路由模式、嗅探与入口认证
+
+`routing.mode` 决定请求走哪里，与负责系统接管的 `network.mode` 分开。profile / local 均可设置 routing，本机对象整体优先：
+
+```yaml
+routing:
+  mode: global
+  global: proxy
+```
+
+`rule`（默认）按规则分流，`direct` 全部直连，`global` 交给明确指定的原生节点或组 ID。切换模式保留已保存的规则。上例要求 proxy 已存在；可用下列命令一次设置本机路由模式：
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" set -local /routing '{"mode":"global","global":"proxy"}'
+./bin/rekactl -state-root "$PWD/.reka-demo" set -local /routing '{"mode":"rule"}'
+```
+
+需要从 IP 目标的 HTTP Host / TLS SNI / QUIC SNI 补充域名分流信息时，在 profile 或 local 加：
+
+```yaml
+sniff:
+  enabled: true
+  protocols: [http, tls, quic]
+  timeout-ms: 300
+  max-bytes: 65536
+  max-packets: 8
+  override-destination: false
+```
+
+默认关闭；local 的 sniff 对象整体覆盖 profile。已有入口域名和 Fake IP 语义保留。默认只补充路由信息，`override-destination: true` 才允许把实际拨号目标改成嗅探域名；无法获得 ECH 的加密内部名称。嗅探会增加有限的等待时间，收到的数据会原样重放。完整示例见 [advanced.yaml](../examples/config/advanced.yaml)。
+
+代理监听器现支持 `users` 认证列表，见 [local-auth.yaml](../examples/config/local-auth.yaml)。先设置其引用的秘密，再用 `commit -local FILE` 提交。客户端需填写对应账号密码。`users` 省略或为空时免认证；修改凭据会重启监听器，已接受连接保留原路由。可用 `in-user` 区分已认证用户，也可按入口名称、协议和端口、进程完整路径及 UID 分流，见[高级规则](advanced-rules.md)和[字段参考](configuration-reference.md)。
+
+VLESS 的 XHTTP 示例见 [xhttp.yaml](../examples/config/xhttp.yaml)，需要替换服务器、SNI 和 UUID。具体上传/下载端点、HTTP/3 与 TLS 限制见[字段参考](configuration-reference.md#310-xhttp)。
+
+## 9. 客户端待机启动
+
+CLI 默认恢复已保存配置。需要在恢复状态时先关闭系统接管，可使用：
+
+```sh
+./bin/reka -state-root "$PWD/.reka-demo" -defer-network
+```
+
+它会在恢复接管前把 `local.network.mode` 持久提交为 `off`，其他本机设置保留；这会产生普通配置事务，之后启用接管仍须显式提交。它不会把 `routing.mode` 改成 direct。
+
+最新 macOS 客户端每次会话均以此模式启动，校验配置和选组后保持待机，等待用户主动启用网络模式。如果确认接管已关闭，但 profile 因缺少秘密等原因启动失败，仍提供控制接口供修复，`GetStatus.start_error` 会说明原因；无法确认已关闭接管或待机转换失败则终止启动。Android 对应入口为 `Native.startOff`。详见[客户端说明](../clients/mimo-reka/README.md)。
+
+## 10. 常用排查
+
+| 现象 | 检查方式 |
+| --- | --- |
+| `rekactl` 无法连接 | 内核是否运行、双方 `-state-root` 是否相同；自定义控制地址用 `-c` |
+| 启动成功但代理端口不可用 | `status` 查看监听器，`get` / API 查看 `start_error`；确认 local 有 listeners、端口可用、秘密已设置 |
+| 改了启动时的 YAML 没变化 | 使用 `commit FILE` 或编辑 `edit/` 内导出文件；初始文件参数只首次导入 |
+| 订阅成功但没用上节点 | 检查 profile 的 `imports`、组成员、最终规则和 `get effective` 中的实际 ID |
+| 配置提示未知字段 | 查[原生字段参考](configuration-reference.md)；Clash YAML 用 `import` 转换 |
+| 编辑后配置未生效 | 查看 `.reka-demo/edit/*.errors`、提交诊断和引用冲突 |
+| 想知道请求走哪个节点 | 用 `explain`，它解释路由，不建立实际代理连接 |
+| TUN 保存了但未接管 | 查看 API 的 `runtime.network.state`、`error` 和权限；以运行状态为准 |
+
+```sh
+./bin/rekactl -state-root "$PWD/.reka-demo" explain example.com:443
+./bin/rekactl -state-root "$PWD/.reka-demo" explain example.com:443 -resolve
+./bin/rekactl -state-root "$PWD/.reka-demo" connections
+./bin/rekactl -state-root "$PWD/.reka-demo" close all
+./bin/rekactl -state-root "$PWD/.reka-demo" -json status
+./bin/rekactl -state-root "$PWD/.reka-demo" watch
+```
+
+`explain` 默认不联网；遇到需要 DNS 的 IP 规则可返回尚不能确定，`-resolve` 才允许解析。`close all` 会主动断开当前连接。`watch` 显示配置、运行时和 `log` 事件；进程日志也输出到运行 `reka` 的终端 stderr。历史日志可通过 API `GetLogs` 查询。测速、累计流量、分页规则、DNS 查询与缓存刷新见[API 手册](control-api.md#10-测速流量规则dns日志和资源上传)。
+
+如果在 local 设置了 `control.listen`，或启动时使用 `-control`，`rekactl -state-root` 仍只推导默认地址。请显式指定：
+
+```sh
+./bin/rekactl -c unix:///absolute/path/control.sock status
+# 或设置 REKA_CONTROL 环境变量供后续命令使用
+```
+
+控制 API 没有 HTTP 端口。脚本接入使用[API 手册](control-api.md)和 [examples/control_client.py](../examples/control_client.py)。

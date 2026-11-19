@@ -36,7 +36,8 @@ Clash 系内核只读一份扁平的配置文件：GUI 每次重新生成它，A
 - **协议**：mixed、SOCKS5、HTTP 监听器，UDP 按目标分流；DIRECT、REJECT、HTTP、SOCKS5、Shadowsocks、VLESS + REALITY + Vision + XUDP、VMess、Trojan、Hysteria2、TUIC v5、Snell v5/v6 出站；VLESS encryption 还支持 Vision 与已列出的流式传输组合；VMess/VLESS/Trojan 支持 WS、gRPC、HTTPUpgrade、H2、通用多路复用及 ShadowTLS/Restls/JLS 安全载体，Shadowsocks 支持文档列出的七类插件。REALITY 客户端由 Reka 自己实现，支持 X25519MLKEM768。
 - **DNS 与自动组**：按作用域的 DNS 策略、bootstrap、fallback、hosts 和缓存，DoT/DoH/DoQ/DoH3、hosts 别名与持久化 Fake IP 世代；select/url-test/fallback/load-balance 的健康检查有并发限制，观测状态不写配置。
 - **秘密**：`secret://` 引用，保存在 macOS 钥匙串、Windows DPAPI、Android Keystore 回调或权限为 0600 的文件中。
-- **控制 API**：在 Unix 域套接字或 Windows 命名管道上传输长度前缀的 JSON，只接受当前用户连接，带事件流；命令行工具 `rekactl`。
+- **新增能力**：HTTP/TLS/QUIC 有界嗅探、VLESS XHTTP（含独立下载端点）、监听器账号认证、进程路径/UID/入口规则，以及 DNS 并发与过期缓存；见[配置字段参考](docs/configuration-reference.md)和[功能扩展](docs/feature-expansion.md)。
+- **控制 API**：在 Unix 域套接字或 Windows 命名管道上传输长度前缀的 JSON，只接受当前用户连接，带事件流；命令行工具 `rekactl`，可通过 `GetCapabilities` 查询当前内核支持的方法。
 - **系统接管**：本机网络意图、TUN 路由与 DNS 劫持、系统设置条件恢复以及 launchd/SCM 服务；只改规则不替换设备，实测范围见验收说明。
 - **Android**：JNI/Kotlin、VpnService fd、socket protect、分应用路由及显式 VPN 重建。
 
@@ -51,6 +52,8 @@ make android      # bin/android/libreka.so（需要 ANDROID_HOME 和 NDK）
 ```
 
 ## 快速开始
+
+第一次使用建议先读[中文配置与使用指南](docs/configuration.md)：从最小启动、节点/订阅到修改和恢复配置都有完整命令，另附[配置字段参考](docs/configuration-reference.md)、[控制 API 手册](docs/control-api.md)和[可复制示例](examples/config/)。
 
 `profile.yaml`：
 
@@ -103,8 +106,9 @@ printf '%s' '<base64 密钥>' | ./bin/rekactl secret set outbounds/my-ss/passwor
 - [GUI 接入与原生示例](docs/gui-integration.md)
 - [Android 接入](docs/android-integration.md)
 
-- [配置参考](docs/configuration.md)（英文）
-- [控制 API](docs/control-api.md)（英文）
+- [配置与使用指南](docs/configuration.md)（中文，含启动、节点、订阅、热更新和排查）
+- [配置字段参考](docs/configuration-reference.md)（中文，含默认值、单位和限制）
+- [控制 API 手册](docs/control-api.md)（中文，含请求/响应与 Python 客户端）
 - [后台订阅与 provider](docs/subscriptions.md)（英文）
 - [Clash 导入与限制](docs/clash-import.md)（英文）
 - [字段支持表](docs/clash-support.md)（英文）
