@@ -198,7 +198,7 @@ func (s *Service) SwitchProfile(ctx context.Context, req api.SwitchProfileReques
 		s.engine.Abort(prepared)
 		return result, err
 	}
-	generation, activationErr := s.engine.Activate(prepared, after.Revision)
+	generation, activationErr := s.engine.ActivateProfile(prepared, after.Revision, req.ProfileID)
 	cursorAttempted := false
 	fail := func(cause error) (api.SwitchProfileResult, error) {
 		result.State = store.OpFailed
@@ -209,7 +209,7 @@ func (s *Service) SwitchProfile(ctx context.Context, req api.SwitchProfileReques
 		if s.eff != nil {
 			previous, e := s.engine.Prepare(s.eff)
 			if e == nil {
-				_, e = s.engine.Activate(previous, s.active)
+				_, e = s.engine.ActivateProfile(previous, s.active, currentID)
 			}
 			if e != nil {
 				result.Degraded = true

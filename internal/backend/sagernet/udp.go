@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/sniff"
 	"github.com/sagernet/sing/common/buf"
@@ -54,6 +55,7 @@ type udpFlow struct {
 	dest         M.Socksaddr
 	md           Metadata
 	prepared     PreparedFlow
+	attempt      *connectionAttempt
 	sniff        SniffOptions
 	rt           Route
 	remote       N.PacketConn
@@ -121,7 +123,7 @@ func (s *udpSession) close(err error) {
 	s.mu.Unlock()
 	s.cancel()
 	for _, f := range flows {
-		f.close()
+		f.closeWithReason(connectionReason(err, "eof"), "")
 	}
 	s.conn.Close()
 	if s.onClose != nil {
@@ -151,8 +153,10 @@ func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 	md.Network = N.NetworkUDP
 	md.Destination = toDestination(dest)
 	ctx, cancel := context.WithCancel(s.ctx)
+	attempt := s.b.beginConnection(md)
+	ctx = history.WithFlow(ctx, attempt.ID)
 	prepared := s.r.prepareFlow(ctx, md)
-	f := &udpFlow{s: s, ctx: ctx, cancel: cancel, dest: dest, md: md, prepared: prepared, sniff: prepared.Sniff, ready: make(chan struct{}), notify: make(chan struct{}, 1)}
+	f := &udpFlow{attempt: attempt, s: s, ctx: ctx, cancel: cancel, dest: dest, md: md, prepared: prepared, sniff: prepared.Sniff, ready: make(chan struct{}), notify: make(chan struct{}, 1)}
 	f.touch()
 	s.flows[dest] = f
 	go f.routeAndDial()
@@ -171,7 +175,7 @@ func (f *udpFlow) routeAndDial() {
 		f.s.r.releaseSniffSlot()
 	}
 	if f.ctx.Err() != nil {
-		f.close()
+		f.closeWithReason(connectionReason(f.ctx.Err(), "cancelled"), "route")
 		return
 	}
 	rt := prepared.pick(f.ctx, md)
@@ -188,16 +192,17 @@ func (f *udpFlow) routeAndDial() {
 		}
 		return
 	}
+	f.attempt.setRoute(rt)
 	if rt.Outbound == nil {
 		f.s.rejected[f.dest] = time.Now()
 		f.s.mu.Unlock()
-		f.close()
+		f.closeWithReason("rejected", "route")
 		return
 	}
 	f.md, f.rt = md, rt
 	var finishProcess func()
 	f.processTraffic, finishProcess = f.s.b.beginProcessTraffic(rt.Owner)
-	untrack := f.s.b.conns.add(&tracked{md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
+	untrack := f.s.b.conns.add(&tracked{id: f.attempt.ID, start: time.Now(), md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
 	f.untrack = func() { untrack(); finishProcess() }
 	f.s.mu.Unlock()
 	f.dial()
@@ -274,6 +279,7 @@ func (f *udpFlow) dial() {
 	if f.rt.Destination != nil {
 		dialDest = M.ParseSocksaddr(f.rt.Destination.String())
 	}
+	dialStart := time.Now()
 	remote, err := f.rt.Outbound.out.ListenPacket(ctx, dialDest)
 	f.sendMu.Lock()
 	s.mu.Lock()
@@ -285,6 +291,7 @@ func (f *udpFlow) dial() {
 		f.sendMu.Unlock()
 		return
 	}
+	f.attempt.dialed(dialStart, err)
 	if err != nil {
 		f.sendMu.Unlock()
 		f.failed = true
@@ -304,7 +311,7 @@ func (f *udpFlow) dial() {
 			b.Release()
 		}
 		s.b.logger.ErrorContext(ctx, E.Cause(err, "open packet connection to ", f.dest, " using outbound/", f.rt.Outbound.Type(), "[", f.rt.Outbound.Tag(), "]"))
-		f.close()
+		f.closeWithReason(connectionReason(err, "error"), "dial")
 		return
 	}
 	for _, b := range pending {
@@ -370,7 +377,7 @@ func (f *udpFlow) writeLocked(b *buf.Buffer) {
 	}
 	if err := f.remote.WritePacket(b, destination); err != nil {
 		b.Leak()
-		f.close()
+		f.closeWithReason(connectionReason(err, "error"), "relay")
 		return
 	}
 	f.up.Add(n)
@@ -385,7 +392,7 @@ func (f *udpFlow) receive() {
 		src, err := f.remote.ReadPacket(b)
 		if err != nil {
 			b.Release()
-			f.close()
+			f.closeWithReason(connectionReason(err, "error"), "relay")
 			return
 		}
 		opts.PostReturn(b)
@@ -408,7 +415,9 @@ func (f *udpFlow) receive() {
 	}
 }
 
-func (f *udpFlow) close() {
+func (f *udpFlow) close() { f.closeWithReason("manual", "") }
+
+func (f *udpFlow) closeWithReason(reason, stage string) {
 	f.once.Do(func() {
 		s := f.s
 		s.mu.Lock()
@@ -436,6 +445,7 @@ func (f *udpFlow) close() {
 		if release != nil {
 			release()
 		}
+		f.attempt.complete(reason, stage, f.up.Load(), f.down.Load())
 	})
 }
 
@@ -458,7 +468,7 @@ func (s *udpSession) reap() {
 			}
 			s.mu.Unlock()
 			for _, f := range idle {
-				f.close()
+				f.closeWithReason("idle_timeout", "")
 			}
 		}
 	}

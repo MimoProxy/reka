@@ -39,8 +39,6 @@ type connTable struct {
 }
 
 func (t *connTable) add(c *tracked) func() {
-	c.id = t.next.Add(1)
-	c.start = time.Now()
 	t.mu.Lock()
 	if t.conns == nil {
 		t.conns = map[uint64]*tracked{}

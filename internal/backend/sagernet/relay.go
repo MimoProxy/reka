@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 // upstream route.ConnectionManager.NewConnection flow (dial, report handshake
 // success to the inbound, kick lazy outbound handshakes, copy). Optional
 // sniffing has already finished before the route was selected.
-func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {
 	out, release := rt.Outbound, rt.Release
 	if rt.Context != nil {
 		ctx = rt.Context(ctx)
@@ -29,17 +30,23 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	if rt.Destination != nil {
 		metadata.Destination = M.ParseSocksaddr(rt.Destination.String())
 	}
-	ctx = WithLookup(ctx, rt.Lookup)
+	ctx = WithLookup(ctx, observeRequestLookup(ctx, rt.Lookup))
 	ctx = adapter.WithContext(ctx, &metadata)
+	dialStart := time.Now()
 	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
+	attempt.dialed(dialStart, err)
+	observeRequestDial(ctx, attempt.DialMS)
 	if err != nil {
+		attempt.complete(connectionReason(err, "error"), "dial", 0, 0)
 		release()
 		err = E.Cause(err, "open connection to ", metadata.Destination, " using outbound/", out.Type(), "[", out.Tag(), "]")
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		b.logger.ErrorContext(ctx, err)
 		return
 	}
+	attempt.peer(remote.RemoteAddr(), out.Type() == "direct")
 	if err = N.ReportConnHandshakeSuccess(conn, remote); err != nil {
+		attempt.complete(connectionReason(err, "error"), "handshake", 0, 0)
 		release()
 		remote.Close()
 		N.CloseOnHandshakeFailure(conn, onClose, E.Cause(err, "report handshake success"))
@@ -47,16 +54,40 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	}
 	var (
 		done      atomic.Bool
+		manual    atomic.Bool
+		drained   atomic.Bool
+		errMu     sync.Mutex
+		firstErr  error
 		finished  = make(chan struct{})
 		up, down  atomic.Int64
 		closeBoth = func() { common.Close(conn, remote) }
 	)
 	processTraffic, finishProcess := b.beginProcessTraffic(rt.Owner)
-	untrackConnection := b.conns.add(&tracked{md: toMetadata(metadata), out: out, info: rt.Info, up: &up, down: &down, close: closeBoth})
+	untrackConnection := b.conns.add(&tracked{id: attempt.ID, start: time.Now(), md: toMetadata(metadata), out: out,
+		info: rt.Info, up: &up, down: &down, close: func() { manual.Store(true); closeBoth() }})
 	untrack := func() { untrackConnection(); finishProcess() }
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
 		if done.Swap(true) {
+			errMu.Lock()
+			cause := firstErr
+			errMu.Unlock()
+			reason := connectionReason(cause, "eof")
+			if manual.Load() {
+				reason = "manual"
+			} else if drained.Load() {
+				reason = "idle_timeout"
+			}
+			stage := ""
+			if cause != nil && reason != "manual" && reason != "idle_timeout" {
+				stage = "relay"
+			}
+			attempt.complete(reason, stage, up.Load(), down.Load())
 			close(finished)
 			untrack()
 			release()
@@ -69,6 +100,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	// abort tears the pair down before any copy goroutine has started.
 	abort := func(err error) {
 		if !done.Swap(true) {
+			attempt.complete(connectionReason(err, "error"), "handshake", up.Load(), down.Load())
 			untrack()
 			release()
 			if onClose != nil {
@@ -83,8 +115,9 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		return
 	}
 	grace := b.halfCloseTimeout
-	go copyHalf(conn, remote, &up, finish, func() { watchIdle(&down, grace, finished, closeBoth) }, &b.trafficUpload, &processTraffic.upload)
-	go copyHalf(remote, conn, &down, finish, func() { watchIdle(&up, grace, finished, closeBoth) }, &b.trafficDownload, &processTraffic.download)
+	closeIdle := func() { drained.Store(true); closeBoth() }
+	go copyHalf(conn, remote, &up, finish, func() { watchIdle(&down, grace, finished, closeIdle) }, &b.trafficUpload, &processTraffic.upload)
+	go copyHalf(remote, conn, &down, finish, func() { watchIdle(&up, grace, finished, closeIdle) }, &b.trafficDownload, &processTraffic.download)
 }
 
 // copyHalf copies source to destination, counting bytes into moved. At EOF

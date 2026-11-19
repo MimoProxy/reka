@@ -103,7 +103,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 				if closed {
 					mu.Unlock()
 					result.Release()
-					return sagernet.Route{Info: result.Info}
+					return sagernet.Route{Info: result.Info, Scope: result.Scope}
 				}
 				flowPins := dnsPins
 				dnsPins = nil

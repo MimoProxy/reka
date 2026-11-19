@@ -17,6 +17,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/history"
 )
 
 type TUNInbound struct {
@@ -150,12 +152,12 @@ func (t *TUNInbound) NewDNSPacket(payload []byte, source, dest M.Socksaddr, writ
 	go func() {
 		defer t.wg.Done()
 		defer func() { <-t.slots }()
-		if b, err := t.answer(p); err == nil {
+		if b, err := t.answer(p, "udp", source, dest); err == nil {
 			_ = writer.WritePacket(buf.As(b), dest)
 		}
 	}()
 }
-func (t *TUNInbound) answer(p []byte) ([]byte, error) {
+func (t *TUNInbound) answer(p []byte, network string, source, destination M.Socksaddr) ([]byte, error) {
 	q := new(D.Msg)
 	if err := q.Unpack(p); err != nil {
 		return nil, err
@@ -165,7 +167,8 @@ func (t *TUNInbound) answer(p []byte) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(t.ctx, 6*time.Second)
 	defer cancel()
-	m, err := t.dns(ctx, q)
+	origin := history.DNSOrigin{Kind: "tun", Network: network, Client: source.String(), Requested: destination.String()}
+	m, err := t.dns(history.WithDNSOrigin(ctx, origin), q)
 	if err != nil {
 		m = new(D.Msg)
 		m.SetRcode(q, D.RcodeServerFailure)
@@ -204,7 +207,7 @@ func (t *TUNInbound) NewConnectionEx(ctx context.Context, c net.Conn, src, dst M
 				if err != nil {
 					return
 				}
-				p, err = t.answer(p)
+				p, err = t.answer(p, "tcp", src, dst)
 				if err != nil {
 					return
 				}
@@ -248,7 +251,7 @@ func (t *TUNInbound) NewPacketConnectionEx(ctx context.Context, c N.PacketConn, 
 					b.Release()
 					return
 				}
-				p, err := t.answer(b.Bytes())
+				p, err := t.answer(b.Bytes(), "udp", src, dst)
 				b.Release()
 				if err == nil {
 					if err = c.WritePacket(buf.As(p), to); err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/service"
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
@@ -116,7 +117,7 @@ var Methods = []string{
 	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
 	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
-	"ListConnections", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
+	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 }
 
@@ -367,6 +368,64 @@ func (s *Session) dispatch(req Request) (any, error) {
 			return nil, err
 		}
 		return svc.RestoreRevision(s.ctx, p)
+	case "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory":
+		p, err := decode[history.ListOptions](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		kind := history.Connections
+		switch req.Method {
+		case "ListDNSHistory":
+			kind = history.DNS
+		case "ListRequestHistory":
+			kind = history.Requests
+		}
+		store, scope := svc.Engine().History()
+		page, err := store.List(kind, scope.ProfileID, p)
+		if err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		return page, nil
+	case "StartHTTPSDebug":
+		p, err := decode[api.HTTPSDebugRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		status, err := svc.Engine().StartHTTPSDebug(p)
+		if err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		return status, nil
+	case "GetHTTPSDebug":
+		return svc.Engine().HTTPSDebugStatus(), nil
+	case "StopHTTPSDebug":
+		svc.Engine().StopHTTPSDebug()
+		return api.HTTPSDebugStatus{}, nil
+	case "GetRequestDetail":
+		p, err := decode[struct {
+			Cursor string `json:"cursor"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		store, scope := svc.Engine().History()
+		detail, ok := store.Detail(history.Requests, scope.ProfileID, p.Cursor)
+		if !ok {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "no retained request detail for this record"}
+		}
+		return detail, nil
+	case "ClearHistory":
+		p, err := decode[struct {
+			Kind history.Kind `json:"kind"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.Kind != history.Connections && p.Kind != history.DNS && p.Kind != history.Requests {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "unknown history kind"}
+		}
+		store, scope := svc.Engine().History()
+		return map[string]int{"cleared": store.Clear(p.Kind, scope.ProfileID)}, nil
 	case "ListConnections":
 		p, err := decode[struct {
 			Offset int `json:"offset"`

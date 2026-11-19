@@ -7,13 +7,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/history"
 	D "github.com/miekg/dns"
 )
 
 type queryFlight struct {
-	done chan struct{}
-	msg  *D.Msg
-	err  error
+	outcome resolutionHistory
+	done    chan struct{}
+	msg     *D.Msg
+	err     error
 }
 
 func agedReply(entry cached, q *D.Msg, now time.Time, stale bool) *D.Msg {
@@ -35,7 +37,7 @@ func agedReply(entry cached, q *D.Msg, now time.Time, stale bool) *D.Msg {
 	return m
 }
 
-func (s *Service) cachedExchange(ctx context.Context, q *D.Msg, scope, key string) (*D.Msg, error) {
+func (s *Service) cachedExchange(ctx context.Context, q *D.Msg, scope, key string, id uint64, outcome *resolutionHistory) (*D.Msg, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -47,9 +49,13 @@ func (s *Service) cachedExchange(ctx context.Context, q *D.Msg, scope, key strin
 		stale := exists && !fresh && s.cfg.StaleTTL > 0 && now.Before(entry.until.Add(time.Duration(s.cfg.StaleTTL)*time.Second))
 		if fresh || stale {
 			s.hits.Add(1)
+			outcome.ResultSource = "cache"
+			if stale {
+				outcome.ResultSource = "stale"
+			}
 			_, refreshing := s.flights[key]
 			if stale && !refreshing && !s.retired {
-				s.refreshLocked(ctx, q.Copy(), scope, key)
+				s.refreshLocked(ctx, q.Copy(), scope, key, id)
 			}
 			s.mu.Unlock()
 			return agedReply(entry, q, now, stale), nil
@@ -69,6 +75,8 @@ func (s *Service) cachedExchange(ctx context.Context, q *D.Msg, scope, key strin
 			if errors.Is(flight.err, context.Canceled) || errors.Is(flight.err, context.DeadlineExceeded) {
 				continue
 			}
+			*outcome = flight.outcome
+			outcome.Coalesced = true
 			if flight.msg != nil {
 				m := flight.msg.Copy()
 				m.Id = q.Id
@@ -86,15 +94,16 @@ func (s *Service) cachedExchange(ctx context.Context, q *D.Msg, scope, key strin
 		epoch := s.cacheEpoch
 		s.mu.Unlock()
 		s.misses.Add(1)
-		m, err := s.resolve(ctx, q, scope)
-		s.finishFlight(key, flight, epoch, m, err)
+		m, err := s.resolve(ctx, q, scope, outcome)
+		outcome.UpstreamQueryID = id
+		s.finishFlight(key, flight, epoch, m, err, *outcome)
 		return m, err
 	}
 }
 
 // Called with mu held. The background job owns its own resource pins and a
 // bounded slot; it never borrows pins after the requesting flow has closed.
-func (s *Service) refreshLocked(caller context.Context, q *D.Msg, scope, key string) {
+func (s *Service) refreshLocked(caller context.Context, q *D.Msg, scope, key string, parent uint64) {
 	if len(s.flights) >= 128 {
 		return
 	}
@@ -113,25 +122,31 @@ func (s *Service) refreshLocked(caller context.Context, q *D.Msg, scope, key str
 			return
 		}
 	}
+	ctx = history.WithDNSOrigin(history.WithFlow(ctx, 0), history.DNSOrigin{Kind: "refresh"})
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	stop := context.AfterFunc(s.background, cancel)
 	flight := &queryFlight{done: make(chan struct{})}
 	s.flights[key] = flight
 	epoch := s.cacheEpoch
+	id, start := queryID.Add(1), time.Now()
 	go func() {
 		defer func() { stop(); cancel(); release(); <-s.refreshSlots }()
-		m, err := s.resolve(ctx, q, scope)
-		s.finishFlight(key, flight, epoch, m, err)
+		var outcome resolutionHistory
+		m, err := s.resolve(ctx, q, scope, &outcome)
+		outcome.UpstreamQueryID = id
+		s.finishFlight(key, flight, epoch, m, err, outcome)
+		s.record(ctx, id, parent, start, scope, q, m, outcome, err)
 	}()
 }
 
-func (s *Service) finishFlight(key string, flight *queryFlight, epoch uint64, m *D.Msg, err error) {
+func (s *Service) finishFlight(key string, flight *queryFlight, epoch uint64, m *D.Msg, err error, outcome resolutionHistory) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m != nil {
 		flight.msg = m.Copy()
 	}
 	flight.err = err
+	flight.outcome = outcome
 	if err == nil && m != nil && epoch == s.cacheEpoch {
 		ttl := uint32(3600)
 		hasTTL := false
@@ -178,7 +193,7 @@ func (s *Service) Retire() {
 	}
 }
 
-func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope string) (*D.Msg, error) {
+func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope string, outcome *resolutionHistory) (*D.Msg, error) {
 	if len(servers) == 0 {
 		return nil, errors.New("no DNS upstream")
 	}
@@ -188,14 +203,15 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 	}
 	limit = min(limit, len(servers))
 	if limit == 1 {
-		return s.queryOne(ctx, servers, q, scope)
+		return s.queryOne(ctx, servers, q, scope, outcome)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	type result struct {
-		m   *D.Msg
-		err error
+		outcome resolutionHistory
+		m       *D.Msg
+		err     error
 	}
 	results := make(chan result, len(servers))
 	jobs := make(chan string, len(servers))
@@ -211,11 +227,12 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 				if ctx.Err() != nil {
 					return
 				}
-				m, err := s.queryOne(ctx, []string{raw}, q.Copy(), scope)
+				var selected resolutionHistory
+				m, err := s.queryOne(ctx, []string{raw}, q.Copy(), scope, &selected)
 				if err == nil && m != nil && m.Rcode != D.RcodeSuccess && m.Rcode != D.RcodeNameError {
 					err = fmt.Errorf("DNS upstream rcode %s", D.RcodeToString[m.Rcode])
 				}
-				results <- result{m, err}
+				results <- result{selected, m, err}
 			}
 		}()
 	}
@@ -225,6 +242,7 @@ func (s *Service) query(ctx context.Context, servers []string, q *D.Msg, scope s
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case r := <-results:
+			*outcome = r.outcome
 			if r.err == nil && r.m != nil {
 				return r.m, nil
 			}
