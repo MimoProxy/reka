@@ -4,8 +4,6 @@ package packettunnel
 
 import (
 	"errors"
-	"io"
-	"log/slog"
 	"net/netip"
 	"slices"
 	"sync"
@@ -96,6 +94,27 @@ func (t *routeTrace) read() []RouteHit {
 }
 
 func StartProfile(snapshot []byte, controls profile.Controls, trace bool) (*Session, error) {
+	s, err := openProfileSession(snapshot, controls, trace, false)
+	if err != nil {
+		return nil, err
+	}
+	tunnel, err := s.profile.engine.AttachPacketFlow(s.device, MTU, netip.MustParsePrefix(ProfileAddress4), netip.MustParsePrefix(Address6), maxTCP, maxUDP)
+	if err != nil {
+		s.Close()
+		return nil, errors.New("could not attach profile packet flow")
+	}
+	s.tunnel = tunnel
+	s.logger.Info("Packet tunnel started")
+	return s, nil
+}
+
+// StartProbeProfile gives the foreground app a short-lived engine for node
+// tests while the VPN is off. It neither installs routes nor opens inbounds.
+func StartProbeProfile(snapshot []byte, controls profile.Controls) (*Session, error) {
+	return openProfileSession(snapshot, controls, false, true)
+}
+
+func openProfileSession(snapshot []byte, controls profile.Controls, trace, probeOnly bool) (*Session, error) {
 	bundle, err := profile.Decode(snapshot)
 	if err != nil {
 		return nil, err
@@ -104,31 +123,33 @@ func StartProfile(snapshot []byte, controls profile.Controls, trace bool) (*Sess
 	if err != nil {
 		return nil, err
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	opts := generation.EngineOptions{HostPacketFlow: true, Backend: sagernet.Options{Logger: logger}}
+	if probeOnly {
+		for i := range base.AutoGroups {
+			base.AutoGroups[i].Lazy = true
+		}
+	}
+	s := newSession()
+	opts := generation.EngineOptions{
+		HostPacketFlow: true, PacketHistory: s.events,
+		Backend: sagernet.Options{Logger: s.logger.With("component", "core")},
+	}
 	p := &profileSession{base: base, summary: profile.Describe(base)}
 	if trace {
 		p.trace = &routeTrace{}
 		opts.ObserveRoute = p.trace.record
 	}
 	p.engine = generation.NewEngine(opts)
-	if err := p.apply(controls); err != nil {
+	if err := p.publish(p.base, p.summary, controls); err != nil {
+		s.cancel()
 		p.engine.Close()
 		return nil, err
 	}
-	s := newSession()
-	tunnel, err := p.engine.AttachPacketFlow(s.device, MTU, netip.MustParsePrefix(ProfileAddress4), netip.MustParsePrefix(Address6), maxTCP, maxUDP)
-	if err != nil {
-		s.cancel()
-		p.engine.Close()
-		return nil, errors.New("could not attach profile packet flow")
-	}
-	s.profile, s.tunnel = p, tunnel
+	s.profile = p
 	return s, nil
 }
 
-func (p *profileSession) apply(controls profile.Controls) error {
-	eff, err := profile.ApplyControls(p.base, p.summary, controls)
+func (p *profileSession) publish(base *compile.Effective, summary profile.Summary, controls profile.Controls) error {
+	eff, err := profile.ApplyControls(base, summary, controls)
 	if err != nil {
 		return errors.New("invalid policy or routing mode")
 	}
@@ -140,6 +161,7 @@ func (p *profileSession) apply(controls profile.Controls) error {
 		return errors.New("could not activate profile")
 	}
 	p.rev++
+	p.base, p.summary = base, summary
 	return nil
 }
 
@@ -153,7 +175,40 @@ func (s *Session) ApplyControls(controls profile.Controls) error {
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
-	return p.apply(controls)
+	err := p.publish(p.base, p.summary, controls)
+	if err == nil {
+		s.logger.Info("Routing updated")
+	}
+	return err
+}
+
+// ReplaceProfile publishes a prepared snapshot through the same runtime as
+// policy changes. The packet link and leases belonging to existing flows stay
+// valid. The old profile is kept on any preparation failure.
+func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) error {
+	p := s.profile
+	if p == nil {
+		return errors.New("tunnel is not using a profile")
+	}
+	bundle, err := profile.Decode(snapshot)
+	if err != nil {
+		return err
+	}
+	base, err := bundle.Compile()
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	if err := p.publish(base, profile.Describe(base), controls); err != nil {
+		s.logger.Warn("Profile refresh could not be applied")
+		return err
+	}
+	s.logger.Info("Profile refreshed")
+	return nil
 }
 
 func (s *Session) ProfileStatus() (*ProfileStatus, error) {

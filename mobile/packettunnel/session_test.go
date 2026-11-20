@@ -7,10 +7,15 @@ import (
 	"context"
 	"io"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/packettunnellab"
+	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/mobile/profile"
 	"github.com/miekg/dns"
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
@@ -20,6 +25,42 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
 	tun "github.com/sagernet/sing-tun"
 )
+
+func TestReplaceProfileKeepsPacketFlowAndRejectsInvalidUpdate(t *testing.T) {
+	ctx := context.Background()
+	prepare := func(target string) []byte {
+		t.Helper()
+		return prepareSnapshot(t, "rules:\n  - DOMAIN,refresh.example.test,"+target+"\n  - MATCH,DIRECT\n")
+	}
+
+	controls := profile.Controls{Mode: "rule"}
+	session, err := StartProfile(prepare("DIRECT"), controls, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	link, engine := session.tunnel, session.profile.engine
+	outbound := func() string {
+		effective, _ := engine.Effective()
+		return effective.RoutingRouter().Route(ctx, router.Metadata{Domain: "refresh.example.test", Network: "tcp"}, nil).Outbound
+	}
+	replacement := prepare("REJECT")
+	if err := session.ReplaceProfile(replacement, profile.Controls{Mode: "invalid"}); err == nil {
+		t.Fatal("accepted invalid routing mode")
+	}
+	if got := outbound(); got != "direct" {
+		t.Fatalf("invalid update changed outbound to %q", got)
+	}
+	if err := session.ReplaceProfile(replacement, controls); err != nil {
+		t.Fatal(err)
+	}
+	if session.tunnel != link || session.profile.engine != engine {
+		t.Fatal("profile replacement rebuilt the packet tunnel")
+	}
+	if got := outbound(); got != "reject" {
+		t.Fatalf("replaced profile routed to %q", got)
+	}
+}
 
 func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
 	peer, err := packettunnellab.Start(netip.MustParseAddr("127.0.0.1"), 0)
@@ -35,70 +76,7 @@ func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-
-	endpoint := channel.New(64, MTU, "")
-	defer endpoint.Close()
-	client, err := tun.NewGVisorStack(endpoint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	address := tcpip.ProtocolAddress{
-		Protocol: ipv4.ProtocolNumber,
-		AddressWithPrefix: tcpip.AddressWithPrefix{
-			Address: tun.AddressFromAddr(netip.MustParseAddr("198.18.0.2")), PrefixLen: 30,
-		},
-	}
-	if failure := client.AddProtocolAddress(tun.DefaultNIC, address, stack.AddressProperties{}); failure != nil {
-		t.Fatal(failure)
-	}
-
-	inputDone, outputDone := make(chan struct{}), make(chan struct{})
-	defer func() {
-		session.Close()
-		cancel()
-		select {
-		case <-inputDone:
-		case <-time.After(3 * time.Second):
-			t.Error("packet submission did not stop")
-		}
-		select {
-		case <-outputDone:
-		case <-time.After(3 * time.Second):
-			t.Error("packet read did not stop")
-		}
-	}()
-	go func() {
-		defer close(inputDone)
-		packet := make([]byte, MTU)
-		for {
-			p := endpoint.ReadContext(ctx)
-			if p == nil {
-				return
-			}
-			n := copyPacket(packet, p)
-			p.DecRef()
-			session.Submit(packet[:n])
-		}
-	}()
-	go func() {
-		defer close(outputDone)
-		packets := make([]byte, MTU*MaxBatch)
-		lengths := make([]uint16, MaxBatch)
-		for {
-			count := session.ReadBatch(packets, lengths)
-			if count == 0 {
-				return
-			}
-			for i, length := range lengths[:count] {
-				p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packets[i*MTU : i*MTU+int(length)])})
-				endpoint.InjectInbound(ipv4.ProtocolNumber, p)
-				p.DecRef()
-			}
-		}
-	}()
+	client, ctx := attachTestClient(t, session, "198.18.0.2")
 
 	target := func(ip string, port uint16) tcpip.FullAddress {
 		return tcpip.FullAddress{NIC: tun.DefaultNIC, Addr: tun.AddressFromAddr(netip.MustParseAddr(ip)), Port: port}
@@ -163,4 +141,133 @@ func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
 	if upload < uint64(len(tcpData)+len(udpData)) || download < uint64(len(tcpData)+len(udpData)) {
 		t.Fatalf("missing tunnel traffic: upload %d download %d", upload, download)
 	}
+}
+
+func TestPacketFlowAnswersDNSFromSuccessiveUDPClients(t *testing.T) {
+	snapshot := prepareSnapshot(t, `
+dns: {enable: true, enhanced-mode: fake-ip, nameserver: [1.1.1.1]}
+rules:
+  - MATCH,DIRECT
+`)
+	session, err := StartProfile(snapshot, profile.Controls{Mode: "rule"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	client, _ := attachTestClient(t, session, "192.0.2.2")
+	server := tcpip.FullAddress{NIC: tun.DefaultNIC, Addr: tun.AddressFromAddr(netip.MustParseAddr("172.27.255.2")), Port: 53}
+	for number := range 12 {
+		source := tcpip.FullAddress{Port: uint16(59000 + number)}
+		conn, err := gonet.DialUDP(client, &source, &server, ipv4.ProtocolNumber)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetDeadline(time.Now().Add(time.Second))
+		query := new(dns.Msg).SetQuestion("probe-"+strconv.Itoa(number)+".example.test.", dns.TypeA)
+		payload, err := query.Pack()
+		if err != nil {
+			conn.Close()
+			t.Fatal(err)
+		}
+		if _, err := conn.Write(payload); err != nil {
+			conn.Close()
+			t.Fatal(err)
+		}
+		reply := make([]byte, 512)
+		n, err := conn.Read(reply)
+		conn.Close()
+		if err != nil {
+			t.Fatalf("DNS query %d: %v", number+1, err)
+		}
+		answer := new(dns.Msg)
+		if err := answer.Unpack(reply[:n]); err != nil || answer.Id != query.Id || len(answer.Answer) != 1 {
+			t.Fatalf("invalid DNS reply to query %d: %v", number+1, err)
+		}
+	}
+}
+
+func prepareSnapshot(t *testing.T, raw string) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	input, output := filepath.Join(dir, "profile.yaml"), filepath.Join(dir, "snapshot.json")
+	if err := os.WriteFile(input, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := profile.PrepareFile(context.Background(), input, output, dir); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func attachTestClient(t *testing.T, session *Session, ip string) (*stack.Stack, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	t.Cleanup(cancel)
+
+	endpoint := channel.New(64, MTU, "")
+	t.Cleanup(endpoint.Close)
+	client, err := tun.NewGVisorStack(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	address := tcpip.ProtocolAddress{
+		Protocol: ipv4.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddressWithPrefix{
+			Address: tun.AddressFromAddr(netip.MustParseAddr(ip)), PrefixLen: 30,
+		},
+	}
+	if failure := client.AddProtocolAddress(tun.DefaultNIC, address, stack.AddressProperties{}); failure != nil {
+		t.Fatal(failure)
+	}
+
+	inputDone, outputDone := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		session.Close()
+		cancel()
+		select {
+		case <-inputDone:
+		case <-time.After(3 * time.Second):
+			t.Error("packet submission did not stop")
+		}
+		select {
+		case <-outputDone:
+		case <-time.After(3 * time.Second):
+			t.Error("packet read did not stop")
+		}
+	})
+	go func() {
+		defer close(inputDone)
+		packet := make([]byte, MTU)
+		for {
+			p := endpoint.ReadContext(ctx)
+			if p == nil {
+				return
+			}
+			n := copyPacket(packet, p)
+			p.DecRef()
+			session.Submit(packet[:n])
+		}
+	}()
+	go func() {
+		defer close(outputDone)
+		packets := make([]byte, MTU*MaxBatch)
+		lengths := make([]uint16, MaxBatch)
+		for {
+			count := session.ReadBatch(packets, lengths)
+			if count == 0 {
+				return
+			}
+			for i, length := range lengths[:count] {
+				p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packets[i*MTU : i*MTU+int(length)])})
+				endpoint.InjectInbound(ipv4.ProtocolNumber, p)
+				p.DecRef()
+			}
+		}
+	}()
+	return client, ctx
 }

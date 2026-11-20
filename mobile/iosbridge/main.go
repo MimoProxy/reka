@@ -41,7 +41,7 @@ func RekaGoStart(data unsafe.Pointer, length C.size_t) C.uint64_t {
 	if err := json.Unmarshal(unsafe.Slice((*byte)(data), int(length)), &node); err != nil {
 		return 0
 	}
-	return start(func() (*packettunnel.Session, error) { return packettunnel.Start(node) }, nil, 0)
+	return start(func() (*packettunnel.Session, error) { return packettunnel.Start(node) }, true, nil, 0)
 }
 
 //export RekaGoPrepareProfile
@@ -66,18 +66,31 @@ func RekaGoStartProfile(snapshot unsafe.Pointer, size C.size_t, data unsafe.Poin
 	}
 	return start(func() (*packettunnel.Session, error) {
 		return packettunnel.StartProfile(unsafe.Slice((*byte)(snapshot), int(size)), controls, trace != 0)
-	}, failure, capacity)
+	}, true, failure, capacity)
 }
 
-func start(open func() (*packettunnel.Session, error), failure *C.char, capacity C.size_t) C.uint64_t {
+//export RekaGoStartProbeProfile
+func RekaGoStartProbeProfile(snapshot unsafe.Pointer, size C.size_t, data unsafe.Pointer, length C.size_t) C.uint64_t {
+	controls, ok := decodeControls(data, length)
+	if !ok || snapshot == nil || size == 0 || size > profile.MaxBundleBytes {
+		return 0
+	}
+	return start(func() (*packettunnel.Session, error) {
+		return packettunnel.StartProbeProfile(unsafe.Slice((*byte)(snapshot), int(size)), controls)
+	}, false, nil, 0)
+}
+
+func start(open func() (*packettunnel.Session, error), extension bool, failure *C.char, capacity C.size_t) C.uint64_t {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
 	if active.Load() != nil {
 		return 0
 	}
-	// This library is linked only into the VPN extension process.
-	runtime.GOMAXPROCS(2)
-	debug.SetMemoryLimit(20 << 20)
+	// Packet-flow sessions run inside the VPN extension process.
+	if extension {
+		runtime.GOMAXPROCS(2)
+		debug.SetMemoryLimit(20 << 20)
+	}
 	session, err := open()
 	if err != nil {
 		writeError(failure, capacity, err.Error())
@@ -96,6 +109,59 @@ func RekaGoApplyControls(id C.uint64_t, data unsafe.Pointer, length C.size_t) C.
 		return 0
 	}
 	return 1
+}
+
+//export RekaGoReplaceProfile
+func RekaGoReplaceProfile(id C.uint64_t, snapshot unsafe.Pointer, size C.size_t, data unsafe.Pointer, length C.size_t) C.int32_t {
+	session := lookup(id)
+	controls, ok := decodeControls(data, length)
+	if session == nil || !ok || snapshot == nil || size == 0 || size > profile.MaxBundleBytes {
+		return 0
+	}
+	if session.ReplaceProfile(unsafe.Slice((*byte)(snapshot), int(size)), controls) != nil {
+		return 0
+	}
+	return 1
+}
+
+//export RekaGoOperation
+func RekaGoOperation(id C.uint64_t, input unsafe.Pointer, length C.size_t, output unsafe.Pointer, capacity C.size_t) C.int32_t {
+	session := lookup(id)
+	if session == nil || input == nil || length == 0 || length > 1024 || output == nil || capacity == 0 || capacity > 128<<10 {
+		return 0
+	}
+	var op packettunnel.Operation
+	if json.Unmarshal(unsafe.Slice((*byte)(input), int(length)), &op) != nil {
+		return 0
+	}
+	result, err := session.RunOperation(op)
+	if err != nil {
+		return 0
+	}
+	data, err := json.Marshal(result)
+	if err != nil || len(data) > int(capacity) {
+		return 0
+	}
+	copy(unsafe.Slice((*byte)(output), int(capacity)), data)
+	return C.int32_t(len(data))
+}
+
+//export RekaGoCounts
+func RekaGoCounts(id C.uint64_t, connections, dns *C.uint32_t) C.int32_t {
+	session := lookup(id)
+	if session == nil || connections == nil || dns == nil {
+		return 0
+	}
+	active, queries := session.Counts()
+	*connections, *dns = C.uint32_t(active), C.uint32_t(queries)
+	return 1
+}
+
+//export RekaGoNetworkChanged
+func RekaGoNetworkChanged(id C.uint64_t, available, changed C.int32_t) {
+	if session := lookup(id); session != nil {
+		session.NetworkChanged(available == 1, changed == 1)
+	}
 }
 
 //export RekaGoPolicyStatus

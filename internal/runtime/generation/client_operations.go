@@ -72,7 +72,13 @@ func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (a
 }
 
 func (e *Engine) takeProbeSlot(ctx context.Context) (func(), error) {
-	e.probeOnce.Do(func() { e.probeSlots = make(chan struct{}, 16) })
+	e.probeOnce.Do(func() {
+		limit := 16
+		if e.opts.HostPacketFlow {
+			limit = 2
+		}
+		e.probeSlots = make(chan struct{}, limit)
+	})
 	select {
 	case e.probeSlots <- struct{}{}:
 		return func() { <-e.probeSlots }, nil

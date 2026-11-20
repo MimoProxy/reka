@@ -67,6 +67,11 @@ func (h *packetFlowHandler) JudgeFlow(protocol uint8, source, target netip.AddrP
 			return tun.FlowVerdict{Action: tun.ActionReject}
 		}
 	case uint8(header.UDPProtocolNumber):
+		// DNS is a bounded exchange. A source port that has received its
+		// answer should not hold a NAT flow and a DNS slot until timeout.
+		if h.cfg.DNSHijack && target.Port() == 53 {
+			return tun.FlowVerdict{Action: tun.ActionHijackDNS}
+		}
 		if len(h.udp) == cap(h.udp) {
 			return tun.FlowVerdict{Action: tun.ActionReject}
 		}

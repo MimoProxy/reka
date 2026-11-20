@@ -1,6 +1,6 @@
 //go:build with_gvisor
 
-// Package packettunnel runs one Reka outbound on a host-provided packet flow.
+// Package packettunnel runs Reka on a host-provided packet flow.
 package packettunnel
 
 import (
@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -21,13 +22,15 @@ import (
 )
 
 const (
-	MTU       = 1280
-	MaxBatch  = 16
-	queueSize = 64
-	maxTCP    = 32
-	maxUDP    = 32
-	Address4  = "198.18.0.1/30"
-	Address6  = "fd83:7265:6b61::1/64"
+	MTU        = 1280
+	MaxBatch   = 16
+	queueSize  = 64
+	maxTCP     = 32
+	maxUDP     = 32
+	eventRows  = 64
+	eventBytes = 96 << 10
+	Address4   = "198.18.0.1/30"
+	Address6   = "fd83:7265:6b61::1/64"
 )
 
 type Node struct {
@@ -47,11 +50,18 @@ type Session struct {
 	outbound *sagernet.Outbound
 	tunnel   io.Closer
 	profile  *profileSession
+	events   *history.Store
+	logger   *slog.Logger
 }
 
 func newSession() *Session {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Session{ctx: ctx, cancel: cancel, device: &packetDevice{endpoint: channel.New(queueSize, MTU, "")}}
+	events := history.NewBounded(eventRows, eventBytes, history.DNS, history.Logs)
+	logger := slog.New(tunnelLogHandler{events: events})
+	return &Session{
+		ctx: ctx, cancel: cancel, device: &packetDevice{endpoint: channel.New(queueSize, MTU, "")},
+		events: events, logger: logger,
+	}
 }
 
 func Start(node Node) (*Session, error) {
@@ -59,17 +69,17 @@ func Start(node Node) (*Session, error) {
 		node.Server.Zone() != "" || node.Port == 0 || node.Method == "" || node.Password == "" {
 		return nil, errors.New("invalid Packet Tunnel node")
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-	backend := sagernet.New(sagernet.Options{Logger: logger})
+	s := newSession()
+	backend := sagernet.New(sagernet.Options{Logger: s.logger.With("component", "core")})
 	outbound, err := backend.NewOutbound("packet-tunnel", sagernet.ShadowsocksSpec{
 		Server: node.Server.String(), Port: node.Port, Method: node.Method, Password: node.Password,
 	})
 	if err != nil {
+		s.cancel()
 		_ = backend.Close()
 		return nil, err
 	}
 	backend.SetRoute(sagernet.Fixed(outbound))
-	s := newSession()
 	tunnel, err := backend.AttachPacketFlow(
 		s.device, MTU, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), maxTCP, maxUDP, nil,
 	)
@@ -80,6 +90,7 @@ func Start(node Node) (*Session, error) {
 		return nil, err
 	}
 	s.backend, s.outbound, s.tunnel = backend, outbound, tunnel
+	s.logger.Info("Packet tunnel started")
 	return s, nil
 }
 
@@ -147,7 +158,11 @@ func (s *Session) Close() {
 			s.profile.mu.Lock()
 			defer s.profile.mu.Unlock()
 			s.profile.engine.CloseConnections(nil)
-			_ = s.tunnel.Close()
+			if s.tunnel != nil {
+				_ = s.tunnel.Close()
+			} else {
+				s.device.endpoint.Close()
+			}
 			s.profile.engine.Close()
 			return
 		}

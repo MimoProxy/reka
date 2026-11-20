@@ -1,4 +1,4 @@
-// Package history keeps local diagnostic records in three bounded, independent
+// Package history keeps local diagnostic records in bounded, independent
 // buffers. A record owns serialized values only, never connections or DNS messages.
 package history
 
@@ -26,6 +26,7 @@ const (
 	Connections Kind = "connections"
 	DNS         Kind = "dns"
 	Requests    Kind = "requests"
+	Logs        Kind = "logs"
 )
 
 var ErrCursor = errors.New("invalid history cursor")
@@ -65,7 +66,7 @@ type entry struct {
 }
 
 type bucket struct {
-	rows  [maxRows]entry
+	rows  []entry
 	first int
 	count int
 	bytes int
@@ -80,13 +81,26 @@ type Store struct {
 	epoch   string
 	buckets map[Kind]*bucket
 	cleared map[Kind]map[string]time.Time
+	kinds   map[Kind]bool
+	rows    int
+	bytes   int
 }
 
 func New() *Store {
+	return NewBounded(maxRows, totalBytes/3)
+}
+
+// NewBounded caps each enabled history independently. With no kinds provided
+// it records all kinds, as the native controller has always done.
+func NewBounded(rows, bytes int, kinds ...Kind) *Store {
 	var epoch [8]byte
 	_, _ = rand.Read(epoch[:])
+	allowed := make(map[Kind]bool, len(kinds))
+	for _, kind := range kinds {
+		allowed[kind] = true
+	}
 	return &Store{epoch: hex.EncodeToString(epoch[:]), buckets: make(map[Kind]*bucket),
-		cleared: make(map[Kind]map[string]time.Time)}
+		cleared: make(map[Kind]map[string]time.Time), kinds: allowed, rows: max(1, rows), bytes: max(1, bytes)}
 }
 
 func (s *Store) Record(kind Kind, scope Scope, started time.Time, summary, detail any) {
@@ -95,7 +109,7 @@ func (s *Store) Record(kind Kind, scope Scope, started time.Time, summary, detai
 
 // RecordFlow adds a summary and its exact connection ID to the bounded history.
 func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint64, summary, detail any) {
-	if s == nil {
+	if s == nil || len(s.kinds) > 0 && !s.kinds[kind] {
 		return
 	}
 	data, err := json.Marshal(summary)
@@ -112,6 +126,9 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 	// Search the summary only. A detail can include authorized body previews.
 	search := strings.ToLower(string(data))
 	size := len(data) + len(private) + len(search) + len(scope.ProfileID) + 128
+	if size > s.bytes {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if started.Before(s.cleared[kind][scope.ProfileID]) {
@@ -119,10 +136,10 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 	}
 	b := s.buckets[kind]
 	if b == nil {
-		b = &bucket{}
+		b = &bucket{rows: make([]entry, s.rows)}
 		s.buckets[kind] = b
 	}
-	for b.count == maxRows || b.bytes+size > totalBytes/3 {
+	for b.count == len(b.rows) || size > s.bytes-b.bytes {
 		old := b.at(0)
 		b.bytes -= old.size
 		b.floor = old.seq
@@ -137,6 +154,15 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 }
 
 func (s *Store) Epoch() string { return s.epoch }
+
+func (s *Store) Count(kind Kind) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bucket := s.buckets[kind]; bucket != nil {
+		return bucket.count
+	}
+	return 0
+}
 
 // FlowRows fetches summaries only, without exposing HTTP request details.
 func (s *Store) FlowRows(profile string, flow uint64) (map[Kind][]Row, bool) {

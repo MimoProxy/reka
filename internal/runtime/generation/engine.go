@@ -66,6 +66,7 @@ type EngineOptions struct {
 	// Traffic is not recorded in desktop history.
 	HostPacketFlow bool
 	ObserveRoute   func(RouteObservation)
+	PacketHistory  *history.Store
 }
 
 type RouteObservation struct {
@@ -135,6 +136,7 @@ func NewEngine(opts EngineOptions) *Engine {
 	e := &Engine{opts: opts, listeners: map[string]*listener{}}
 	if opts.HostPacketFlow {
 		e.fake = RD.NewFakePool(2048)
+		e.history = opts.PacketHistory
 	} else {
 		e.history = history.New()
 		e.fake = RD.NewFakePool(65536)
@@ -150,7 +152,9 @@ func NewEngine(opts EngineOptions) *Engine {
 		return e.guard.Control(n, a, c)
 	}
 	opts.Backend.ProtectFD = nil
-	opts.Backend.History = e.history
+	if !opts.HostPacketFlow {
+		opts.Backend.History = e.history
+	}
 	opts.Backend.HistoryScope = func() history.Scope {
 		_, active := e.current()
 		return active.historyScope

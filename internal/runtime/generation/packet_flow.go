@@ -18,3 +18,7 @@ func (e *Engine) AttachPacketFlow(device tun.GVisorTun, mtu int, v4, v6 netip.Pr
 func (e *Engine) PacketFlowTraffic() (uint64, uint64) {
 	return e.backend.Traffic()
 }
+
+func (e *Engine) PacketFlowConnections() int {
+	return e.backend.ConnectionCount()
+}
