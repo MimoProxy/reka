@@ -162,7 +162,7 @@ func Open(opts Options) (*Service, error) {
 		ss, oo := string(opts.InitialSources), string(opts.InitialOverlay)
 		res, err := s.Commit(context.Background(), CommitRequest{
 			ChangeRequest: ChangeRequest{Profile: &p, Local: &l, Sources: &ss, Overlay: &oo},
-			OperationID:   "initial", Source: "initial",
+			Source:        "initial",
 		})
 		if err != nil {
 			return nil, err
@@ -172,9 +172,9 @@ func Open(opts Options) (*Service, error) {
 				return nil, fmt.Errorf("initial configuration: %s", describe(res))
 			}
 			// The documents are valid but reference secrets that cannot be
-			// stored before the kernel runs. Keep them as revision 1 without
+			// stored before the kernel runs. Keep the documents without
 			// starting them; storing the secrets re-applies them.
-			if err := s.storeUnstarted(profile, local, opts.InitialSources, opts.InitialOverlay, res.Diagnostics); err != nil {
+			if err := s.storeUnstarted(profile, local, opts.InitialSources, opts.InitialOverlay, res); err != nil {
 				return nil, err
 			}
 			s.log.Warn("the initial configuration needs secrets before it can start", "missing", res.Diagnostics.Errors().Error())
@@ -224,29 +224,33 @@ func onlySecretErrors(res Result) bool {
 	return len(errs) > 0
 }
 
-// storeUnstarted records the initial documents as revision 1 without
-// running them, for an empty state root whose import needs secrets.
-func (s *Service) storeUnstarted(profile, local, sources, overlay []byte, diags model.Diagnostics) error {
+// storeUnstarted records the initial documents without running them when the
+// import needs secrets.
+func (s *Service) storeUnstarted(profile, local, sources, overlay []byte, res Result) error {
+	number, err := s.nextRevision()
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	if _, err := s.store.WriteRevision(store.Revision{Number: 1, Operation: "initial", Source: "initial", Created: now,
+	if _, err := s.store.WriteRevision(store.Revision{Number: number, Operation: res.OperationID, Source: "initial", Created: now,
 		Message: "imported; waiting for secrets"}, profile, local, sources, overlay); err != nil {
 		return err
 	}
-	res := Result{OperationID: "initial", State: store.OpCommitted, Revision: 1, Diagnostics: diags}
+	res.State, res.Revision, res.Error = store.OpCommitted, number, nil
 	b, _ := json.Marshal(res)
-	if err := s.store.WriteOperation(store.Operation{ID: "initial", State: store.OpCommitted, Revision: 1,
+	if err := s.store.WriteOperation(store.Operation{ID: res.OperationID, State: store.OpCommitted, Revision: number,
 		RequestHash: "initial", Created: now, Updated: now, Result: b}); err != nil {
 		return err
 	}
-	if err := s.store.WriteActive(store.Active{Revision: 1, Profile: store.Hash(profile), Local: store.Hash(local),
-		Sources: store.Hash(sources), Overlay: store.Hash(overlay), Operation: "initial", Updated: now}); err != nil {
+	if err := s.store.WriteActive(store.Active{Revision: number, Profile: store.Hash(profile), Local: store.Hash(local),
+		Sources: store.Hash(sources), Overlay: store.Hash(overlay), Operation: res.OperationID, Updated: now}); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.active, s.profile, s.local, s.warnings = 1, profile, local, diags
+	s.active, s.profile, s.local, s.warnings = number, profile, local, res.Diagnostics
 	s.sources, s.overlay = sources, overlay
 
-	s.startErr = diags.Errors()
+	s.startErr = res.Diagnostics.Errors()
 	s.mu.Unlock()
 	return nil
 }
@@ -594,8 +598,7 @@ func (s *Service) commit(ctx context.Context, req CommitRequest, restoredFrom ui
 		return res, nil
 	}
 
-	initial := s.active == 0 && req.OperationID == "initial"
-	if !initial && req.BaseRevision != s.active {
+	if req.BaseRevision != s.active {
 		res.Conflict = s.conflict(req.BaseRevision)
 		return reject(errf(CodeConflict, "revision %d is active, not %d", s.active, req.BaseRevision))
 	}
@@ -622,7 +625,7 @@ func (s *Service) commit(ctx context.Context, req CommitRequest, restoredFrom ui
 	}
 	unchanged := bytes.Equal(profile, s.profile) && bytes.Equal(local, s.local) &&
 		bytes.Equal(sources, s.sources) && bytes.Equal(overlay, s.overlay) && sameInstances(s.eff, eff)
-	if !initial && s.startErr == nil && unchanged {
+	if s.startErr == nil && unchanged {
 		res.State, res.Revision, res.NoChange = store.OpCommitted, s.active, true
 		op.State, op.Revision = store.OpCommitted, s.active
 		op.Result, _ = json.Marshal(res)
