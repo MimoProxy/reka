@@ -110,6 +110,7 @@ type Engine struct {
 	dnsListener       *sagernet.DNSListener
 	dnsAddress        string
 	opts              EngineOptions
+	packetFlowRealDNS atomic.Bool
 	backend           *sagernet.Backend
 	rt                *runtime.Runtime[*sagernet.Outbound]
 

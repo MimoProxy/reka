@@ -4,7 +4,10 @@ package packettunnel
 
 import (
 	"errors"
+	"net"
+	"net/http"
 	"net/netip"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -114,6 +117,10 @@ func StartProbeProfile(snapshot []byte, controls profile.Controls) (*Session, er
 	return openProfileSession(snapshot, controls, false, true)
 }
 
+func (s *Session) ProviderClient(name string) (*http.Client, error) {
+	return s.profile.engine.SubscriptionProxyClient("ios", name)
+}
+
 func openProfileSession(snapshot []byte, controls profile.Controls, trace, probeOnly bool) (*Session, error) {
 	bundle, err := profile.Decode(snapshot)
 	if err != nil {
@@ -133,6 +140,9 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 		HostPacketFlow: true, PacketHistory: s.events,
 		Backend: sagernet.Options{Logger: s.logger.With("component", "core")},
 	}
+	if runtime.GOOS == "ios" {
+		opts.Resolver = net.DefaultResolver
+	}
 	p := &profileSession{base: base, summary: profile.Describe(base)}
 	if trace {
 		p.trace = &routeTrace{}
@@ -146,6 +156,12 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	}
 	s.profile = p
 	return s, nil
+}
+
+func (s *Session) SetRealDNS(real bool) {
+	if s.profile != nil {
+		s.profile.engine.SetPacketFlowRealDNS(real)
+	}
 }
 
 func (p *profileSession) publish(base *compile.Effective, summary profile.Summary, controls profile.Controls) error {

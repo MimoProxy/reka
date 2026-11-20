@@ -1,4 +1,4 @@
-package service
+package subscription
 
 import (
 	"errors"
@@ -8,9 +8,9 @@ import (
 	"github.com/MimoProxy/reka/internal/resource"
 )
 
-// Remote paths are interpreted only inside an explicit local root. os.Root
+// ReadProviderFile interprets paths only inside an explicit local root. os.Root
 // rejects parent traversal, absolute paths and symlinks escaping that root.
-func readProviderFile(directory, path string) ([]byte, error) {
+func ReadProviderFile(directory, path string) ([]byte, error) {
 	if directory == "" {
 		return nil, errors.New("provider_directory_required")
 	}

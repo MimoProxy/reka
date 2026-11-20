@@ -22,3 +22,9 @@ func (e *Engine) PacketFlowTraffic() (uint64, uint64) {
 func (e *Engine) PacketFlowConnections() int {
 	return e.backend.ConnectionCount()
 }
+
+// SetPacketFlowRealDNS keeps ordinary client addresses available to the host
+// routing table when NetworkExtension routes only a subset of destinations.
+func (e *Engine) SetPacketFlowRealDNS(real bool) {
+	e.packetFlowRealDNS.Store(real)
+}

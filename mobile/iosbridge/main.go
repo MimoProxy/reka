@@ -10,6 +10,9 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -17,6 +20,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/mobile/packettunnel"
 	"github.com/MimoProxy/reka/mobile/profile"
 )
@@ -53,6 +57,77 @@ func RekaGoPrepareProfile(input, output, cache *C.char, failure *C.char, capacit
 	defer cancel()
 	if err := profile.PrepareFile(ctx, C.GoString(input), C.GoString(output), C.GoString(cache)); err != nil {
 		writeError(failure, capacity, err.Error())
+		return 0
+	}
+	return 1
+}
+
+//export RekaGoPrepareProfileEx
+func RekaGoPrepareProfileEx(input, output, cache, optionsPath *C.char, failure *C.char, capacity C.size_t) C.int32_t {
+	if input == nil || output == nil || cache == nil || optionsPath == nil {
+		return 0
+	}
+	data, err := os.ReadFile(C.GoString(optionsPath))
+	var options struct {
+		profile.PrepareOptions
+		ProxySnapshot string           `json:"proxySnapshot"`
+		ProxyControls profile.Controls `json:"proxyControls"`
+		Background    bool             `json:"background"`
+	}
+	if err != nil || len(data) > 256<<10 || json.Unmarshal(data, &options) != nil {
+		return 0
+	}
+	timeout := 75 * time.Second
+	if options.Background {
+		timeout = 22 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var seed *packettunnel.Session
+	defer func() {
+		if seed != nil {
+			seed.Close()
+		}
+	}()
+	if options.ProxySnapshot != "" {
+		options.ClientFor = func(name string) (*http.Client, error) {
+			if seed == nil {
+				raw, err := os.ReadFile(options.ProxySnapshot)
+				if err != nil {
+					return nil, err
+				}
+				seed, err = packettunnel.StartProbeProfile(raw, options.ProxyControls)
+				if err != nil {
+					return nil, err
+				}
+			}
+			return seed.ProviderClient(name)
+		}
+	}
+	if err := profile.PrepareFileWithOptions(ctx, C.GoString(input), C.GoString(output), C.GoString(cache), options.PrepareOptions); err != nil {
+		var report *profile.ValidationError
+		if !errors.As(err, &report) {
+			report = &profile.ValidationError{Message: err.Error()}
+		}
+		bounded := *report
+		bounded.Message = history.Text(bounded.Message, 512)
+		bounded.Diagnostics = bounded.Diagnostics[:min(len(bounded.Diagnostics), 40)]
+		for i := range bounded.Diagnostics {
+			bounded.Diagnostics[i].Message = history.Text(bounded.Diagnostics[i].Message, 512)
+			bounded.Diagnostics[i].Path = history.Text(bounded.Diagnostics[i].Path, 256)
+		}
+		for {
+			payload, encodeErr := json.Marshal(bounded)
+			if encodeErr == nil && len(payload) < int(capacity) {
+				writeError(failure, capacity, string(payload))
+				break
+			}
+			if len(bounded.Diagnostics) == 0 {
+				break
+			}
+			bounded.Diagnostics = bounded.Diagnostics[:len(bounded.Diagnostics)/2]
+		}
 		return 0
 	}
 	return 1
@@ -164,6 +239,13 @@ func RekaGoNetworkChanged(id C.uint64_t, available, changed C.int32_t) {
 	}
 }
 
+//export RekaGoSetRealDNS
+func RekaGoSetRealDNS(id C.uint64_t, real C.int32_t) {
+	if session := lookup(id); session != nil {
+		session.SetRealDNS(real != 0)
+	}
+}
+
 //export RekaGoPolicyStatus
 func RekaGoPolicyStatus(id C.uint64_t, out unsafe.Pointer, capacity C.size_t) C.int32_t {
 	session := lookup(id)
@@ -192,7 +274,7 @@ func decodeControls(data unsafe.Pointer, length C.size_t) (profile.Controls, boo
 }
 
 func writeError(failure *C.char, capacity C.size_t, description string) {
-	if failure != nil && capacity > 1 && capacity <= 4096 {
+	if failure != nil && capacity > 1 && capacity <= 48<<10 {
 		buffer := unsafe.Slice((*byte)(unsafe.Pointer(failure)), int(capacity))
 		n := copy(buffer[:len(buffer)-1], description)
 		buffer[n] = 0

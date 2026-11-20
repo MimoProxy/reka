@@ -509,7 +509,7 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 			fetcher.Client = m.client
 		}
 		if p.Type == "file" {
-			data, err = readProviderFile(spec.ProviderDirectory, p.Path)
+			data, err = subscription.ReadProviderFile(spec.ProviderDirectory, p.Path)
 			if err != nil {
 				return fail(err.Error())
 			}

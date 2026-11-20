@@ -26,10 +26,21 @@ type Bundle struct {
 }
 
 type Summary struct {
-	Groups []Group           `json:"groups"`
-	Names  map[string]string `json:"names"`
-	Nodes  int               `json:"nodes"`
-	Rules  int               `json:"rules"`
+	Groups      []Group           `json:"groups"`
+	Names       map[string]string `json:"names"`
+	Nodes       int               `json:"nodes"`
+	Rules       int               `json:"rules"`
+	Outbounds   []Node            `json:"outbounds"`
+	Resources   []Asset           `json:"resources,omitempty"`
+	Format      string            `json:"format,omitempty"`
+	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
+}
+
+const NodeGroup = "reka-ios-nodes"
+
+type Node struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
 type Group struct {
@@ -53,6 +64,14 @@ func Decode(data []byte) (*Bundle, error) {
 }
 
 func (b *Bundle) Compile() (*compile.Effective, error) {
+	eff, diagnostics := b.compile()
+	if diagnostics.HasErrors() {
+		return nil, diagnosticError("invalid profile", diagnostics)
+	}
+	return eff, nil
+}
+
+func (b *Bundle) compile() (*compile.Effective, model.Diagnostics) {
 	eff, diagnostics := compile.Compile(b.Profile, nil, compile.Options{ReadResource: func(hash string) ([]byte, error) {
 		if data := b.Resources[hash]; data != nil {
 			return data, nil
@@ -60,13 +79,45 @@ func (b *Bundle) Compile() (*compile.Effective, error) {
 		return nil, errors.New("rule resource is missing from this snapshot")
 	}})
 	if diagnostics.HasErrors() {
-		return nil, diagnosticError("invalid profile", diagnostics)
+		return nil, diagnostics
+	}
+	if len(eff.Groups) == 0 && eff.Router.Rules().Len() == 0 {
+		if err := addNodeGroup(eff); err != nil {
+			return nil, append(diagnostics, model.Diagnostic{
+				Severity: model.SeverityError, Code: "ios.node-group", Path: "/outbounds", Message: err.Error(),
+			})
+		}
 	}
 	// These maps describe configuration edits. The phone publishes a read-only
 	// snapshot and does not need to retain editor provenance in the extension.
 	eff.Provenance = nil
 	eff.SourceHashes = nil
-	return eff, nil
+	return eff, diagnostics
+}
+
+func addNodeGroup(eff *compile.Effective) error {
+	var members, ids []string
+	for _, out := range eff.Outbounds {
+		ids = append(ids, out.ID)
+		if !out.Builtin {
+			members = append(members, out.ID)
+		}
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	id := NodeGroup
+	for slices.Contains(ids, id) {
+		id += "-1"
+	}
+	eff.Groups = []router.Group{{ID: id, Members: members, Selected: members[0]}}
+	eff.GroupMetadata = map[string]compile.GroupMetadata{id: {Name: "Nodes"}}
+	eff.Final = id
+	eff.Routing.Global = id
+	var err error
+	eff.Router, err = router.New(eff.Router.Rules(), router.Options{Outbounds: ids, Groups: eff.Groups, Final: id})
+	eff.ActiveRouter = eff.Router
+	return err
 }
 
 func Describe(eff *compile.Effective) Summary {
@@ -77,6 +128,7 @@ func Describe(eff *compile.Effective) Summary {
 			continue
 		}
 		summary.Nodes++
+		summary.Outbounds = append(summary.Outbounds, Node{ID: outbound.ID, Type: outbound.Type})
 		if outbound.Name != "" {
 			summary.Names[outbound.ID] = outbound.Name
 		}
@@ -96,6 +148,9 @@ func Describe(eff *compile.Effective) Summary {
 	}
 	if summary.Groups == nil {
 		summary.Groups = []Group{}
+	}
+	if summary.Outbounds == nil {
+		summary.Outbounds = []Node{}
 	}
 	return summary
 }

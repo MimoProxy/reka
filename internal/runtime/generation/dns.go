@@ -153,7 +153,7 @@ func (e *Engine) ExchangeDNS(ctx context.Context, q *D.Msg) (*D.Msg, error) {
 		return nil, err
 	}
 	defer release()
-	return resolver.Exchange(ctx, q, "normal", true)
+	return resolver.Exchange(ctx, q, "normal", !e.packetFlowRealDNS.Load())
 }
 
 // A foreground DNS operation owns its captured dependencies until all racing

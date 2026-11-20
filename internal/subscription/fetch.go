@@ -117,6 +117,7 @@ type Fetcher struct {
 	Blobs        *resource.Store
 	Now          func() time.Time
 	ValidateBody func([]byte) error
+	MaxBytes     int
 }
 type Batch struct {
 	f        *Fetcher
@@ -130,6 +131,15 @@ type Batch struct {
 func (f *Fetcher) Batch(previous map[string]Entry, force bool) *Batch {
 	return &Batch{f: f, Previous: previous, Entries: map[string]Entry{}, Force: force}
 }
+
+func RequestDigest(raw string, headers http.Header) string {
+	identity, _ := json.Marshal(struct {
+		URL     string
+		Headers http.Header
+	}{raw, headers})
+	return resource.Hash(identity)
+}
+
 func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers http.Header, interval int) ([]byte, error) {
 	if !ValidURL(raw) {
 		return nil, failure("invalid_url")
@@ -138,15 +148,14 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 	if kind == "subscription" || kind == "proxy" {
 		limit = model.MaxDocumentSize
 	}
+	if b.f.MaxBytes > 0 {
+		limit = min(limit, b.f.MaxBytes)
+	}
 	now := time.Now().UTC()
 	if b.f.Now != nil {
 		now = b.f.Now()
 	}
-	identity, _ := json.Marshal(struct {
-		URL     string
-		Headers http.Header
-	}{raw, headers})
-	request := resource.Hash(identity)
+	request := RequestDigest(raw, headers)
 	old := b.Previous[id]
 	var cached []byte
 	if old.Request == request && old.Hash != "" {
