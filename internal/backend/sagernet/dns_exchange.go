@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -260,16 +261,16 @@ func exchangeDoHTransport(ctx context.Context, ep RD.Endpoint, q *D.Msg, transpo
 	if ep.Scheme == "http" {
 		scheme = "http"
 	}
-	url := scheme + "://" + net.JoinHostPort(ep.Host, ep.Port) + ep.Path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
+	origin := scheme + "://" + net.JoinHostPort(ep.Host, ep.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+ep.Path, bytes.NewReader(wire))
 	if err != nil {
-		return nil, err
+		return nil, redactDoHURLError(err, origin)
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactDoHURLError(err, origin)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Type"), "application/dns-message") {
@@ -285,6 +286,24 @@ func exchangeDoHTransport(ctx context.Context, ep RD.Endpoint, q *D.Msg, transpo
 	}
 	return m, nil
 }
+
+func redactDoHURLError(err error, origin string) error {
+	urlErr, ok := err.(*url.Error)
+	if !ok {
+		return err
+	}
+	cause := urlErr.Err
+	// The HTTP client can quote a malformed Location header before CheckRedirect runs.
+	if strings.HasPrefix(cause.Error(), "failed to parse Location header ") {
+		cause = invalidDoHRedirectError{cause: cause}
+	}
+	return &url.Error{Op: urlErr.Op, URL: origin, Err: cause}
+}
+
+type invalidDoHRedirectError struct{ cause error }
+
+func (e invalidDoHRedirectError) Error() string { return "invalid DNS redirect URL" }
+func (e invalidDoHRedirectError) Unwrap() error { return e.cause }
 
 // exchangeDoT sends one query over a fresh DNS-over-TLS connection.
 func exchangeDoT(ctx context.Context, open func(context.Context, string) (net.Conn, error), tlsConfig *tls.Config, q *D.Msg) (*D.Msg, error) {
