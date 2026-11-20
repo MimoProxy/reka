@@ -281,6 +281,20 @@ func (s *Store) WriteActive(a Active) error {
 	return s.Barrier()
 }
 
+// DeleteActive restores an empty state root after an unsuccessful first commit.
+func (s *Store) DeleteActive() error {
+	if err := os.Remove(filepath.Join(s.root, "active.json")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err := syncDir(s.root); err != nil {
+		return err
+	}
+	return s.Barrier()
+}
+
 var opIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 // ValidOperationID checks an operation ID.

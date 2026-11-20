@@ -101,6 +101,8 @@ type Service struct {
 	engine          *generation.Engine
 	events          *Broker
 	log             *slog.Logger
+	// Tests can inject an error after active.json has been written.
+	writeActive func(*store.Store, store.Active) error
 
 	mu       sync.Mutex
 	active   uint64
@@ -123,7 +125,7 @@ func Open(opts Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{opts: opts, store: st, engine: opts.Engine, events: NewBroker(), log: opts.Logger}
+	s := &Service{opts: opts, store: st, writeActive: (*store.Store).WriteActive, engine: opts.Engine, events: NewBroker(), log: opts.Logger}
 	if opts.Engine == nil {
 		return nil, fmt.Errorf("runtime engine required")
 	}
@@ -626,6 +628,10 @@ func (s *Service) commit(ctx context.Context, req CommitRequest, restoredFrom ui
 		op.Result, _ = json.Marshal(res)
 		return res, s.store.WriteOperation(op)
 	}
+	before, err := s.store.ReadActive()
+	if err != nil {
+		return Result{}, err
+	}
 	prepared, err := s.engine.Prepare(eff)
 	if err != nil {
 		code := CodePrepare
@@ -678,16 +684,26 @@ func (s *Service) commit(ctx context.Context, req CommitRequest, restoredFrom ui
 
 	gen, actErr := s.engine.Activate(prepared, number)
 	if actErr != nil {
-		return s.rollback(op, res, number, actErr)
+		return s.rollback(op, res, actErr, true)
 	}
 	if err := s.fail("activated"); err != nil {
 		return Result{}, err
 	}
-	if err := s.store.WriteActive(store.Active{Revision: number, Profile: store.Hash(profile), Local: store.Hash(local),
+	if err := s.writeActive(s.store, store.Active{Revision: number, Profile: store.Hash(profile), Local: store.Hash(local),
 		Sources: store.Hash(sources), Overlay: store.Hash(overlay), Operation: req.OperationID, Updated: time.Now().UTC()}); err != nil {
-		// The runtime runs the new revision but it is not durable: go back
-		// to the old one so what runs matches what is recorded.
-		return s.rollback(op, res, number, err)
+		// The rename may already have succeeded. Restore the previous record
+		// before removing the revision it could now point to.
+		var restoreErr error
+		if before == nil {
+			restoreErr = s.store.DeleteActive()
+		} else {
+			restoreErr = s.writeActive(s.store, *before)
+		}
+		if restoreErr != nil {
+			res.Degraded = true
+			s.log.Error("restore active revision record", "revision", s.active, "err", restoreErr)
+		}
+		return s.rollback(op, res, err, restoreErr == nil)
 	}
 	if err := s.fail("active-written"); err != nil {
 		return Result{}, err
@@ -710,9 +726,10 @@ func (s *Service) commit(ctx context.Context, req CommitRequest, restoredFrom ui
 	return res, nil
 }
 
-// rollback returns to the previous revision after the switch or its
-// recording failed. Called with s.mu held.
-func (s *Service) rollback(op store.Operation, res Result, number uint64, cause error) (Result, error) {
+// rollback returns to the previous runtime after the switch or its recording
+// failed. Discard the failed revision only once the active record is safe.
+// Called with s.mu held.
+func (s *Service) rollback(op store.Operation, res Result, cause error, discard bool) (Result, error) {
 	res.State, res.Revision = store.OpFailed, 0
 	res.Error = errf(CodeActivate, "%v", cause)
 	var ae *generation.ActivateError
@@ -732,10 +749,12 @@ func (s *Service) rollback(op store.Operation, res Result, number uint64, cause 
 	op.Updated = time.Now().UTC()
 	op.Result, _ = json.Marshal(res)
 	if err := s.store.WriteOperation(op); err != nil {
-		return Result{}, err
+		return res, err
 	}
-	if err := s.store.DeleteRevision(number); err != nil {
-		s.log.Error("remove failed revision", "revision", number, "err", err)
+	if discard {
+		if err := s.store.DeleteRevision(op.Revision); err != nil {
+			s.log.Error("remove failed revision", "revision", op.Revision, "err", err)
+		}
 	}
 	s.events.Publish(EventRejected, res)
 	return res, nil
