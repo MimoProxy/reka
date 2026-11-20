@@ -13,6 +13,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/secret"
 )
 
 const bundleVersion = 1
@@ -21,6 +22,7 @@ const MaxBundleBytes = 4 << 20
 type Bundle struct {
 	Version   int               `json:"version"`
 	Profile   json.RawMessage   `json:"profile"`
+	Local     json.RawMessage   `json:"local,omitempty"`
 	Resources map[string][]byte `json:"resources,omitempty"`
 	Summary   Summary           `json:"summary"`
 }
@@ -53,6 +55,8 @@ type Group struct {
 type Controls struct {
 	Mode       string            `json:"mode"`
 	Selections map[string]string `json:"selections"`
+	ProfileID  string            `json:"profileID,omitempty"`
+	Secrets    secret.Store      `json:"-"`
 }
 
 func Decode(data []byte) (*Bundle, error) {
@@ -64,15 +68,19 @@ func Decode(data []byte) (*Bundle, error) {
 }
 
 func (b *Bundle) Compile() (*compile.Effective, error) {
-	eff, diagnostics := b.compile()
+	return b.CompileWithSecrets(nil)
+}
+
+func (b *Bundle) CompileWithSecrets(secrets secret.Store) (*compile.Effective, error) {
+	eff, diagnostics := b.compile(secrets)
 	if diagnostics.HasErrors() {
 		return nil, diagnosticError("invalid profile", diagnostics)
 	}
 	return eff, nil
 }
 
-func (b *Bundle) compile() (*compile.Effective, model.Diagnostics) {
-	eff, diagnostics := compile.Compile(b.Profile, nil, compile.Options{ReadResource: func(hash string) ([]byte, error) {
+func (b *Bundle) compile(secrets secret.Store) (*compile.Effective, model.Diagnostics) {
+	eff, diagnostics := compile.Compile(b.Profile, b.Local, compile.Options{Secrets: secrets, ReadResource: func(hash string) ([]byte, error) {
 		if data := b.Resources[hash]; data != nil {
 			return data, nil
 		}

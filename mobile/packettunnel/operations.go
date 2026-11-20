@@ -13,9 +13,25 @@ import (
 )
 
 type Operation struct {
-	Action string `json:"action"`
-	ID     uint64 `json:"id,omitempty"`
-	Member string `json:"member,omitempty"`
+	Action     string               `json:"action"`
+	ID         uint64               `json:"id,omitempty"`
+	Member     string               `json:"member,omitempty"`
+	IDs        []uint64             `json:"ids,omitempty"`
+	Category   string               `json:"category,omitempty"`
+	Cursor     string               `json:"cursor,omitempty"`
+	Search     string               `json:"search,omitempty"`
+	Offset     int                  `json:"offset,omitempty"`
+	Limit      int                  `json:"limit,omitempty"`
+	Target     string               `json:"target,omitempty"`
+	Network    string               `json:"network,omitempty"`
+	Resolve    bool                 `json:"resolve,omitempty"`
+	Rule       string               `json:"rule,omitempty"`
+	TTLSeconds int                  `json:"ttl_seconds,omitempty"`
+	URL        string               `json:"url,omitempty"`
+	TimeoutMS  int                  `json:"timeout_ms,omitempty"`
+	Members    []string             `json:"members,omitempty"`
+	Rounds     int                  `json:"rounds,omitempty"`
+	DNS        *api.DNSQueryRequest `json:"dns,omitempty"`
 }
 
 type ConnectionRow struct {
@@ -30,9 +46,10 @@ type ConnectionRow struct {
 }
 
 type Latency struct {
-	Member  string `json:"member"`
-	DelayMS *int64 `json:"delayMs,omitempty"`
-	Status  int    `json:"status,omitempty"`
+	Member   string `json:"member"`
+	Resolved string `json:"resolved,omitempty"`
+	DelayMS  *int64 `json:"delayMs,omitempty"`
+	Status   int    `json:"status,omitempty"`
 }
 
 type tunnelLogHandler struct {
@@ -77,7 +94,15 @@ func (s *Session) Counts() (connections, dns int) {
 	} else {
 		connections = s.backend.ConnectionCount()
 	}
-	return connections, s.events.Count(history.DNS)
+	return connections, s.events.CountProfile(history.DNS, s.historyProfile())
+}
+
+func (s *Session) historyProfile() string {
+	if s.profile == nil {
+		return ""
+	}
+	_, scope := s.profile.engine.History()
+	return scope.ProfileID
 }
 
 func (s *Session) RunOperation(op Operation) (any, error) {
@@ -93,13 +118,13 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		}
 		return s.closeConnection(op.ID), nil
 	case "dns":
-		return s.events.List(history.DNS, "", history.ListOptions{Limit: eventRows})
+		return s.historyPage(history.DNS, op)
 	case "logs":
-		return s.events.List(history.Logs, "", history.ListOptions{Limit: eventRows})
+		return s.historyPage(history.Logs, op)
 	case "probe":
-		return s.probe(op.Member)
+		return s.probe(op)
 	default:
-		return nil, errors.New("unknown packet tunnel operation")
+		return s.runDiagnostics(op)
 	}
 }
 
@@ -172,14 +197,18 @@ func (s *Session) closeConnection(id uint64) bool {
 	return count > 0
 }
 
-func (s *Session) probe(member string) (Latency, error) {
+func (s *Session) probe(op Operation) (Latency, error) {
+	member := op.Member
 	if s.profile == nil || member == "" || len(member) > 128 {
 		return Latency{}, errors.New("probe requires a profile member")
 	}
+	if op.URL == "" {
+		op.URL = "https://www.gstatic.com/generate_204"
+	}
 	result, err := s.profile.engine.ProbeOutbound(s.ctx, api.ProbeRequest{
-		Outbound: member, URL: "https://www.gstatic.com/generate_204", TimeoutMS: 5000,
+		Outbound: member, URL: op.URL, TimeoutMS: op.TimeoutMS,
 	})
-	latency := Latency{Member: member, Status: result.StatusCode}
+	latency := Latency{Member: member, Resolved: result.ResolvedOutbound, Status: result.StatusCode}
 	if err == nil {
 		latency.DelayMS = &result.DelayMS
 	}
@@ -213,5 +242,11 @@ func (s *Session) NetworkChanged(available, changed bool) {
 		s.logger.Info("Network available")
 	} else {
 		s.logger.Warn("Network unavailable")
+	}
+}
+
+func (s *Session) SetNetworkInterface(name string) {
+	if s.profile != nil && s.ctx.Err() == nil && len(name) <= 64 {
+		s.profile.engine.SetPacketFlowInterface(name)
 	}
 }

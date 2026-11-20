@@ -5,6 +5,8 @@ import "time"
 type HTTPSDebugRequest struct {
 	Targets     []string `json:"targets"`
 	CaptureBody bool     `json:"capture_body,omitempty"`
+	AllowHTTP   bool     `json:"allow_http,omitempty"`
+	MaxClients  int      `json:"-"`
 }
 
 type HTTPSDebugStatus struct {

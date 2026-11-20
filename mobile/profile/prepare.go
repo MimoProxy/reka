@@ -16,6 +16,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/rulesdata"
+	"github.com/MimoProxy/reka/internal/secret"
 	"github.com/MimoProxy/reka/internal/subscription"
 	"go.yaml.in/yaml/v3"
 )
@@ -30,7 +31,29 @@ type PrepareOptions struct {
 	OutputState       string                             `json:"outputState"`
 	RefreshAsset      string                             `json:"refreshAsset"`
 	ForceProviders    bool                               `json:"forceProviders"`
+	Scenes            []SceneDefinition                  `json:"scenes"`
+	RebindSnapshot    string                             `json:"rebindSnapshot"`
+	Secrets           secret.Store                       `json:"-"`
 	ClientFor         func(string) (*http.Client, error) `json:"-"`
+}
+
+type SceneDefinition struct {
+	ID        string   `json:"id"`
+	Interface string   `json:"interface,omitempty"`
+	IPCIDR    []string `json:"ip-cidr,omitempty"`
+}
+
+func sceneSettings(scenes []SceneDefinition) (json.RawMessage, error) {
+	if len(scenes) > 32 {
+		return nil, errors.New("at most 32 network scenes are supported")
+	}
+	if len(scenes) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(struct {
+		Version int               `json:"schema-version"`
+		Scenes  []SceneDefinition `json:"network-scenes"`
+	}{1, scenes})
 }
 
 type Asset struct {
@@ -90,7 +113,23 @@ func PrepareFileWithOptions(ctx context.Context, input, output, cache string, op
 	defer client.CloseIdleConnections()
 	fetcher := &subscription.Fetcher{Client: client, Blobs: blobs, MaxBytes: maxAssetBytes}
 	p := &preparer{options: options, cache: cache, client: client, fetcher: fetcher, batch: fetcher.Batch(previous, false)}
-	bundle, err := prepare(ctx, raw, p)
+	var bundle *Bundle
+	if options.RebindSnapshot != "" {
+		bundle, err = rebind(options.RebindSnapshot, options)
+		if err == nil {
+			for hash, data := range bundle.Resources {
+				if !resource.ValidHash(hash) || resource.Hash(data) != hash {
+					return errors.New("archive resource digest mismatch")
+				}
+				if _, err := blobs.Put(data); err != nil {
+					return errors.New("cannot cache archive resources")
+				}
+			}
+			p.batch.Entries = previous
+		}
+	} else {
+		bundle, err = prepare(ctx, raw, p)
+	}
 	if err != nil {
 		return err
 	}
@@ -157,27 +196,20 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		}
 	}
 
-	delete(document, "listeners")
-	dns, ok := document["dns"].(map[string]any)
-	if !ok {
-		dns = map[string]any{
-			"nameserver": []string{"system", "https://1.1.1.1/dns-query"}, "enhanced-mode": "fake-ip",
-			"fake-ip-range": "198.18.0.0/16", "ipv6": true,
-		}
-		document["dns"] = dns
-	}
-	delete(dns, "listen")
-	dns["cache-size"] = boundedNumber(dns["cache-size"], 512)
-	dns["max-concurrent-upstreams"] = boundedNumber(dns["max-concurrent-upstreams"], 2)
+	normalize(document)
 	data, err := json.Marshal(document)
 	if err != nil {
 		return nil, errors.New("could not encode profile")
 	}
 	bundle.Profile = data
-	eff, compileDiagnostics := bundle.compile()
+	bundle.Local, err = sceneSettings(p.options.Scenes)
+	if err != nil {
+		return nil, err
+	}
+	eff, compileDiagnostics := bundle.compile(p.options.Secrets)
 	for i := range compileDiagnostics {
 		d := &compileDiagnostics[i]
-		if pos, ok := positions[d.Path]; ok {
+		if pos, ok := positions[d.Path]; ok && d.Document == model.DocProfile {
 			d.Line, d.Column = pos.Line, pos.Column
 		} else {
 			// The compiler read normalized JSON. Its line numbers don't refer
@@ -193,6 +225,59 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	bundle.Summary.Format = format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = p.assets
+	return bundle, nil
+}
+
+func normalize(document map[string]any) {
+	delete(document, "listeners")
+	dns, ok := document["dns"].(map[string]any)
+	if !ok {
+		dns = map[string]any{
+			"nameserver": []string{"system", "https://1.1.1.1/dns-query"}, "enhanced-mode": "fake-ip",
+			"fake-ip-range": "198.18.0.0/16", "ipv6": true,
+		}
+		document["dns"] = dns
+	}
+	delete(dns, "listen")
+	dns["cache-size"] = boundedNumber(dns["cache-size"], 512)
+	dns["max-concurrent-upstreams"] = boundedNumber(dns["max-concurrent-upstreams"], 2)
+}
+
+func rebind(path string, options PrepareOptions) (*Bundle, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > MaxBundleBytes {
+		return nil, errors.New("cannot read prepared archive")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("cannot read prepared archive")
+	}
+	bundle, err := Decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	var document map[string]any
+	if json.Unmarshal(bundle.Profile, &document) != nil || document == nil {
+		return nil, errors.New("invalid archived profile")
+	}
+	normalize(document)
+	bundle.Profile, err = json.Marshal(document)
+	if err != nil {
+		return nil, err
+	}
+	bundle.Local, err = sceneSettings(options.Scenes)
+	if err != nil {
+		return nil, err
+	}
+	eff, diagnostics := bundle.compile(options.Secrets)
+	if diagnostics.HasErrors() {
+		return nil, &ValidationError{"Invalid profile", diagnostics}
+	}
+	original := bundle.Summary
+	bundle.Summary = Describe(eff)
+	bundle.Summary.Format = original.Format
+	bundle.Summary.Diagnostics = diagnostics
+	bundle.Summary.Resources = original.Resources
 	return bundle, nil
 }
 
@@ -378,7 +463,21 @@ func (p *preparer) nativeAssets(ctx context.Context, document map[string]any, re
 				asset.Source = "http"
 				asset.Automatic, _ = download["automatic"].(bool)
 				interval, _ := download["interval"].(int)
-				data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
+				if name, ref := secret.ParseRef(address); ref {
+					if p.options.Secrets == nil || secret.ValidName(name) != nil {
+						return assetError(asset, errors.New("resource credential unavailable"))
+					}
+					address, err = p.options.Secrets.Get(name)
+					if err != nil {
+						return assetError(asset, errors.New("resource credential unavailable"))
+					}
+					data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
+					if err != nil {
+						return assetError(asset, errors.New("protected resource download failed"))
+					}
+				} else {
+					data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
+				}
 			} else {
 				asset.Source = "file"
 				if !resource.ValidHash(hash) {

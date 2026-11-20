@@ -41,7 +41,9 @@ type httpsDebug struct {
 	upstreamRoots *x509.CertPool
 	profileID     string
 	auth          string
+	allowHTTP     bool
 	previewSlots  chan struct{}
+	slots         chan struct{}
 
 	mu      sync.Mutex
 	tunnels map[*debugTunnel]struct{}
@@ -76,10 +78,15 @@ func (b *Backend) startHTTPSDebug(request api.HTTPSDebugRequest, roots *x509.Cer
 	sort.Strings(targets)
 	password := hex.EncodeToString(randomDebugBytes(24))
 	ctx, cancel := context.WithDeadline(b.ctx, expires)
+	maxClients := request.MaxClients
+	if maxClients <= 0 || maxClients > 16 {
+		maxClients = 16
+	}
 	debug := &httpsDebug{
 		backend: b, certificates: certificates, ctx: ctx, cancel: cancel, upstreamRoots: roots, listener: listener,
-		auth:    base64.StdEncoding.EncodeToString([]byte(debugUsername + ":" + password)),
+		auth: base64.StdEncoding.EncodeToString([]byte(debugUsername + ":" + password)), allowHTTP: request.AllowHTTP,
 		tunnels: make(map[*debugTunnel]struct{}), previewSlots: make(chan struct{}, 16),
+		slots: make(chan struct{}, maxClients),
 		status: api.HTTPSDebugStatus{
 			Running: true, Address: listener.Addr().String(), Targets: targets,
 			Username: debugUsername, Password: password, Certificate: publicCA,
@@ -91,7 +98,7 @@ func (b *Backend) startHTTPSDebug(request api.HTTPSDebugRequest, roots *x509.Cer
 	}
 	debug.server = &http.Server{
 		Handler: http.HandlerFunc(debug.connect), ReadHeaderTimeout: 5 * time.Second,
-		MaxHeaderBytes: 16 << 10, IdleTimeout: 5 * time.Second,
+		MaxHeaderBytes: 16 << 10, IdleTimeout: 5 * time.Second, WriteTimeout: debugTimeout,
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	b.httpsDebug = debug
@@ -104,7 +111,7 @@ func (b *Backend) startHTTPSDebug(request api.HTTPSDebugRequest, roots *x509.Cer
 		b.debugMu.Unlock()
 	})
 	go func() {
-		_ = debug.server.Serve(&debugListener{Listener: listener, slots: make(chan struct{}, 16)})
+		_ = debug.server.Serve(&debugListener{Listener: listener, slots: debug.slots})
 		debug.close()
 	}()
 	return debug.status, nil
@@ -151,6 +158,20 @@ func (s *httpsDebug) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodConnect || r.URL.Path != "" {
+		if s.allowHTTP && r.Method != http.MethodConnect && r.URL.Scheme == "http" &&
+			r.URL.User == nil && r.URL.Host != "" {
+			authority := r.URL.Host
+			if r.URL.Port() == "" {
+				authority = net.JoinHostPort(r.URL.Hostname(), "80")
+			}
+			target, err := parseDebugAuthority(authority)
+			if _, allowed := s.certificates[target]; err == nil && allowed {
+				s.forward(w, r, target, s.listener.Addr().String(), "http")
+			} else {
+				http.Error(w, "Target is outside the debug session", http.StatusForbidden)
+			}
+			return
+		}
 		http.Error(w, "Use CONNECT to an authorized HTTPS target", http.StatusMethodNotAllowed)
 		return
 	}
@@ -195,10 +216,10 @@ func (s *httpsDebug) connect(w http.ResponseWriter, r *http.Request) {
 	server := &http.Server{
 		BaseContext: func(net.Listener) context.Context { return s.ctx },
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.forward(w, r, authority, conn.LocalAddr().String())
+			s.forward(w, r, authority, conn.LocalAddr().String(), "https")
 		}),
 		ReadHeaderTimeout: 5 * time.Second, WriteTimeout: debugTimeout, IdleTimeout: 20 * time.Second,
-		MaxHeaderBytes: 32 << 10, HTTP2: &http.HTTP2Config{MaxConcurrentStreams: 16},
+		MaxHeaderBytes: 32 << 10, HTTP2: &http.HTTP2Config{MaxConcurrentStreams: cap(s.slots)},
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12,
 			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
@@ -213,11 +234,13 @@ func (s *httpsDebug) connect(w http.ResponseWriter, r *http.Request) {
 	_ = server.Close()
 }
 
-func (s *httpsDebug) forward(w http.ResponseWriter, r *http.Request, target debugAuthority, local string) {
-	host, err := parseDebugAuthority(r.Host)
-	if err != nil || host != target || r.URL.IsAbs() {
-		http.Error(w, "Request authority does not match the debug tunnel", http.StatusMisdirectedRequest)
-		return
+func (s *httpsDebug) forward(w http.ResponseWriter, r *http.Request, target debugAuthority, local, scheme string) {
+	if scheme == "https" {
+		host, err := parseDebugAuthority(r.Host)
+		if err != nil || host != target || r.URL.IsAbs() {
+			http.Error(w, "Request authority does not match the debug tunnel", http.StatusMisdirectedRequest)
+			return
+		}
 	}
 	if r.Method == http.MethodConnect || r.Header.Get("Upgrade") != "" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -230,8 +253,11 @@ func (s *httpsDebug) forward(w http.ResponseWriter, r *http.Request, target debu
 		return
 	}
 	request := r.Clone(ctx)
-	request.URL.Scheme = "https"
+	request.URL.Scheme = scheme
 	request.URL.Host = target.String()
+	if scheme == "http" {
+		request.Host = target.String()
+	}
 	request.RequestURI = ""
 	stripHTTPHopHeaders(request.Header)
 	ctx, observation := s.backend.beginRequest(ctx, request, debugInbound, r.RemoteAddr)
@@ -263,7 +289,7 @@ func (s *httpsDebug) forward(w http.ResponseWriter, r *http.Request, target debu
 		if s.ctx.Err() == nil {
 			observation.finish(http.StatusBadGateway, err)
 		}
-		http.Error(w, "HTTPS upstream request failed", http.StatusBadGateway)
+		http.Error(w, "Debug upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer res.Body.Close()

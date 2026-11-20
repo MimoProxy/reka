@@ -164,6 +164,22 @@ func (s *Store) Count(kind Kind) int {
 	return 0
 }
 
+func (s *Store) CountProfile(kind Kind, profile string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.buckets[kind]
+	if b == nil {
+		return 0
+	}
+	count := 0
+	for i := range b.count {
+		if b.at(i).profile == profile {
+			count++
+		}
+	}
+	return count
+}
+
 // FlowRows fetches summaries only, without exposing HTTP request details.
 func (s *Store) FlowRows(profile string, flow uint64) (map[Kind][]Row, bool) {
 	s.mu.Lock()

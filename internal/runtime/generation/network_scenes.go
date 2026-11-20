@@ -32,7 +32,7 @@ func (e *Engine) refreshSceneObservation(g *generation) {
 		return
 	}
 	obs := &sceneObservation{at: time.Now().UTC()}
-	iface, err := e.guard.SceneInterface()
+	iface, err := e.sceneInterface()
 	if err != nil {
 		obs.err = err.Error()
 	} else if iface.Flags&net.FlagUp == 0 {
@@ -48,6 +48,27 @@ func (e *Engine) refreshSceneObservation(g *generation) {
 		}
 	}
 	e.sceneObservation.Store(obs)
+}
+
+func (e *Engine) sceneInterface() (*net.Interface, error) {
+	if !e.opts.HostPacketFlow {
+		return e.guard.SceneInterface()
+	}
+	if e.packetInterface == "" {
+		return nil, errors.New("no active physical network interface")
+	}
+	return net.InterfaceByName(e.packetInterface)
+}
+
+func (e *Engine) SetPacketFlowInterface(name string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || !e.opts.HostPacketFlow {
+		return
+	}
+	e.packetInterface = name
+	_, g := e.current()
+	e.refreshSceneObservation(g)
 }
 
 func matchNetworkScene(scenes []compile.NetworkScene, obs *sceneObservation) string {

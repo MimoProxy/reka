@@ -182,3 +182,72 @@ func TestHTTPSDebugAuthorizedCaptureAndNativeRoute(t *testing.T) {
 		t.Fatal("debug listener remained open")
 	}
 }
+
+func TestDebugHTTPRequiresOptInAndAuthorizedAuthority(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != "" {
+			t.Error("received proxy credentials")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	_, port, _ := net.SplitHostPort(origin.Listener.Addr().String())
+	target := net.JoinHostPort("origin.test", port)
+	records := history.New()
+	b := New(Options{History: records, Logger: testLogger(t)})
+	defer b.Close()
+	direct, err := b.NewOutbound("direct", DirectSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer direct.Close()
+	b.SetRoute(func(ctx context.Context, md Metadata) Route {
+		if md.Inbound != debugInbound || md.Destination.String() != target {
+			return Route{}
+		}
+		route := Fixed(direct)(ctx, md)
+		route.Lookup = func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}
+		return route
+	})
+
+	check := func(proxyURL *url.URL, host string, expected int) {
+		t.Helper()
+		transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		defer transport.CloseIdleConnections()
+		client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+		response, err := client.Get("http://" + host + "/fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != expected {
+			t.Fatalf("status %d, want %d", response.StatusCode, expected)
+		}
+	}
+	legacy, err := b.StartHTTPSDebug(api.HTTPSDebugRequest{Targets: []string{target}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(&url.URL{Scheme: "http", Host: legacy.Address, User: url.UserPassword(legacy.Username, legacy.Password)}, target, http.StatusMethodNotAllowed)
+	b.StopHTTPSDebug()
+
+	status, err := b.StartHTTPSDebug(api.HTTPSDebugRequest{Targets: []string{target}, AllowHTTP: true, MaxClients: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL := &url.URL{Scheme: "http", Host: status.Address}
+	check(proxyURL, target, http.StatusProxyAuthRequired)
+	proxyURL.User = url.UserPassword(status.Username, status.Password)
+	check(proxyURL, "outside.test:"+port, http.StatusForbidden)
+	check(proxyURL, target, http.StatusNoContent)
+	page, err := records.List(history.Requests, "", history.ListOptions{})
+	if err != nil || len(page.Rows) != 1 {
+		t.Fatalf("want one recorded request: %v (%v)", len(page.Rows), err)
+	}
+	var trace requestRecord
+	if err := json.Unmarshal(page.Rows[0].Data, &trace); err != nil || trace.Scheme != "http" || trace.ConnectionID == 0 {
+		t.Fatalf("unexpected HTTP trace: %+v (%v)", trace, err)
+	}
+}

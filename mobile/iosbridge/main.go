@@ -4,6 +4,10 @@ package main
 
 /*
 #include <stdint.h>
+typedef int32_t (*RekaSecretReader)(const void *, size_t, void *, size_t);
+static inline int32_t readSecret(RekaSecretReader reader, const void *name, size_t length, void *output, size_t capacity) {
+	return reader(name, length, output, capacity);
+}
 */
 import "C"
 
@@ -21,6 +25,7 @@ import (
 	"unsafe"
 
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/secret"
 	"github.com/MimoProxy/reka/mobile/packettunnel"
 	"github.com/MimoProxy/reka/mobile/profile"
 )
@@ -34,7 +39,44 @@ var (
 	lifecycle sync.Mutex
 	active    atomic.Pointer[runningTunnel]
 	lastID    uint64
+	reader    atomic.Pointer[C.RekaSecretReader]
 )
+
+//export RekaGoSetSecretReader
+func RekaGoSetSecretReader(callback C.RekaSecretReader) {
+	reader.Store(&callback)
+}
+
+type keychainReader struct{}
+
+func (keychainReader) Get(name string) (string, error) {
+	callback := reader.Load()
+	if callback == nil || *callback == nil || len(name) == 0 {
+		return "", errors.New("iOS Keychain unavailable")
+	}
+	output := make([]byte, 16<<10)
+	defer clear(output)
+	size := int(C.readSecret(*callback, unsafe.Pointer(unsafe.StringData(name)), C.size_t(len(name)),
+		unsafe.Pointer(&output[0]), C.size_t(len(output))))
+	if size == 0 {
+		return "", secret.ErrNotFound
+	}
+	if size < 0 || size > len(output) {
+		return "", errors.New("iOS Keychain read failed")
+	}
+	return string(output[:size]), nil
+}
+
+func (keychainReader) Set(string, string) error { return errors.ErrUnsupported }
+func (keychainReader) Delete(string) error      { return errors.ErrUnsupported }
+func (keychainReader) List() ([]string, error)  { return nil, errors.ErrUnsupported }
+
+//export RekaGoSetNetworkInterface
+func RekaGoSetNetworkInterface(id C.uint64_t, name *C.char) {
+	if session := lookup(id); session != nil && name != nil {
+		session.SetNetworkInterface(C.GoString(name))
+	}
+}
 
 //export RekaGoStart
 func RekaGoStart(data unsafe.Pointer, length C.size_t) C.uint64_t {
@@ -55,7 +97,7 @@ func RekaGoPrepareProfile(input, output, cache *C.char, failure *C.char, capacit
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
-	if err := profile.PrepareFile(ctx, C.GoString(input), C.GoString(output), C.GoString(cache)); err != nil {
+	if err := profile.PrepareFileWithOptions(ctx, C.GoString(input), C.GoString(output), C.GoString(cache), profile.PrepareOptions{Secrets: keychainReader{}}); err != nil {
 		writeError(failure, capacity, err.Error())
 		return 0
 	}
@@ -83,6 +125,8 @@ func RekaGoPrepareProfileEx(input, output, cache, optionsPath *C.char, failure *
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	options.Secrets = keychainReader{}
+	options.ProxyControls.Secrets = options.Secrets
 
 	var seed *packettunnel.Session
 	defer func() {
@@ -202,7 +246,7 @@ func RekaGoReplaceProfile(id C.uint64_t, snapshot unsafe.Pointer, size C.size_t,
 //export RekaGoOperation
 func RekaGoOperation(id C.uint64_t, input unsafe.Pointer, length C.size_t, output unsafe.Pointer, capacity C.size_t) C.int32_t {
 	session := lookup(id)
-	if session == nil || input == nil || length == 0 || length > 1024 || output == nil || capacity == 0 || capacity > 128<<10 {
+	if session == nil || input == nil || length == 0 || length > 8<<10 || output == nil || capacity == 0 || capacity > 128<<10 {
 		return 0
 	}
 	var op packettunnel.Operation
@@ -211,7 +255,7 @@ func RekaGoOperation(id C.uint64_t, input unsafe.Pointer, length C.size_t, outpu
 	}
 	result, err := session.RunOperation(op)
 	if err != nil {
-		return 0
+		result = map[string]string{"operation_error": history.Text(err.Error(), 384)}
 	}
 	data, err := json.Marshal(result)
 	if err != nil || len(data) > int(capacity) {
@@ -265,7 +309,7 @@ func RekaGoPolicyStatus(id C.uint64_t, out unsafe.Pointer, capacity C.size_t) C.
 }
 
 func decodeControls(data unsafe.Pointer, length C.size_t) (profile.Controls, bool) {
-	var controls profile.Controls
+	controls := profile.Controls{Secrets: keychainReader{}}
 	if data == nil || length == 0 || length > 64<<10 {
 		return controls, false
 	}

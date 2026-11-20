@@ -109,3 +109,11 @@ func (e *Engine) GroupStatus() []policy.Status {
 	}
 	return g.policies.Statuses()
 }
+
+func (e *Engine) GroupHealth(id string, offset, limit int) []policy.Result {
+	_, g := e.current()
+	if g.policies == nil {
+		return []policy.Result{}
+	}
+	return g.policies.Results(id, offset, limit)
+}

@@ -253,6 +253,25 @@ func (m *Manager) Statuses() []Status {
 	})
 	return out
 }
+
+func (m *Manager) Results(id string, offset, limit int) []Result {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.states[id]
+	if state == nil || limit <= 0 {
+		return []Result{}
+	}
+	members := state.group.Members
+	offset = min(max(0, offset), len(members))
+	batch := members[offset : offset+min(limit, len(members)-offset)]
+	results := make([]Result, 0, len(batch))
+	for _, member := range batch {
+		result := state.results[member]
+		result.Member = member
+		results = append(results, result)
+	}
+	return results
+}
 func (m *Manager) Close() {
 	if m.cancel != nil {
 		m.cancel()

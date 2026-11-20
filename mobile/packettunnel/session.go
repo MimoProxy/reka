@@ -56,7 +56,7 @@ type Session struct {
 
 func newSession() *Session {
 	ctx, cancel := context.WithCancel(context.Background())
-	events := history.NewBounded(eventRows, eventBytes, history.DNS, history.Logs)
+	events := history.NewBounded(eventRows, eventBytes, history.DNS, history.Logs, history.Connections, history.Requests)
 	logger := slog.New(tunnelLogHandler{events: events})
 	return &Session{
 		ctx: ctx, cancel: cancel, device: &packetDevice{endpoint: channel.New(queueSize, MTU, "")},

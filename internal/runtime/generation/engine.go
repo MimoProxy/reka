@@ -97,6 +97,7 @@ type Engine struct {
 	temporary         atomic.Pointer[temporaryRules]
 	temporarySequence uint64
 	sceneObservation  atomic.Pointer[sceneObservation]
+	packetInterface   string
 	sceneManual       atomic.Pointer[manualScene]
 	arenaRunning      atomic.Bool
 	history           *history.Store
@@ -153,9 +154,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		return e.guard.Control(n, a, c)
 	}
 	opts.Backend.ProtectFD = nil
-	if !opts.HostPacketFlow {
-		opts.Backend.History = e.history
-	}
+	opts.Backend.History = e.history
 	opts.Backend.HistoryScope = func() history.Scope {
 		_, active := e.current()
 		return active.historyScope

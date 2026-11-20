@@ -15,6 +15,7 @@ import (
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/policy"
+	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/mobile/profile"
 )
@@ -28,6 +29,7 @@ type profileSession struct {
 	summary profile.Summary
 	rev     uint64
 	trace   *routeTrace
+	sets    map[string]*router.RuleSet
 }
 
 type ProfileStatus struct {
@@ -126,7 +128,7 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	if err != nil {
 		return nil, err
 	}
-	base, err := bundle.Compile()
+	base, err := bundle.CompileWithSecrets(controls.Secrets)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +145,7 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	if runtime.GOOS == "ios" {
 		opts.Resolver = net.DefaultResolver
 	}
-	p := &profileSession{base: base, summary: profile.Describe(base)}
+	p := &profileSession{base: base, summary: profile.Describe(base), sets: collectRuleSets(base.Router.Rules())}
 	if trace {
 		p.trace = &routeTrace{}
 		opts.ObserveRoute = p.trace.record
@@ -173,7 +175,12 @@ func (p *profileSession) publish(base *compile.Effective, summary profile.Summar
 	if err != nil {
 		return errors.New("could not prepare profile outbounds or DNS")
 	}
-	if _, err := p.engine.Activate(prepared, p.rev+1); err != nil {
+	_, scope := p.engine.History()
+	profileID := controls.ProfileID
+	if profileID == "" {
+		profileID = scope.ProfileID
+	}
+	if _, err := p.engine.ActivateProfile(prepared, p.rev+1, profileID); err != nil {
 		return errors.New("could not activate profile")
 	}
 	p.rev++
@@ -210,7 +217,7 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	if err != nil {
 		return err
 	}
-	base, err := bundle.Compile()
+	base, err := bundle.CompileWithSecrets(controls.Secrets)
 	if err != nil {
 		return err
 	}
@@ -223,6 +230,7 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 		s.logger.Warn("Profile refresh could not be applied")
 		return err
 	}
+	p.sets = collectRuleSets(base.Router.Rules())
 	s.logger.Info("Profile refreshed")
 	return nil
 }
@@ -248,8 +256,10 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 		if i := slices.IndexFunc(observed, func(o policy.Status) bool { return o.ID == group.ID }); i >= 0 {
 			auto := observed[i]
 			row.Selected = auto.Selected
-			row.Checked = len(auto.Results)
 			for _, result := range auto.Results {
+				if !result.Checked.IsZero() {
+					row.Checked++
+				}
 				if result.Alive {
 					row.Available++
 				}

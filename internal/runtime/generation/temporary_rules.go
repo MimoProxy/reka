@@ -15,6 +15,10 @@ type temporaryRules struct {
 }
 
 func (e *Engine) AddTemporaryRule(request api.TemporaryRuleRequest) (api.TemporaryRule, error) {
+	return e.AddNamedTemporaryRule(request, nil)
+}
+
+func (e *Engine) AddNamedTemporaryRule(request api.TemporaryRuleRequest, names map[string]string) (api.TemporaryRule, error) {
 	if request.TTLSeconds == 0 {
 		request.TTLSeconds = 300
 	}
@@ -34,7 +38,22 @@ func (e *Engine) AddTemporaryRule(request api.TemporaryRuleRequest) (api.Tempora
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	_, g := e.current()
-	if e.closed || g.router == nil || !g.router.HasTarget(spec.Target) {
+	if e.closed || g.router == nil {
+		return api.TemporaryRule{}, errors.New("no active configuration")
+	}
+	if !g.router.HasTarget(spec.Target) {
+		var id string
+		for candidate, name := range names {
+			if name == spec.Target {
+				if id != "" {
+					return api.TemporaryRule{}, errors.New("ambiguous policy name; use its configuration ID")
+				}
+				id = candidate
+			}
+		}
+		spec.Target = id
+	}
+	if spec.Target == "pass" || !g.router.HasTarget(spec.Target) {
 		return api.TemporaryRule{}, errors.New("unknown outbound or policy group")
 	}
 	now := time.Now()

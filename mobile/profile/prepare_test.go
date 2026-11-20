@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/secret"
 )
 
 func TestSharingLinksUseSelectedNodeInRuleAndGlobalModes(t *testing.T) {
@@ -206,5 +207,84 @@ rules:
 	}
 	if got := eff.Router.Route(t.Context(), router.Metadata{Domain: "x.suffix.test"}, nil); got.Outbound != "reject" {
 		t.Fatalf("downloaded geosite did not match: %+v", got)
+	}
+}
+
+func TestOfflineArchiveReusesResourcesAndResolvesCurrentCredentials(t *testing.T) {
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		_, _ = w.Write([]byte("archive.example.test\n"))
+	}))
+	defer server.Close()
+	raw := fmt.Sprintf(`
+schema-version: 1
+outbounds:
+  - {id: fixture, type: shadowsocks, server: 127.0.0.1, port: 2525, method: aes-128-gcm, password: 'secret://test/fixture'}
+rule-sets:
+  - id: sites
+    behavior: domain
+    format: text
+    download: {url: %q, interval: 300}
+rules: [{match: {rule-set: sites}, outbound: reject}, {match: {all: true}, outbound: direct}]
+`, server.URL)
+
+	dir := t.TempDir()
+	input, original, rebound := filepath.Join(dir, "source.yaml"), filepath.Join(dir, "original.json"), filepath.Join(dir, "restored.json")
+	if err := os.WriteFile(input, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := secret.NewFileStore(filepath.Join(dir, "secrets"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const password = "local-fixture-value"
+	if err := store.Set("test/fixture", password); err != nil {
+		t.Fatal(err)
+	}
+	opts := PrepareOptions{Secrets: store, Scenes: []SceneDefinition{{ID: "local"}}}
+	if err := PrepareFileWithOptions(t.Context(), input, original, dir, opts); err != nil {
+		var validation *ValidationError
+		if errors.As(err, &validation) {
+			t.Fatal(validation.Diagnostics)
+		}
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(original)
+	if err != nil || strings.Contains(string(saved), password) {
+		t.Fatal("snapshot must only retain the credential reference", err)
+	}
+	server.Close()
+	opts.RebindSnapshot = original
+	opts.Scenes = []SceneDefinition{{ID: "restored"}}
+	if err := store.Delete("test/fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareFileWithOptions(t.Context(), input, rebound, dir, opts); err == nil {
+		t.Fatal("restored snapshot bypassed missing credential")
+	}
+	if err := store.Set("test/fixture", "rotated-test-value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareFileWithOptions(t.Context(), input, rebound, dir, opts); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := os.ReadFile(rebound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := Decode(bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := bundle.CompileWithSecrets(store)
+	if err != nil || len(effective.NetworkScenes) != 1 || effective.NetworkScenes[0].ID != "restored" {
+		t.Fatal("restored local scenes are invalid", err)
+	}
+	if match := effective.Router.Route(t.Context(), router.Metadata{Domain: "archive.example.test"}, nil); match.Outbound != "reject" {
+		t.Fatal("archived rule asset did not match", match)
+	}
+	if fetches.Load() != 1 {
+		t.Fatalf("archive rebind fetched the rule provider %d times", fetches.Load())
 	}
 }
