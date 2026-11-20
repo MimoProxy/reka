@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/MimoProxy/reka/internal/api"
+	"log/slog"
 	goruntime "runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
@@ -125,7 +127,14 @@ var Methods = []string{
 	"RunNodeArena", "GetNetworkScene", "SetNetworkScene", "GetTrafficBudgets",
 }
 
-func (s *Session) dispatch(req Request) (any, error) {
+func (s *Session) dispatch(req Request) (result any, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("control request panicked", "method", req.Method, "request_id", req.ID, "panic", p, "stack", string(debug.Stack()))
+			result = nil
+			err = &service.Error{Code: CodeInternal, Message: "request handler panicked"}
+		}
+	}()
 	svc := s.h.svc
 	if req.Method == "SwitchProfile" {
 		p, err := decode[api.SwitchProfileRequest](req.Params)
@@ -522,10 +531,8 @@ func (s *Session) dispatch(req Request) (any, error) {
 		}
 		all := svc.Engine().Connections()
 		total := len(all)
-		if p.Offset > total {
-			p.Offset = total
-		}
-		end := min(p.Offset+p.Limit, total)
+		p.Offset = min(max(p.Offset, 0), total)
+		end := p.Offset + min(p.Limit, total-p.Offset)
 		return map[string]any{"total": total, "offset": p.Offset, "connections": all[p.Offset:end]}, nil
 	case "CloseConnections":
 		p, err := decode[struct {
