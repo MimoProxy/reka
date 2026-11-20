@@ -89,7 +89,9 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 		sequence = old.dns.Generation()
 	}
 	pool := sagernet.NewDNSPool()
-	resolver, err = RD.New(*cfg, RD.Options{History: e.history, Generation: sequence, Pool: e.fake, Match: match, Retire: pool.Retire, ResetIdle: pool.ResetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
+	dhcp := new(sagernet.DHCPDNS)
+	resetIdle := func() { pool.ResetIdle(); dhcp.Reset() }
+	resolver, err = RD.New(*cfg, RD.Options{History: e.history, Generation: sequence, Pool: e.fake, Match: match, Retire: pool.Retire, ResetIdle: resetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
 		retained, release, active, err := e.retainCurrentDNS(ctx)
 		if err == nil && active != resolver {
 			release()
@@ -99,6 +101,9 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 	}, System: func(ctx context.Context, d string) ([]netip.Addr, error) {
 		return e.opts.Resolver.LookupNetIP(ctx, "ip", d)
 	}, Route: route, Exchange: func(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
+		if ep.Scheme == "dhcp" {
+			return dhcp.Exchange(ctx, ep, q)
+		}
 		id, err := resolveOutbound(ep.Via, net.JoinHostPort(ep.Host, ep.Port))
 		if err != nil {
 			return nil, err

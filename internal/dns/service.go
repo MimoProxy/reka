@@ -34,6 +34,7 @@ type Options struct {
 type cached struct {
 	msg       *D.Msg
 	at, until time.Time
+	noStale   bool
 }
 type Service struct {
 	historyScope   history.Scope
@@ -411,7 +412,7 @@ func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scop
 			}
 			return m, nil
 		}
-		if ep.Via == "" && scope == "normal" && s.cfg.RespectRules && s.opts.Route != nil {
+		if ep.Scheme != "dhcp" && ep.Via == "" && scope == "normal" && s.cfg.RespectRules && s.opts.Route != nil {
 			ep.Via = s.opts.Route(ctx, ep)
 			if ep.Via == "" {
 				last = errors.New("DNS routing could not determine a target")

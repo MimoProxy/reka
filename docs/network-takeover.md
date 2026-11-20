@@ -17,7 +17,7 @@ network:
     # bind-interface: en1      # optional explicit physical interface
 ```
 
-Configure profile DNS with explicit `nameserver` and `default-nameserver` IP endpoints before full takeover. `system` upstreams are rejected in full mode because the OS resolver may point back to Reka. Node and subscription bootstrap use the explicit resolver and the same socket bypass as other internal traffic. Bootstrap and node-resolution endpoints cannot depend on the proxy they resolve.
+Configure profile DNS with explicit `nameserver` and `default-nameserver` endpoints before full takeover. For bootstrap use IP endpoints or `dhcp://<physical-interface>` on a supported desktop. `system` upstreams are rejected in full mode because the OS resolver may point back to Reka. Node and subscription bootstrap use the explicit resolver and the same socket bypass as other internal traffic. Bootstrap and node-resolution endpoints cannot depend on the proxy they resolve.
 
 Only configured address families are captured; `runtime.network.ipv6: false` means IPv6 is not claimed. DNS hijacking consumes TCP/UDP port 53 locally, including the Windows gateway DNS address. Other traffic to a TUN's own address is dropped. Encrypted application DNS follows normal routing and is not intercepted as port-53 DNS.
 

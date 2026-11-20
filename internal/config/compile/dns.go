@@ -3,6 +3,7 @@ package compile
 import (
 	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/router"
 	"net/netip"
 	"strings"
@@ -106,6 +107,9 @@ func (c *compiler) dns(eff *Effective) {
 	for _, list := range lists {
 		for _, v := range list {
 			ep, err := RD.ParseEndpoint(v)
+			if err == nil && ep.Scheme == "dhcp" && !platform.DHCPDNSSupported() {
+				c.errorf(model.DocProfile, "/dns", "dns.dhcp", "DHCP DNS is unavailable on this platform")
+			}
 			if err == nil && ep.Via != "" && !targets[ep.Via] {
 				c.errorf(model.DocProfile, "/dns", "dns.target", "unknown DNS outbound %q", ep.Via)
 			}

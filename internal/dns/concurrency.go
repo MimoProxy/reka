@@ -46,7 +46,7 @@ func (s *Service) cachedExchange(ctx context.Context, q *D.Msg, scope, key strin
 		s.mu.Lock()
 		entry, exists := s.cache[key]
 		fresh := exists && now.Before(entry.until)
-		stale := exists && !fresh && s.cfg.StaleTTL > 0 && now.Before(entry.until.Add(time.Duration(s.cfg.StaleTTL)*time.Second))
+		stale := exists && !fresh && !entry.noStale && s.cfg.StaleTTL > 0 && now.Before(entry.until.Add(time.Duration(s.cfg.StaleTTL)*time.Second))
 		if fresh || stale {
 			s.hits.Add(1)
 			outcome.ResultSource = "cache"
@@ -168,7 +168,8 @@ func (s *Service) finishFlight(key string, flight *queryFlight, epoch uint64, m 
 				}
 			}
 			now := time.Now()
-			s.cache[key] = cached{m.Copy(), now, now.Add(time.Duration(ttl) * time.Second)}
+			dhcp := outcome.Upstream != nil && outcome.Upstream.Transport == "dhcp"
+			s.cache[key] = cached{msg: m.Copy(), at: now, until: now.Add(time.Duration(ttl) * time.Second), noStale: dhcp}
 		}
 	}
 	if s.flights[key] == flight {

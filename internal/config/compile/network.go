@@ -2,6 +2,7 @@ package compile
 
 import (
 	"github.com/MimoProxy/reka/internal/config/model"
+	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/platform"
 )
 
@@ -46,7 +47,7 @@ func (c *compiler) network(e *Effective) {
 			servers = append(servers, policy.Servers...)
 		}
 		for _, v := range servers {
-			if v == "system" {
+			if endpoint, err := RD.ParseEndpoint(v); err == nil && endpoint.Scheme == "system" {
 				c.errorf(model.DocLocal, "/network", "network.bootstrap", "full takeover requires explicit DNS upstreams instead of system")
 			}
 		}

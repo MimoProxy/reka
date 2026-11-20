@@ -354,7 +354,7 @@ DNS 放在 profile 或 source 内；不配置时使用系统解析。启用原�
 | `from` | source ID | 选用已导入 source 的 DNS，不自动启用所有 source DNS |
 | `listen` | 可选 `IP:port` | 内核 DNS UDP/TCP 服务地址；省略不监听本地 DNS 端口 |
 | `nameserver` | endpoint 字符串列表 | 普通解析上游，必填 |
-| `default-nameserver` | endpoint 列表，默认 system | bootstrap：解析上游服务器域名；只允许 IP endpoint 或 system，且只能直连 |
+| `default-nameserver` | endpoint 列表，默认 system | bootstrap：解析上游服务器域名；允许 IP endpoint、system，或已指定物理网卡的 DHCP DNS，且只能直连 |
 | `proxy-server-nameserver` | endpoint 列表 | 解析代理节点服务器；不得依赖另一个代理 |
 | `direct-nameserver` | endpoint 列表 | 直连目的地解析 |
 | `direct-nameserver-follow-policy` | false | direct 解析是否继续遵循 nameserver-policy |

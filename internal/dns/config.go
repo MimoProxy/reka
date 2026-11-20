@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"unicode"
 )
 
 type Config struct {
@@ -64,6 +65,14 @@ type Endpoint struct {
 func ParseEndpoint(raw string) (Endpoint, error) {
 	if raw == "system" || raw == "system://" || raw == "dhcp://system" {
 		return Endpoint{Scheme: "system"}, nil
+	}
+	if value, found := strings.CutPrefix(raw, "dhcp://"); found {
+		name, err := url.PathUnescape(value)
+		if err != nil || name == "" || len(name) > 255 || strings.TrimSpace(name) != name ||
+			strings.HasPrefix(name, "-") || strings.ContainsAny(name, "/\\#?:@%") || strings.ContainsFunc(name, unicode.IsControl) {
+			return Endpoint{}, fmt.Errorf("DHCP DNS requires a physical interface name and no port, path or route")
+		}
+		return Endpoint{Scheme: "dhcp", Host: name, Port: "53"}, nil
 	}
 	if !strings.Contains(raw, "://") {
 		raw = "udp://" + raw
@@ -148,7 +157,7 @@ func Validate(c *Config) error {
 	}
 	for _, v := range c.Bootstrap {
 		ep, _ := ParseEndpoint(v)
-		if ep.Scheme != "system" {
+		if ep.Scheme != "system" && ep.Scheme != "dhcp" {
 			if _, err := netip.ParseAddr(ep.Host); err != nil {
 				return fmt.Errorf("bootstrap DNS endpoint must be an IP")
 			}
