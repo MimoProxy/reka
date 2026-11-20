@@ -640,14 +640,15 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 func (s *Session) subscribe(types []string, epoch string, after uint64) {
 	svc := s.h.svc
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.sub != nil {
 		s.sub.Close()
 	}
 	sub := svc.Events().Subscribe(types, epoch, after, func() any {
-		return map[string]any{"status": status(svc), "revision": svc.ActiveRevision()}
+		st := status(svc)
+		return map[string]any{"status": st, "revision": st.Revision}
 	})
 	s.sub = sub
-	s.mu.Unlock()
 	go func() {
 		for ev := range sub.C {
 			ev := ev
