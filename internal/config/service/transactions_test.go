@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/MimoProxy/reka/internal/config/store"
+	"github.com/MimoProxy/reka/internal/runtime/generation"
 )
 
 func TestCommitRestoresActiveRecordAfterWriteError(t *testing.T) {
@@ -70,6 +71,53 @@ func TestCommitRestoresActiveRecordAfterWriteError(t *testing.T) {
 			defer reopened.Close()
 			if reopened.ActiveRevision() != before.Revision || selected(t, reopened) != "direct" {
 				t.Fatal("reopening did not start the restored revision")
+			}
+		})
+	}
+}
+
+func TestBootstrapRetriesAfterInterruptedIntent(t *testing.T) {
+	for _, choice := range []string{"direct", "alt"} {
+		t.Run(choice, func(t *testing.T) {
+			env := newEnv(t)
+			engine := generation.NewEngine(generation.EngineOptions{Backend: backendOptions()})
+			s, err := Open(Options{StateRoot: env.root, Engine: engine, Logger: quiet(),
+				InitialProfile: []byte(profileWith("direct")), FailPoint: func(point string) error {
+					if point == "intent-written" {
+						return errors.New("interrupted startup")
+					}
+					return nil
+				}})
+			engine.Close()
+			if s != nil || !errors.Is(err, ErrCrashed) {
+				t.Fatalf("interrupted startup returned %v, %v", s, err)
+			}
+			st, err := store.Open(env.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if active, err := st.ReadActive(); err != nil || active != nil {
+				t.Fatalf("unexpected active record after interruption: %+v, %v", active, err)
+			}
+			pending, err := st.ListOperations()
+			if err != nil || len(pending) != 1 || pending[0].State != store.OpPending {
+				t.Fatalf("interrupted operation: %+v, %v", pending, err)
+			}
+
+			s = env.open(profileWith(choice), "")
+			defer s.Close()
+			active, err := st.ReadActive()
+			if err != nil || active == nil || active.Operation == pending[0].ID || active.Revision != s.ActiveRevision() {
+				t.Fatalf("retried startup active record: %+v, %v", active, err)
+			}
+			if got := selected(t, s); got != choice {
+				t.Fatalf("startup selected %s, want %s", got, choice)
+			}
+			if op, err := s.GetOperation(pending[0].ID); err != nil || op.State != store.OpFailed {
+				t.Fatalf("interrupted operation after recovery: %+v, %v", op, err)
+			}
+			if numbers, err := st.RevisionNumbers(); err != nil || len(numbers) != 1 || numbers[0] != active.Revision {
+				t.Fatalf("revisions after recovery: %v, %v", numbers, err)
 			}
 		})
 	}
