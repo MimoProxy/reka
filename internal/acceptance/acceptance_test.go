@@ -36,6 +36,46 @@ rules:
     outbound: direct
 `
 
+func TestDomainSniffingDefaultAndOptOut(t *testing.T) {
+	const profile = `schema-version: 1
+outbounds:
+  - {id: by-domain, type: direct}
+rules:
+  - {match: {domain: sniff.test}, outbound: by-domain}
+  - {match: {all: true}, outbound: direct}
+`
+	for _, tt := range []struct {
+		name, sniff, outbound string
+	}{
+		{name: "default", outbound: "by-domain"},
+		{name: "disabled", sniff: "sniff: {enabled: false}\n", outbound: "direct"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, profile+tt.sniff)
+			target := echoServer(t)
+			conn, err := socks5Connect(h.proxy(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			const request = "GET / HTTP/1.1\r\nHost: sniff.test\r\n\r\n"
+			if _, err := io.WriteString(conn, request); err != nil {
+				t.Fatal(err)
+			}
+			reply := make([]byte, len(request))
+			if _, err := io.ReadFull(conn, reply); err != nil || string(reply) != request {
+				t.Fatalf("original target did not echo the whole request: %q, %v", reply, err)
+			}
+			if rows := connsByDest(h, target.String()); len(rows) != 1 || rows[0].Outbound != tt.outbound {
+				t.Fatalf("connections = %+v, want outbound %s", rows, tt.outbound)
+			}
+		})
+	}
+}
+
 // Long connection while rules and the group selection change: the old
 // connection keeps its outbound and every byte; new connections follow the
 // new configuration; listeners and outbound instances are not rebuilt.

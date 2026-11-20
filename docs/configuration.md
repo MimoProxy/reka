@@ -432,7 +432,7 @@ routing:
 ./bin/rekactl -state-root "$PWD/.reka-demo" set -local /routing '{"mode":"rule"}'
 ```
 
-需要从 IP 目标的 HTTP Host / TLS SNI / QUIC SNI 补充域名分流信息时，在 profile 或 local 加：
+当 IP 目标缺少域名且当前路由规则包含域名条件时，内核默认通过 HTTP Host、TLS SNI 和 QUIC SNI 补充分流信息。可在 profile 或 local 自定义嗅探设置。以下示例显式开启嗅探，适用于收集连接域名等场景。
 
 ```yaml
 sniff:
@@ -444,7 +444,7 @@ sniff:
   override-destination: false
 ```
 
-默认关闭；local 的 sniff 对象整体覆盖 profile。已有入口域名和 Fake IP 语义保留。默认只补充路由信息，`override-destination: true` 才允许把实际拨号目标改成嗅探域名；无法获得 ECH 的加密内部名称。嗅探会增加有限的等待时间，收到的数据会原样重放。完整示例见 [advanced.yaml](../examples/config/advanced.yaml)。
+设置 `sniff: {enabled: false}` 可关闭嗅探。local 的 `sniff` 对象整体覆盖 profile。已有入口域名和 Fake IP 仍用于路由。默认只补充路由信息，`override-destination: true` 才允许把实际拨号目标改成嗅探域名。嗅探无法获取 ECH 加密的内部名称。嗅探可增加有限的等待时间，收到的数据会原样重放。完整示例见 [advanced.yaml](../examples/config/advanced.yaml)。
 
 代理监听器现支持 `users` 认证列表，见 [local-auth.yaml](../examples/config/local-auth.yaml)。先设置其引用的秘密，再用 `commit -local FILE` 提交。客户端需填写对应账号密码。`users` 省略或为空时免认证；修改凭据会重启监听器，已接受连接保留原路由。可用 `in-user` 区分已认证用户，也可按入口名称、协议和端口、进程完整路径及 UID 分流，见[高级规则](advanced-rules.md)和[字段参考](configuration-reference.md)。
 

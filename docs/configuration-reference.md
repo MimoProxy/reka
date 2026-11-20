@@ -441,14 +441,14 @@ API 默认将内联凭据显示为 `********`，把遮罩原样提交会保留�
 
 | `sniff` 字段 | 默认 / 边界 |
 | --- | --- |
-| `enabled` | false，省略整个对象也关闭 |
+| `enabled` | true，省略整个对象或省略该字段时开启。设置 `enabled: false` 或 `sniff: null` 可关闭 |
 | `protocols` | 省略/空为 `[http, tls, quic]`；不允许重复或其他协议 |
 | `timeout-ms` | 0/省略为 300；10–2000 毫秒 |
 | `max-bytes` | 0/省略为 65536；512–262144 字节 |
 | `max-packets` | 0/省略为 8；1–32 |
 | `override-destination` | false；true 才允许拨号目标改成嗅探域名 |
 
-嗅探补充缺少入口域名的路由信息，保留已有域名/Fake IP 含义；不能解开 ECH 内部名称。最多并发 64 个嗅探操作，溢出直接路由；超时或无效数据也会原样重放。开启后，CONNECT/SOCKS 可能先确认隧道再因路由拒绝而关闭。详见[功能扩展](feature-expansion.md)。
+默认仅在 IP 目标缺少域名且当前路由规则包含域名条件时嗅探。已有入口域名和 Fake IP 会直接用于路由。可显式设置 `enabled: true`、添加 `sniff.rules` 或开启 `override-destination` 来扩大嗅探范围。嗅探无法获取 ECH 加密的内部名称。最多并发 64 个嗅探操作，达到上限后直接路由。超时或收到无效数据时仍会原样重放。需要嗅探时，CONNECT/SOCKS 可能先确认隧道，再因路由拒绝而关闭。详见[功能扩展](feature-expansion.md)。
 
 ### 10.1 网络场景
 

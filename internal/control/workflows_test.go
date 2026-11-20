@@ -32,7 +32,6 @@ func TestTemporaryRulesAndScenesOverIPC(t *testing.T) {
 outbounds:
   - {id: alt, type: direct}
   - {id: down, type: http, server: %q, port: %s}
-sniff: {enabled: true}
 rules:
   - {id: lab, match: {network-scene: lab}, outbound: direct}
   - {id: otherwise, match: {all: true}, outbound: reject}

@@ -16,6 +16,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
@@ -649,6 +650,8 @@ func (s *Session) subscribe(types []string, epoch string, after uint64) {
 
 // Capabilities describes what this build supports.
 type Capabilities struct {
+	DHCPDNS             bool               `json:"dhcp_dns"`
+	ConditionalSniff    bool               `json:"conditional_sniff"`
 	ProcessModes        []string           `json:"process_modes,omitempty"`
 	SniffProtocols      []string           `json:"sniff_protocols,omitempty"`
 	NetworkModes        []string           `json:"network_modes"`
@@ -686,6 +689,7 @@ func capabilities(svc *service.Service) Capabilities {
 		stacks = svc.Engine().TUNStacks()
 	}
 	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"}, ProcessModes: []string{"off", "rule", "always"},
+		DHCPDNS: platform.DHCPDNSSupported(), ConditionalSniff: true,
 		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
 		SourceFormats:       []string{"native", "clash", "links"},
 		ImportSupport:       importer.SupportMatrix(),

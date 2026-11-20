@@ -28,6 +28,7 @@ type RuleSet struct {
 	others []int
 
 	hasProcess bool
+	hasDomain  bool
 }
 
 // CompileRules compiles specs in order.
@@ -47,6 +48,7 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 		}
 		rs.rules = append(rs.rules, r)
 		rs.maxDepth = max(rs.maxDepth, ruleDepth(r))
+		rs.hasDomain = rs.hasDomain || matchesDomain(r)
 		switch spec.Kind {
 		case KindDomain:
 			for _, d := range r.strs {
@@ -90,6 +92,9 @@ func (rs *RuleSet) Rule(i int) RuleSpec { return rs.rules[i].spec }
 
 // NeedsProcess reports whether any rule matches on the process name.
 func (rs *RuleSet) NeedsProcess() bool { return rs.hasProcess }
+
+// MatchesDomain reports whether rules can use the destination domain.
+func (rs *RuleSet) MatchesDomain() bool { return rs.hasDomain }
 
 // Metadata describes a connection for matching.
 type Metadata struct {
@@ -679,6 +684,16 @@ func needsProcess(r *rule) bool {
 		}
 	}
 	return false
+}
+
+func matchesDomain(r *rule) bool {
+	switch r.spec.Kind {
+	case KindDomain, KindDomainSuffix, KindDomainKeyword, KindDomainRegex, KindDomainPattern:
+		return true
+	case KindRuleSet:
+		return r.spec.Set.MatchesDomain()
+	}
+	return slices.ContainsFunc(r.children, matchesDomain)
 }
 
 func ruleDepth(r *rule) int {

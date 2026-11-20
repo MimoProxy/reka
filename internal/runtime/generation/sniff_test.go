@@ -16,7 +16,7 @@ import (
 func TestRouteReportsFakeIPDomainAlongsideSniffedDomain(t *testing.T) {
 	e := NewEngine(EngineOptions{})
 	defer e.Close()
-	eff, ds := compile.Compile([]byte("schema-version: 1\nrules: [{match: {all: true}, outbound: direct}]\n"), nil, compile.Options{})
+	eff, ds := compile.Compile([]byte("schema-version: 1\nrules: [{match: {domain: mapped.test}, outbound: direct}, {match: {all: true}, outbound: reject}]\n"), nil, compile.Options{})
 	if ds.HasErrors() {
 		t.Fatal(ds)
 	}
@@ -31,9 +31,14 @@ func TestRouteReportsFakeIPDomainAlongsideSniffedDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	route := e.route(context.Background(), sagernet.Metadata{
-		Network: "tcp", Destination: sagernet.Destination{Addr: ip, Port: 443}, SniffedDomain: "sniff.test",
-	})
+	ctx := context.Background()
+	md := sagernet.Metadata{Network: "tcp", Destination: sagernet.Destination{Addr: ip, Port: 443}}
+	if prepared := e.prepareFlow(ctx, md); prepared.Sniff.Enabled {
+		prepared.Release()
+		t.Fatal("default sniffing did not use the known Fake IP mapping")
+	}
+	md.SniffedDomain = "sniff.test"
+	route := e.route(ctx, md)
 	if route.Outbound == nil {
 		t.Fatal("Fake IP flow did not route")
 	}
@@ -132,5 +137,50 @@ func TestPreparedSniffFlowCanResolveThroughRetiredSnapshotOutbound(t *testing.T)
 	defer result.Release()
 	if result.Outbound.Tag() != "old" {
 		t.Fatal("wrong route", result.Outbound.Tag())
+	}
+}
+
+func TestConditionalSniffUsesFirstMatchingRule(t *testing.T) {
+	const profile = `schema-version: 1
+sniff:
+  override-destination: true
+  skip-domains: ["+.private.test"]
+  rules:
+    - match: {src-ip-cidr: 10.3.0.0/16}
+      action: skip
+    - match: {and: [{in-name: mixed}, {dst-port: [443, 8443-8445]}]}
+      action: sniff
+      protocols: [tls]
+      override-destination: false
+`
+	eff, ds := compile.Compile([]byte(profile), nil, compile.Options{})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if eff.SniffForRouting {
+		t.Fatal("explicit sniff rules must apply even when routing does not need to recover a domain")
+	}
+	ctx := context.Background()
+	md := sagernet.Metadata{Network: "tcp", Inbound: "mixed", Source: netip.MustParseAddrPort("192.0.2.4:1234"),
+		Destination: sagernet.Destination{Addr: netip.MustParseAddr("203.0.113.7"), Port: 8444}}
+	got := flowSniffOptions(ctx, eff, md, "")
+	if !got.Enabled || got.OverrideDestination || len(got.Protocols) != 1 || got.Protocols[0] != "tls" {
+		t.Fatalf("unexpected sniff decision: %+v", got)
+	}
+	if got.SkipDomain == nil || !got.SkipDomain("a.private.test") || got.SkipDomain("elsewhere.test") {
+		t.Fatal("domain exclusion was not compiled")
+	}
+	known := md
+	known.Destination.Domain = "private.test"
+	if flowSniffOptions(ctx, eff, known, "").Enabled {
+		t.Fatal("known excluded domain was inspected")
+	}
+	md.Source = netip.MustParseAddrPort("10.3.4.5:1234")
+	if flowSniffOptions(ctx, eff, md, "").Enabled {
+		t.Fatal("later inclusion took precedence over earlier skip")
+	}
+	md.Source, md.Inbound = netip.MustParseAddrPort("192.0.2.4:1234"), "other"
+	if flowSniffOptions(ctx, eff, md, "").Enabled {
+		t.Fatal("unmatched inlet was inspected")
 	}
 }

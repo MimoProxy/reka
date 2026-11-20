@@ -3,6 +3,7 @@ package sagernet
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,13 +34,14 @@ const (
 // rules and outbounds, and each flow binds the generation current when it
 // was created. Replies from a flow only go back to this session.
 type udpSession struct {
-	b        *Backend
-	r        *router
-	ctx      context.Context
-	cancel   context.CancelFunc
-	conn     N.PacketConn
-	metadata adapter.InboundContext
-	onClose  N.CloseHandlerFunc
+	b           *Backend
+	r           *router
+	ctx         context.Context
+	cancel      context.CancelFunc
+	conn        N.PacketConn
+	metadata    adapter.InboundContext
+	inboundPort uint16
+	onClose     N.CloseHandlerFunc
 
 	writeMu  sync.Mutex
 	mu       sync.Mutex
@@ -79,6 +81,11 @@ func (b *Backend) relayUDP(ctx context.Context, r *router, conn N.PacketConn, me
 	s := &udpSession{
 		b: b, r: r, ctx: ctx, cancel: cancel, conn: conn, metadata: metadata, onClose: onClose,
 		flows: map[M.Socksaddr]*udpFlow{}, rejected: map[M.Socksaddr]time.Time{},
+	}
+	if metadata.InboundType != "tun" && conn.LocalAddr() != nil {
+		if address, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
+			s.inboundPort = address.Port()
+		}
 	}
 	if err := N.ReportPacketConnHandshakeSuccess(conn, nil); err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, E.Cause(err, "report handshake success"))
@@ -150,6 +157,7 @@ func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 	}
 	md := toMetadata(s.metadata)
 	md.InboundProtocol = inboundProtocol(s.ctx, md.InboundType)
+	md.InboundPort = s.inboundPort
 	md.Network = N.NetworkUDP
 	md.Destination = toDestination(dest)
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -256,7 +264,7 @@ func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) Metadata {
 		total += len(packet)
 		err := sniff.QUICClientHello(f.ctx, &parsed, packet)
 		if err == nil {
-			return sniffResult(md, parsed)
+			return sniffResult(md, parsed, o)
 		}
 		if !errors.Is(err, sniff.ErrNeedMoreData) {
 			return md

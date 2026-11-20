@@ -206,7 +206,8 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	p := Plan{Rules: len(eff.Rules)}
 	p.RoutingChanged = gen.eff == nil && eff.Routing.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Routing, eff.Routing)
 	p.ProcessChanged = gen.eff == nil && eff.Process.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Process, eff.Process)
-	p.SniffChanged = gen.eff == nil && eff.Sniff.Enabled || gen.eff != nil && !reflect.DeepEqual(gen.eff.Sniff, eff.Sniff)
+	p.SniffChanged = gen.eff == nil && eff.Sniff.Enabled || gen.eff != nil &&
+		(!reflect.DeepEqual(gen.eff.Sniff, eff.Sniff) || gen.eff.SniffForRouting != eff.SniffForRouting)
 	oldNetwork := platform.Network{Mode: "off"}
 	if gen.eff != nil {
 		oldNetwork = gen.eff.Network

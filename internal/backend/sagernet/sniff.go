@@ -25,6 +25,7 @@ type SniffOptions struct {
 	MaxBytes            int
 	MaxPackets          int
 	OverrideDestination bool
+	SkipDomain          func(string) bool
 }
 
 // PreparedFlow pins the routing generation while bounded sniffing takes place.
@@ -128,9 +129,12 @@ func (o SniffOptions) streamEligible(md Metadata) bool {
 	return !sniff.Skip(&adapter.InboundContext{Destination: M.Socksaddr{Port: md.Destination.Port}})
 }
 
-func sniffResult(md Metadata, parsed adapter.InboundContext) Metadata {
-	md.Protocol = parsed.Protocol
+func sniffResult(md Metadata, parsed adapter.InboundContext, options SniffOptions) Metadata {
 	domain := strings.ToLower(strings.TrimSuffix(parsed.Domain, "."))
+	if options.SkipDomain != nil && options.SkipDomain(domain) {
+		return md
+	}
+	md.Protocol = parsed.Protocol
 	if _, err := netip.ParseAddr(domain); domain != "" && err != nil && M.IsDomainName(domain) {
 		md.SniffedDomain = domain
 	}
@@ -184,7 +188,7 @@ func sniffStream(ctx context.Context, conn net.Conn, md Metadata, o SniffOptions
 				parseErr = errors.New("unrecognized stream")
 			}
 			if parseErr == nil {
-				md = sniffResult(md, parsed)
+				md = sniffResult(md, parsed, o)
 				break
 			}
 			if !errors.Is(parseErr, sniff.ErrNeedMoreData) && !errors.Is(parseErr, io.ErrUnexpectedEOF) && !errors.Is(parseErr, io.EOF) {

@@ -140,6 +140,9 @@ type Effective struct {
 	Routing          model.Routing             `json:"routing"`
 	ActiveRouter     *router.Router            `json:"-"`
 	Sniff            model.Sniff               `json:"sniff"`
+	SniffRules       *router.Router            `json:"-"`
+	SniffSkipDomains *router.Router            `json:"-"`
+	SniffForRouting  bool                      `json:"-"`
 	Network          platform.Network          `json:"network"`
 	GroupUDPDisabled map[string]bool           `json:"group-udp-disabled,omitempty"`
 	AutoGroups       []policy.Group            `json:"automatic-groups,omitempty"`

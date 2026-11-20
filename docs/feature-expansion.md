@@ -17,10 +17,14 @@ sniff:
   override-destination: false
 ```
 
-The profile or local document can contain `sniff`; a local object replaces the
-profile object. It is disabled when omitted. HTTP Host, TLS ClientHello SNI and
-QUIC ClientHello SNI become routing hints when the inbound did not supply a
-domain. DNS/Fake IP and explicit inbound domains keep their existing meaning.
+Sniffing is enabled by default, including when `sniff` or `enabled` is omitted.
+Set `sniff: {enabled: false}` to turn it off. A local `sniff` object replaces the
+profile object. By default, the kernel inspects IP targets without a known
+domain when the active rules match on domains. HTTP Host, TLS ClientHello SNI,
+and QUIC ClientHello SNI can supply the missing routing hint. A Fake IP or an
+inbound hostname already supplies a domain. Explicit `enabled: true`,
+conditional sniff rules, or destination rewriting can request inspection
+outside the default scope.
 `override-destination` explicitly permits dialing the sniffed domain instead
 of the original IP. Sniffing cannot reveal ECH's encrypted inner name.
 
@@ -33,9 +37,28 @@ and dependencies before inspection, so concurrent configuration replacement
 cannot redirect a half-inspected flow or destroy its later DNS/ECH path.
 
 SOCKS/HTTP CONNECT must acknowledge the tunnel before an application sends its
-ClientHello. With sniffing enabled, a subsequent rejection can therefore appear
-as a successful handshake followed by a closed tunnel. No payload is decrypted
-or modified. Connection listings expose `sniffed_domain` and `protocol`.
+ClientHello. When a flow needs inspection, a subsequent rejection can therefore
+appear as a successful handshake followed by a closed tunnel. No payload is
+decrypted or modified. Connection listings expose `sniffed_domain` and `protocol`.
+
+### Inspect only selected traffic
+
+```yaml
+sniff:
+  enabled: true
+  skip-domains: ["+.private.example"]
+  rules:
+    - match: {src-ip-cidr: 10.3.0.0/16}
+      action: skip
+    - match: {and: [{in-name: mixed}, {dst-port: [443, 8443-8450]}]}
+      action: sniff
+      protocols: [tls, quic]
+      override-destination: false
+```
+
+Rules use the first matching action. With a nonempty list, unmatched flows skip inspection. Without a list, the global sniff configuration applies as before. Conditions can use IPs, ports, network, inbound names/types/users, domains already supplied by the inbound, and logical operators. Matching never triggers DNS or process discovery. Matched `sniff` actions can inherit or override the global protocols and destination rewriting.
+
+`skip-domains` accepts Clash domain patterns and applies to known names and names discovered by inspection. An excluded inspection result is discarded, with all bytes and packets forwarded through the normal path.
 
 ## XHTTP
 

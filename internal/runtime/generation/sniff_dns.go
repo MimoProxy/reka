@@ -32,7 +32,7 @@ func sniffDNSDependencies(g *generation, resources map[string]*sagernet.Outbound
 	for _, list := range lists {
 		for _, raw := range list {
 			endpoint, err := RD.ParseEndpoint(raw)
-			if err != nil || endpoint.Scheme == "system" {
+			if err != nil || endpoint.Scheme == "system" || endpoint.Scheme == "dhcp" {
 				continue
 			}
 			via := endpoint.Via

@@ -2,10 +2,13 @@ package generation
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime"
 )
 
@@ -20,7 +23,8 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 		}
 		snap, g := e.current()
 		state := e.routingState(g)
-		if g.eff == nil || !g.eff.Sniff.Enabled {
+		options := flowSniffOptions(ctx, g.eff, md, state.scene)
+		if !options.Enabled || (g.eff.SniffForRouting && !e.routingNeedsDomain(g, md, state)) {
 			return sagernet.PreparedFlow{Route: e.route}
 		}
 		pins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
@@ -91,9 +95,8 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			delete(pins, outbound)
 			return snap.Generation, outbound, release, true, nil
 		}
-		cfg := g.eff.Sniff
 		return sagernet.PreparedFlow{
-			Sniff: sagernet.SniffOptions{Enabled: true, Protocols: append([]string(nil), cfg.Protocols...), Timeout: time.Duration(cfg.TimeoutMS) * time.Millisecond, MaxBytes: cfg.MaxBytes, MaxPackets: cfg.MaxPackets, OverrideDestination: cfg.OverrideDestination},
+			Sniff: options,
 			Route: func(ctx context.Context, md sagernet.Metadata) sagernet.Route {
 				ctx = sniffSnapshotContext(ctx, snap)
 				result := e.routeWithAcquire(sagernet.WithPinnedOutbounds(ctx, borrowPins), md, acquire, snap, state)
@@ -113,5 +116,58 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			},
 			Release: release,
 		}
+	}
+}
+
+func (e *Engine) routingNeedsDomain(g *generation, md sagernet.Metadata, state routingState) bool {
+	if g.router == nil || md.Destination.Domain != "" || md.SniffedDomain != "" || !md.Destination.Addr.IsValid() {
+		return false
+	}
+	usesDomain := g.router.Rules().MatchesDomain() || slices.ContainsFunc(state.temporary, func(rule router.TimedRule) bool {
+		return rule.Match.MatchesDomain() && g.router.OverrideActive(rule, state.at)
+	})
+	return usesDomain && !e.isFakeIP(g, md.Destination.Addr)
+}
+
+func flowSniffOptions(ctx context.Context, eff *compile.Effective, md sagernet.Metadata, scene string) sagernet.SniffOptions {
+	if eff == nil || !eff.Sniff.Enabled {
+		return sagernet.SniffOptions{}
+	}
+	cfg := eff.Sniff
+	excluded := eff.SniffSkipDomains
+	var skip func(string) bool
+	if excluded != nil {
+		skip = func(domain string) bool {
+			return domain != "" && excluded.Route(ctx, router.Metadata{Domain: router.NormalizeDomain(domain)}, nil).Outbound == "yes"
+		}
+		if skip(md.Destination.Domain) || skip(md.SniffedDomain) {
+			return sagernet.SniffOptions{}
+		}
+	}
+	if eff.SniffRules != nil {
+		m := router.Metadata{
+			NetworkScene: scene,
+			Inbound:      md.Inbound, InboundType: md.InboundProtocol, InboundUser: md.InboundUser, InboundPort: md.InboundPort,
+			Network: md.Network, Source: md.Source, Domain: router.NormalizeDomain(md.Destination.Domain),
+			Addr: md.Destination.Addr, Port: md.Destination.Port,
+		}
+		if m.Domain == "" {
+			m.Domain = router.NormalizeDomain(md.SniffedDomain)
+		}
+		index := eff.SniffRules.Route(ctx, m, nil).RuleIndex
+		if index < 0 || cfg.Rules[index].Action == "skip" {
+			return sagernet.SniffOptions{}
+		}
+		rule := cfg.Rules[index]
+		if len(rule.Protocols) > 0 {
+			cfg.Protocols = rule.Protocols
+		}
+		if rule.OverrideDestination != nil {
+			cfg.OverrideDestination = *rule.OverrideDestination
+		}
+	}
+	return sagernet.SniffOptions{
+		Enabled: true, Protocols: cfg.Protocols, Timeout: time.Duration(cfg.TimeoutMS) * time.Millisecond,
+		MaxBytes: cfg.MaxBytes, MaxPackets: cfg.MaxPackets, OverrideDestination: cfg.OverrideDestination, SkipDomain: skip,
 	}
 }

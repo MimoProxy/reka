@@ -2,8 +2,11 @@ package control
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -63,11 +66,24 @@ rules:
 		t.Fatal(commit, err)
 	}
 	dialer, _ := proxy.SOCKS5("tcp", serverAddress, nil, &net.Dialer{Timeout: time.Second})
-	for _, target := range []string{"blocked.test:443", reservedPort(t)} {
-		if c, err := dialer.Dial("tcp", target); err == nil {
-			c.Close()
-			t.Fatal("unexpected successful connection", target)
-		}
+	if c, err := dialer.Dial("tcp", "blocked.test:443"); err == nil {
+		c.Close()
+		t.Fatal("known blocked domain was not rejected during the SOCKS handshake")
+	}
+	c, err := dialer.Dial("tcp", reservedPort(t))
+	if err != nil {
+		t.Fatal("SOCKS handshake did not allow payload for domain recovery", err)
+	}
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: allowed.test\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if n, err := c.Read(b[:]); n != 0 || err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("SOCKS tunnel did not close after dial failure: read %d bytes, %v", n, err)
 	}
 	var connections history.Page
 	if err := client.Call("ListConnectionHistory", nil, &connections); err != nil || len(connections.Rows) != 2 {

@@ -482,3 +482,20 @@ func TestSniffUDPForwardsRetainedQUICDatagrams(t *testing.T) {
 		t.Fatalf("active UDP connection lost its domain or original peer: %+v", active)
 	}
 }
+
+func TestSniffDiscardedDomainReplaysPayload(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	data := []byte("GET / HTTP/1.1\r\nHost: private.example\r\n\r\nrest of stream")
+	go func() {
+		defer client.Close()
+		_, _ = client.Write(data)
+	}()
+	options := SniffOptions{Enabled: true, OverrideDestination: true, Timeout: time.Second,
+		SkipDomain: func(domain string) bool { return domain == "private.example" }}
+	conn, md := sniffStream(context.Background(), server, Metadata{Destination: Destination{Port: 80}}, options)
+	replayed, err := io.ReadAll(conn)
+	if err != nil || !bytes.Equal(replayed, data) || md.SniffedDomain != "" || md.Protocol != "" {
+		t.Fatalf("excluded result or replay was incorrect: %+v, %q, %v", md, replayed, err)
+	}
+}

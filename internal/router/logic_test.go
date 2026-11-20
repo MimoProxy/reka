@@ -53,6 +53,9 @@ func TestNestedSetOrderNoResolveAndProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	specs := []RuleSpec{{Kind: KindRuleSet, Values: []string{"list"}, Set: set, Target: "proxy", NoResolve: true}, {Kind: KindDomainSuffix, Values: []string{"test"}, Target: "reject"}}
+	if nested := mustRouter(t, specs[:1], nil); !nested.Rules().MatchesDomain() {
+		t.Fatal("nested domain dependency lost")
+	}
 	r := mustRouter(t, specs, nil)
 	if !r.Rules().NeedsProcess() {
 		t.Fatal("nested process dependency lost")
