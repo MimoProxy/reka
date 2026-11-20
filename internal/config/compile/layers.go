@@ -32,7 +32,7 @@ func nodeCopy(n *yaml.Node) *yaml.Node {
 }
 
 func field(n *yaml.Node, key string) *yaml.Node {
-	if n == nil {
+	if n == nil || n.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
@@ -549,8 +549,12 @@ func (c *compiler) layers(profile []byte) {
 				fail(fmt.Errorf("invalid inserted resource"))
 				continue
 			}
+			if value.Kind != yaml.MappingNode {
+				fail(fmt.Errorf("inserted resource must be a mapping"))
+				continue
+			}
 			id := field(value, "id")
-			if id == nil || !idRE.MatchString(id.Value) {
+			if id == nil || id.Kind != yaml.ScalarNode || !idRE.MatchString(id.Value) {
 				fail(fmt.Errorf("inserted resource requires a native stable ID"))
 				continue
 			}

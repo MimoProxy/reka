@@ -152,6 +152,27 @@ func TestSourceIDMustBeLiteralScalar(t *testing.T) {
 	}
 }
 
+func TestOverlayRejectsNonMappingResource(t *testing.T) {
+	for _, tc := range []struct{ name, patch string }{
+		{name: "insert", patch: "{op: insert, path: /rules, value: [id, custom]}"},
+		{name: "replace", patch: "{op: set, path: /rules/final, value: [id, final]}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			overlay := "patches:\n  - " + tc.patch + "\n"
+			eff, ds := Compile([]byte(layeredProfile), nil, Options{Sources: []byte(layeredSources), Overlay: []byte(overlay)})
+			if eff != nil || !ds.HasErrors() {
+				t.Fatalf("overlay accepted a resource sequence: %+v", ds)
+			}
+			for _, d := range ds.Errors() {
+				if d.Document == model.DocOverlay && d.Path == "/patches/#0" && d.Code == "overlay.path" {
+					return
+				}
+			}
+			t.Fatalf("missing diagnostic at the overlay patch: %+v", ds)
+		})
+	}
+}
+
 func TestOverlayDisableAndInsert(t *testing.T) {
 	overlay := `patches:
  - {op: remove, path: /rules/airport~1remote}
