@@ -205,17 +205,12 @@ func (s *Service) SwitchProfile(ctx context.Context, req api.SwitchProfileReques
 		result.ProfileID = currentID
 		result.Epoch = currentEpoch
 		result.Revision = currentRevision
-		result.Error = errf(CodeActivate, "profile switch failed: %v", cause)
-		if s.eff != nil {
-			previous, e := s.engine.Prepare(s.eff)
-			if e == nil {
-				_, e = s.engine.ActivateProfile(previous, s.active, currentID)
-			}
-			if e != nil {
-				result.Degraded = true
-				s.startErr = e
-			}
+		if e := s.restoreRuntime(currentID); e != nil {
+			result.Degraded = true
+			s.startErr = fmt.Errorf("restore previous profile runtime: %w", e)
+			cause = errors.Join(cause, s.startErr)
 		}
+		result.Error = errf(CodeActivate, "profile switch failed: %v", cause)
 		// A rename can succeed before directory fsync reports an error.
 		// Explicitly restore the old workspace pointer on that failure path.
 		if cursorAttempted {
@@ -223,10 +218,9 @@ func (s *Service) SwitchProfile(ctx context.Context, req api.SwitchProfileReques
 				result.Degraded = true
 			}
 		}
-		if e := target.WriteActive(*active); e != nil {
+		if e := s.writeActive(target, *active); e != nil {
 			result.Degraded = true
-		}
-		if newRevision != 0 {
+		} else if newRevision != 0 {
 			if e := target.DeleteRevision(newRevision); e != nil {
 				result.Degraded = true
 			}
@@ -241,7 +235,7 @@ func (s *Service) SwitchProfile(ctx context.Context, req api.SwitchProfileReques
 	if err = s.fail("profile-switch-activated"); err != nil {
 		return result, err
 	}
-	if err = target.WriteActive(after); err != nil {
+	if err = s.writeActive(target, after); err != nil {
 		return fail(err)
 	}
 	cursor := w.cursor

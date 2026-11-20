@@ -554,6 +554,24 @@ func (e *Engine) Activate(p *Prepared, revision uint64) (uint64, error) {
 	return e.ActivateProfile(p, revision, previous.historyScope.ProfileID)
 }
 
+// DeactivateProfile returns the runtime to its idle state for a profile that
+// cannot start yet. The engine can still prepare and activate a later change.
+func (e *Engine) DeactivateProfile(profileID string) error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return errors.New("engine closed")
+	}
+	_, previous := e.current()
+	if previous.eff == nil && previous.historyScope.ProfileID == profileID {
+		e.mu.Unlock()
+		return nil
+	}
+	p := &Prepared{changes: e.listenerChanges(nil)}
+	_, err := e.ActivateProfile(p, 0, profileID)
+	return err
+}
+
 // ActivateProfile tags the new generation before it can receive traffic.
 func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string) (uint64, error) {
 	if p.done {
@@ -562,12 +580,15 @@ func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string)
 	defer e.mu.Unlock()
 	p.done = true
 	eff := p.eff
+	if eff == nil {
+		eff = &compile.Effective{Network: platform.Network{Mode: "off"}}
+	}
 	previousSnapshot, previousGeneration := e.current()
 	scope := history.Scope{ProfileID: profileID, Generation: previousSnapshot.Generation + 1, Revision: revision}
 	if p.dns != nil {
 		p.dns.SetHistoryScope(scope)
 	}
-	g := &generation{historyScope: scope, policies: p.policies, dns: p.dns, revision: revision, eff: eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
+	g := &generation{historyScope: scope, policies: p.policies, dns: p.dns, revision: revision, eff: p.eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
@@ -665,6 +686,9 @@ func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string)
 			e.networkErr = nil
 		}
 
+	}
+	if p.eff == nil {
+		e.backend.CloseConnections(nil)
 	}
 	if len(errs) > 0 {
 		return genNo, &ActivateError{Err: errors.Join(errs...), Degraded: degraded}
