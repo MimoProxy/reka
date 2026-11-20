@@ -58,7 +58,11 @@ func (e *Engine) preparePolicies(p *Prepared) {
 		}
 		return nil
 	}
-	manager = policy.New(p.eff.AutoGroups, probe)
+	concurrency := 4
+	if e.opts.HostPacketFlow {
+		concurrency = 2
+	}
+	manager = policy.NewWithConcurrency(p.eff.AutoGroups, probe, concurrency)
 	_, old := e.current()
 	same := old.eff != nil && reflect.DeepEqual(old.eff.Groups, p.eff.Groups) && len(old.eff.Outbounds) == len(p.eff.Outbounds)
 	if same {

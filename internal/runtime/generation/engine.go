@@ -62,6 +62,16 @@ type EngineOptions struct {
 	// Resolver looks up domains for ip-cidr rules. Default: the system
 	// resolver.
 	Resolver *net.Resolver
+	// HostPacketFlow uses host-owned networking and a smaller fake IP pool.
+	// Traffic is not recorded in desktop history.
+	HostPacketFlow bool
+	ObserveRoute   func(RouteObservation)
+}
+
+type RouteObservation struct {
+	Domain   string
+	Address  netip.Addr
+	Decision router.Decision
 }
 
 // generation is the immutable value published with each snapshot.
@@ -121,7 +131,13 @@ func NewEngine(opts EngineOptions) *Engine {
 		opts.MaxRetiring = DefaultMaxRetiring
 	}
 
-	e := &Engine{history: history.New(), fake: RD.NewFakePool(65536), opts: opts, listeners: map[string]*listener{}}
+	e := &Engine{opts: opts, listeners: map[string]*listener{}}
+	if opts.HostPacketFlow {
+		e.fake = RD.NewFakePool(2048)
+	} else {
+		e.history = history.New()
+		e.fake = RD.NewFakePool(65536)
+	}
 	e.guard = sagernet.NewSocketGuard(opts.Backend.ProtectFD)
 	oldProtect := opts.Backend.Protect
 	opts.Backend.Protect = func(n, a string, c syscall.RawConn) error {
@@ -878,7 +894,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		}
 		udpAllowed := g.inUDP[md.Inbound]
 		if md.InboundType == "tun" {
-			udpAllowed = g.eff.Network.Mode == "tun"
+			udpAllowed = e.opts.HostPacketFlow || g.eff.Network.Mode == "tun"
 		}
 		if md.Network == "udp" && !udpAllowed {
 			dec = router.Decision{RuleIndex: -1, Outbound: model.OutboundReject}
@@ -923,6 +939,9 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	})
 	if err != nil {
 		slog.Error("route", "err", err)
+	}
+	if observe := e.opts.ObserveRoute; observe != nil {
+		observe(RouteObservation{Domain: routerMetadata(md).Domain, Address: md.Destination.Addr, Decision: dec})
 	}
 	info := &FlowInfo{
 		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,

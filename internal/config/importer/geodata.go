@@ -13,16 +13,41 @@ import (
 // ImportBundle binds explicitly supplied geodata to the same resource snapshot
 // as providers. It never uses geox-url or implicit global download locations.
 func ImportBundle(req Request, payloads, geodata map[string][]byte) Result {
+	refs, err := GeodataSelectors(req, payloads)
+	if err != nil {
+		return invalidBundle(req, err)
+	}
+	req.resourceNames = map[string]string{}
+	for _, ref := range refs {
+		kind, code, _ := strings.Cut(ref, ":")
+		data := geodata[kind]
+		if len(data) == 0 {
+			return invalidBundle(req, fmt.Errorf("missing explicit %s resource", kind))
+		}
+		format := rulesdata.GeodataFormat(kind, data)
+		if _, err := rulesdata.Decode(kind, format, code, data); err != nil {
+			return invalidBundle(req, err)
+		}
+		id := StableID(kind, code)
+		req.resourceNames[ref] = id
+		req.ruleSets = append(req.ruleSets, object{"id": id, "behavior": kind, "format": format, "code": code, "hash": resource.Hash(data)})
+	}
+	return ImportProviders(req, payloads)
+}
+
+// GeodataSelectors returns the locked datasets needed by this conversion.
+// It includes references from DNS policy and supplied classical rule sets.
+func GeodataSelectors(req Request, payloads map[string][]byte) ([]string, error) {
 	format := req.Format
 	if format == "" || format == "auto" {
 		format = detectFormat(req.Data)
 	}
 	if req.NodesOnly || format != "clash" {
-		return ImportProviders(req, payloads)
+		return nil, nil
 	}
 	root, err := checkedDocument([]byte(req.Data))
 	if err != nil {
-		return invalidBundle(req, err)
+		return nil, err
 	}
 	refs := map[string]bool{}
 	var collect func(router.RuleSpec)
@@ -87,36 +112,21 @@ func ImportBundle(req Request, payloads, geodata map[string][]byte) Result {
 	}
 	ps, err := Providers(req)
 	if err != nil {
-		return invalidBundle(req, err)
+		return nil, err
 	}
 	for _, p := range ps {
 		if p.Kind == "rule" && p.Behavior == "classical" {
 			specs, e := rulesdata.Decode(p.Behavior, p.Format, "", payloads[p.ID])
 			if e != nil {
-				return invalidBundle(req, e)
+				return nil, e
 			}
 			for _, r := range specs {
 				collect(r)
 			}
 		}
 	}
-	req.resourceNames = map[string]string{}
 	// Sort refs so map iteration never affects source snapshots or fingerprints.
-	for _, ref := range sortedNames(refs) {
-		kind, code, _ := strings.Cut(ref, ":")
-		data := geodata[kind]
-		if len(data) == 0 {
-			return invalidBundle(req, fmt.Errorf("missing explicit %s resource", kind))
-		}
-		format := rulesdata.GeodataFormat(kind, data)
-		if _, err := rulesdata.Decode(kind, format, code, data); err != nil {
-			return invalidBundle(req, err)
-		}
-		id := StableID(kind, code)
-		req.resourceNames[ref] = id
-		req.ruleSets = append(req.ruleSets, object{"id": id, "behavior": kind, "format": format, "code": code, "hash": resource.Hash(data)})
-	}
-	return ImportProviders(req, payloads)
+	return sortedNames(refs), nil
 }
 
 func sortedNames(m map[string]bool) []string {

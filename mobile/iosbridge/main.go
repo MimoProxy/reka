@@ -8,14 +8,17 @@ package main
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"runtime"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/MimoProxy/reka/mobile/packettunnel"
+	"github.com/MimoProxy/reka/mobile/profile"
 )
 
 type runningTunnel struct {
@@ -38,6 +41,35 @@ func RekaGoStart(data unsafe.Pointer, length C.size_t) C.uint64_t {
 	if err := json.Unmarshal(unsafe.Slice((*byte)(data), int(length)), &node); err != nil {
 		return 0
 	}
+	return start(func() (*packettunnel.Session, error) { return packettunnel.Start(node) }, nil, 0)
+}
+
+//export RekaGoPrepareProfile
+func RekaGoPrepareProfile(input, output, cache *C.char, failure *C.char, capacity C.size_t) C.int32_t {
+	if input == nil || output == nil || cache == nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	defer cancel()
+	if err := profile.PrepareFile(ctx, C.GoString(input), C.GoString(output), C.GoString(cache)); err != nil {
+		writeError(failure, capacity, err.Error())
+		return 0
+	}
+	return 1
+}
+
+//export RekaGoStartProfile
+func RekaGoStartProfile(snapshot unsafe.Pointer, size C.size_t, data unsafe.Pointer, length C.size_t, trace C.int32_t, failure *C.char, capacity C.size_t) C.uint64_t {
+	controls, ok := decodeControls(data, length)
+	if !ok || snapshot == nil || size == 0 || size > profile.MaxBundleBytes {
+		return 0
+	}
+	return start(func() (*packettunnel.Session, error) {
+		return packettunnel.StartProfile(unsafe.Slice((*byte)(snapshot), int(size)), controls, trace != 0)
+	}, failure, capacity)
+}
+
+func start(open func() (*packettunnel.Session, error), failure *C.char, capacity C.size_t) C.uint64_t {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
 	if active.Load() != nil {
@@ -46,13 +78,59 @@ func RekaGoStart(data unsafe.Pointer, length C.size_t) C.uint64_t {
 	// This library is linked only into the VPN extension process.
 	runtime.GOMAXPROCS(2)
 	debug.SetMemoryLimit(20 << 20)
-	session, err := packettunnel.Start(node)
+	session, err := open()
 	if err != nil {
+		writeError(failure, capacity, err.Error())
 		return 0
 	}
 	lastID++
 	active.Store(&runningTunnel{id: lastID, session: session})
 	return C.uint64_t(lastID)
+}
+
+//export RekaGoApplyControls
+func RekaGoApplyControls(id C.uint64_t, data unsafe.Pointer, length C.size_t) C.int32_t {
+	session := lookup(id)
+	controls, ok := decodeControls(data, length)
+	if session == nil || !ok || session.ApplyControls(controls) != nil {
+		return 0
+	}
+	return 1
+}
+
+//export RekaGoPolicyStatus
+func RekaGoPolicyStatus(id C.uint64_t, out unsafe.Pointer, capacity C.size_t) C.int32_t {
+	session := lookup(id)
+	if session == nil || out == nil || capacity == 0 || capacity > 64<<10 {
+		return 0
+	}
+	status, err := session.ProfileStatus()
+	if err != nil {
+		return 0
+	}
+	data, err := json.Marshal(status)
+	if err != nil || len(data) > int(capacity) {
+		return 0
+	}
+	copy(unsafe.Slice((*byte)(out), int(capacity)), data)
+	return C.int32_t(len(data))
+}
+
+func decodeControls(data unsafe.Pointer, length C.size_t) (profile.Controls, bool) {
+	var controls profile.Controls
+	if data == nil || length == 0 || length > 64<<10 {
+		return controls, false
+	}
+	err := json.Unmarshal(unsafe.Slice((*byte)(data), int(length)), &controls)
+	return controls, err == nil
+}
+
+func writeError(failure *C.char, capacity C.size_t, description string) {
+	if failure != nil && capacity > 1 && capacity <= 4096 {
+		buffer := unsafe.Slice((*byte)(unsafe.Pointer(failure)), int(capacity))
+		n := copy(buffer[:len(buffer)-1], description)
+		buffer[n] = 0
+	}
 }
 
 func lookup(id C.uint64_t) *packettunnel.Session {

@@ -1,0 +1,195 @@
+// Package profile prepares and loads the configuration shared with the iOS
+// Packet Tunnel. Subscription downloads and geodata filtering happen in the
+// app. The packet tunnel only reads the resulting snapshot.
+package profile
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/router"
+)
+
+const bundleVersion = 1
+const MaxBundleBytes = 4 << 20
+
+type Bundle struct {
+	Version   int               `json:"version"`
+	Profile   json.RawMessage   `json:"profile"`
+	Resources map[string][]byte `json:"resources,omitempty"`
+	Summary   Summary           `json:"summary"`
+}
+
+type Summary struct {
+	Groups []Group           `json:"groups"`
+	Names  map[string]string `json:"names"`
+	Nodes  int               `json:"nodes"`
+	Rules  int               `json:"rules"`
+}
+
+type Group struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Members  []string `json:"members"`
+	Selected string   `json:"selected"`
+}
+
+type Controls struct {
+	Mode       string            `json:"mode"`
+	Selections map[string]string `json:"selections"`
+}
+
+func Decode(data []byte) (*Bundle, error) {
+	var bundle Bundle
+	if len(data) > MaxBundleBytes || json.Unmarshal(data, &bundle) != nil || bundle.Version != bundleVersion {
+		return nil, errors.New("invalid profile snapshot")
+	}
+	return &bundle, nil
+}
+
+func (b *Bundle) Compile() (*compile.Effective, error) {
+	eff, diagnostics := compile.Compile(b.Profile, nil, compile.Options{ReadResource: func(hash string) ([]byte, error) {
+		if data := b.Resources[hash]; data != nil {
+			return data, nil
+		}
+		return nil, errors.New("rule resource is missing from this snapshot")
+	}})
+	if diagnostics.HasErrors() {
+		return nil, diagnosticError("invalid profile", diagnostics)
+	}
+	// These maps describe configuration edits. The phone publishes a read-only
+	// snapshot and does not need to retain editor provenance in the extension.
+	eff.Provenance = nil
+	eff.SourceHashes = nil
+	return eff, nil
+}
+
+func Describe(eff *compile.Effective) Summary {
+	summary := Summary{Names: map[string]string{"direct": "DIRECT", "reject": "REJECT", "reject-drop": "REJECT-DROP", "pass": "PASS"},
+		Rules: eff.Router.Rules().Len()}
+	for _, outbound := range eff.Outbounds {
+		if outbound.Builtin {
+			continue
+		}
+		summary.Nodes++
+		if outbound.Name != "" {
+			summary.Names[outbound.ID] = outbound.Name
+		}
+	}
+	for _, group := range eff.Groups {
+		kind := "select"
+		for _, auto := range eff.AutoGroups {
+			if auto.ID == group.ID {
+				kind = auto.Type
+				break
+			}
+		}
+		if name := eff.GroupMetadata[group.ID].Name; name != "" {
+			summary.Names[group.ID] = name
+		}
+		summary.Groups = append(summary.Groups, Group{ID: group.ID, Type: kind, Members: group.Members, Selected: group.Selected})
+	}
+	if summary.Groups == nil {
+		summary.Groups = []Group{}
+	}
+	return summary
+}
+
+// ApplyControls shares the already-compiled rule index and outbound specs
+// across updates. Stable IDs are preferred; old iOS saves used display names.
+func ApplyControls(base *compile.Effective, summary Summary, controls Controls) (*compile.Effective, error) {
+	eff := *base
+	eff.Groups = slices.Clone(base.Groups)
+	ids := make([]string, 0, len(base.Outbounds))
+	for _, outbound := range base.Outbounds {
+		ids = append(ids, outbound.ID)
+	}
+	global := base.Routing.Global
+	for i := range eff.Groups {
+		group := &eff.Groups[i]
+		if global == "" && (strings.EqualFold(group.ID, "GLOBAL") || strings.EqualFold(summary.Names[group.ID], "GLOBAL")) {
+			global = group.ID
+		}
+		entry := summary.Groups[i]
+		if entry.Type != "select" {
+			continue
+		}
+		member := controls.Selections[group.ID]
+		if member == "" && summary.Names[group.ID] != "" {
+			member = controls.Selections[summary.Names[group.ID]]
+		}
+		if slices.Contains(group.Members, member) {
+			group.Selected = member
+		} else if member != "" {
+			for _, id := range group.Members {
+				if summary.Names[id] == member {
+					group.Selected = id
+					break
+				}
+			}
+		}
+	}
+	if global == "" && len(eff.Groups) > 0 {
+		global = eff.Groups[0].ID
+	}
+	if global == "" {
+		global = base.Final
+		for _, outbound := range base.Outbounds {
+			if !outbound.Builtin && outbound.Type != "pass" && outbound.Type != "reject-drop" {
+				global = outbound.ID
+				break
+			}
+		}
+	}
+	mode := controls.Mode
+	if mode == "" {
+		mode = base.Routing.Mode
+	}
+	eff.Routing = model.Routing{Mode: mode, Global: global}
+	opts := router.Options{Outbounds: ids, Groups: eff.Groups, Final: base.Final}
+	var err error
+	eff.Router, err = router.New(base.Router.Rules(), opts)
+	if err != nil {
+		return nil, err
+	}
+	eff.ActiveRouter = eff.Router
+	switch mode {
+	case "rule":
+		return &eff, nil
+	case "global":
+		opts.Final = global
+	case "direct":
+		opts.Final = model.OutboundDirect
+	default:
+		return nil, errors.New("unknown routing mode")
+	}
+	active, err := router.CompileRules([]router.RuleSpec{{ID: "routing-mode-" + mode, Kind: router.KindMatch, Target: opts.Final}})
+	if err != nil {
+		return nil, err
+	}
+	eff.ActiveRouter, err = router.New(active, opts)
+	return &eff, err
+}
+
+func diagnosticError(prefix string, diagnostics model.Diagnostics) error {
+	// Paths and malformed values can contain credentials. Report stable error
+	// codes only to the app and the system VPN log.
+	var codes []string
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code != "import.partial" && !strings.HasPrefix(diagnostic.Code, "import.ignored") && !slices.Contains(codes, diagnostic.Code) {
+			codes = append(codes, diagnostic.Code)
+		}
+		if len(codes) == 4 {
+			break
+		}
+	}
+	if len(codes) == 0 {
+		return errors.New(prefix)
+	}
+	return fmt.Errorf("%s (%s)", prefix, strings.Join(codes, ", "))
+}

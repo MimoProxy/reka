@@ -17,6 +17,56 @@ type wireField struct {
 	v uint64
 }
 
+// SubsetDAT retains the country/category records required by a profile. A
+// GeoSite category keeps all attributes so the normal decoder can match them.
+func SubsetDAT(data []byte, selectors []string) ([]byte, error) {
+	wanted := make(map[string]bool, len(selectors))
+	for _, selector := range selectors {
+		code, _, _ := strings.Cut(strings.ToLower(selector), "@")
+		wanted[strings.TrimSpace(code)] = true
+	}
+	entries, err := fieldsTyped(data, protowire.BytesType)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []byte
+	for _, entry := range entries {
+		if entry.n != 1 {
+			continue
+		}
+		// Country/category is the first field in the published databases.
+		// Accept other field ordering as required by the protobuf format.
+		rest := entry.b
+		for len(rest) > 0 {
+			n, t, k := protowire.ConsumeTag(rest)
+			if k < 0 {
+				return nil, errors.New("invalid geodata entry")
+			}
+			rest = rest[k:]
+			if n == 1 && t == protowire.BytesType {
+				value, size := protowire.ConsumeBytes(rest)
+				if size < 0 {
+					return nil, errors.New("invalid geodata selector")
+				}
+				if wanted[strings.ToLower(string(value))] {
+					filtered = protowire.AppendTag(filtered, 1, protowire.BytesType)
+					filtered = protowire.AppendBytes(filtered, entry.b)
+				}
+				break
+			}
+			k = protowire.ConsumeFieldValue(n, t, rest)
+			if k < 0 {
+				return nil, errors.New("invalid geodata entry")
+			}
+			rest = rest[k:]
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, errors.New("geodata does not contain the required selectors")
+	}
+	return filtered, nil
+}
+
 func fields(data []byte) ([]wireField, error) {
 	var out []wireField
 	for len(data) > 0 {

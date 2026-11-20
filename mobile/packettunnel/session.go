@@ -46,6 +46,12 @@ type Session struct {
 	backend  *sagernet.Backend
 	outbound *sagernet.Outbound
 	tunnel   io.Closer
+	profile  *profileSession
+}
+
+func newSession() *Session {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Session{ctx: ctx, cancel: cancel, device: &packetDevice{endpoint: channel.New(queueSize, MTU, "")}}
 }
 
 func Start(node Node) (*Session, error) {
@@ -63,20 +69,18 @@ func Start(node Node) (*Session, error) {
 		return nil, err
 	}
 	backend.SetRoute(sagernet.Fixed(outbound))
-	ctx, cancel := context.WithCancel(context.Background())
-	device := &packetDevice{endpoint: channel.New(queueSize, MTU, "")}
+	s := newSession()
 	tunnel, err := backend.AttachPacketFlow(
-		device, MTU, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), maxTCP, maxUDP,
+		s.device, MTU, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), maxTCP, maxUDP, nil,
 	)
 	if err != nil {
-		cancel()
+		s.cancel()
 		_ = outbound.Close()
 		_ = backend.Close()
 		return nil, err
 	}
-	return &Session{
-		ctx: ctx, cancel: cancel, device: device, backend: backend, outbound: outbound, tunnel: tunnel,
-	}, nil
+	s.backend, s.outbound, s.tunnel = backend, outbound, tunnel
+	return s, nil
 }
 
 // Submit copies one host packet into the stack before returning. The host may
@@ -128,6 +132,9 @@ func (s *Session) ReadBatch(output []byte, lengths []uint16) int {
 }
 
 func (s *Session) Traffic() (upload, download uint64) {
+	if s.profile != nil {
+		return s.profile.engine.PacketFlowTraffic()
+	}
 	return s.backend.Traffic()
 }
 
@@ -136,6 +143,14 @@ func (s *Session) Close() {
 		s.cancel()
 		s.input.Lock()
 		defer s.input.Unlock()
+		if s.profile != nil {
+			s.profile.mu.Lock()
+			defer s.profile.mu.Unlock()
+			s.profile.engine.CloseConnections(nil)
+			_ = s.tunnel.Close()
+			s.profile.engine.Close()
+			return
+		}
 		s.backend.SetRoute(sagernet.Fixed(nil))
 		s.backend.CloseConnections(nil)
 		_ = s.tunnel.Close()

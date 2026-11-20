@@ -75,6 +75,13 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 		return Endpoint{Scheme: "dhcp", Host: name, Port: "53"}, nil
 	}
 	if !strings.Contains(raw, "://") {
+		host, fragment, hasFragment := strings.Cut(raw, "#")
+		if addr, err := netip.ParseAddr(host); err == nil && addr.Is6() {
+			raw = "[" + strings.ReplaceAll(host, "%", "%25") + "]"
+			if hasFragment {
+				raw += "#" + fragment
+			}
+		}
 		raw = "udp://" + raw
 	}
 	u, err := url.Parse(raw)

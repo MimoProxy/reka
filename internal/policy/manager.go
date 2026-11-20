@@ -50,7 +50,11 @@ type Manager struct {
 }
 
 func New(groups []Group, probe Probe) *Manager {
-	m := &Manager{states: map[string]*state{}, probe: probe, sem: make(chan struct{}, 4)}
+	return NewWithConcurrency(groups, probe, 4)
+}
+
+func NewWithConcurrency(groups []Group, probe Probe, concurrency int) *Manager {
+	m := &Manager{states: map[string]*state{}, probe: probe, sem: make(chan struct{}, max(1, concurrency))}
 	for _, g := range groups {
 		if g.Type == "select" {
 			continue
@@ -101,7 +105,7 @@ func (m *Manager) check(ctx context.Context, s *state) {
 	results := make([]Result, len(s.group.Members))
 	var wg sync.WaitGroup
 	jobs := make(chan int)
-	for range min(4, len(s.group.Members)) {
+	for range min(cap(m.sem), len(s.group.Members)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

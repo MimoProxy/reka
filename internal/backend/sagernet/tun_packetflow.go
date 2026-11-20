@@ -12,19 +12,21 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/platform"
+	D "github.com/miekg/dns"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
 	tun "github.com/sagernet/sing-tun"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
 
-// AttachPacketFlow uses a host-owned network interface. The host installs
-// routes and DNS. All IP traffic, including DNS, uses the ordinary relay.
-func (b *Backend) AttachPacketFlow(device tun.GVisorTun, mtu int, v4, v6 netip.Prefix, tcpLimit, udpLimit int) (io.Closer, error) {
+// AttachPacketFlow uses a host-owned network interface. DNS is relayed like
+// other traffic unless the host supplies the engine's DNS exchange.
+func (b *Backend) AttachPacketFlow(device tun.GVisorTun, mtu int, v4, v6 netip.Prefix, tcpLimit, udpLimit int, dns func(context.Context, *D.Msg) (*D.Msg, error)) (io.Closer, error) {
 	ctx, cancel := context.WithCancel(b.ctx)
 	inbound := &TUNInbound{
 		b: b, dev: device, ctx: ctx, cancel: cancel,
-		cfg: platform.TUNConfig{Address4: v4.String(), Address6: v6.String()},
+		cfg: platform.TUNConfig{Address4: v4.String(), Address6: v6.String(), DNSHijack: dns != nil},
+		dns: dns, slots: make(chan struct{}, 8),
 	}
 	handler := &packetFlowHandler{
 		TUNInbound: inbound,
@@ -33,7 +35,7 @@ func (b *Backend) AttachPacketFlow(device tun.GVisorTun, mtu int, v4, v6 netip.P
 	}
 	options := tun.Options{
 		MTU: uint32(mtu), Inet4Address: []netip.Prefix{v4}, Inet6Address: []netip.Prefix{v6},
-		EXP_DisableDNSHijack: true, Logger: newLogger(b.slog, "packet-flow"),
+		EXP_DisableDNSHijack: dns == nil, Logger: newLogger(b.slog, "packet-flow"),
 	}
 	var err error
 	inbound.stack, err = tun.NewGVisor(tun.StackOptions{

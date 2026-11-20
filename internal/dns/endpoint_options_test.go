@@ -61,3 +61,12 @@ func TestEndpointECSAndDisabledQuery(t *testing.T) {
 		t.Fatal("ECS override or isolation failed")
 	}
 }
+func TestBareIPv6BootstrapEndpoint(t *testing.T) {
+	ep, err := ParseEndpoint("2400:3200::1")
+	if err != nil || ep.Scheme != "udp" || ep.Host != "2400:3200::1" || ep.Port != "53" {
+		t.Fatalf("bare IPv6 endpoint: %#v, %v", ep, err)
+	}
+	if err := Validate(&Config{Nameservers: []string{"1.1.1.1"}, Bootstrap: []string{"system", "2400:3200::1"}}); err != nil {
+		t.Fatal(err)
+	}
+}
