@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/clashapi"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/control"
 	"github.com/MimoProxy/reka/internal/platform"
@@ -46,6 +47,7 @@ type Options struct {
 	// disables the socket (the Android binding calls the handler
 	// directly).
 	ControlAddress string
+	ClashAPI       clashapi.Options
 	// EditDir holds candidate files; empty disables them.
 	EditDir        string
 	InitialProfile []byte
@@ -61,8 +63,10 @@ type Kernel struct {
 	Handler   *control.Handler
 	// ControlAddress is where the control API listens, if anywhere.
 	ControlAddress string
+	ClashAddress   string
 
 	server *control.Server
+	clash  *clashapi.Server
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	once   sync.Once
@@ -193,6 +197,21 @@ func Start(opts Options) (*Kernel, error) {
 			}
 		}()
 	}
+	if opts.ClashAPI.Listen != "" {
+		k.clash, err = clashapi.Listen(svc, opts.ClashAPI)
+		if err != nil {
+			k.Close()
+			return nil, fmt.Errorf("Clash API: %w", err)
+		}
+		k.ClashAddress = k.clash.Addr()
+		k.wg.Add(1)
+		go func() {
+			defer k.wg.Done()
+			if err := k.clash.Serve(); err != nil && !errors.Is(err, net.ErrClosed) {
+				opts.Logger.Error("Clash API stopped", "err", err)
+			}
+		}()
+	}
 	k.wg.Add(1)
 	go func() {
 		defer k.wg.Done()
@@ -225,6 +244,9 @@ func Start(opts Options) (*Kernel, error) {
 func (k *Kernel) Close() {
 	k.once.Do(func() {
 		k.cancel()
+		if k.clash != nil {
+			k.clash.Close()
+		}
 		if k.server != nil {
 			k.server.Close()
 		}

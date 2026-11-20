@@ -105,6 +105,7 @@ printf '%s' '<base64 密钥>' | ./bin/rekactl secret set outbounds/my-ss/passwor
 - [系统接管](docs/network-takeover.md)
 - [GUI 接入与原生示例](docs/gui-integration.md)
 - [Android 接入](docs/android-integration.md)
+- [Clash 兼容控制 API](docs/clash-api.md)
 
 - [配置与使用指南](docs/configuration.md)（中文，含启动、节点、订阅、热更新和排查）
 - [配置字段参考](docs/configuration-reference.md)（中文，含默认值、单位和限制）

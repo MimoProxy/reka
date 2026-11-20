@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	"github.com/MimoProxy/reka/internal/clashapi"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/control"
 	"github.com/MimoProxy/reka/internal/daemon"
@@ -39,6 +41,8 @@ func run() error {
 		owner          = flag.String("owner", "", "control API owner: numeric UID on Unix, SID on Windows (privileged service)")
 		stateRoot      = flag.String("state-root", defRoot, "directory holding configuration revisions and state")
 		ctl            = flag.String("control", "", "control API address (unix:///path or pipe://name); default from local settings or the state root")
+		clashListen    = flag.String("clash-listen", "", "optional Clash HTTP API (numeric loopback IP:port, requires REKA_CLASH_SECRET)")
+		clashOrigins   = flag.String("clash-allow-origin", "", "comma-separated exact origins for browser dashboards")
 		editDir        = flag.String("edit-dir", "", `directory for candidate files edited by hand; default <state-root>/edit, "-" to disable`)
 		profile        = flag.String("profile", "", "profile to import as revision 1 when the state root is empty")
 		local          = flag.String("local", "", "local settings to import as revision 1 when the state root is empty")
@@ -70,6 +74,12 @@ func run() error {
 	control.Version = version
 
 	opts := daemon.Options{InitialArchiveHash: *profileArchive, ProfileRoot: *profileRoot, ProfileID: *profileID, ProfileNested: *profileNested, ProfileResume: *profileResume, StateRoot: *stateRoot, Logger: logger, LogLevel: level, ControlAddress: *ctl, DeferNetwork: *deferNetwork}
+	opts.ClashAPI = clashapi.Options{Listen: *clashListen, Token: os.Getenv("REKA_CLASH_SECRET"), Version: version}
+	for origin := range strings.SplitSeq(*clashOrigins, ",") {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			opts.ClashAPI.AllowOrigins = append(opts.ClashAPI.AllowOrigins, origin)
+		}
+	}
 	switch *editDir {
 	case "":
 		opts.EditDir = filepath.Join(*stateRoot, "edit")
@@ -107,6 +117,9 @@ func run() error {
 	}
 	logger.Info("reka started", "version", version, "state_root", *stateRoot, "control", k.ControlAddress,
 		"revision", k.Service.ActiveRevision(), "edit_dir", opts.EditDir)
+	if k.ClashAddress != "" {
+		logger.Info("Clash API listening", "address", k.ClashAddress)
+	}
 	if e := k.Service.StartError(); e != "" {
 		logger.Error("the active configuration is not running", "err", e)
 	}

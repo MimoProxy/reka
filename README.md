@@ -103,6 +103,7 @@ The state lives in `~/Library/Application Support/Reka` (macOS), `%LOCALAPPDATA%
 - [System takeover](docs/network-takeover.md)
 - [GUI integration and native example](docs/gui-integration.md)
 - [Android integration](docs/android-integration.md)
+- [Optional Clash-compatible controller](docs/clash-api.md)
 - [Configuration and usage guide (中文)](docs/configuration.md)
 - [Configuration field reference (中文)](docs/configuration-reference.md)
 - [Background subscriptions and providers](docs/subscriptions.md)
