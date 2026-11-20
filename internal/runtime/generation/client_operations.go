@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -17,6 +15,7 @@ import (
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/runtime"
 	D "github.com/miekg/dns"
 )
 
@@ -30,57 +29,32 @@ func (e *Engine) Traffic() api.Traffic {
 // bounded request, including lazy node DNS and dialer-proxy dependencies.
 func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (api.ProbeResult, error) {
 	result := api.ProbeResult{Outbound: request.Outbound}
-	u, err := url.Parse(request.URL)
-	if err != nil || len(request.URL) > 8192 || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-		return result, errors.New("probe requires an HTTP(S) URL without userinfo")
+	timeout, err := probeTimeout(request.URL, request.TimeoutMS)
+	if err != nil {
+		return result, err
 	}
 	if request.Outbound == "" {
 		return result, errors.New("probe outbound is required")
 	}
-	if request.TimeoutMS == 0 {
-		request.TimeoutMS = 5000
-	}
-	if request.TimeoutMS < 100 || request.TimeoutMS > 30000 {
-		return result, errors.New("probe timeout must be 100..30000 ms")
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(request.TimeoutMS)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	e.probeOnce.Do(func() { e.probeSlots = make(chan struct{}, 16) })
-	select {
-	case e.probeSlots <- struct{}{}:
-		defer func() { <-e.probeSlots }()
-	case <-ctx.Done():
-		return result, ctx.Err()
+	release, err := e.takeProbeSlot(ctx)
+	if err != nil {
+		return result, err
 	}
+	defer release()
 	for ctx.Err() == nil {
 		snapshot, g := e.current()
 		if g.eff == nil || g.router == nil {
 			return result, errors.New("no active configuration")
 		}
-		id, _, err := g.router.ResolveDynamic(request.Outbound, func(group router.Group) string {
-			if g.policies != nil {
-				return g.policies.Peek(group.ID, "probe:"+request.URL, group.Selected)
-			}
-			return group.Selected
-		})
+		id, err := g.resolveProbe(request.Outbound, request.URL)
 		if err != nil || snapshot.Resources[id] == nil {
 			return result, errors.New("probe outbound unavailable or rejected")
 		}
 		out := snapshot.Resources[id]
-		pins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
-		needed := sniffDNSDependencies(g, snapshot.Resources)
-		needed[out] = true
-		valid := true
-		for outbound := range needed {
-			pin, err := outbound.Pin()
-			if err != nil {
-				valid = false
-				break
-			}
-			pins[outbound] = pin
-		}
-		if !valid {
-			closeSniffPins(pins)
+		pins, err := pinProbeOutbounds(g, snapshot, out)
+		if err != nil {
 			if e.rt.Current() == snapshot {
 				return result, errors.New("probe runtime stopped")
 			}
@@ -88,39 +62,81 @@ func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (a
 		}
 		defer closeSniffPins(pins)
 		ctx = sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, pins), snapshot)
-		if g.dns != nil {
-			ctx = sagernet.WithLookup(ctx, func(ctx context.Context, name string) ([]netip.Addr, error) {
-				scope := "proxy"
-				if out.Type() == "direct" {
-					scope = "direct"
-				}
-				return g.dns.Lookup(ctx, name, scope)
-			})
+		sample, err := probeHTTP(ctx, g, out, pins[out], request.URL)
+		if sample.StatusCode != 0 {
+			result.ResolvedOutbound, result.StatusCode, result.DelayMS = id, sample.StatusCode, sample.DelayMS
 		}
-		transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return pins[out].Dial(ctx, network, address)
-		}}
-		defer transport.CloseIdleConnections()
-		client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, request.URL, nil)
-		if err != nil {
-			return result, err
-		}
-		start := time.Now()
-		response, err := client.Do(req)
-		if err != nil {
-			return result, err
-		}
-		defer response.Body.Close()
-		result.ResolvedOutbound, result.StatusCode = id, response.StatusCode
-		result.DelayMS = max(1, time.Since(start).Milliseconds())
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		if response.StatusCode < 200 || response.StatusCode >= 400 {
-			return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)
-		}
-		return result, nil
+		return result, err
 	}
 	return result, ctx.Err()
+}
+
+func (e *Engine) takeProbeSlot(ctx context.Context) (func(), error) {
+	e.probeOnce.Do(func() { e.probeSlots = make(chan struct{}, 16) })
+	select {
+	case e.probeSlots <- struct{}{}:
+		return func() { <-e.probeSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (g *generation) resolveProbe(outbound, url string) (string, error) {
+	id, _, err := g.router.ResolveDynamic(outbound, func(group router.Group) string {
+		if g.policies != nil {
+			return g.policies.Peek(group.ID, "probe:"+url, group.Selected)
+		}
+		return group.Selected
+	})
+	return id, err
+}
+
+func pinProbeOutbounds(g *generation, snapshot *runtime.Snapshot[*sagernet.Outbound], outbounds ...*sagernet.Outbound) (map[*sagernet.Outbound]*sagernet.PinnedOutbound, error) {
+	needed := sniffDNSDependencies(g, snapshot.Resources)
+	for _, out := range outbounds {
+		needed[out] = true
+	}
+	pins := make(map[*sagernet.Outbound]*sagernet.PinnedOutbound, len(needed))
+	for out := range needed {
+		pin, err := out.Pin()
+		if err != nil {
+			closeSniffPins(pins)
+			return nil, err
+		}
+		pins[out] = pin
+	}
+	return pins, nil
+}
+
+func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string) (api.ArenaSample, error) {
+	if g.dns != nil {
+		ctx = sagernet.WithLookup(ctx, func(ctx context.Context, name string) ([]netip.Addr, error) {
+			scope := "proxy"
+			if out.Type() == "direct" {
+				scope = "direct"
+			}
+			return g.dns.Lookup(ctx, name, scope)
+		})
+	}
+	transport := &http.Transport{DisableKeepAlives: true, DialContext: pin.Dial}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return api.ArenaSample{}, err
+	}
+	start := time.Now()
+	response, err := client.Do(req)
+	if err != nil {
+		return api.ArenaSample{}, err
+	}
+	defer response.Body.Close()
+	result := api.ArenaSample{DelayMS: max(1, time.Since(start).Milliseconds()), StatusCode: response.StatusCode}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)
+	}
+	return result, nil
 }
 
 func (e *Engine) QueryDNS(ctx context.Context, request api.DNSQueryRequest) (api.DNSQueryResult, error) {

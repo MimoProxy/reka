@@ -112,6 +112,31 @@ func cmdTemporaryRule(args []string) error {
 	return errors.New("usage: temp-rule list | add [-ttl 5m] RULE | remove ID")
 }
 
+func cmdArena(args []string) error {
+	fs := flag.NewFlagSet("arena", flag.ExitOnError)
+	endpoint := fs.String("url", "", "test URL (default is the generate_204 endpoint)")
+	rounds := fs.Int("rounds", 3, "samples per candidate")
+	timeout := fs.Int("timeout-ms", 5000, "per-sample timeout in milliseconds")
+	parse(fs, args)
+	if fs.NArg() < 2 {
+		return errors.New("usage: arena [-url URL] [-rounds 3] [-timeout-ms 5000] OUTBOUND OUTBOUND...")
+	}
+	var result api.ArenaResult
+	if err := call("RunNodeArena", api.ArenaRequest{Outbounds: fs.Args(), URL: *endpoint, Rounds: *rounds, TimeoutMS: *timeout}, &result); err != nil || *jsonFlag {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "OUTBOUND\tRESOLVED\tSUCCESS\tMEDIAN\tSPREAD")
+	for _, row := range result.Ranking {
+		median, spread := "–", "–"
+		if row.Successes != 0 {
+			median, spread = fmt.Sprintf("%dms", row.MedianMS), fmt.Sprintf("%dms", row.SpreadMS)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d/%d\t%s\t%s\n", row.Outbound, row.ResolvedOutbound, row.Successes, len(row.Samples), median, spread)
+	}
+	return w.Flush()
+}
+
 func cmdScene(args []string) error {
 	var status api.NetworkSceneStatus
 	var err error

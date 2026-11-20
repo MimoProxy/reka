@@ -86,6 +86,7 @@ type Engine struct {
 	temporarySequence uint64
 	sceneObservation  atomic.Pointer[sceneObservation]
 	sceneManual       atomic.Pointer[manualScene]
+	arenaRunning      atomic.Bool
 	history           *history.Store
 	probeOnce         sync.Once
 	probeSlots        chan struct{}

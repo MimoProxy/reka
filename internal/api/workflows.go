@@ -59,6 +59,35 @@ type TemporaryRule struct {
 	Active    bool      `json:"active"`
 }
 
+type ArenaRequest struct {
+	Outbounds []string `json:"outbounds"`
+	URL       string   `json:"url"`
+	Rounds    int      `json:"rounds,omitempty"`
+	TimeoutMS int      `json:"timeout_ms,omitempty"`
+}
+
+type ArenaSample struct {
+	DelayMS    int64  `json:"delay_ms,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+type ArenaEntry struct {
+	Outbound         string        `json:"outbound"`
+	ResolvedOutbound string        `json:"resolved_outbound"`
+	Successes        int           `json:"successes"`
+	MedianMS         int64         `json:"median_ms,omitempty"`
+	SpreadMS         int64         `json:"spread_ms,omitempty"`
+	Samples          []ArenaSample `json:"samples"`
+}
+
+type ArenaResult struct {
+	Generation uint64       `json:"generation"`
+	Revision   uint64       `json:"revision"`
+	Winner     string       `json:"winner,omitempty"`
+	Ranking    []ArenaEntry `json:"ranking"`
+}
+
 type NetworkSceneStatus struct {
 	Current    string    `json:"current,omitempty"`
 	Manual     string    `json:"manual,omitempty"`

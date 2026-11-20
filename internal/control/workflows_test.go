@@ -16,7 +16,7 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-func TestTemporaryRulesAndScenesOverIPC(t *testing.T) {
+func TestTemporaryRulesScenesAndArenaOverIPC(t *testing.T) {
 	address, svc := startServer(t)
 	client, err := Connect(address, "workflows")
 	if err != nil {
@@ -132,7 +132,61 @@ rules:
 		t.Fatal(scene, err)
 	}
 	explain("reject", "", "")
+	var arena api.ArenaResult
+	if err := client.Call("RunNodeArena", api.ArenaRequest{Outbounds: []string{"down", "alt"}, Rounds: 2, TimeoutMS: 800, URL: origin.URL}, &arena); err != nil ||
+		arena.Winner != "alt" || len(arena.Ranking) != 2 || arena.Ranking[0].Successes != 2 || arena.Ranking[1].Successes != 0 {
+		t.Fatal(arena, err)
+	}
 	if after := svc.GetConfiguration(true); before.Revision != after.Revision || before.Profile != after.Profile || before.Local != after.Local {
 		t.Fatal("runtime workflows changed saved configuration")
+	}
+}
+
+func TestClosingControlServerCancelsNodeArena(t *testing.T) {
+	_, svc := startServer(t)
+	server := NewServer(NewHandler(svc))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go server.Serve(listener)
+	conn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	client, err := api.NewClient(conn, "arena-shutdown")
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	started := make(chan struct{}, 2)
+	unblock := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-request.Context().Done():
+		case <-unblock:
+		}
+	}))
+	defer origin.Close()
+	defer close(unblock)
+	go client.Call("RunNodeArena", api.ArenaRequest{Outbounds: []string{"direct", "alt"}, URL: origin.URL, Rounds: 1, TimeoutMS: 15000}, nil)
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		server.Close()
+		t.Fatal("arena did not reach loopback fixture")
+	}
+	done := make(chan struct{})
+	go func() {
+		server.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown waited for an arena probe after closing its connection")
 	}
 }

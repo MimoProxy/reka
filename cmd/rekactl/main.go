@@ -48,6 +48,7 @@ runtime
   timeline [CONNECTION-ID] [-epoch EPOCH]    inspect a flow or list recent connections
   temp-rule add [-ttl 5m] RULE               route new connections with a rule that expires
   temp-rule list | remove ID
+  arena [-url URL] [-rounds 3] OUTBOUND...   compare two or more nodes or groups
   scene [use ID | auto]                      inspect or select a network scene
   close ID...|all
   watch                                     stream events
@@ -193,6 +194,8 @@ func run(args []string) error {
 		return cmdTimeline(rest)
 	case "temp-rule":
 		return cmdTemporaryRule(rest)
+	case "arena":
+		return cmdArena(rest)
 	case "scene":
 		return cmdScene(rest)
 	case "close":

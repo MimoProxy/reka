@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,6 +77,8 @@ func (l *peerListener) Accept() (net.Conn, error) {
 // Server serves the control API on listeners.
 type Server struct {
 	h      *Handler
+	ctx    context.Context
+	cancel context.CancelFunc
 	mu     sync.Mutex
 	lns    []net.Listener
 	conns  map[net.Conn]struct{}
@@ -84,7 +87,10 @@ type Server struct {
 }
 
 // NewServer serves h.
-func NewServer(h *Handler) *Server { return &Server{h: h, conns: map[net.Conn]struct{}{}} }
+func NewServer(h *Handler) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Server{h: h, ctx: ctx, cancel: cancel, conns: map[net.Conn]struct{}{}}
+}
 
 // Serve accepts connections on ln until Close.
 func (s *Server) Serve(ln net.Listener) error {
@@ -108,9 +114,14 @@ func (s *Server) Serve(ln net.Listener) error {
 			return err
 		}
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			c.Close()
+			return nil
+		}
 		s.conns[c] = struct{}{}
-		s.mu.Unlock()
 		s.wg.Add(1)
+		s.mu.Unlock()
 		go func() {
 			defer s.wg.Done()
 			s.ServeConn(c)
@@ -131,6 +142,8 @@ func (s *Server) ServeConn(c net.Conn) {
 		return WriteFrame(c, b)
 	})
 	defer sess.Close()
+	stop := context.AfterFunc(s.ctx, sess.stop)
+	defer stop()
 	for {
 		frame, err := ReadFrame(c)
 		if err != nil {
@@ -144,6 +157,9 @@ func (s *Server) ServeConn(c net.Conn) {
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
+	// Closing the socket unblocks reads, but a session may be handling a
+	// bounded, long-running operation such as a node arena at this point.
+	s.cancel()
 	for _, ln := range s.lns {
 		ln.Close()
 	}

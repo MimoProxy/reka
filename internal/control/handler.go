@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/MimoProxy/reka/internal/api"
 	goruntime "runtime"
 	"slices"
 	"sync"
-
-	"github.com/MimoProxy/reka/internal/api"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/importer"
@@ -123,7 +122,7 @@ var Methods = []string{
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
-	"GetNetworkScene", "SetNetworkScene",
+	"RunNodeArena", "GetNetworkScene", "SetNetworkScene",
 }
 
 func (s *Session) dispatch(req Request) (any, error) {
@@ -276,6 +275,12 @@ func (s *Session) dispatch(req Request) (any, error) {
 			return nil, err
 		}
 		return svc.Engine().ProbeOutbound(s.ctx, p)
+	case "RunNodeArena":
+		p, err := decode[api.ArenaRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().RunArena(s.ctx, p)
 	case "AddTemporaryRule":
 		p, err := decode[api.TemporaryRuleRequest](req.Params)
 		if err != nil {

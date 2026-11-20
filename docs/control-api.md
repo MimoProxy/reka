@@ -96,6 +96,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `ProbeOutbound` | `outbound`、`url`，可选 `timeout_ms` | 显式节点/组的测速结果 |
 | `GetConnectionTimeline` | `id`，可选历史 `epoch` | 连接阶段和关联的 DNS、HTTP 摘要 |
 | `AddTemporaryRule` / `ListTemporaryRules` / `RemoveTemporaryRule` | `rule` 和可选 `ttl_seconds`，或 `id` | 临时分流规则 |
+| `RunNodeArena` | `outbounds`，可选 `url`、`rounds`、`timeout_ms` | 多轮测速排名与逐轮结果 |
 | `GetNetworkScene` / `SetNetworkScene` | 读取，或设置 `scene` | 当前场景和默认接口信息 |
 | `GetTraffic` | 无 | 累计 upload_total/download_total、sampled_at、epoch |
 | `GetRules` | 可选 `offset`、`limit` | 活动模式与分页规则 |
@@ -411,7 +412,7 @@ seq 在一个 epoch 内递增。服务器保留最近 512 条事件；游标可�
 
 客户端可通过 `GetCapabilities.methods` 查询内核提供的方法。调用前先执行 `Hello`。
 
-### 连接时间线、临时规则和网络场景
+### 连接时间线、临时规则和节点擂台
 
 ```sh
 ./bin/rekactl timeline
@@ -419,12 +420,15 @@ seq 在一个 epoch 内递增。服务器保留最近 512 条事件；游标可�
 ./bin/rekactl temp-rule add -ttl 15m 'DOMAIN-SUFFIX,example.com,direct'
 ./bin/rekactl temp-rule list
 ./bin/rekactl temp-rule remove temp-1
+./bin/rekactl arena -rounds 3 hk jp sg
 ./bin/rekactl scene
 ```
 
 时间线以连接 ID 关联已有 DNS 和 HTTP 摘要，并显示接收、嗅探、路由、拨号和结束的时间。可查询正在转发的连接及当前历史缓冲区保留的已结束连接。保存历史 ID 的客户端可附带对应 `epoch`。
 
 临时规则接受 Clash 单行条件和原生出站或组 ID。规则模式按最近添加优先，然后进入保存的规则。有效期默认 5 分钟，范围 1 秒到 24 小时。到期、移除或切换配置档后，后续连接按生效规则重新判定。已有连接继续使用建立时的路由。
+
+擂台固定一份配置快照，比较 2 到 16 个节点或策略组。每个候选默认跑 3 轮，最多 5 轮，每轮最多 4 项并行，全场限时 30 秒。排名依次按成功次数、中位延迟和极差，结果供选择节点时参考。
 
 场景定义示例见[配置字段手册](configuration-reference.md#101-网络场景)。
 
