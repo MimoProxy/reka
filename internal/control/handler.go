@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/MimoProxy/reka/internal/api"
 	goruntime "runtime"
 	"slices"
 	"sync"
+
+	"github.com/MimoProxy/reka/internal/api"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/importer"
@@ -120,7 +121,8 @@ var Methods = []string{
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
-	"GetConnectionTimeline",
+	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
+	"GetNetworkScene", "SetNetworkScene",
 }
 
 func (s *Session) dispatch(req Request) (any, error) {
@@ -273,6 +275,46 @@ func (s *Session) dispatch(req Request) (any, error) {
 			return nil, err
 		}
 		return svc.Engine().ProbeOutbound(s.ctx, p)
+	case "AddTemporaryRule":
+		p, err := decode[api.TemporaryRuleRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		rule, err := svc.Engine().AddTemporaryRule(p)
+		if err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		return rule, nil
+	case "ListTemporaryRules":
+		return svc.Engine().ListTemporaryRules(), nil
+	case "RemoveTemporaryRule":
+		p, err := decode[struct {
+			ID string `json:"id"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if !svc.Engine().RemoveTemporaryRule(p.ID) {
+			return nil, &service.Error{Code: service.CodeNotFound, Message: "temporary rule is missing or expired"}
+		}
+		return map[string]bool{"removed": true}, nil
+	case "GetNetworkScene":
+		return svc.Engine().NetworkScene(), nil
+	case "SetNetworkScene":
+		p, err := decode[struct {
+			Scene *string `json:"scene"`
+		}](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.Scene == nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "scene is required; use an empty string for automatic matching"}
+		}
+		status, err := svc.Engine().SetNetworkScene(*p.Scene)
+		if err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		return status, nil
 	case "GetTraffic":
 		value := svc.Engine().Traffic()
 		value.Epoch = svc.Events().Epoch()

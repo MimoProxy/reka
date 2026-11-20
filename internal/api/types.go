@@ -200,6 +200,8 @@ type Plan struct {
 
 // FlowInfo is attached to every routed connection.
 type FlowInfo struct {
+	RuleSource    string   `json:"rule_source,omitempty"`
+	NetworkScene  string   `json:"network_scene,omitempty"`
 	ProcessPID    uint32   `json:"process_pid,omitempty"`
 	ProcessPath   string   `json:"process_path,omitempty"`
 	ProcessUID    *uint32  `json:"process_uid,omitempty"`
@@ -240,6 +242,8 @@ type ExplainRequest struct {
 
 // Explanation is the answer to ExplainRoute.
 type Explanation struct {
+	RuleSource   string   `json:"rule_source,omitempty"`
+	NetworkScene string   `json:"network_scene,omitempty"`
 	Generation   uint64   `json:"generation"`
 	Revision     uint64   `json:"revision"`
 	Matched      bool     `json:"matched"`

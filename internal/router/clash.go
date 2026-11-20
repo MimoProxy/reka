@@ -56,7 +56,7 @@ func SplitClash(s string) ([]string, error) {
 
 var clashKinds = map[string]Kind{"DOMAIN": KindDomain, "DOMAIN-SUFFIX": KindDomainSuffix, "DOMAIN-KEYWORD": KindDomainKeyword, "DOMAIN-REGEX": KindDomainRegex, "IP-CIDR": KindIPCIDR, "IP-CIDR6": KindIPCIDR, "SRC-IP-CIDR": KindSrcIPCIDR, "DST-PORT": KindDstPort, "SRC-PORT": KindSrcPort, "NETWORK": KindNetwork, "PROCESS-NAME": KindProcessName, "PROCESS-NAME-REGEX": KindProcessNameRegex, "MATCH": KindMatch, "FINAL": KindMatch, "AND": KindAnd, "OR": KindOr, "NOT": KindNot, "RULE-SET": KindRuleSet, "GEOIP": KindGeoIP, "GEOSITE": KindRuleSet, "IP-ASN": KindRuleSet,
 	"PROCESS-PATH": KindProcessPath, "PROCESS-PATH-REGEX": KindProcessPathRegex, "PROCESS-NAME-WILDCARD": KindProcessNameWildcard, "PROCESS-PATH-WILDCARD": KindProcessPathWildcard,
-	"IN-NAME": KindInboundName, "IN-TYPE": KindInboundType, "IN-PORT": KindInboundPort, "IN-USER": KindInboundUser, "UID": KindUID}
+	"IN-NAME": KindInboundName, "IN-TYPE": KindInboundType, "IN-PORT": KindInboundPort, "IN-USER": KindInboundUser, "UID": KindUID, "NETWORK-SCENE": KindNetworkScene}
 
 // ParseClashCondition parses an actionless classical rule or logical operand.
 // External references remain unresolved for the configuration compiler.

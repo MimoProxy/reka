@@ -45,3 +45,26 @@ type ConnectionTimeline struct {
 	Trace     ConnectionTrace `json:"connection"`
 	Events    []TimelineEvent `json:"events"`
 }
+
+type TemporaryRuleRequest struct {
+	Rule       string `json:"rule"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+}
+
+type TemporaryRule struct {
+	ID        string    `json:"id"`
+	Rule      string    `json:"rule"`
+	Outbound  string    `json:"outbound"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Active    bool      `json:"active"`
+}
+
+type NetworkSceneStatus struct {
+	Current    string    `json:"current,omitempty"`
+	Manual     string    `json:"manual,omitempty"`
+	Scenes     []string  `json:"scenes"`
+	Interface  string    `json:"interface,omitempty"`
+	Addresses  []string  `json:"addresses,omitempty"`
+	ObservedAt time.Time `json:"observed_at,omitzero"`
+	Error      string    `json:"error,omitempty"`
+}

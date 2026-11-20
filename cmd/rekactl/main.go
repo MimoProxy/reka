@@ -41,11 +41,14 @@ configuration
   op ID                                     result of an operation
 
 runtime
-  timeline [CONNECTION-ID] [-epoch EPOCH]    inspect a flow or list recent connections
   status
   group-status                               observed automatic choices and health
   explain DESTINATION [-network tcp|udp] [-source ADDR] [-addr IP]... [-resolve] [-process NAME]
   connections
+  timeline [CONNECTION-ID] [-epoch EPOCH]    inspect a flow or list recent connections
+  temp-rule add [-ttl 5m] RULE               route new connections with a rule that expires
+  temp-rule list | remove ID
+  scene [use ID | auto]                      inspect or select a network scene
   close ID...|all
   watch                                     stream events
 
@@ -114,9 +117,10 @@ func call(method string, params, out any) error {
 		return err
 	}
 	if *jsonFlag {
-		var v any
-		json.Unmarshal(raw, &v)
-		b, _ := json.MarshalIndent(v, "", "  ")
+		b, err := json.MarshalIndent(raw, "", "  ")
+		if err != nil {
+			return err
+		}
 		fmt.Println(string(b))
 	}
 	if out != nil {
@@ -179,14 +183,18 @@ func run(args []string) error {
 			}
 		}
 		return nil
-	case "timeline":
-		return cmdTimeline(rest)
 	case "status":
 		return cmdStatus()
 	case "explain":
 		return cmdExplain(rest)
 	case "connections":
 		return cmdConnections()
+	case "timeline":
+		return cmdTimeline(rest)
+	case "temp-rule":
+		return cmdTemporaryRule(rest)
+	case "scene":
+		return cmdScene(rest)
 	case "close":
 		return cmdClose(rest)
 	case "watch":
@@ -729,7 +737,12 @@ func cmdExplain(args []string) error {
 		fmt.Println("undetermined:", x.Undetermined)
 		return nil
 	}
-	if x.Matched {
+	if x.NetworkScene != "" {
+		fmt.Printf("network scene: %s\n", x.NetworkScene)
+	}
+	if x.RuleSource == "temporary" {
+		fmt.Printf("temporary rule %s: %s\n", x.RuleID, x.Rule)
+	} else if x.Matched {
 		id := ""
 		if x.RuleID != "" {
 			id = " (" + x.RuleID + ")"

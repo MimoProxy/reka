@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // RuleSet is a compiled, immutable rule list with its domain index. It can
@@ -92,12 +93,13 @@ func (rs *RuleSet) NeedsProcess() bool { return rs.hasProcess }
 
 // Metadata describes a connection for matching.
 type Metadata struct {
-	Inbound     string
-	InboundType string
-	InboundUser string
-	InboundPort uint16
-	Network     string // "tcp" or "udp"
-	Source      netip.AddrPort
+	NetworkScene string
+	Inbound      string
+	InboundType  string
+	InboundUser  string
+	InboundPort  uint16
+	Network      string // "tcp" or "udp"
+	Source       netip.AddrPort
 	// Domain is set when the destination is a name. Use NormalizeDomain.
 	Domain string
 	// Addr is set when the destination is an address.
@@ -280,6 +282,8 @@ func (e *evaluation) match(index int, r *rule) bool {
 		return matchPorts(r.ports, md.Source.Port())
 	case KindNetwork:
 		return slices.Contains(r.strs, md.Network)
+	case KindNetworkScene:
+		return md.NetworkScene != "" && slices.Contains(r.strs, md.NetworkScene)
 	case KindProcessName, KindProcessPath, KindProcessNameWildcard, KindProcessPathWildcard:
 		p, ok := e.processName(index)
 		if !ok {
@@ -482,6 +486,8 @@ func (r *Router) exists(id string) bool {
 	return isGroup || r.outbounds[id]
 }
 
+func (r *Router) HasTarget(id string) bool { return r.exists(id) }
+
 // resolve follows group selections from target to an outbound. It returns
 // the chain of groups passed through.
 func (r *Router) resolve(target string) ([]string, error) {
@@ -532,6 +538,7 @@ type Decision struct {
 	// RuleIndex is the matching rule's position, or -1 when the final
 	// target was used.
 	RuleIndex int
+	Temporary bool
 	Rule      RuleSpec
 	Target    string
 	Chain     []string
@@ -584,13 +591,15 @@ func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision
 	}
 }
 func (r *Router) decide(e *evaluation, index int) Decision {
-	d := Decision{RuleIndex: index, Resolved: e.addrs, ResolveError: e.resolveErr, Process: e.process}
 	if index >= 0 {
-		d.Rule = r.rules.rules[index].spec
-		d.Target = d.Rule.Target
-	} else {
-		d.Target = r.final
+		spec := r.rules.rules[index].spec
+		return r.decideTarget(e, index, spec, spec.Target)
 	}
+	return r.decideTarget(e, -1, RuleSpec{}, r.final)
+}
+
+func (r *Router) decideTarget(e *evaluation, index int, spec RuleSpec, target string) Decision {
+	d := Decision{RuleIndex: index, Rule: spec, Target: target, Resolved: e.addrs, ResolveError: e.resolveErr, Process: e.process}
 	if d.Target == "" {
 		return d
 	}
@@ -606,6 +615,7 @@ type Explanation struct {
 	// allowed to make; StoppedAt is that rule's position.
 	Undetermined bool
 	StoppedAt    int
+	StoppedRule  RuleSpec
 }
 
 // Explain routes md like Route. If env.Resolve returns ErrNoLookup the
@@ -615,10 +625,46 @@ func (r *Router) Explain(ctx context.Context, md Metadata, env Env) Explanation 
 	return r.ExplainWithResolver(ctx, md, env, nil)
 }
 func (r *Router) ExplainWithResolver(ctx context.Context, md Metadata, env Env, resolve func(*Decision)) Explanation {
+	return r.ExplainWithOverrides(ctx, md, env, resolve, nil, time.Time{})
+}
+
+// TimedRule is one compiled rule checked before the saved rules. Its expiry
+// is evaluated against the time at which the flow began routing.
+type TimedRule struct {
+	Match     *RuleSet
+	ExpiresAt time.Time
+}
+
+func (r *Router) OverrideActive(rule TimedRule, at time.Time) bool {
+	return at.Before(rule.ExpiresAt) && r.exists(rule.Match.Rule(0).Target)
+}
+
+func (r *Router) ExplainWithOverrides(ctx context.Context, md Metadata, env Env, resolve func(*Decision), overrides []TimedRule, at time.Time) Explanation {
 	e := &evaluation{ctx: ctx, md: &md, env: env}
+	for _, override := range overrides {
+		if !r.OverrideActive(override, at) {
+			continue
+		}
+		spec := override.Match.Rule(0)
+		index := override.Match.first(e)
+		if e.stopped {
+			return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: -1, StoppedRule: spec}
+		}
+		if index < 0 {
+			continue
+		}
+		d := r.decideTarget(e, -1, spec, spec.Target)
+		d.Temporary = true
+		if resolve != nil {
+			resolve(&d)
+		}
+		if d.Outbound != "pass" {
+			return Explanation{Decision: d}
+		}
+	}
 	d := r.decideWithPass(e, resolve)
 	if e.stopped {
-		return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: e.stoppedAt}
+		return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: e.stoppedAt, StoppedRule: r.rules.Rule(e.stoppedAt)}
 	}
 	return Explanation{Decision: d}
 }

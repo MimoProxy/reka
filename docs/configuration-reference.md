@@ -9,7 +9,7 @@
 | 文件 | 顶层字段 | 用途 |
 | --- | --- | --- |
 | `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process` | 节点、分组、路由和 DNS；必须有 `schema-version: 1` |
-| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process` | 本机端口、日志、控制通道、系统接管；可为空 |
+| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes` | 本机端口、日志、控制通道、系统接管和场景；可为空 |
 | `sources.yaml` | `schema-version`、`sources` | 导入和订阅的原生快照 |
 | `overlay.yaml` | `schema-version`、`patches` | 对已合成资源的持久覆盖 |
 
@@ -449,6 +449,29 @@ API 默认将内联凭据显示为 `********`，把遮罩原样提交会保留�
 | `override-destination` | false；true 才允许拨号目标改成嗅探域名 |
 
 嗅探补充缺少入口域名的路由信息，保留已有域名/Fake IP 含义；不能解开 ECH 内部名称。最多并发 64 个嗅探操作，溢出直接路由；超时或无效数据也会原样重放。开启后，CONNECT/SOCKS 可能先确认隧道再因路由拒绝而关闭。详见[功能扩展](feature-expansion.md)。
+
+### 10.1 网络场景
+
+在 `local.yaml` 定义场景。自动模式按列表顺序选择第一个匹配项，`interface` 匹配默认路由网卡名，`ip-cidr` 匹配其任一地址。两项同时配置时须同时满足。启用 TUN 且指定 `bind-interface` 时检查该网卡。仅指定 `id` 的场景可手动选择。
+
+```yaml
+network-scenes:
+  - id: home
+    interface: en0
+    ip-cidr: [192.168.50.0/24]
+  - id: travel
+```
+
+在 `profile.yaml` 的 `rules` 中使用 `network-scene`，可与域名等条件组合。以下规则只有在 `home` 场景下才让指定域名走直连。
+
+```yaml
+rules:
+  - id: home-printer
+    match: {and: [{network-scene: home}, {domain-suffix: printer.home.arpa}]}
+    outbound: direct
+```
+
+`rekactl scene` 显示识别结果，`rekactl scene use travel` 临时选择场景，`rekactl scene auto` 恢复自动识别。场景变化影响新连接。自动识别依赖系统默认路由监视，Android 可手动选择。
 
 ## 11. 源码核对入口
 

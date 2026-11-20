@@ -2,13 +2,15 @@ package sagernet
 
 import (
 	"errors"
-	"github.com/MimoProxy/reka/internal/platform"
-	tun "github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing/common/control"
+	"net"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/MimoProxy/reka/internal/platform"
+	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/control"
 )
 
 // SocketGuard resolves the current physical interface for each NEW socket.
@@ -37,6 +39,10 @@ func (g *SocketGuard) Set(enabled bool, c platform.TUNConfig) error {
 		}
 		return nil
 	}
+	return g.startMonitor()
+}
+
+func (g *SocketGuard) startMonitor() error {
 	if g.netMon != nil {
 		return nil
 	}
@@ -68,6 +74,25 @@ func (g *SocketGuard) Set(enabled bool, c platform.TUNConfig) error {
 	g.netMon = n
 	g.ifMon = m
 	return nil
+}
+
+// SceneInterface observes the default interface without enabling socket binding.
+func (g *SocketGuard) SceneInterface() (*net.Interface, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.enabled && g.bind != "" {
+		return net.InterfaceByName(g.bind)
+	}
+	if runtime.GOOS == "android" {
+		return nil, errors.New("automatic network scenes are unavailable on Android")
+	}
+	if err := g.startMonitor(); err != nil {
+		return nil, errors.New("default interface monitoring is unavailable")
+	}
+	if iface := g.ifMon.DefaultInterface(); iface != nil {
+		return net.InterfaceByIndex(iface.Index)
+	}
+	return nil, errors.New("no default interface")
 }
 func (g *SocketGuard) Control(network, address string, c syscall.RawConn) error {
 	if g.protect != nil {

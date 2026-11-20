@@ -82,19 +82,23 @@ type generation struct {
 // switches atomically. Commits are serialized by the caller (ConfigService)
 // and additionally by an internal lock.
 type Engine struct {
-	history     *history.Store
-	probeOnce   sync.Once
-	probeSlots  chan struct{}
-	tunSerial   uint64
-	takeover    *platform.Takeover
-	networkErr  error
-	guard       *sagernet.SocketGuard
-	fake        *RD.FakePool
-	dnsListener *sagernet.DNSListener
-	dnsAddress  string
-	opts        EngineOptions
-	backend     *sagernet.Backend
-	rt          *runtime.Runtime[*sagernet.Outbound]
+	temporary         atomic.Pointer[temporaryRules]
+	temporarySequence uint64
+	sceneObservation  atomic.Pointer[sceneObservation]
+	sceneManual       atomic.Pointer[manualScene]
+	history           *history.Store
+	probeOnce         sync.Once
+	probeSlots        chan struct{}
+	tunSerial         uint64
+	takeover          *platform.Takeover
+	networkErr        error
+	guard             *sagernet.SocketGuard
+	fake              *RD.FakePool
+	dnsListener       *sagernet.DNSListener
+	dnsAddress        string
+	opts              EngineOptions
+	backend           *sagernet.Backend
+	rt                *runtime.Runtime[*sagernet.Outbound]
 
 	mu        sync.Mutex
 	listeners map[string]*listener
@@ -644,6 +648,13 @@ func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string)
 	if len(errs) > 0 {
 		return genNo, &ActivateError{Err: errors.Join(errs...), Degraded: degraded}
 	}
+	if rules := e.temporary.Load(); rules != nil && rules.profile != profileID {
+		e.temporary.Store(nil)
+	}
+	if scene := e.sceneManual.Load(); scene != nil && (scene.profile != profileID || !networkSceneExists(g, scene.id)) {
+		e.sceneManual.Store(nil)
+	}
+	e.refreshSceneObservation(g)
 	return genNo, nil
 }
 
@@ -811,12 +822,29 @@ func (e *Engine) History() (*history.Store, history.Scope) {
 }
 
 func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route {
-	return e.routeWithAcquire(ctx, md, e.rt.Acquire, nil)
+	return e.routeWithAcquire(ctx, md, e.rt.Acquire, nil, routingState{})
 }
 
 type snapshotAcquirer func(func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error)
 
-func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound]) sagernet.Route {
+func (e *Engine) isFakeIP(g *generation, addr netip.Addr) bool {
+	if e.fake.Contains(addr) {
+		return true
+	}
+	if g.dns != nil {
+		cfg := g.dns.Config()
+		if cfg.Mode == "fake-ip" {
+			for _, text := range []string{cfg.FakeRange, cfg.FakeRange6} {
+				if prefix, err := netip.ParsePrefix(text); err == nil && prefix.Contains(addr) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState) sagernet.Route {
 	var fakeRelease func()
 	if md.Destination.Addr.IsValid() {
 		if domain, release, ok := e.fake.Acquire(md.Destination.Addr); ok {
@@ -824,23 +852,11 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			md.Destination.Domain = domain
 			md.Destination.Addr = netip.Addr{}
 		} else {
-			unknown := e.fake.Contains(md.Destination.Addr)
 			_, active := e.current()
 			if fixed != nil {
 				active = fixed.Value.(*generation)
 			}
-			if active.dns != nil {
-				cfg := active.dns.Config()
-				if cfg.Mode == "fake-ip" {
-					for _, text := range []string{cfg.FakeRange, cfg.FakeRange6} {
-						prefix, err := netip.ParsePrefix(text)
-						if err == nil && prefix.Contains(md.Destination.Addr) {
-							unknown = true
-						}
-					}
-				}
-			}
-			if unknown {
+			if e.isFakeIP(active, md.Destination.Addr) {
 				return sagernet.Route{Scope: active.historyScope}
 			}
 		}
@@ -854,6 +870,9 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		g = s.Value.(*generation)
 		if g.router == nil {
 			return nil, false
+		}
+		if fixed == nil {
+			state = e.routingState(g)
 		}
 		udpAllowed := g.inUDP[md.Inbound]
 		if md.InboundType == "tun" {
@@ -869,6 +888,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			env.ProcessInfo(ctx)
 		}
 		routeMD := routerMetadata(md)
+		routeMD.NetworkScene = state.scene
 		if routeMD.InboundPort == 0 && md.InboundType != "tun" {
 			for _, listener := range g.eff.Listeners {
 				if listener.ID == md.Inbound {
@@ -877,7 +897,12 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 				}
 			}
 		}
-		dec = g.router.RouteWithResolver(ctx, routeMD, env, func(dec *router.Decision) { g.resolveObserved(dec, routeMD, true) })
+		resolve := func(dec *router.Decision) { g.resolveObserved(dec, routeMD, true) }
+		if len(state.temporary) == 0 {
+			dec = g.router.RouteWithResolver(ctx, routeMD, env, resolve)
+		} else {
+			dec = g.router.ExplainWithOverrides(ctx, routeMD, env, resolve, state.temporary, state.at).Decision
+		}
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
 		}
@@ -900,6 +925,10 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	info := &FlowInfo{
 		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
 		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
+		NetworkScene: state.scene,
+	}
+	if dec.Temporary {
+		info.RuleSource = "temporary"
 	}
 	if !env.processOff && env.procDone && env.procOK {
 		info.ProcessPID = env.owner.PID
@@ -912,7 +941,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	if g != nil {
 		info.Revision = g.revision
 		info.Fingerprint = fingerprintOf(g, dec.Outbound)
-		if dec.RuleIndex >= 0 {
+		if dec.RuleIndex >= 0 || dec.Temporary {
 			info.RuleID = dec.Rule.ID
 			info.Rule = dec.Rule.String()
 		}
@@ -1041,13 +1070,22 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 		}
 		env.addrs = append(env.addrs, a)
 	}
-	x := g.router.ExplainWithResolver(ctx, md, env, func(dec *router.Decision) { g.resolveObserved(dec, md, false) })
-	out := Explanation{Generation: snap.Generation, Revision: g.revision, RuleIndex: x.RuleIndex}
+	state := e.routingState(g)
+	md.NetworkScene = state.scene
+	x := g.router.ExplainWithOverrides(ctx, md, env, func(dec *router.Decision) { g.resolveObserved(dec, md, false) }, state.temporary, state.at)
+	out := Explanation{Generation: snap.Generation, Revision: g.revision, RuleIndex: x.RuleIndex, NetworkScene: state.scene}
 	if x.Undetermined {
-		out.Undetermined = fmt.Sprintf("rule %d (%s) needs the destination address; pass resolve or addresses", x.StoppedAt, g.router.Rules().Rule(x.StoppedAt))
+		if x.StoppedAt >= 0 {
+			out.Undetermined = fmt.Sprintf("rule %d (%s) needs the destination address; pass resolve or addresses", x.StoppedAt, x.StoppedRule)
+		} else {
+			out.Undetermined = fmt.Sprintf("temporary rule %s (%s) needs the destination address; pass resolve or addresses", x.StoppedRule.ID, x.StoppedRule)
+		}
 		return out, nil
 	}
-	out.Matched = x.RuleIndex >= 0
+	if x.Temporary {
+		out.RuleSource = "temporary"
+	}
+	out.Matched = x.RuleIndex >= 0 || x.Temporary
 	out.Final = !out.Matched
 	out.Chain, out.Outbound = x.Chain, x.Outbound
 	if out.Matched {
@@ -1303,6 +1341,12 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 func (e *Engine) CheckNetwork() {
 	if e.takeover != nil {
 		_ = e.takeover.Check()
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.closed {
+		_, g := e.current()
+		e.refreshSceneObservation(g)
 	}
 }
 

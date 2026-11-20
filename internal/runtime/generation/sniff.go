@@ -19,6 +19,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			return sagernet.PreparedFlow{Route: func(context.Context, sagernet.Metadata) sagernet.Route { return sagernet.Route{} }}
 		}
 		snap, g := e.current()
+		state := e.routingState(g)
 		if g.eff == nil || !g.eff.Sniff.Enabled {
 			return sagernet.PreparedFlow{Route: e.route}
 		}
@@ -95,7 +96,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			Sniff: sagernet.SniffOptions{Enabled: true, Protocols: append([]string(nil), cfg.Protocols...), Timeout: time.Duration(cfg.TimeoutMS) * time.Millisecond, MaxBytes: cfg.MaxBytes, MaxPackets: cfg.MaxPackets, OverrideDestination: cfg.OverrideDestination},
 			Route: func(ctx context.Context, md sagernet.Metadata) sagernet.Route {
 				ctx = sniffSnapshotContext(ctx, snap)
-				result := e.routeWithAcquire(sagernet.WithPinnedOutbounds(ctx, borrowPins), md, acquire, snap)
+				result := e.routeWithAcquire(sagernet.WithPinnedOutbounds(ctx, borrowPins), md, acquire, snap, state)
 				if result.Outbound == nil {
 					return result
 				}

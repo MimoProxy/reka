@@ -50,6 +50,7 @@ const (
 	KindInboundPort
 	KindInboundUser
 	KindUID
+	KindNetworkScene
 )
 
 var kindNames = map[Kind]string{
@@ -62,6 +63,7 @@ var kindNames = map[Kind]string{
 	KindDstPort:             "dst-port",
 	KindSrcPort:             "src-port",
 	KindNetwork:             "network",
+	KindNetworkScene:        "network-scene",
 	KindProcessName:         "process-name",
 	KindProcessNameRegex:    "process-name-regex",
 	KindProcessPath:         "process-path",
@@ -99,7 +101,7 @@ func ParseKind(s string) (Kind, bool) {
 func Kinds() []Kind {
 	return []Kind{KindDomain, KindDomainSuffix, KindDomainKeyword, KindDomainRegex,
 		KindIPCIDR, KindSrcIPCIDR, KindDstPort, KindSrcPort, KindNetwork, KindProcessName, KindMatch, KindAnd, KindOr, KindNot, KindRuleSet, KindGeoIP, KindDomainPattern, KindProcessNameRegex,
-		KindProcessPath, KindProcessPathRegex, KindProcessNameWildcard, KindProcessPathWildcard, KindInboundName, KindInboundType, KindInboundPort, KindInboundUser, KindUID}
+		KindProcessPath, KindProcessPathRegex, KindProcessNameWildcard, KindProcessPathWildcard, KindInboundName, KindInboundType, KindInboundPort, KindInboundUser, KindUID, KindNetworkScene}
 }
 
 // usesDestinationIP reports whether a kind matches on the destination
@@ -312,7 +314,7 @@ func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 			}
 			re.MatchTimeout = 50 * time.Millisecond
 			r.processRegexps = append(r.processRegexps, re)
-		case KindInboundName, KindInboundType, KindInboundPort, KindInboundUser, KindUID:
+		case KindInboundName, KindInboundType, KindInboundPort, KindInboundUser, KindUID, KindNetworkScene:
 			if err := compileAdvancedRule(r, v); err != nil {
 				return nil, fail(v, err)
 			}

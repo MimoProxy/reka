@@ -30,6 +30,7 @@ type Profile struct {
 // LocalSettings are per-machine settings kept apart from the profile, so
 // switching profiles never changes ports or the control endpoint.
 type LocalSettings struct {
+	NetworkScenes []NetworkScene    `yaml:"network-scenes"`
 	Process       *Process          `yaml:"process"`
 	Routing       *Routing          `yaml:"routing"`
 	Sniff         *Sniff            `yaml:"sniff"`

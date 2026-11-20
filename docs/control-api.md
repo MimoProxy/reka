@@ -95,6 +95,8 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `GetStatus` | 无 | 配置版本与运行时状态 |
 | `ProbeOutbound` | `outbound`、`url`，可选 `timeout_ms` | 显式节点/组的测速结果 |
 | `GetConnectionTimeline` | `id`，可选历史 `epoch` | 连接阶段和关联的 DNS、HTTP 摘要 |
+| `AddTemporaryRule` / `ListTemporaryRules` / `RemoveTemporaryRule` | `rule` 和可选 `ttl_seconds`，或 `id` | 临时分流规则 |
+| `GetNetworkScene` / `SetNetworkScene` | 读取，或设置 `scene` | 当前场景和默认接口信息 |
 | `GetTraffic` | 无 | 累计 upload_total/download_total、sampled_at、epoch |
 | `GetRules` | 可选 `offset`、`limit` | 活动模式与分页规则 |
 | `QueryDNS` | `name`，可选 `type`、`scope`、`fake` | rcode、answer、authority、extra |
@@ -407,7 +409,24 @@ seq 在一个 epoch 内递增。服务器保留最近 512 条事件；游标可�
 
 ## 10. 测速、流量、规则、DNS、日志和资源上传
 
-下面 8 个方法为近期新增。先查 `GetCapabilities.methods`；旧 v1 内核可能尚未提供。所有方法仍先执行 Hello，示例客户端可以直接调用。
+客户端可通过 `GetCapabilities.methods` 查询内核提供的方法。调用前先执行 `Hello`。
+
+### 连接时间线、临时规则和网络场景
+
+```sh
+./bin/rekactl timeline
+./bin/rekactl timeline 42
+./bin/rekactl temp-rule add -ttl 15m 'DOMAIN-SUFFIX,example.com,direct'
+./bin/rekactl temp-rule list
+./bin/rekactl temp-rule remove temp-1
+./bin/rekactl scene
+```
+
+时间线以连接 ID 关联已有 DNS 和 HTTP 摘要，并显示接收、嗅探、路由、拨号和结束的时间。可查询正在转发的连接及当前历史缓冲区保留的已结束连接。保存历史 ID 的客户端可附带对应 `epoch`。
+
+临时规则接受 Clash 单行条件和原生出站或组 ID。规则模式按最近添加优先，然后进入保存的规则。有效期默认 5 分钟，范围 1 秒到 24 小时。到期、移除或切换配置档后，后续连接按生效规则重新判定。已有连接继续使用建立时的路由。
+
+场景定义示例见[配置字段手册](configuration-reference.md#101-网络场景)。
 
 ### ProbeOutbound
 

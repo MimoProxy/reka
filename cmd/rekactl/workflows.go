@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
@@ -59,7 +60,7 @@ func timelineEventDetail(event api.TimelineEvent, trace api.ConnectionTrace) str
 	case "sniff-finish":
 		return strings.TrimSpace(trace.Protocol + " " + trace.SniffedDomain)
 	case "routed":
-		return strings.TrimSpace(strings.Join([]string{trace.RuleID, trace.Outbound}, " "))
+		return strings.TrimSpace(strings.Join([]string{trace.NetworkScene, trace.RuleID, trace.Outbound}, " "))
 	case "dial-start":
 		return trace.DialDestination
 	case "dial-finish":
@@ -78,4 +79,70 @@ func timelineEventDetail(event api.TimelineEvent, trace api.ConnectionTrace) str
 		}
 	}
 	return ""
+}
+
+func cmdTemporaryRule(args []string) error {
+	if len(args) == 0 || (len(args) == 1 && args[0] == "list") {
+		var list []api.TemporaryRule
+		if err := call("ListTemporaryRules", nil, &list); err != nil || *jsonFlag {
+			return err
+		}
+		for _, rule := range list {
+			fmt.Printf("%s  %s  expires %s  active=%t\n", rule.ID, rule.Rule, rule.ExpiresAt.Local().Format(time.RFC3339), rule.Active)
+		}
+		return nil
+	}
+	if args[0] == "add" {
+		fs := flag.NewFlagSet("temp-rule add", flag.ExitOnError)
+		ttl := fs.Duration("ttl", 5*time.Minute, "lifetime (1s..24h, in whole seconds)")
+		parse(fs, args[1:])
+		if fs.NArg() != 1 || *ttl < time.Second || *ttl > 24*time.Hour || *ttl%time.Second != 0 {
+			return errors.New("usage: temp-rule add [-ttl 5m] 'DOMAIN-SUFFIX,example.com,direct'")
+		}
+		var rule api.TemporaryRule
+		if err := call("AddTemporaryRule", api.TemporaryRuleRequest{Rule: fs.Arg(0), TTLSeconds: int(*ttl / time.Second)}, &rule); err != nil || *jsonFlag {
+			return err
+		}
+		fmt.Printf("%s  expires %s  active=%t\n", rule.ID, rule.ExpiresAt.Local().Format(time.RFC3339), rule.Active)
+		return nil
+	}
+	if len(args) == 2 && args[0] == "remove" {
+		return call("RemoveTemporaryRule", map[string]string{"id": args[1]}, nil)
+	}
+	return errors.New("usage: temp-rule list | add [-ttl 5m] RULE | remove ID")
+}
+
+func cmdScene(args []string) error {
+	var status api.NetworkSceneStatus
+	var err error
+	switch {
+	case len(args) == 0:
+		err = call("GetNetworkScene", nil, &status)
+	case len(args) == 1 && args[0] == "auto":
+		err = call("SetNetworkScene", map[string]string{"scene": ""}, &status)
+	case len(args) == 2 && args[0] == "use" && args[1] != "":
+		err = call("SetNetworkScene", map[string]string{"scene": args[1]}, &status)
+	default:
+		return errors.New("usage: scene [use ID | auto]")
+	}
+	if err != nil || *jsonFlag {
+		return err
+	}
+	mode := "auto"
+	if status.Manual != "" {
+		mode = "manual"
+	}
+	current := status.Current
+	if current == "" {
+		current = "none"
+	}
+	fmt.Printf("Scene %s (%s)\n", current, mode)
+	if status.Interface != "" {
+		fmt.Printf("Interface %s  %s\n", status.Interface, strings.Join(status.Addresses, ", "))
+	}
+	if status.Error != "" {
+		fmt.Println(status.Error)
+	}
+	fmt.Println("Configured scenes", strings.Join(status.Scenes, ", "))
+	return nil
 }
