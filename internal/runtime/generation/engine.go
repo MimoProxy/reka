@@ -71,6 +71,7 @@ type EngineOptions struct {
 type RouteObservation struct {
 	Domain   string
 	Address  netip.Addr
+	Failure  string
 	Decision router.Decision
 }
 
@@ -863,6 +864,7 @@ func (e *Engine) isFakeIP(g *generation, addr netip.Addr) bool {
 }
 
 func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState) sagernet.Route {
+	inputAddress := md.Destination.Addr
 	var fakeRelease func()
 	if md.Destination.Addr.IsValid() {
 		if domain, release, ok := e.fake.Acquire(md.Destination.Addr); ok {
@@ -875,6 +877,9 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 				active = fixed.Value.(*generation)
 			}
 			if e.isFakeIP(active, md.Destination.Addr) {
+				if observe := e.opts.ObserveRoute; observe != nil {
+					observe(RouteObservation{Address: inputAddress, Failure: "fake-ip-unavailable"})
+				}
 				return sagernet.Route{Scope: active.historyScope}
 			}
 		}
@@ -941,7 +946,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		slog.Error("route", "err", err)
 	}
 	if observe := e.opts.ObserveRoute; observe != nil {
-		observe(RouteObservation{Domain: routerMetadata(md).Domain, Address: md.Destination.Addr, Decision: dec})
+		observe(RouteObservation{Domain: routerMetadata(md).Domain, Address: inputAddress, Decision: dec})
 	}
 	info := &FlowInfo{
 		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,

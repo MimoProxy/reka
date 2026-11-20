@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
@@ -43,6 +44,9 @@ type GroupStatus struct {
 
 type RouteHit struct {
 	Destination string   `json:"destination"`
+	Address     string   `json:"address,omitempty"`
+	Failure     string   `json:"failure,omitempty"`
+	TimeMS      int64    `json:"timeMs"`
 	Kind        string   `json:"kind"`
 	Target      string   `json:"target"`
 	Chain       []string `json:"chain,omitempty"`
@@ -67,7 +71,13 @@ func (t *routeTrace) record(route generation.RouteObservation) {
 		return
 	}
 	dec := route.Decision
-	item := RouteHit{Destination: destination, Kind: dec.Rule.Kind.String(), Target: dec.Target, Chain: dec.Chain, Outbound: dec.Outbound}
+	item := RouteHit{
+		Destination: destination, Failure: route.Failure, TimeMS: time.Now().UnixMilli(),
+		Kind: dec.Rule.Kind.String(), Target: dec.Target, Chain: dec.Chain, Outbound: dec.Outbound,
+	}
+	if route.Address.IsValid() {
+		item.Address = route.Address.String()
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.items[t.next] = item

@@ -2,9 +2,11 @@ package dns
 
 import (
 	"context"
-	D "github.com/miekg/dns"
 	"net/netip"
 	"testing"
+	"time"
+
+	D "github.com/miekg/dns"
 )
 
 func TestHostsAliasAnswersAndUpstreamRewrite(t *testing.T) {
@@ -51,23 +53,30 @@ func TestHostsAliasCyclesAndInvalidValues(t *testing.T) {
 	}
 }
 
-func TestExplicitZeroFakeTTLRetainsUsableMapping(t *testing.T) {
-	zero := 0
-	pool := NewFakePool(8)
-	s, e := New(Config{Nameservers: []string{"192.0.2.1"}, Mode: "fake-ip", TTL: &zero}, Options{Pool: pool, Generation: 1})
-	if e != nil {
-		t.Fatal(e)
+func TestWireFakeTTLAndMappingLifetime(t *testing.T) {
+	for _, wireTTL := range []int{0, 1, 120} {
+		pool := NewFakePool(8)
+		s, err := New(Config{Nameservers: []string{"192.0.2.1"}, Mode: "fake-ip", TTL: &wireTTL}, Options{Pool: pool, Generation: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(s.Retire)
+		before := time.Now()
+		m, err := s.Exchange(context.Background(), query("mapping.test"), "normal", true)
+		if err != nil || len(m.Answer) != 1 || m.Answer[0].Header().Ttl != uint32(wireTTL) {
+			t.Fatalf("DNS TTL %d: %v %v", wireTTL, m, err)
+		}
+		ip, _ := netip.AddrFromSlice(m.Answer[0].(*D.A).A)
+		ip = ip.Unmap()
+		domain, release, ok := pool.Acquire(ip)
+		if !ok || domain != "mapping.test" {
+			t.Fatalf("DNS TTL %d produced an unusable mapping", wireTTL)
+		}
+		release()
+		if remaining := pool.entries[ip].expires.Sub(before); remaining < time.Duration(max(60, wireTTL))*time.Second {
+			t.Fatalf("DNS TTL %d gave a mapping for only %v", wireTTL, remaining)
+		}
 	}
-	m, e := s.Exchange(context.Background(), query("zero.test"), "normal", true)
-	if e != nil || m.Answer[0].Header().Ttl != 0 {
-		t.Fatalf("%v %v", m, e)
-	}
-	ip, _ := netip.AddrFromSlice(m.Answer[0].(*D.A).A)
-	domain, release, ok := pool.Acquire(ip.Unmap())
-	if !ok || domain != "zero.test" {
-		t.Fatal("zero DNS TTL expired connection mapping")
-	}
-	release()
 	if (Config{}).FakeTTL() != 60 {
 		t.Fatal("omitted TTL default changed")
 	}
