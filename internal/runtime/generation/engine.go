@@ -276,7 +276,7 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	}
 	p.Draining += int(e.rt.Stats().Retiring)
 
-	for _, ch := range e.listenerChanges(eff) {
+	for _, ch := range e.listenerChanges(eff.Listeners) {
 		p.Listeners = append(p.Listeners, ch.ResourceChange)
 		if ch.Action == ActionRestart {
 			p.Interrupts = true
@@ -321,32 +321,31 @@ func fingerprintOf(g *generation, id string) string {
 
 type listenerChange struct {
 	ResourceChange
-	cfg compile.Listener
-	old *listener
+	cfg    compile.Listener
+	holder *listener
 }
 
-// listenerChanges lists, for every listener in eff and every running one
-// that eff drops, what happens to it. A listener that needs an address a
-// running listener still holds (same port, new protocol) must stop the old
-// one first; that is a restart, a short interruption for new connections.
-func (e *Engine) listenerChanges(eff *compile.Effective) []listenerChange {
+// listenerChanges lists what happens to each configured listener and each
+// running listener that the configuration drops. Restarting on an occupied
+// address requires closing its current socket before binding the replacement.
+func (e *Engine) listenerChanges(listeners []compile.Listener) []listenerChange {
 	byAddr := map[netip.AddrPort]*listener{}
 	for _, l := range e.listeners {
 		byAddr[l.cfg.Listen] = l
 	}
 	var out []listenerChange
 	wanted := map[string]bool{}
-	for _, c := range eff.Listeners {
+	for _, c := range listeners {
 		wanted[c.ID] = true
 		old := e.listeners[c.ID]
-		ch := listenerChange{ResourceChange: ResourceChange{ID: c.ID, Listen: c.Listen.String()}, cfg: c, old: old}
+		ch := listenerChange{ResourceChange: ResourceChange{ID: c.ID, Listen: c.Listen.String()}, cfg: c}
 		holder := byAddr[c.Listen]
 		switch {
 		case old != nil && old.cfg.Listen == c.Listen && old.cfg.Fingerprint == c.Fingerprint:
 			ch.Action = ActionKeep
-		case holder != nil && (holder != old || old.cfg.Fingerprint != c.Fingerprint):
+		case holder != nil:
 			ch.Action = ActionRestart
-			ch.old = holder
+			ch.holder = holder
 			ch.Note = "the address is in use by the listener being replaced, so it stops first: new connections are refused briefly; accepted ones continue"
 		case old != nil:
 			ch.Action = ActionRebind
@@ -359,7 +358,7 @@ func (e *Engine) listenerChanges(eff *compile.Effective) []listenerChange {
 	for id, l := range e.listeners {
 		if !wanted[id] {
 			out = append(out, listenerChange{ResourceChange: ResourceChange{ID: id, Action: ActionRemove, Listen: l.cfg.Listen.String(),
-				Note: "stops accepting; accepted connections continue"}, old: l})
+				Note: "stops accepting; accepted connections continue"}})
 		}
 	}
 	return out
@@ -497,7 +496,7 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 	for _, detour := range p.detours {
 		detour.ready.Store(true)
 	}
-	p.changes = e.listenerChanges(eff)
+	p.changes = e.listenerChanges(eff.Listeners)
 	for _, ch := range p.changes {
 		if ch.Action != ActionCreate && ch.Action != ActionRebind {
 			continue
@@ -609,46 +608,45 @@ func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string)
 	if g.policies != nil {
 		g.policies.Start()
 	}
-	// Listeners: bound ones replace their predecessors; restarts stop the
-	// holder first, then bind.
+	// Release old sockets by their original IDs before installing any
+	// replacements. A restart may need an address held by another listener.
+	for _, ch := range p.changes {
+		if ch.Action == ActionKeep {
+			e.listeners[ch.ID].cfg = ch.cfg
+		} else if old := e.listeners[ch.ID]; old != nil {
+			old.in.Close()
+			delete(e.listeners, ch.ID)
+		}
+	}
 	var errs []error
-	degraded := false
+	var failedRestarts []compile.Listener
 	for _, ch := range p.changes {
 		switch ch.Action {
 		case ActionCreate, ActionRebind:
-			if ch.old != nil {
-				ch.old.in.Close()
-			}
 			e.listeners[ch.ID] = &listener{cfg: ch.cfg, in: p.bound[ch.ID]}
-		case ActionRemove:
-			ch.old.in.Close()
-			delete(e.listeners, ch.ID)
-		case ActionKeep:
-			e.listeners[ch.ID].cfg = ch.cfg
+		case ActionRestart:
+			in, err := e.newInbound(ch.cfg)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("listener %s: %w", ch.ID, err))
+				failedRestarts = append(failedRestarts, ch.holder.cfg)
+				continue
+			}
+			e.listeners[ch.ID] = &listener{cfg: ch.cfg, in: in}
 		}
 	}
-	for _, ch := range p.changes {
-		if ch.Action != ActionRestart {
+	degraded := false
+	for _, previous := range failedRestarts {
+		// Restore the previous socket if its ID is still available.
+		if e.listeners[previous.ID] != nil {
+			degraded = true
 			continue
 		}
-		if ch.old != nil {
-			ch.old.in.Close()
-			delete(e.listeners, ch.old.cfg.ID)
-		}
-		in, err := e.newInbound(ch.cfg)
+		in, err := e.newInbound(previous)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("listener %s: %w", ch.ID, err))
-			// Put the previous listener back if we can.
-			if ch.old != nil {
-				if back, err2 := e.newInbound(ch.old.cfg); err2 == nil {
-					e.listeners[ch.old.cfg.ID] = &listener{cfg: ch.old.cfg, in: back}
-				} else {
-					degraded = true
-				}
-			}
+			degraded = true
 			continue
 		}
-		e.listeners[ch.ID] = &listener{cfg: ch.cfg, in: in}
+		e.listeners[previous.ID] = &listener{cfg: previous, in: in}
 	}
 	if e.opts.LogLevel != nil {
 		e.opts.LogLevel.Set(parseLevel(eff.LogLevel))
@@ -662,7 +660,7 @@ func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string)
 		}
 		if err := e.takeover.Apply(eff.Network, proxy); err != nil {
 			errs = append(errs, err)
-			degraded = e.takeover.Status().State == "Degraded"
+			degraded = degraded || e.takeover.Status().State == "Degraded"
 		} else if eff.Network.Mode == "off" {
 			e.networkErr = nil
 		}

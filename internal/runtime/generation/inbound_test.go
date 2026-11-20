@@ -144,3 +144,73 @@ func TestAuthenticatedMixedRulesAndCredentialRotation(t *testing.T) {
 		t.Fatal("failed credentials leaked into logs")
 	}
 }
+
+func TestListenerAddressChangesKeepSocketsTracked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		b    int
+	}{
+		{name: "swap addresses", b: 0},
+		{name: "move to previous address", b: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reserved [3]net.Listener
+			var addresses [3]string
+			for i := range reserved {
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { ln.Close() })
+				reserved[i], addresses[i] = ln, ln.Addr().String()
+			}
+			e := NewEngine(EngineOptions{Backend: sagernet.Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}})
+			defer e.Close()
+			apply := func(a, b string, revision uint64) {
+				t.Helper()
+				local := fmt.Sprintf("listeners: [{id: a, type: http, listen: %q}, {id: b, type: http, listen: %q}]\n", a, b)
+				eff, ds := compile.Compile([]byte("schema-version: 1\n"), []byte(local), compile.Options{})
+				if ds.HasErrors() {
+					t.Fatal(ds)
+				}
+				prepared, err := e.Prepare(eff)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := e.Activate(prepared, revision); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reserved[0].Close()
+			reserved[1].Close()
+			apply(addresses[0], addresses[1], 1)
+			reserved[2].Close()
+			apply(addresses[1], addresses[tc.b], 2)
+
+			if len(e.listeners) != 2 {
+				t.Errorf("tracked %d listeners, want two", len(e.listeners))
+			}
+			for id, want := range map[string]string{"a": addresses[1], "b": addresses[tc.b]} {
+				if got := e.listeners[id]; got == nil || got.cfg.Listen.String() != want {
+					t.Errorf("listener %s is not tracked at %s", id, want)
+				}
+			}
+			checkFree := func(addr string) {
+				t.Helper()
+				ln, err := net.Listen("tcp", addr)
+				if err != nil {
+					t.Errorf("listener address %s is still occupied: %v", addr, err)
+					return
+				}
+				ln.Close()
+			}
+			if tc.b != 0 {
+				checkFree(addresses[0])
+			}
+			e.Close()
+			for _, addr := range addresses {
+				checkFree(addr)
+			}
+		})
+	}
+}
