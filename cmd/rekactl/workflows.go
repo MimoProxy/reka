@@ -171,3 +171,32 @@ func cmdScene(args []string) error {
 	fmt.Println("Configured scenes", strings.Join(status.Scenes, ", "))
 	return nil
 }
+
+func cmdTrafficBudget(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: budget")
+	}
+	var budgets []api.TrafficBudgetStatus
+	if err := call("GetTrafficBudgets", nil, &budgets); err != nil || *jsonFlag {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "SOURCE\tSTATE\tREMAINING BYTES\tSPENDABLE BYTES\tBYTES/DAY\tENDS")
+	bytes := func(n *uint64) string {
+		if n == nil {
+			return "–"
+		}
+		return strconv.FormatUint(*n, 10)
+	}
+	for _, budget := range budgets {
+		state, end := budget.State, "–"
+		if budget.Stale {
+			state += " (stale)"
+		}
+		if budget.EndsAt != nil {
+			end = budget.EndsAt.Local().Format(time.RFC3339)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", budget.SourceID, state, bytes(budget.RemainingBytes), bytes(budget.SpendableBytes), bytes(budget.DailyBytes), end)
+	}
+	return w.Flush()
+}

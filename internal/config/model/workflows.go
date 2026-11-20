@@ -7,3 +7,10 @@ type NetworkScene struct {
 	Interface string   `yaml:"interface"`
 	IPCIDR    []string `yaml:"ip-cidr"`
 }
+
+type TrafficBudget struct {
+	Source      string `yaml:"source"`
+	Reserve     uint64 `yaml:"reserve-bytes"`
+	ResetAt     string `yaml:"reset-at"`
+	WarnPercent *int   `yaml:"warn-remaining-percent"`
+}

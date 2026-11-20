@@ -122,7 +122,7 @@ var Methods = []string{
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
-	"RunNodeArena", "GetNetworkScene", "SetNetworkScene",
+	"RunNodeArena", "GetNetworkScene", "SetNetworkScene", "GetTrafficBudgets",
 }
 
 func (s *Session) dispatch(req Request) (any, error) {
@@ -321,6 +321,8 @@ func (s *Session) dispatch(req Request) (any, error) {
 			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
 		}
 		return status, nil
+	case "GetTrafficBudgets":
+		return svc.TrafficBudgets()
 	case "GetTraffic":
 		value := svc.Engine().Traffic()
 		value.Epoch = svc.Events().Epoch()

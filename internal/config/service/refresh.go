@@ -409,6 +409,10 @@ func (m *RefreshManager) work(id string, force bool, job *refreshJob) {
 	close(job.done)
 	m.mu.Unlock()
 	m.svc.Events().Publish("subscription.updated", record.Status)
+	if record.Status.Usage != nil {
+		eff, _ := m.svc.engine.Effective()
+		m.svc.Events().Publish("traffic_budget.updated", trafficBudget(record.Status, budgetFor(eff, id), time.Now().UTC()))
+	}
 }
 func (m *RefreshManager) resolve(value string) (string, error) {
 	if name, ok := secret.ParseRef(value); ok {

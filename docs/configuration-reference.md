@@ -9,7 +9,7 @@
 | 文件 | 顶层字段 | 用途 |
 | --- | --- | --- |
 | `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process` | 节点、分组、路由和 DNS；必须有 `schema-version: 1` |
-| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes` | 本机端口、日志、控制通道、系统接管和场景；可为空 |
+| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes`、`traffic-budgets` | 本机端口、日志、控制通道、系统接管、场景和预算；可为空 |
 | `sources.yaml` | `schema-version`、`sources` | 导入和订阅的原生快照 |
 | `overlay.yaml` | `schema-version`、`patches` | 对已合成资源的持久覆盖 |
 
@@ -472,6 +472,20 @@ rules:
 ```
 
 `rekactl scene` 显示识别结果，`rekactl scene use travel` 临时选择场景，`rekactl scene auto` 恢复自动识别。场景变化影响新连接。自动识别依赖系统默认路由监视，Android 可手动选择。
+
+### 10.2 套餐流量预算
+
+预算按订阅服务商报告的上传、下载和总量计算。可在 `local.yaml` 按 `sources.yaml` 中的订阅源 ID 设置预留字节数、低余量阈值和当前计费周期的结束时间。
+
+```yaml
+traffic-budgets:
+  - source: airport
+    reserve-bytes: 5368709120
+    warn-remaining-percent: 10
+    reset-at: '2026-12-01T00:00:00+08:00'
+```
+
+每日预算等于可用余量除以剩余的 24 小时段数，天数向上取整。截止时间取 `reset-at` 与服务商报告的到期时间中较早的一项。缺少可信总量或截止时间时，相应的估算字段为空。`rekactl budget` 显示预算和数据是否过期。
 
 ## 11. 源码核对入口
 

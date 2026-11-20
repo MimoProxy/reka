@@ -98,6 +98,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `AddTemporaryRule` / `ListTemporaryRules` / `RemoveTemporaryRule` | `rule` 和可选 `ttl_seconds`，或 `id` | 临时分流规则 |
 | `RunNodeArena` | `outbounds`，可选 `url`、`rounds`、`timeout_ms` | 多轮测速排名与逐轮结果 |
 | `GetNetworkScene` / `SetNetworkScene` | 读取，或设置 `scene` | 当前场景和默认接口信息 |
+| `GetTrafficBudgets` | 空 | 当前订阅的套餐流量预算 |
 | `GetTraffic` | 无 | 累计 upload_total/download_total、sampled_at、epoch |
 | `GetRules` | 可选 `offset`、`limit` | 活动模式与分页规则 |
 | `QueryDNS` | `name`，可选 `type`、`scope`、`fake` | rcode、answer、authority、extra |
@@ -374,6 +375,7 @@ types 省略/空数组接收全部事件；同连接再次 Subscribe 替换上�
 | `runtime.generation` | 运行时切换 |
 | `candidate.invalid` | 手工编辑候选失败 |
 | `subscription.updated` | 订阅观察状态更新 |
+| `traffic_budget.updated` | 订阅用量观测更新后的预算 |
 | `log` | 实际启用的日志记录，data 含 level、message、time |
 
 ```json
@@ -422,6 +424,7 @@ seq 在一个 epoch 内递增。服务器保留最近 512 条事件；游标可�
 ./bin/rekactl temp-rule remove temp-1
 ./bin/rekactl arena -rounds 3 hk jp sg
 ./bin/rekactl scene
+./bin/rekactl budget
 ```
 
 时间线以连接 ID 关联已有 DNS 和 HTTP 摘要，并显示接收、嗅探、路由、拨号和结束的时间。可查询正在转发的连接及当前历史缓冲区保留的已结束连接。保存历史 ID 的客户端可附带对应 `epoch`。
@@ -430,7 +433,7 @@ seq 在一个 epoch 内递增。服务器保留最近 512 条事件；游标可�
 
 擂台固定一份配置快照，比较 2 到 16 个节点或策略组。每个候选默认跑 3 轮，最多 5 轮，每轮最多 4 项并行，全场限时 30 秒。排名依次按成功次数、中位延迟和极差，结果供选择节点时参考。
 
-场景定义示例见[配置字段手册](configuration-reference.md#101-网络场景)。
+场景定义和预算示例见[配置字段手册](configuration-reference.md#101-网络场景)。
 
 ### ProbeOutbound
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/config/model"
 )
@@ -13,6 +14,14 @@ type NetworkScene struct {
 	Interface string         `json:"interface,omitempty"`
 	CIDRs     []netip.Prefix `json:"ip-cidr,omitempty"`
 }
+
+type TrafficBudget struct {
+	Reserve     uint64    `json:"reserve-bytes"`
+	ResetAt     time.Time `json:"reset-at,omitzero"`
+	WarnPercent int       `json:"warn-remaining-percent"`
+}
+
+const DefaultBudgetWarning = 10
 
 func (c *compiler) networkScenes(eff *Effective) {
 	const path = "/network-scenes"
@@ -46,5 +55,41 @@ func (c *compiler) networkScenes(eff *Effective) {
 			scene.CIDRs = append(scene.CIDRs, prefix.Masked())
 		}
 		eff.NetworkScenes = append(eff.NetworkScenes, scene)
+	}
+}
+
+func (c *compiler) trafficBudgets(eff *Effective) {
+	const path = "/traffic-budgets"
+	if len(c.local.TrafficBudgets) > 128 {
+		c.errorf(model.DocLocal, path, "budget.limit", "at most 128 traffic budgets are allowed")
+		return
+	}
+	c.override(eff, path)
+	if len(c.local.TrafficBudgets) == 0 {
+		return
+	}
+	eff.TrafficBudgets = make(map[string]TrafficBudget, len(c.local.TrafficBudgets))
+	for i, cfg := range c.local.TrafficBudgets {
+		base := fmt.Sprintf("%s/#%d", path, i)
+		if _, seen := eff.TrafficBudgets[cfg.Source]; !idRE.MatchString(cfg.Source) || seen {
+			c.errorf(model.DocLocal, base+"/source", "budget.source", "each budget needs a unique subscription source ID")
+			continue
+		}
+		budget := TrafficBudget{Reserve: cfg.Reserve, WarnPercent: DefaultBudgetWarning}
+		if cfg.ResetAt != "" {
+			at, err := time.Parse(time.RFC3339, cfg.ResetAt)
+			if err != nil || at.Year() < 1970 || at.Year() > 9999 {
+				c.errorf(model.DocLocal, base+"/reset-at", "budget.reset", "expected an RFC3339 time with a timezone")
+			} else {
+				budget.ResetAt = at.UTC()
+			}
+		}
+		if cfg.WarnPercent != nil {
+			budget.WarnPercent = *cfg.WarnPercent
+			if budget.WarnPercent < 0 || budget.WarnPercent > 100 {
+				c.errorf(model.DocLocal, base+"/warn-remaining-percent", "budget.warning", "warning percentage must be between 0 and 100")
+			}
+		}
+		eff.TrafficBudgets[cfg.Source] = budget
 	}
 }

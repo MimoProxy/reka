@@ -97,3 +97,20 @@ type NetworkSceneStatus struct {
 	ObservedAt time.Time `json:"observed_at,omitzero"`
 	Error      string    `json:"error,omitempty"`
 }
+
+type TrafficBudgetStatus struct {
+	SourceID       string     `json:"source_id"`
+	State          string     `json:"state"`
+	Stale          bool       `json:"stale"`
+	ObservedAt     time.Time  `json:"observed_at,omitzero"`
+	TotalBytes     *uint64    `json:"total_bytes,omitempty"`
+	UsedBytes      *uint64    `json:"used_bytes,omitempty"`
+	RemainingBytes *uint64    `json:"remaining_bytes,omitempty"`
+	ReserveBytes   uint64     `json:"reserve_bytes"`
+	SpendableBytes *uint64    `json:"spendable_bytes,omitempty"`
+	EndsAt         *time.Time `json:"ends_at,omitempty"`
+	EndReason      string     `json:"end_reason,omitempty"`
+	DaysRemaining  *uint64    `json:"days_remaining,omitempty"`
+	DailyBytes     *uint64    `json:"daily_bytes,omitempty"`
+	WarnPercent    int        `json:"warn_remaining_percent"`
+}

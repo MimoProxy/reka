@@ -2,13 +2,44 @@ package service
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/MimoProxy/reka/internal/api"
+	"github.com/MimoProxy/reka/internal/config/compile"
 )
+
+func TestTrafficBudgetExplicitResetAndReserve(t *testing.T) {
+	eff, ds := compile.Compile([]byte(DefaultProfile), []byte("traffic-budgets: [{source: test, reserve-bytes: 100, reset-at: '2030-06-02T16:00:00Z'}]\n"), compile.Options{})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	now := time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC)
+	upload, download, total := uint64(150), uint64(250), uint64(1000)
+	expires := uint64(now.Add(7 * 24 * time.Hour).Unix())
+	status := SubscriptionStatus{SourceID: "test", Usage: &api.SubscriptionUsage{Upload: &upload, Download: &download, Total: &total, ExpireUnix: &expires, ObservedAt: now}}
+	budget := budgetFor(eff, "test")
+	result := trafficBudget(status, budget, now)
+	if result.State != "ok" || result.EndReason != "reset" || result.DaysRemaining == nil || *result.DaysRemaining != 2 ||
+		result.DailyBytes == nil || *result.DailyBytes != 250 {
+		t.Fatal(result)
+	}
+	status.Usage.Download = nil
+	if result := trafficBudget(status, budget, now); result.State != "unknown" || result.DailyBytes != nil {
+		t.Fatal("missing usage guessed a daily allowance", result)
+	}
+	download = math.MaxUint64
+	status.Usage.Download = &download
+	if result := trafficBudget(status, budget, now); result.State != "exhausted" || *result.RemainingBytes != 0 {
+		t.Fatal("overflow created budget", result)
+	}
+}
 
 func TestSubscriptionUsageRefreshPersists304AndLastGood(t *testing.T) {
 	var stage atomic.Int32
@@ -51,6 +82,9 @@ func TestSubscriptionUsageRefreshPersists304AndLastGood(t *testing.T) {
 	status := refreshNow(t, s, "account")
 	if status.Usage == nil || *status.Usage.Upload != 1 || *status.Usage.Download != 2 || *status.Usage.Total != 100 {
 		t.Fatal("root declaration absent", status)
+	}
+	if budgets, err := s.TrafficBudgets(); err != nil || len(budgets) != 1 || budgets[0].RemainingBytes == nil || *budgets[0].RemainingBytes != 97 {
+		t.Fatal("budget did not use the provider declaration", budgets, err)
 	}
 	observed := status.Usage.ObservedAt
 	stage.Store(1)

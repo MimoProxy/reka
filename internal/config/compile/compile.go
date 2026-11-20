@@ -136,6 +136,7 @@ type GroupMetadata struct {
 // Effective is the immutable configuration used by the runtime.
 type Effective struct {
 	NetworkScenes    []NetworkScene            `json:"network-scenes,omitempty"`
+	TrafficBudgets   map[string]TrafficBudget  `json:"traffic-budgets,omitempty"`
 	Process          model.Process             `json:"process"`
 	Routing          model.Routing             `json:"routing"`
 	ActiveRouter     *router.Router            `json:"-"`
@@ -307,6 +308,7 @@ func (c *compiler) compose() *Effective {
 	c.network(eff)
 	c.routing(eff)
 	c.networkScenes(eff)
+	c.trafficBudgets(eff)
 	if c.diags.HasErrors() {
 		return eff
 	}

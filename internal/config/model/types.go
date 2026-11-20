@@ -30,15 +30,16 @@ type Profile struct {
 // LocalSettings are per-machine settings kept apart from the profile, so
 // switching profiles never changes ports or the control endpoint.
 type LocalSettings struct {
-	NetworkScenes []NetworkScene    `yaml:"network-scenes"`
-	Process       *Process          `yaml:"process"`
-	Routing       *Routing          `yaml:"routing"`
-	Sniff         *Sniff            `yaml:"sniff"`
-	Network       *platform.Network `yaml:"network"`
-	SchemaVersion int               `yaml:"schema-version"`
-	Listeners     []Listener        `yaml:"listeners"`
-	Log           *Log              `yaml:"log"`
-	Control       *Control          `yaml:"control"`
+	NetworkScenes  []NetworkScene    `yaml:"network-scenes"`
+	TrafficBudgets []TrafficBudget   `yaml:"traffic-budgets"`
+	Process        *Process          `yaml:"process"`
+	Routing        *Routing          `yaml:"routing"`
+	Sniff          *Sniff            `yaml:"sniff"`
+	Network        *platform.Network `yaml:"network"`
+	SchemaVersion  int               `yaml:"schema-version"`
+	Listeners      []Listener        `yaml:"listeners"`
+	Log            *Log              `yaml:"log"`
+	Control        *Control          `yaml:"control"`
 }
 
 // Outbound types.

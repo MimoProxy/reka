@@ -50,6 +50,7 @@ runtime
   temp-rule list | remove ID
   arena [-url URL] [-rounds 3] OUTBOUND...   compare two or more nodes or groups
   scene [use ID | auto]                      inspect or select a network scene
+  budget                                    show subscription traffic budgets
   close ID...|all
   watch                                     stream events
 
@@ -198,6 +199,8 @@ func run(args []string) error {
 		return cmdArena(rest)
 	case "scene":
 		return cmdScene(rest)
+	case "budget":
+		return cmdTrafficBudget(rest)
 	case "close":
 		return cmdClose(rest)
 	case "watch":
