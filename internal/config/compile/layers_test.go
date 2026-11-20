@@ -130,6 +130,28 @@ func TestLayerFailures(t *testing.T) {
 	}
 }
 
+func TestSourceIDMustBeLiteralScalar(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{name: "alias", value: "*source-id"},
+		{name: "sequence", value: "[sample]"},
+		{name: "mapping", value: "{name: sample}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sources := "sources:\n  - outbounds: [{id: node, type: direct, name: &source-id sample}]\n    id: " + tc.value + "\n"
+			eff, ds := Compile([]byte("schema-version: 1\n"), nil, Options{Sources: []byte(sources)})
+			if eff != nil || !ds.HasErrors() {
+				t.Fatalf("invalid source ID accepted: %+v", ds)
+			}
+			for _, d := range ds.Errors() {
+				if d.Document == model.DocSources && d.Path == "/sources/#0/id" && d.Line == 3 {
+					return
+				}
+			}
+			t.Fatalf("missing diagnostic at the source ID: %+v", ds)
+		})
+	}
+}
+
 func TestOverlayDisableAndInsert(t *testing.T) {
 	overlay := `patches:
  - {op: remove, path: /rules/airport~1remote}

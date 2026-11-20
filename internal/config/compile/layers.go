@@ -133,7 +133,7 @@ func (c *compiler) layers(profile []byte) {
 				addDiag(model.DocSources, path+"/lock", "source.lock", "root resource is not locked", spos)
 			}
 		}
-		n := nodeCopy(sourceDoc.Get(path))
+		n := nodeCopy(sourceDoc.Get(model.JoinPath("/sources", seg("", i))))
 		byID[src.ID] = n
 		localTargets[src.ID] = map[string]bool{}
 		sum := sha256.Sum256(model.Format(n))

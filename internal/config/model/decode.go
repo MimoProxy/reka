@@ -317,6 +317,10 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 				d.errorf(k, kp, "schema.unknown-field", "unknown field %q", k.Value)
 				continue
 			}
+			if k.Value == "id" && val.Kind != yaml.ScalarNode && v.Type() == reflect.TypeFor[Source]() {
+				d.errorf(val, kp, "source.id", "source id must be a literal scalar")
+				continue
+			}
 			d.decode(val, kp, v.Field(idx), depth+1)
 		}
 	default:
