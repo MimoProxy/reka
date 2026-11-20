@@ -50,6 +50,21 @@ Domain provider patterns follow Clash label semantics: `example.org` is exact, `
 
 Pure local import resolves inline providers. HTTP resources require [background refresh](subscriptions.md); the local preview never downloads them. Native external definitions contain `id`, `behavior`, `format` and the full SHA-256 `hash`; geodata also has `code`. The blob must already exist under the state's content-addressed resource store. `references: [{name: 'geosite:test', to: test-sites}]` maps names inside classical bytes to native sets; generated sources scope the destination IDs. There are no live file paths or URLs in a compiled rule set.
 
+## Independent remote resources
+
+The daemon can check URL resources defined directly in the native profile, independently of subscription refreshes and clients. Use `rekactl` to fetch and validate the first version and add it to the profile:
+
+```sh
+./bin/rekactl resource add rule-set private-sites https://example.org/sites.txt -format text -behavior domain
+./bin/rekactl resource add geodata asn https://example.org/asn.mmdb -format mmdb
+./bin/rekactl resource list
+./bin/rekactl resource refresh rule-set private-sites
+```
+
+Reference the rule set by ID in ordinary rules. Existing pinned rules and databases can use `download: {url: "https://example.org/sites.txt", interval: 86400, automatic: true}`. For a private URL, pass a `secret://` reference. The interval is in seconds (300–604800, default 86400 for the add command). Set `automatic: false` for manual refresh only.
+
+Conditional HTTP requests reuse the validators of the last active hash. Identical content doesn't add a revision. A download or validation failure keeps the last active version. A successful replacement runs through the configuration transaction. The daemon cancels and joins old download work before switching profiles.
+
 ## GeoIP and GeoSite
 
 `GEOIP,LAN` is built in: private, unspecified, loopback, multicast and link-local-unicast addresses. Other GEOIP and GEOSITE selectors use explicitly configured assets. GEOIP accepts country MMDB and protobuf DAT; GEOSITE uses DAT. Downloads remain explicit and SHA-locked:

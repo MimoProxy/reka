@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
@@ -253,6 +252,8 @@ func (c *compiler) prepareRuleResources() *ruleCompiler {
 	for i, def := range c.profile.RuleSets {
 		if err := validateDownload(def.Download); err != nil {
 			c.errorf(model.DocProfile, model.JoinPath("/rule-sets", def.ID), "resource.download", "%s", err)
+		} else if def.Download != nil && def.Hash == "" {
+			c.errorf(model.DocProfile, model.JoinPath("/rule-sets", def.ID), "resource.download", "a downloadable rule set requires an initial locked hash")
 		}
 		path := model.JoinPath("/rule-sets", seg(def.ID, i))
 		if !idRE.MatchString(def.ID) && !c.scopedIDs[def.ID] {
@@ -480,12 +481,5 @@ func validateDownload(d *model.ResourceDownload) error {
 	if d == nil {
 		return nil
 	}
-	u, err := url.Parse(d.URL)
-	if err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
-		return errors.New("download URL must be HTTP(S) without embedded credentials")
-	}
-	if d.Interval < 300 || d.Interval > 604800 {
-		return errors.New("resource update interval must be 300–604800 seconds")
-	}
-	return nil
+	return model.ValidResourceDownload(*d)
 }

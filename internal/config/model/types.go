@@ -396,7 +396,7 @@ type SSPlugin struct {
 	Password    string               `yaml:"password"`
 }
 
-// ResourceDownload is client-managed refresh metadata; hashes remain authoritative.
+// ResourceDownload schedules updates of a pinned resource.
 type ResourceDownload struct {
 	URL       string `yaml:"url"`
 	Interval  int    `yaml:"interval"`

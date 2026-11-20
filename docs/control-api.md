@@ -487,3 +487,11 @@ print(digest)
 随后 ImportSource 或 change.import 可附加 `provider_resources: {"proxy-providers/pool":"完整SHA256","rule-providers/sites":"完整SHA256"}` 和 `geodata_resources: {"geoip":"完整SHA256","geosite":"完整SHA256"}`。键需与原始 Clash 文档声明的 provider 精确对应；优先用带种类的名称避免歧义。最多 1024 个 provider 映射、2 个地理库映射，去重后的输入资源总计最多 32 MiB；缺失/损坏字节会拒绝导入。先预览报告，再按原有 Validate→Plan→Commit 流程激活。
 
 本文以 [handler.go](../internal/control/handler.go)、[协议与 wire types](../internal/api/) 和配置服务实现为依据。v1 会继续增加可选字段；客户端应允许响应中的未知字段，并通过 GetCapabilities 判断具体能力。
+
+### 独立远程规则集与地理库
+
+`InstallManagedResource` 接收 `base_revision`、`kind`（`rule-set` 或 `geodata`）、`id`、`url`、`format`、`interval` 和 `automatic`。规则集还需要 `behavior`。接口先下载首个版本并校验，再把锁定的摘要和更新设置写入当前档案。返回普通配置提交结果。
+
+`ListManagedResources` 返回不含 URL 的更新状态。`RefreshManagedResource` 使用 `{kind, id, wait}`。设 `wait: true` 可等待本次结果，失败时状态为 `stale`，已有版本继续运行。`resource.updated` 事件使用同一状态结构。命令及配置示例见[独立远程资源](rule-resources.md#independent-remote-resources)。
+
+Clash 兼容面板可使用[独立的本地 HTTP 接口](clash-api.md)。

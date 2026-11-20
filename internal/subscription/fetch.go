@@ -113,9 +113,10 @@ type Entry struct {
 	Next     time.Time              `json:"next"`
 }
 type Fetcher struct {
-	Client *http.Client
-	Blobs  *resource.Store
-	Now    func() time.Time
+	Client       *http.Client
+	Blobs        *resource.Store
+	Now          func() time.Time
+	ValidateBody func([]byte) error
 }
 type Batch struct {
 	f        *Fetcher
@@ -204,6 +205,11 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			}
 			if len(data) == 0 {
 				return nil, failure("empty_body")
+			}
+			if b.f.ValidateBody != nil && (old.Hash == "" || resource.Hash(data) != old.Hash) {
+				if err := b.f.ValidateBody(data); err != nil {
+					return nil, err
+				}
 			}
 		default:
 			return nil, failure(fmt.Sprintf("http_status_%d", response.StatusCode))

@@ -462,3 +462,60 @@ func TestProfileCommittedCursorRecoversLostFinalOperationRecord(t *testing.T) {
 		t.Fatal(state, recovered, err)
 	}
 }
+
+func TestManagedResourceRefreshStopsBeforeProfileSwitch(t *testing.T) {
+	var requests atomic.Int32
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			_, _ = io.WriteString(w, "seed.test\n")
+			return
+		}
+		close(started)
+		<-r.Context().Done()
+		close(cancelled)
+	}))
+	defer remote.Close()
+	k, err := Start(profileOptions(t, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer k.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	added, err := k.Service.InstallManagedResource(ctx, api.InstallManagedResourceRequest{
+		BaseRevision: k.Service.ActiveRevision(), Kind: "rule-set", ID: "sites", URL: remote.URL, Format: "text", Behavior: "domain",
+	})
+	if err != nil || added.State != "committed" {
+		t.Fatal(added, err)
+	}
+	_, err = k.Service.RefreshManagedResource(ctx, api.RefreshManagedResourceRequest{Kind: "rule-set", ID: "sites"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if result := switchProfile(t, k, "beta", "managed-to-beta"); result.State != "committed" {
+		t.Fatal(result)
+	}
+	select {
+	case <-cancelled:
+	case <-ctx.Done():
+		t.Fatal("old network request survived the switch")
+	}
+	statuses, err := k.Service.ListManagedResources()
+	if err != nil || len(statuses) != 0 {
+		t.Fatalf("the old resource crossed profiles: %+v %v", statuses, err)
+	}
+	if result := switchProfile(t, k, "alpha", "managed-back-alpha"); result.State != "committed" {
+		t.Fatal(result)
+	}
+	statuses, err = k.Service.ListManagedResources()
+	if err != nil || len(statuses) != 1 || statuses[0].Hash != resource.Hash([]byte("seed.test\n")) {
+		t.Fatalf("the old profile lost its pinned resource: %+v %v", statuses, err)
+	}
+}

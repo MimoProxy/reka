@@ -1,5 +1,39 @@
 package api
 
+import "time"
+
+type InstallManagedResourceRequest struct {
+	BaseRevision uint64 `json:"base_revision"`
+	Kind         string `json:"kind"`
+	ID           string `json:"id"`
+	URL          string `json:"url"`
+	Format       string `json:"format"`
+	Behavior     string `json:"behavior,omitempty"`
+	Interval     int    `json:"interval,omitempty"`
+	Automatic    bool   `json:"automatic"`
+}
+
+type RefreshManagedResourceRequest struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Wait bool   `json:"wait"`
+}
+
+type ManagedResourceStatus struct {
+	Kind        string    `json:"kind"`
+	ID          string    `json:"id"`
+	Format      string    `json:"format"`
+	Behavior    string    `json:"behavior,omitempty"`
+	Automatic   bool      `json:"automatic"`
+	Hash        string    `json:"hash"`
+	Revision    uint64    `json:"revision"`
+	State       string    `json:"state"`
+	ErrorCode   string    `json:"error_code,omitempty"`
+	LastAttempt time.Time `json:"last_attempt,omitempty"`
+	LastSuccess time.Time `json:"last_success,omitempty"`
+	NextAttempt time.Time `json:"next_attempt,omitempty"`
+}
+
 type StageResourceRequest struct {
 	ProfileID string `json:"profile_id,omitempty"`
 	Hash      string `json:"hash"`

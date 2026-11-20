@@ -27,6 +27,7 @@ const usage = `usage: rekactl [-c address | -state-root dir] [-json] command [ar
 configuration
   get [profile|local|sources|overlay|effective] [-reveal]   print the active configuration
   subscription list|set ID URL|refresh ID|pause ID|resume ID|remove ID
+  resource list|add KIND ID URL [options]|refresh KIND ID
   import -source ID [-format auto|clash|links] [-nodes-only] [-allow-partial] [-apply] FILE
   origin PATH                               where an effective field comes from
   validate [-local|-sources|-overlay] FILE                    check a document, no side effects
@@ -134,6 +135,8 @@ func run(args []string) error {
 		return cmdGet(rest)
 	case "subscription":
 		return cmdSubscription(rest)
+	case "resource":
+		return cmdResource(rest)
 	case "import":
 		return cmdImport(rest)
 	case "origin":

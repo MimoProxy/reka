@@ -48,6 +48,7 @@ type RefreshManager struct {
 	mu               sync.Mutex
 	jobs             map[string]*refreshJob
 	records          map[string]refreshRecord
+	managed          managedRefresh
 	slots            chan struct{}
 	started, closing bool
 	wg               sync.WaitGroup
@@ -64,7 +65,7 @@ func (s *Service) manager(opts RefreshOptions) (*RefreshManager, error) {
 		m := s.refresh
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if !m.started && len(m.jobs) == 0 {
+		if !m.started && len(m.jobs) == 0 && len(m.managed.slot) == 0 {
 			if opts.Client != nil || opts.Protect != nil {
 				m.client.CloseIdleConnections()
 				m.client = opts.Client
@@ -126,6 +127,7 @@ func (s *Service) manager(opts RefreshOptions) (*RefreshManager, error) {
 		jobs:    map[string]*refreshJob{},
 		records: map[string]refreshRecord{},
 		slots:   make(chan struct{}, opts.Concurrency),
+		managed: newManagedRefresh(),
 	}
 	return s.refresh, nil
 }
@@ -162,6 +164,7 @@ func (m *RefreshManager) loop() {
 	defer ticker.Stop()
 	for {
 		m.runDue()
+		m.runManagedDue()
 		select {
 		case <-m.ctx.Done():
 			return

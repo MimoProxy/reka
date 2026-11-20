@@ -119,6 +119,7 @@ var Methods = []string{
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
+	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 }
 
 func (s *Session) dispatch(req Request) (any, error) {
@@ -251,6 +252,20 @@ func (s *Session) dispatch(req Request) (any, error) {
 			return nil, err
 		}
 		return svc.StageResource(p)
+	case "InstallManagedResource":
+		p, err := decode[api.InstallManagedResourceRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.InstallManagedResource(s.ctx, p)
+	case "ListManagedResources":
+		return svc.ListManagedResources()
+	case "RefreshManagedResource":
+		p, err := decode[api.RefreshManagedResourceRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.RefreshManagedResource(s.ctx, p)
 	case "ProbeOutbound":
 		p, err := decode[api.ProbeRequest](req.Params)
 		if err != nil {
