@@ -1,6 +1,7 @@
 package sagernet
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -33,13 +34,17 @@ func (s *Server) Close() error {
 }
 
 func startNode(logger *slog.Logger, build func(b *Backend) (adapter.Inbound, string, error)) (*Server, error) {
+	return startNodeWithRoute(logger, Fixed, build)
+}
+
+func startNodeWithRoute(logger *slog.Logger, routes func(*Outbound) RouteFunc, build func(b *Backend) (adapter.Inbound, string, error)) (*Server, error) {
 	b := New(Options{Logger: logger})
 	out, err := b.NewOutbound("direct", DirectSpec{})
 	if err != nil {
 		b.Close()
 		return nil, err
 	}
-	b.SetRoute(Fixed(out))
+	b.SetRoute(routes(out))
 	in, typ, err := build(b)
 	if err == nil {
 		var adopted *Inbound
@@ -59,7 +64,38 @@ func listenOpts(listen netip.AddrPort) option.ListenOptions {
 
 // StartShadowsocksServer runs a Shadowsocks node on listen.
 func StartShadowsocksServer(listen netip.AddrPort, method, password string, logger *slog.Logger) (*Server, error) {
-	return startNode(logger, func(b *Backend) (adapter.Inbound, string, error) {
+	return startShadowsocksServer(listen, method, password, logger, Fixed)
+}
+
+// StartShadowsocksTestServer relays only explicitly mapped test addresses.
+// The supplied targets are loopback services on the test host.
+func StartShadowsocksTestServer(listen netip.AddrPort, method, password string, logger *slog.Logger, targets map[netip.AddrPort]netip.AddrPort) (*Server, error) {
+	if len(targets) == 0 {
+		return nil, errors.New("test node needs at least one target")
+	}
+	endpoints := make(map[netip.AddrPort]Destination, len(targets))
+	for original, target := range targets {
+		if !original.IsValid() || original.Port() == 0 || !target.Addr().IsLoopback() || target.Port() == 0 {
+			return nil, errors.New("invalid test node target")
+		}
+		endpoints[original] = Destination{Addr: target.Addr(), Port: target.Port()}
+	}
+	return startShadowsocksServer(listen, method, password, logger, func(out *Outbound) RouteFunc {
+		fixed := Fixed(out)
+		return func(ctx context.Context, metadata Metadata) Route {
+			destination, ok := endpoints[netip.AddrPortFrom(metadata.Destination.Addr, metadata.Destination.Port)]
+			if !ok {
+				return Route{}
+			}
+			route := fixed(ctx, metadata)
+			route.Destination = &destination
+			return route
+		}
+	})
+}
+
+func startShadowsocksServer(listen netip.AddrPort, method, password string, logger *slog.Logger, routes func(*Outbound) RouteFunc) (*Server, error) {
+	return startNodeWithRoute(logger, routes, func(b *Backend) (adapter.Inbound, string, error) {
 		in, err := shadowsocks.NewInbound(b.ctx, b.router, b.componentLogger("inbound", "shadowsocks", "server"), "server",
 			option.ShadowsocksInboundOptions{ListenOptions: listenOpts(listen), Method: method, Password: password})
 		return in, "shadowsocks", err

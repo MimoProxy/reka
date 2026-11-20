@@ -11,6 +11,7 @@ It fails closed: a different sing-box version, a changed upstream file or
 a modified copy stops the build until the overlay is reviewed again. It
 prints the overlay path for the Makefile.
 """
+import argparse
 import hashlib
 import json
 import os
@@ -37,6 +38,13 @@ def tree_hashes(root):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output-dir', type=Path, default=ROOT / 'bin')
+    output = parser.parse_args().output_dir.resolve()
+
+    def module_path(path):
+        return './' + path.relative_to(ROOT).as_posix() if output == ROOT / 'bin' else str(path)
+
     # Inspect the root lockfile, even when called from a build already using
     # the generated modfile/overlay. Otherwise our own replacements look like
     # unreviewed changes to the source dependency pins.
@@ -55,7 +63,7 @@ def main():
     if sha256(original / TROJAN_FILE) != PINNED_TROJAN_SHA256:
         raise SystemExit('Pinned Trojan source changed; review the overlay before building')
 
-    copy = ROOT / 'bin/upstream/sing-box'
+    copy = output / 'upstream/sing-box'
     if not copy.exists():
         copy.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(original, copy)
@@ -65,9 +73,9 @@ def main():
     if sha256(source) != PINNED_ECH_SHA256:
         raise SystemExit('Generated upstream copy changed; remove bin/upstream and retry')
 
-    replacements = {'github.com/sagernet/sing-box': './bin/upstream/sing-box'}
+    replacements = {'github.com/sagernet/sing-box': module_path(copy)}
     extra_overlays = {}
-    patches = ROOT / 'bin/upstream-patches'
+    patches = output / 'upstream-patches'
     patches.mkdir(exist_ok=True)
     for name, (version, files) in MODULES.items():
         module = json.loads(subprocess.check_output(['go', 'list', '-m', '-json', name], cwd=ROOT, env=module_env))
@@ -76,7 +84,7 @@ def main():
         if 'Dir' not in module:
             module = json.loads(subprocess.check_output(['go', 'mod', 'download', '-json', name + '@' + version], cwd=ROOT, env=module_env))
         module_root = Path(module['Dir'])
-        module_copy = ROOT / 'bin/upstream' / name.rsplit('/', 1)[1]
+        module_copy = output / 'upstream' / name.rsplit('/', 1)[1]
         if not module_copy.exists():
             shutil.copytree(module_root, module_copy)
         if tree_hashes(module_root) != tree_hashes(module_copy):
@@ -89,12 +97,12 @@ def main():
             patched_file.write_text(transform(source_file.read_text()))
             subprocess.check_call(['gofmt', '-w', str(patched_file)])
             extra_overlays[str(source_file)] = str(patched_file)
-        replacements[name] = './bin/upstream/' + name.rsplit('/', 1)[1]
-    modfile = ROOT / 'bin/build.mod'
+        replacements[name] = module_path(module_copy)
+    modfile = output / 'build.mod'
     modfile.write_text((ROOT / 'go.mod').read_text() + ''.join('\nreplace ' + name + ' => ' + json.dumps(path) + '\n' for name, path in replacements.items()))
-    shutil.copyfile(ROOT / 'go.sum', ROOT / 'bin/build.sum')
+    shutil.copyfile(ROOT / 'go.sum', output / 'build.sum')
 
-    target = ROOT / 'bin/build-overlay.json'
+    target = output / 'build-overlay.json'
     target.parent.mkdir(exist_ok=True)
     # Reka's loopback test/tool node uses this inbound. A single stream Read
     # may return a partial authentication key (notably an HTTPUpgrade cache).
@@ -102,7 +110,7 @@ def main():
     trojan = (copy / TROJAN_FILE).read_text()
     trojan = trojan.replace('"encoding/binary"\n', '"encoding/binary"\n\t"io"\n', 1)
     trojan = trojan.replace('n, err := conn.Read(key[:])', 'n, err := io.ReadFull(conn, key[:])', 1)
-    patched = ROOT / 'bin/trojan-service-overlay.go.txt'
+    patched = output / 'trojan-service-overlay.go.txt'
     patched.write_text(trojan)
     target.write_text(json.dumps({'Replace': {str(source): str(REPLACEMENT), str(copy / TROJAN_FILE): str(patched), **extra_overlays}}) + '\n')
     print(target)
