@@ -131,7 +131,9 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if started.Before(s.cleared[kind][scope.ProfileID]) {
+	// Windows clocks are coarse, so a flow can report the same instant as the
+	// clear that should drop it.
+	if cleared, ok := s.cleared[kind][scope.ProfileID]; ok && !started.After(cleared) {
 		return
 	}
 	b := s.buckets[kind]
