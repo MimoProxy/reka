@@ -38,6 +38,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	ctx = WithLookup(ctx, observeRequestLookup(ctx, rt.Lookup))
 	ctx = adapter.WithContext(ctx, &metadata)
 	dialStart := time.Now()
+	attempt.dialing(dialStart)
 	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
 	attempt.dialed(dialStart, err)
 	observeRequestDial(ctx, attempt.DialMS)
@@ -68,7 +69,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		closeBoth = func() { common.Close(conn, remote) }
 	)
 	processTraffic, finishProcess := b.beginProcessTraffic(rt.Owner)
-	untrackConnection := b.conns.add(&tracked{id: attempt.ID, start: time.Now(), md: toMetadata(metadata), out: out,
+	untrackConnection := b.conns.add(&tracked{attempt: attempt, id: attempt.ID, start: time.Now(), md: toMetadata(metadata), out: out,
 		originalDestination: originalDestination,
 		info:                rt.Info, up: &up, down: &down, close: func() { manual.Store(true); closeBoth() }})
 	untrack := func() { untrackConnection(); finishProcess() }

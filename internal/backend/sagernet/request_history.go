@@ -218,10 +218,10 @@ func (obs *requestObservation) finish(proxyStatus int, err error) {
 				obs.detail.Response.Body.ContentEncoding = obs.detail.Response.Headers.Get("Content-Encoding")
 			}
 		}
-		obs.store.Record(history.Requests, record.Scope, obs.start, record, obs.detail)
+		obs.store.RecordFlow(history.Requests, record.Scope, obs.start, record.ConnectionID, record, obs.detail)
 		return
 	}
-	obs.store.Record(history.Requests, record.Scope, obs.start, record, nil)
+	obs.store.RecordFlow(history.Requests, record.Scope, obs.start, record.ConnectionID, record, nil)
 }
 
 type observedBody struct {

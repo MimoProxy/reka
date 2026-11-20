@@ -171,7 +171,9 @@ func (f *udpFlow) routeAndDial() {
 	defer prepared.Release()
 	md := f.md
 	if prepared.Sniff.Enabled && prepared.Sniff.protocol("quic") && f.s.r.takeSniffSlot() {
+		start := time.Now()
 		md = f.sniffQUIC(md, prepared.Sniff)
+		f.attempt.sniffing(start, md)
 		f.s.r.releaseSniffSlot()
 	}
 	if f.ctx.Err() != nil {
@@ -202,7 +204,7 @@ func (f *udpFlow) routeAndDial() {
 	f.md, f.rt = md, rt
 	var finishProcess func()
 	f.processTraffic, finishProcess = f.s.b.beginProcessTraffic(rt.Owner)
-	untrack := f.s.b.conns.add(&tracked{id: f.attempt.ID, start: time.Now(), md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
+	untrack := f.s.b.conns.add(&tracked{attempt: f.attempt, id: f.attempt.ID, start: time.Now(), md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
 	f.untrack = func() { untrack(); finishProcess() }
 	f.s.mu.Unlock()
 	f.dial()
@@ -280,6 +282,7 @@ func (f *udpFlow) dial() {
 		dialDest = M.ParseSocksaddr(f.rt.Destination.String())
 	}
 	dialStart := time.Now()
+	f.attempt.dialing(dialStart)
 	remote, err := f.rt.Outbound.out.ListenPacket(ctx, dialDest)
 	f.sendMu.Lock()
 	s.mu.Lock()
@@ -439,13 +442,13 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 		if remote != nil {
 			remote.Close()
 		}
+		f.attempt.complete(reason, stage, f.up.Load(), f.down.Load())
 		if untrack != nil {
 			untrack()
 		}
 		if release != nil {
 			release()
 		}
-		f.attempt.complete(reason, stage, f.up.Load(), f.down.Load())
 	})
 }
 

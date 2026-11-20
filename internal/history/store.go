@@ -56,6 +56,7 @@ type Page struct {
 
 type entry struct {
 	seq     uint64
+	flow    uint64
 	profile string
 	search  string
 	data    json.RawMessage
@@ -89,6 +90,11 @@ func New() *Store {
 }
 
 func (s *Store) Record(kind Kind, scope Scope, started time.Time, summary, detail any) {
+	s.RecordFlow(kind, scope, started, 0, summary, detail)
+}
+
+// RecordFlow adds a summary and its exact connection ID to the bounded history.
+func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint64, summary, detail any) {
 	if s == nil {
 		return
 	}
@@ -125,9 +131,40 @@ func (s *Store) Record(kind Kind, scope Scope, started time.Time, summary, detai
 		b.count--
 	}
 	b.seq++
-	*b.at(b.count) = entry{b.seq, scope.ProfileID, search, data, private, size}
+	*b.at(b.count) = entry{seq: b.seq, flow: flow, profile: scope.ProfileID, search: search, data: data, detail: private, size: size}
 	b.count++
 	b.bytes += size
+}
+
+func (s *Store) Epoch() string { return s.epoch }
+
+// FlowRows fetches summaries only, without exposing HTTP request details.
+func (s *Store) FlowRows(profile string, flow uint64) (map[Kind][]Row, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := make(map[Kind][]Row, 3)
+	truncated := false
+	for _, kind := range []Kind{Connections, DNS, Requests} {
+		b := s.buckets[kind]
+		if b == nil {
+			continue
+		}
+		for i := b.count - 1; i >= 0; i-- {
+			r := b.at(i)
+			if flow == 0 || r.flow != flow || r.profile != profile {
+				continue
+			}
+			if len(rows[kind]) == 50 {
+				truncated = true
+				break
+			}
+			rows[kind] = append(rows[kind], Row{Cursor: s.cursor(kind, r.seq), Data: r.data})
+			if kind == Connections {
+				break
+			}
+		}
+	}
+	return rows, truncated
 }
 
 func (s *Store) cursor(kind Kind, seq uint64) string {

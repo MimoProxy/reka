@@ -94,6 +94,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `GetCapabilities` | 无 | API/schema 版本、方法列表、协议/规则/平台能力 |
 | `GetStatus` | 无 | 配置版本与运行时状态 |
 | `ProbeOutbound` | `outbound`、`url`，可选 `timeout_ms` | 显式节点/组的测速结果 |
+| `GetConnectionTimeline` | `id`，可选历史 `epoch` | 连接阶段和关联的 DNS、HTTP 摘要 |
 | `GetTraffic` | 无 | 累计 upload_total/download_total、sampled_at、epoch |
 | `GetRules` | 可选 `offset`、`limit` | 活动模式与分页规则 |
 | `QueryDNS` | `name`，可选 `type`、`scope`、`fake` | rcode、answer、authority、extra |

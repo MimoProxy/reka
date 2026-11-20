@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,17 +15,8 @@ import (
 
 type connectionAttempt struct {
 	store *history.Store
-	history.Scope
-	api.Connection
-	DialDestination string     `json:"dial_destination,omitempty"`
-	DialPeer        string     `json:"dial_peer,omitempty"`
-	TargetIP        string     `json:"target_ip,omitempty"`
-	ReadyAt         *time.Time `json:"ready_at,omitempty"`
-	EndedAt         time.Time  `json:"ended_at"`
-	DurationMS      int64      `json:"duration_ms"`
-	DialMS          *int64     `json:"dial_ms,omitempty"`
-	CloseReason     string     `json:"close_reason"`
-	ErrorStage      string     `json:"error_stage,omitempty"`
+	mu    sync.Mutex
+	api.ConnectionTrace
 }
 
 func (b *Backend) beginConnection(md Metadata) *connectionAttempt {
@@ -35,7 +27,7 @@ func (b *Backend) beginConnection(md Metadata) *connectionAttempt {
 	if md.Source.IsValid() {
 		c.Source = md.Source.String()
 	}
-	attempt := &connectionAttempt{store: b.history, Connection: c}
+	attempt := &connectionAttempt{store: b.history, ConnectionTrace: api.ConnectionTrace{Connection: c}}
 	if b.historyScope != nil {
 		attempt.Scope = b.historyScope()
 	}
@@ -43,6 +35,9 @@ func (b *Backend) beginConnection(md Metadata) *connectionAttempt {
 }
 
 func (a *connectionAttempt) setRoute(rt Route) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.RoutedAt = time.Now().UTC()
 	if rt.Scope.Generation != 0 {
 		a.Scope = rt.Scope
 	}
@@ -64,11 +59,32 @@ func (a *connectionAttempt) setRoute(rt Route) {
 	}
 }
 
+func (a *connectionAttempt) sniffing(start time.Time, md Metadata) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.EndedAt.IsZero() {
+		return
+	}
+	a.SniffStartedAt, a.SniffFinishedAt = start.UTC(), time.Now().UTC()
+	a.SniffedDomain, a.Protocol = md.SniffedDomain, md.Protocol
+}
+
+func (a *connectionAttempt) dialing(start time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.EndedAt.IsZero() {
+		a.DialStartedAt = start.UTC()
+	}
+}
+
 func (a *connectionAttempt) dialed(start time.Time, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.DialFinishedAt = time.Now().UTC()
 	ms := time.Since(start).Milliseconds()
 	a.DialMS = &ms
 	if err == nil {
-		now := time.Now().UTC()
+		now := a.DialFinishedAt
 		a.ReadyAt = &now
 	}
 }
@@ -79,6 +95,8 @@ func (a *connectionAttempt) peer(addr net.Addr, direct bool) {
 	if remote, ok := addr.(*net.TCPAddr); ok {
 		peer := remote.AddrPort()
 		if peer.IsValid() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
 			a.DialPeer = peer.String()
 			if direct {
 				a.TargetIP = peer.Addr().Unmap().String()
@@ -91,11 +109,25 @@ func (a *connectionAttempt) complete(reason, stage string, up, down int64) {
 	if a.store == nil {
 		return
 	}
+	a.mu.Lock()
 	a.EndedAt = time.Now().UTC()
 	a.DurationMS = time.Since(a.Start).Milliseconds()
 	a.Upload, a.Download = up, down
 	a.CloseReason, a.ErrorStage = reason, stage
-	a.store.Record(history.Connections, a.Scope, a.Start, a, nil)
+	trace := a.ConnectionTrace
+	a.mu.Unlock()
+	a.store.RecordFlow(history.Connections, trace.Scope, trace.Start, trace.ID, trace, nil)
+}
+
+func (a *connectionAttempt) trace(up, down int64) api.ConnectionTrace {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	trace := a.ConnectionTrace
+	if trace.EndedAt.IsZero() {
+		trace.Upload, trace.Download = up, down
+		trace.DurationMS = time.Since(trace.Start).Milliseconds()
+	}
+	return trace
 }
 
 func connectionReason(err error, otherwise string) string {

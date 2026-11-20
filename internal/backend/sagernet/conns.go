@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/api"
 )
 
 // ConnInfo is a point-in-time view of one relayed connection (a TCP
@@ -24,16 +26,28 @@ type ConnInfo struct {
 }
 
 type tracked struct {
-	id    uint64
-	md    Metadata
-	out   *Outbound
-	info  any
-	start time.Time
-	up    *atomic.Int64
-	down  *atomic.Int64
-	close func()
+	attempt *connectionAttempt
+	id      uint64
+	md      Metadata
+	out     *Outbound
+	info    any
+	start   time.Time
+	up      *atomic.Int64
+	down    *atomic.Int64
+	close   func()
 
 	originalDestination string
+}
+
+func (b *Backend) ConnectionTrace(id uint64, profile string) (api.ConnectionTrace, bool) {
+	b.conns.mu.Lock()
+	tracked := b.conns.conns[id]
+	b.conns.mu.Unlock()
+	if tracked == nil || tracked.attempt == nil {
+		return api.ConnectionTrace{}, false
+	}
+	trace := tracked.attempt.trace(tracked.up.Load(), tracked.down.Load())
+	return trace, trace.Scope.ProfileID == profile
 }
 
 type connTable struct {

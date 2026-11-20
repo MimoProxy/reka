@@ -97,7 +97,7 @@ func (s *Service) record(ctx context.Context, id, parent uint64, start time.Time
 			r.Error = "resolution_failed"
 		}
 	}
-	s.opts.History.Record(history.DNS, s.historyScope, start, r, nil)
+	s.opts.History.RecordFlow(history.DNS, s.historyScope, start, r.ConnectionID, r, nil)
 }
 
 func displayType(typ uint16) string {

@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/sing-box/adapter"
@@ -166,7 +167,9 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	prepared := r.prepareFlow(ctx, md)
 	defer prepared.Release()
 	if _, debugBridge := conn.(*debugBridge); !debugBridge && prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
+		start := time.Now()
 		conn, md = sniffStream(ctx, conn, md, prepared.Sniff)
+		attempt.sniffing(start, md)
 		r.releaseSniffSlot()
 	}
 	rt := prepared.pick(ctx, md)

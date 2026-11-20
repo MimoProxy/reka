@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/history"
 )
@@ -93,6 +94,19 @@ func TestRequestHistoryRecordsHTTPKeepAliveWithoutCredentialsOrBodies(t *testing
 		if request.ConnectionID == 0 || request.Status != http.StatusCreated ||
 			request.RequestBytes != len(payload) || request.Path != expected || request.TTFB == nil {
 			t.Fatalf("unexpected record: %+v", request)
+		}
+		var timeline api.ConnectionTimeline
+		if err := client.Call("GetConnectionTimeline", api.TimelineRequest{ID: request.ConnectionID, Epoch: page.Epoch}, &timeline); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, event := range timeline.Events {
+			if event.Stage == "http" && event.Cursor == page.Rows[i].Cursor {
+				found = string(event.Data) == data
+			}
+		}
+		if !found {
+			t.Fatal("timeline did not include the exact redacted request", timeline)
 		}
 	}
 }

@@ -120,6 +120,7 @@ var Methods = []string{
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
+	"GetConnectionTimeline",
 }
 
 func (s *Session) dispatch(req Request) (any, error) {
@@ -401,6 +402,23 @@ func (s *Session) dispatch(req Request) (any, error) {
 			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
 		}
 		return page, nil
+	case "GetConnectionTimeline":
+		p, err := decode[api.TimelineRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.ID == 0 {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "connection ID is required"}
+		}
+		store, _ := svc.Engine().History()
+		if p.Epoch != "" && p.Epoch != store.Epoch() {
+			return nil, &service.Error{Code: service.CodeNotFound, Message: "connection history belongs to an earlier runtime"}
+		}
+		timeline, found := svc.Engine().ConnectionTimeline(p.ID)
+		if !found {
+			return nil, &service.Error{Code: service.CodeNotFound, Message: "connection is missing or its history has expired"}
+		}
+		return timeline, nil
 	case "StartHTTPSDebug":
 		p, err := decode[api.HTTPSDebugRequest](req.Params)
 		if err != nil {

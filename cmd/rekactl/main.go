@@ -41,6 +41,7 @@ configuration
   op ID                                     result of an operation
 
 runtime
+  timeline [CONNECTION-ID] [-epoch EPOCH]    inspect a flow or list recent connections
   status
   group-status                               observed automatic choices and health
   explain DESTINATION [-network tcp|udp] [-source ADDR] [-addr IP]... [-resolve] [-process NAME]
@@ -178,6 +179,8 @@ func run(args []string) error {
 			}
 		}
 		return nil
+	case "timeline":
+		return cmdTimeline(rest)
 	case "status":
 		return cmdStatus()
 	case "explain":
