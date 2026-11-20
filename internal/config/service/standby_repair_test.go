@@ -1,13 +1,20 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
+	"github.com/MimoProxy/reka/internal/secret"
 )
 
 func TestDeferredStartupAllowsAlreadyOffSecretRepairOnly(t *testing.T) {
@@ -74,5 +81,92 @@ func TestDeferredStartupAllowsAlreadyOffSecretRepairOnly(t *testing.T) {
 				t.Fatal("repair enabled network takeover")
 			}
 		})
+	}
+}
+
+func TestProfileSwitchWriteFailureRestoresRepairMode(t *testing.T) {
+	if !profileWorkspaceSupported() {
+		t.Skip("profile workspaces are unavailable")
+	}
+	root := t.TempDir()
+	workspace, err := OpenProfileWorkspace(root, "repair", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	state, err := workspace.StateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := generation.NewEngine(generation.EngineOptions{ProfileID: "repair", Backend: backendOptions()})
+	defer engine.Close()
+	profile := strings.Replace(profileWith("alt"), "outbounds:\n", "outbounds:\n  - {id: ss, type: shadowsocks, server: 192.0.2.1, port: 8388, method: aes-128-gcm, password: secret://outbounds/ss/missing}\n", 1)
+	s, err := Open(Options{StateRoot: state, Engine: engine, Logger: quiet(), InitialProfile: []byte(profile),
+		ProfileSecrets: func(string) (secret.Store, error) { return nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.BindProfiles(workspace); err != nil {
+		t.Fatal(err)
+	}
+	startError := s.StartError()
+	if eff, _ := engine.Effective(); startError == "" || eff != nil {
+		t.Fatalf("initial profile did not start in repair mode: %s", startError)
+	}
+	before, err := s.ProfileState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := os.ReadFile(workspace.cursorPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	address := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	targetProfile := DefaultProfile + fmt.Sprintf("listeners: [{id: ready, type: http, listen: %q}]\n", address)
+	req := api.SwitchProfileRequest{ProfileID: "ready", BaseProfile: before.ProfileID, BaseEpoch: before.Epoch,
+		BaseRevision: before.Revision, OperationID: "switch-to-ready", InitialProfile: &targetProfile}
+	injected := false
+	s.writeActive = func(st *store.Store, active store.Active) error {
+		if err := st.WriteActive(active); err != nil {
+			return err
+		}
+		if !injected {
+			injected = true
+			return errors.New("could not sync target active record")
+		}
+		return nil
+	}
+	res, err := s.SwitchProfile(context.Background(), req)
+	if err != nil || !injected || res.State != store.OpFailed || res.Degraded {
+		t.Fatalf("switch after active write error: %+v, %v", res, err)
+	}
+	after, err := s.ProfileState("")
+	if err != nil || after != before || s.StartError() != startError {
+		t.Fatalf("recorded repair state changed: %+v, %s, %v", after, s.StartError(), err)
+	}
+	saved, err := os.ReadFile(workspace.cursorPath())
+	if err != nil || !bytes.Equal(saved, cursor) {
+		t.Fatalf("workspace cursor changed: %s, %v", saved, err)
+	}
+	if eff, revision := engine.Effective(); eff != nil || revision != 0 {
+		t.Errorf("target runtime remained active at revision %d", revision)
+	}
+	if _, ok := engine.ListenerAddr("ready"); ok {
+		t.Error("target listener remained tracked")
+	}
+	ln, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("target listener did not release its address: %v", err)
+	}
+	ln.Close()
+	_, scope := engine.History()
+	if scope.ProfileID != before.ProfileID {
+		t.Fatalf("runtime profile was not restored: %+v", scope)
+	}
+	req.OperationID = "retry-switch-to-ready"
+	if res, err := s.SwitchProfile(context.Background(), req); err != nil || res.State != store.OpCommitted || s.StartError() != "" {
+		t.Fatalf("retrying the switch: %+v, %v", res, err)
 	}
 }

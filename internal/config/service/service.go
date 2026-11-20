@@ -736,14 +736,10 @@ func (s *Service) rollback(op store.Operation, res Result, cause error, discard 
 	if errors.As(cause, &ae) && ae.Degraded {
 		res.Degraded = true
 	}
-	if s.eff != nil {
-		if p, err := s.engine.Prepare(s.eff); err != nil {
-			res.Degraded = true
-			s.log.Error("roll back to the previous revision", "revision", s.active, "err", err)
-		} else if _, err := s.engine.Activate(p, s.active); err != nil {
-			res.Degraded = true
-			s.log.Error("roll back to the previous revision", "revision", s.active, "err", err)
-		}
+	_, scope := s.engine.History()
+	if err := s.restoreRuntime(scope.ProfileID); err != nil {
+		res.Degraded = true
+		s.log.Error("roll back to the previous revision", "revision", s.active, "err", err)
 	}
 	op.State = store.OpFailed
 	op.Updated = time.Now().UTC()
@@ -758,6 +754,20 @@ func (s *Service) rollback(op store.Operation, res Result, cause error, discard 
 	}
 	s.events.Publish(EventRejected, res)
 	return res, nil
+}
+
+// restoreRuntime reinstates the confirmed runtime, including an idle repair
+// state. It is called with s.mu held.
+func (s *Service) restoreRuntime(profileID string) error {
+	if s.eff == nil {
+		return s.engine.DeactivateProfile(profileID)
+	}
+	previous, err := s.engine.Prepare(s.eff)
+	if err != nil {
+		return err
+	}
+	_, err = s.engine.ActivateProfile(previous, s.active, profileID)
+	return err
 }
 
 func (s *Service) nextRevision() (uint64, error) {
