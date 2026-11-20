@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +25,89 @@ func dnsTestAnswer(q *D.Msg) *D.Msg {
 	rr, _ := D.NewRR(q.Question[0].Name + " 30 IN A 192.0.2.8")
 	m.Answer = []D.RR{rr}
 	return m
+}
+
+type dnsTestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f dnsTestRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDoHErrorRedactsRequestURL(t *testing.T) {
+	const origin = "https://resolver.example.test:8443"
+	const pathToken, queryToken = "test-path-token", "test-query-token"
+	const requestURI = "/dns-query/" + pathToken + "?token=" + queryToken
+	ep, err := RD.ParseEndpoint(origin + requestURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := new(D.Msg).SetQuestion("example.test.", D.TypeA)
+	checkRedacted := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an exchange error")
+		}
+		message := err.Error()
+		if strings.Contains(message, pathToken) || strings.Contains(message, queryToken) {
+			t.Errorf("exchange error exposes request credentials: %s", message)
+		}
+		if !strings.Contains(message, origin) {
+			t.Errorf("exchange error omits %s: %s", origin, message)
+		}
+	}
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			transport := dnsTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if got := req.URL.RequestURI(); got != requestURI {
+					t.Errorf("request URI = %q, want %q", got, requestURI)
+				}
+				return nil, cause
+			})
+			_, err := exchangeDoHTransport(t.Context(), ep, q, transport)
+			if !errors.Is(err, cause) {
+				t.Fatalf("exchange error = %v, want cause %v", err, cause)
+			}
+			checkRedacted(t, err)
+			if cause == context.DeadlineExceeded {
+				var timeout net.Error
+				if !errors.As(err, &timeout) || !timeout.Timeout() {
+					t.Errorf("exchange error does not report a timeout: %v", err)
+				}
+			}
+		})
+	}
+	t.Run("request construction", func(t *testing.T) {
+		ep := ep
+		ep.Path = "/%zz" + requestURI
+		transport := dnsTestRoundTripper(func(*http.Request) (*http.Response, error) {
+			t.Fatal("sent request with an invalid URL")
+			return nil, nil
+		})
+		_, err := exchangeDoHTransport(t.Context(), ep, q, transport)
+		checkRedacted(t, err)
+	})
+	t.Run("malformed redirect", func(t *testing.T) {
+		transport := dnsTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": {origin + "/%zz" + requestURI}},
+				Body:       http.NoBody,
+				Request:    req,
+			}, nil
+		})
+		_, err := exchangeDoHTransport(t.Context(), ep, q, transport)
+		checkRedacted(t, err)
+	})
+	t.Run("HTTP3", func(t *testing.T) {
+		ep := ep
+		ep.Scheme = "h3"
+		open := func(context.Context, string) (net.Conn, error) { return nil, context.Canceled }
+		_, err := exchangeQUICDNS(t.Context(), ep, q, open, dnsTLSConfig(ep, nil), "192.0.2.1:8443")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("exchange error = %v, want cause %v", err, context.Canceled)
+		}
+		checkRedacted(t, err)
+	})
 }
 
 func TestEncryptedDNS(t *testing.T) {
