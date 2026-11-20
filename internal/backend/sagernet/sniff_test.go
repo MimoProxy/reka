@@ -296,6 +296,10 @@ func TestSniffHTTPConnectAndOptInDestinationOverride(t *testing.T) {
 	if md.Destination.Addr != original.Addr() || md.SniffedDomain != "localhost" {
 		t.Fatal("route hint overwrote original metadata", md)
 	}
+	active := b.Connections()
+	if len(active) != 1 || active[0].Metadata.Destination.Domain != "localhost" || active[0].OriginalDestination != original.String() {
+		t.Fatalf("active connection lost its original target after the override: %+v", active)
+	}
 }
 
 // A genuine QUIC client produces CRYPTO frames split across several Initial
@@ -472,5 +476,9 @@ func TestSniffUDPForwardsRetainedQUICDatagrams(t *testing.T) {
 	md := <-observed
 	if md.SniffedDomain != "udp-preserved.test" || md.Protocol != "quic" || !md.Destination.Addr.IsLoopback() {
 		t.Fatalf("QUIC selection did not retain its original peer: %+v", md)
+	}
+	active := b.Connections()
+	if len(active) != 1 || active[0].Metadata.SniffedDomain != md.SniffedDomain || active[0].Metadata.Destination.String() != echo.LocalAddr().String() {
+		t.Fatalf("active UDP connection lost its domain or original peer: %+v", active)
 	}
 }

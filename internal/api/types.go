@@ -213,6 +213,9 @@ type FlowInfo struct {
 	Chain         []string `json:"chain,omitempty"`
 	Outbound      string   `json:"outbound"`
 	Fingerprint   string   `json:"fingerprint"`
+
+	// DestinationDomain includes names recovered from Fake IP mappings.
+	DestinationDomain string `json:"destination_domain,omitempty"`
 }
 
 // ExplainRequest describes a hypothetical connection.
@@ -265,6 +268,9 @@ type Connection struct {
 	Upload      int64     `json:"upload"`
 	Download    int64     `json:"download"`
 	FlowInfo
+
+	// OriginalDestination is set when the active destination was rewritten.
+	OriginalDestination string `json:"original_destination,omitempty"`
 }
 
 // RuntimeStatus is a summary of the running state.

@@ -897,7 +897,10 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	if err != nil {
 		slog.Error("route", "err", err)
 	}
-	info := &FlowInfo{Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol}
+	info := &FlowInfo{
+		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
+		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
+	}
 	if !env.processOff && env.procDone && env.procOK {
 		info.ProcessPID = env.owner.PID
 		info.ProcessPath = env.owner.Path
@@ -1071,6 +1074,7 @@ func (e *Engine) Connections() []Connection {
 			ID: c.ID, Inbound: c.Metadata.Inbound, Network: c.Metadata.Network,
 			Source: c.Metadata.Source.String(), Destination: c.Metadata.Destination.String(),
 			Outbound: c.Outbound, Start: c.Start, Upload: c.Upload, Download: c.Download,
+			OriginalDestination: c.OriginalDestination,
 		}
 		if fi, ok := c.Info.(*FlowInfo); ok {
 			conn.FlowInfo = *fi

@@ -4,12 +4,44 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	D "github.com/miekg/dns"
 )
+
+func TestRouteReportsFakeIPDomainAlongsideSniffedDomain(t *testing.T) {
+	e := NewEngine(EngineOptions{})
+	defer e.Close()
+	eff, ds := compile.Compile([]byte("schema-version: 1\nrules: [{match: {all: true}, outbound: direct}]\n"), nil, compile.Options{})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	p, err := e.Prepare(eff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Activate(p, 1); err != nil {
+		t.Fatal(err)
+	}
+	ip, err := e.fake.Allocate(1, "mapped.test", netip.MustParsePrefix("198.18.0.0/16"), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := e.route(context.Background(), sagernet.Metadata{
+		Network: "tcp", Destination: sagernet.Destination{Addr: ip, Port: 443}, SniffedDomain: "sniff.test",
+	})
+	if route.Outbound == nil {
+		t.Fatal("Fake IP flow did not route")
+	}
+	defer route.Release()
+	if info := route.Info.(*FlowInfo); info.DestinationDomain != "mapped.test" || info.SniffedDomain != "sniff.test" {
+		t.Fatalf("expected both names on the connection: %+v", info)
+	}
+}
 
 func TestPreparedSniffFlowRetainsConfigurationAcrossCommit(t *testing.T) {
 	e := NewEngine(EngineOptions{})

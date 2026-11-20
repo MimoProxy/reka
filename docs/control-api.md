@@ -179,6 +179,8 @@ GetGroupStatus 返回自动组数组，每项含 `id`、`type`、`selected`、`r
 
 ListConnections 的 offset 应为非负数；limit 为 1–1000，省略、≤0 或 >1000 时用 100。连接含 `id`、`inbound`、`network`、`source`、`destination`、`outbound`、`start`、`upload`、`download`，以及 `generation`、`revision`、`rule_index`、可选 `rule_id`、`rule`、`chain`、`fingerprint`。流量单位为字节。可选的新字段有 `sniffed_domain`、`protocol`、`process_path`、`process_uid`；进程信息按需查询，缺省不代表 UID 为 0。
 
+`destination_domain` 记录入站提供的域名或 Fake IP 映射中的域名。活动连接的 `destination` 发生改写时，`original_destination` 保留入站收到的地址和端口。
+
 ```json
 {"id":10,"method":"ListConnections","params":{"offset":0,"limit":100}}
 {"id":11,"method":"CloseConnections","params":{"ids":[123,124]}}

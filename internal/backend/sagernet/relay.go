@@ -27,8 +27,13 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	if rt.Context != nil {
 		ctx = rt.Context(ctx)
 	}
+	var originalDestination string
 	if rt.Destination != nil {
-		metadata.Destination = M.ParseSocksaddr(rt.Destination.String())
+		destination := rt.Destination.String()
+		if destination != attempt.Destination {
+			originalDestination = attempt.Destination
+		}
+		metadata.Destination = M.ParseSocksaddr(destination)
 	}
 	ctx = WithLookup(ctx, observeRequestLookup(ctx, rt.Lookup))
 	ctx = adapter.WithContext(ctx, &metadata)
@@ -64,7 +69,8 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	)
 	processTraffic, finishProcess := b.beginProcessTraffic(rt.Owner)
 	untrackConnection := b.conns.add(&tracked{id: attempt.ID, start: time.Now(), md: toMetadata(metadata), out: out,
-		info: rt.Info, up: &up, down: &down, close: func() { manual.Store(true); closeBoth() }})
+		originalDestination: originalDestination,
+		info:                rt.Info, up: &up, down: &down, close: func() { manual.Store(true); closeBoth() }})
 	untrack := func() { untrackConnection(); finishProcess() }
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {

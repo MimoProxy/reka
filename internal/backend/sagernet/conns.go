@@ -19,6 +19,8 @@ type ConnInfo struct {
 	Start    time.Time
 	Upload   int64
 	Download int64
+
+	OriginalDestination string
 }
 
 type tracked struct {
@@ -30,6 +32,8 @@ type tracked struct {
 	up    *atomic.Int64
 	down  *atomic.Int64
 	close func()
+
+	originalDestination string
 }
 
 type connTable struct {
@@ -60,6 +64,7 @@ func (b *Backend) Connections() []ConnInfo {
 		out = append(out, ConnInfo{
 			ID: c.id, Metadata: c.md, Outbound: c.out.Tag(), OutboundType: c.out.Type(), Info: c.info,
 			Start: c.start, Upload: c.up.Load(), Download: c.down.Load(),
+			OriginalDestination: c.originalDestination,
 		})
 	}
 	b.conns.mu.Unlock()
