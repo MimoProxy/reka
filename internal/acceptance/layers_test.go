@@ -26,7 +26,7 @@ rules: [{id: final, match: {all: true}, outbound: sub/proxy}]
 	listener := h.engine().ListenerInstance("mixed")
 	a, b := h.engine().OutboundInstance("sub/a"), h.engine().OutboundInstance("sub/b")
 	old := openStream(t, h.proxy(), echo)
-	waitFor(t, "source connection", 2*time.Second, func() bool { return a.Active() == 1 })
+	waitFor(t, "source connection", 2*time.Second, func() bool { return a.Active() == 1 && len(connsByDest(h, echo.String())) == 1 })
 	before := connsByDest(h, echo.String())[0]
 	overlay := "patches: [{op: set, path: /groups/sub~1proxy/selected, value: sub/b}]\n"
 	h.mustCommit(service.CommitRequest{ChangeRequest: service.ChangeRequest{Overlay: &overlay}})
