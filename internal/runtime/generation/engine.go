@@ -226,7 +226,8 @@ func (e *Engine) Plan(eff *compile.Effective) Plan {
 func (e *Engine) plan(eff *compile.Effective) Plan {
 	snap, gen := e.current()
 	p := Plan{Rules: len(eff.Rules)}
-	p.RoutingChanged = gen.eff == nil && eff.Routing.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Routing, eff.Routing)
+	p.RoutingChanged = gen.eff == nil && (eff.Routing.Mode != "rule" || eff.Routing.BlockQUIC != "off") ||
+		gen.eff != nil && !reflect.DeepEqual(gen.eff.Routing, eff.Routing)
 	p.ProcessChanged = gen.eff == nil && eff.Process.Mode != "rule" || gen.eff != nil && !reflect.DeepEqual(gen.eff.Process, eff.Process)
 	p.SniffChanged = gen.eff == nil && eff.Sniff.Enabled || gen.eff != nil &&
 		(!reflect.DeepEqual(gen.eff.Sniff, eff.Sniff) || gen.eff.SniffForRouting != eff.SniffForRouting)
@@ -911,9 +912,11 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		}
 	}
 	env := &lookupEnv{e: e, md: md}
+	isQUIC := md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
 	var (
-		dec router.Decision
-		g   *generation
+		dec          router.Decision
+		g            *generation
+		rejectReason string
 	)
 	genNo, out, release, ok, err := acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
 		g = s.Value.(*generation)
@@ -961,11 +964,18 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 					return nil, false
 				}
 			}
-		}
-		if md.Network == "udp" && !g.outUDP[dec.Outbound] {
-			return nil, false
+			if !g.outUDP[dec.Outbound] {
+				return nil, false
+			}
 		}
 		o, ok := s.Resources[dec.Outbound]
+		if ok && isQUIC {
+			mode, typ := g.eff.Routing.BlockQUIC, o.Type()
+			if typ != "reject-drop" && (mode == "all" || mode == "proxy" && typ != model.OutboundDirect) {
+				rejectReason = "block-quic"
+				return nil, false
+			}
+		}
 		return o, ok
 	})
 	if err != nil {
@@ -977,7 +987,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	info := &FlowInfo{
 		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
 		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
-		NetworkScene: state.scene,
+		NetworkScene: state.scene, RejectReason: rejectReason,
 	}
 	if dec.Temporary {
 		info.RuleSource = "temporary"

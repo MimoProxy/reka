@@ -201,6 +201,7 @@ type Plan struct {
 // FlowInfo is attached to every routed connection.
 type FlowInfo struct {
 	RuleSource    string   `json:"rule_source,omitempty"`
+	RejectReason  string   `json:"reject_reason,omitempty"`
 	NetworkScene  string   `json:"network_scene,omitempty"`
 	ProcessPID    uint32   `json:"process_pid,omitempty"`
 	ProcessPath   string   `json:"process_path,omitempty"`

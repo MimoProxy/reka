@@ -437,7 +437,15 @@ API 默认将内联凭据显示为 `********`，把遮罩原样提交会保留�
 
 ## 10. 路由模式与嗅探
 
-`routing` 和 `sniff` 均可放在 profile / local，local 对象整体优先。routing 默认为 `{mode: rule}`；mode 接受 rule/global/direct，global 模式必须设置 `global: 节点或组ID`，任何已填写的 global 目标都必须存在。模式切换保留原始规则，影响新连接；network.mode 另行管理系统接管。
+`routing` 和 `sniff` 均可放在 profile / local，local 对象整体优先。`routing` 默认为 `{mode: rule, block-quic: off}`。`mode` 接受 `rule`、`global`、`direct`，`global` 模式必须设置 `global: 节点或组ID`，任何已填写的 `global` 目标都必须存在。模式切换保留原始规则，影响新连接。`network.mode` 另行管理系统接管。
+
+| `routing.block-quic` | 作用 |
+| --- | --- |
+| `off` | 默认值，允许路由规则照常处理 QUIC |
+| `proxy` | 最终出站为代理时丢弃 QUIC，直连 QUIC 照常通过 |
+| `all` | 丢弃所有 QUIC，包括直连 |
+
+内核将发往 UDP 443 端口的流量按 QUIC 处理，其他 UDP 端口仅在嗅探识别为 QUIC 时匹配。`proxy` 和 `all` 丢弃匹配的数据包，支持回退的客户端随后改用 TCP。开关在配置提交后对新流生效，拦截原因在连接历史中记为 `reject_reason: block-quic`。
 
 | `sniff` 字段 | 默认 / 边界 |
 | --- | --- |

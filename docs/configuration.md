@@ -432,6 +432,8 @@ routing:
 ./bin/rekactl -state-root "$PWD/.reka-demo" set -local /routing '{"mode":"rule"}'
 ```
 
+可在同一个 `routing` 对象中设置 `block-quic: proxy` 来拦截走代理的 QUIC，或设置 `block-quic: all` 来一并拦截直连 QUIC，默认值为 `off`。匹配的 UDP 数据包被丢弃后，支持回退的客户端会改用 TCP。UDP 443 以外的流量仅在嗅探识别为 QUIC 时才会被此开关拦截。
+
 当 IP 目标缺少域名且当前路由规则包含域名条件时，内核默认通过 HTTP Host、TLS SNI 和 QUIC SNI 补充分流信息。可在 profile 或 local 自定义嗅探设置。以下示例显式开启嗅探，适用于收集连接域名等场景。
 
 ```yaml
