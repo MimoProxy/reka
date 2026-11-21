@@ -78,15 +78,16 @@ type RouteObservation struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
-	historyScope history.Scope
-	policies     *policy.Manager
-	dns          *RD.Service
-	revision     uint64
-	eff          *compile.Effective
-	router       *router.Router
-	outUDP       map[string]bool
-	packetAddr   map[string]bool
-	inUDP        map[string]bool
+	historyScope    history.Scope
+	policies        *policy.Manager
+	dns             *RD.Service
+	revision        uint64
+	eff             *compile.Effective
+	router          *router.Router
+	outUDP          map[string]bool
+	packetAddr      map[string]bool
+	inUDP           map[string]bool
+	packetFlowNames map[string]string
 }
 
 // Engine turns effective configurations into running generations: it
@@ -575,6 +576,10 @@ func (e *Engine) DeactivateProfile(profileID string) error {
 
 // ActivateProfile tags the new generation before it can receive traffic.
 func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string) (uint64, error) {
+	return e.activateProfile(p, revision, profileID, nil)
+}
+
+func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string, packetFlowNames map[string]string) (uint64, error) {
 	if p.done {
 		return 0, errors.New("preparation already used")
 	}
@@ -590,6 +595,7 @@ func (e *Engine) ActivateProfile(p *Prepared, revision uint64, profileID string)
 		p.dns.SetHistoryScope(scope)
 	}
 	g := &generation{historyScope: scope, policies: p.policies, dns: p.dns, revision: revision, eff: p.eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
+	g.packetFlowNames = packetFlowNames
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
@@ -1003,6 +1009,14 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	if g != nil {
 		info.Revision = g.revision
 		info.Fingerprint = fingerprintOf(g, dec.Outbound)
+		if g.packetFlowNames != nil {
+			target := dec.Outbound
+			if len(dec.Chain) > 0 {
+				target = dec.Chain[0]
+			}
+			info.PolicyName = g.packetFlowNames[target]
+			info.OutboundName = g.packetFlowNames[dec.Outbound]
+		}
 		if dec.RuleIndex >= 0 || dec.Temporary {
 			info.RuleID = dec.Rule.ID
 			info.Rule = dec.Rule.String()

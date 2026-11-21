@@ -219,6 +219,10 @@ type FlowInfo struct {
 
 	// DestinationDomain includes names recovered from Fake IP mappings.
 	DestinationDomain string `json:"destination_domain,omitempty"`
+
+	// Display names captured from the packet-flow profile that routed this flow.
+	PolicyName   string `json:"-"`
+	OutboundName string `json:"-"`
 }
 
 // ExplainRequest describes a hypothetical connection.

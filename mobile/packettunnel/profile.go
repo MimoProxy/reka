@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
@@ -140,7 +139,7 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	s := newSession()
 	opts := generation.EngineOptions{
 		HostPacketFlow: true, PacketHistory: s.events,
-		Backend: sagernet.Options{Logger: s.logger.With("component", "core")},
+		Backend: s.backendOptions(),
 	}
 	if runtime.GOOS == "ios" {
 		opts.Resolver = net.DefaultResolver
@@ -180,7 +179,7 @@ func (p *profileSession) publish(base *compile.Effective, summary profile.Summar
 	if profileID == "" {
 		profileID = scope.ProfileID
 	}
-	if _, err := p.engine.ActivateProfile(prepared, p.rev+1, profileID); err != nil {
+	if _, err := p.engine.ActivatePacketFlowProfile(prepared, p.rev+1, profileID, summary.Names); err != nil {
 		return errors.New("could not activate profile")
 	}
 	p.rev++

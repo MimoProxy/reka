@@ -62,6 +62,7 @@ type udpFlow struct {
 	rt           Route
 	remote       N.PacketConn
 	ready        chan struct{} // closed once remote is set or the dial failed
+	receiveDone  chan struct{} // allocated when final counters are observed
 	pending      []*buf.Buffer
 	pendingBytes int
 	notify       chan struct{}
@@ -308,6 +309,9 @@ func (f *udpFlow) dial() {
 		f.failed = true
 	} else {
 		f.remote = bufio.NewPacketConn(remote)
+		if s.b.conns.onClosed != nil {
+			f.receiveDone = make(chan struct{})
+		}
 	}
 	pending := f.pending
 	f.pending = nil
@@ -397,6 +401,9 @@ func (f *udpFlow) writeLocked(b *buf.Buffer) {
 }
 
 func (f *udpFlow) receive() {
+	if f.receiveDone != nil {
+		defer close(f.receiveDone)
+	}
 	opts := N.NewReadWaitOptions(f.remote, f.s.conn)
 	for {
 		b := opts.NewPacketBuffer()
@@ -437,6 +444,7 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 			delete(s.flows, f.dest)
 		}
 		remote := f.remote
+		receiveDone := f.receiveDone
 		pending := f.pending
 		f.pending = nil
 		f.pendingBytes = 0
@@ -450,13 +458,27 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 		if remote != nil {
 			remote.Close()
 		}
-		f.attempt.complete(reason, stage, f.up.Load(), f.down.Load())
-		if untrack != nil {
-			untrack()
+		finish := func() {
+			f.attempt.complete(reason, stage, f.up.Load(), f.down.Load())
+			if untrack != nil {
+				untrack()
+			}
+			if release != nil {
+				release()
+			}
 		}
-		if release != nil {
-			release()
+		if receiveDone == nil {
+			finish()
+			return
 		}
+		// Either relay direction can initiate close. Wait asynchronously for
+		// successful in-flight writes to update their counters before untracking.
+		go func() {
+			<-receiveDone
+			f.sendMu.Lock()
+			f.sendMu.Unlock()
+			finish()
+		}()
 	})
 }
 

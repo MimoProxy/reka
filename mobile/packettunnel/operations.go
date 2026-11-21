@@ -115,6 +115,11 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 	switch op.Action {
 	case "connections":
 		return s.connections(), nil
+	case "trafficRanking":
+		return s.trafficRanking(op.Limit), nil
+	case "resetTrafficRanking":
+		s.resetTrafficRanking()
+		return true, nil
 	case "close":
 		if op.ID == 0 {
 			return nil, errors.New("connection ID required")
@@ -149,12 +154,6 @@ func (s *Session) connections() []ConnectionRow {
 	p.mu.Lock()
 	names := p.summary.Names
 	p.mu.Unlock()
-	display := func(id string) string {
-		if name := names[id]; name != "" {
-			return history.Text(name, 128)
-		}
-		return id
-	}
 	active := p.engine.Connections()
 	rows := make([]ConnectionRow, 0, len(active))
 	for _, conn := range active {
@@ -165,19 +164,24 @@ func (s *Session) connections() []ConnectionRow {
 		if destination == "" {
 			destination = conn.Destination
 		}
-		groups := make([]string, 0, min(8, len(conn.Chain)))
-		for _, id := range conn.Chain[:min(8, len(conn.Chain))] {
-			groups = append(groups, display(id))
-		}
-		rule := conn.Rule
 		target := conn.Outbound
 		if len(conn.Chain) > 0 {
 			target = conn.Chain[0]
 		}
-		if name := display(target); name != target {
+		targetName := connectionDisplayName(target, conn.PolicyName)
+		groups := make([]string, 0, min(8, len(conn.Chain)))
+		for i, id := range conn.Chain[:min(8, len(conn.Chain))] {
+			name := targetName
+			if i != 0 {
+				name = connectionDisplayName(id, names[id])
+			}
+			groups = append(groups, name)
+		}
+		rule := conn.Rule
+		if targetName != target {
 			prefix, noResolve := strings.CutSuffix(rule, ",no-resolve")
 			if match, ok := strings.CutSuffix(prefix, ","+target); ok {
-				rule = match + "," + name
+				rule = match + "," + targetName
 				if noResolve {
 					rule += ",no-resolve"
 				}
@@ -185,12 +189,19 @@ func (s *Session) connections() []ConnectionRow {
 		}
 		rows = append(rows, ConnectionRow{
 			ID: conn.ID, StartMS: conn.Start.UnixMilli(), Destination: history.Text(destination, 255), Network: conn.Network,
-			Rule: history.Text(rule, 384), Groups: groups, Outbound: display(conn.Outbound),
+			Rule: history.Text(rule, 384), Groups: groups, Outbound: connectionDisplayName(conn.Outbound, conn.OutboundName),
 			Uploaded: conn.Upload, Downloaded: conn.Download,
 		})
 	}
 	sortConnectionRows(rows)
 	return rows
+}
+
+func connectionDisplayName(id, name string) string {
+	if name == "" {
+		return id
+	}
+	return history.Text(name, 128)
 }
 
 func sortConnectionRows(rows []ConnectionRow) {
