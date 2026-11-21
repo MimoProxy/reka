@@ -32,9 +32,10 @@ type profileSession struct {
 }
 
 type ProfileStatus struct {
-	Mode   string        `json:"mode"`
-	Groups []GroupStatus `json:"groups"`
-	Routes []RouteHit    `json:"routes,omitempty"`
+	Mode      string        `json:"mode"`
+	BlockQUIC string        `json:"blockQuic,omitempty"`
+	Groups    []GroupStatus `json:"groups"`
+	Routes    []RouteHit    `json:"routes,omitempty"`
 }
 
 type GroupStatus struct {
@@ -245,7 +246,7 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 		return nil, err
 	}
 	eff, _ := p.engine.Effective()
-	status := &ProfileStatus{Mode: eff.Routing.Mode, Groups: make([]GroupStatus, 0, len(eff.Groups))}
+	status := &ProfileStatus{Mode: eff.Routing.Mode, BlockQUIC: eff.Routing.BlockQUIC, Groups: make([]GroupStatus, 0, len(eff.Groups))}
 	observed := p.engine.GroupStatus()
 	for _, group := range eff.Groups {
 		row := GroupStatus{ID: group.ID, Selected: group.Selected}
