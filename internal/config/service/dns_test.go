@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	D "github.com/miekg/dns"
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/MimoProxy/reka/internal/config/store"
+	"github.com/MimoProxy/reka/internal/testnet"
+	D "github.com/miekg/dns"
 )
 
 func TestDNSListenersSourceCacheAndFakeReload(t *testing.T) {
@@ -25,9 +29,15 @@ func TestDNSListenersSourceCacheAndFakeReload(t *testing.T) {
 	env := newEnv(t)
 	s := env.open(DefaultProfile, "")
 	defer s.Close()
-	port := freePort(t)
-	profile := fmt.Sprintf("schema-version: 1\ndns: {nameserver: ['udp://%s'], listen: '127.0.0.1:%d', enhanced-mode: fake-ip, fake-ip-range: 198.18.0.0/29, fake-ip-ttl: 1}\nrules: [{match: {all: true}, outbound: direct}]\n", socket.LocalAddr(), port)
-	mustLayerCommit(t, s, ChangeRequest{BaseRevision: s.ActiveRevision(), Profile: &profile})
+	var profile string
+	port := testnet.Retry(t, func(port uint16) error {
+		profile = fmt.Sprintf("schema-version: 1\ndns: {nameserver: ['udp://%s'], listen: '127.0.0.1:%d', enhanced-mode: fake-ip, fake-ip-range: 198.18.0.0/29, fake-ip-ttl: 1}\nrules: [{match: {all: true}, outbound: direct}]\n", socket.LocalAddr(), port)
+		res, err := s.Commit(context.Background(), CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: s.ActiveRevision(), Profile: &profile}})
+		if err == nil && res.State != store.OpCommitted {
+			err = errors.New(describe(res))
+		}
+		return err
+	})
 	q := new(D.Msg)
 	q.SetQuestion("fake.test.", D.TypeA)
 	client := &D.Client{Net: "udp"}

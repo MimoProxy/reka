@@ -16,6 +16,7 @@ import (
 	"time"
 
 	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 )
 
@@ -221,15 +222,7 @@ func TestEncryptedDNS(t *testing.T) {
 }
 
 func TestDNSTruncatedUDPUsesTCP(t *testing.T) {
-	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	listener, err := net.Listen("tcp", packet.LocalAddr().String())
-	if err != nil {
-		packet.Close()
-		t.Fatal(err)
-	}
+	listener, packet := testnet.ListenTCPUDP(t)
 	handler := D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		m := dnsTestAnswer(q)
 		if _, udp := w.RemoteAddr().(*net.UDPAddr); udp {

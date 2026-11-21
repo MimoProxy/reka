@@ -6,12 +6,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 func TestProcessTrafficCardinalityUnknownAndClosedCounters(t *testing.T) {
@@ -81,11 +84,11 @@ func TestProcessTrafficRealTCPUDPClosedTotals(t *testing.T) {
 		rt.Owner = ProcessInfo{Path: "/app/echo", UID: 501, UIDKnown: true, PID: 321}
 		return rt
 	})
-	listen := loopback(freePort(t))
-	inbound, err := b.NewMixedInbound("mixed", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var inbound *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		inbound, err = b.NewMixedInbound("mixed", address)
+		return err
+	})
 	defer inbound.Close()
 	roundTrip(t, listen, echoServer(t), false, 4096)
 	echo, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -195,11 +198,11 @@ func TestDarwinHTTPProxyFindsCurlProcess(t *testing.T) {
 		rt.Owner = owner
 		return rt
 	})
-	address := loopback(freePort(t))
-	in, err := b.NewMixedInbound("test", address)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Inbound
+	address := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		in, err = b.NewMixedInbound("test", address)
+		return err
+	})
 	defer in.Close()
 	for request := 0; request < 2; request++ {
 		command := exec.Command("/usr/bin/curl", "--silent", "--show-error", "--max-time", "5", "--noproxy", "", "--proxy", "http://"+address.String(), server.URL)

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	TR "github.com/sagernet/sing-box/protocol/trojan"
@@ -30,7 +31,6 @@ func tlsCarrierCases() []SSPluginSpec {
 }
 func carrierNode(t *testing.T, protocol, transport string) (*Server, netip.AddrPort, json.RawMessage) {
 	t.Helper()
-	listen := loopback(freePort(t))
 	opts := map[string]any{}
 	var stream *option.V2RayTransportOptions
 	if transport != "" {
@@ -46,23 +46,24 @@ func carrierNode(t *testing.T, protocol, transport string) (*Server, netip.AddrP
 		}
 		opts["transport"] = value
 	}
-	server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
-		logger := b.componentLogger("inbound", protocol, "carrier")
-		switch protocol {
-		case "vless":
-			in, err := VL.NewInbound(b.ctx, b.router, logger, "carrier", option.VLESSInboundOptions{ListenOptions: listenOpts(listen), Users: []option.VLESSUser{{UUID: testUUID}}, Transport: stream})
-			return in, protocol, err
-		case "vmess":
-			in, err := VM.NewInbound(b.ctx, b.router, logger, "carrier", option.VMessInboundOptions{ListenOptions: listenOpts(listen), Users: []option.VMessUser{{UUID: testUUID}}, Transport: stream})
-			return in, protocol, err
-		default:
-			in, err := TR.NewInbound(b.ctx, b.router, logger, "carrier", option.TrojanInboundOptions{ListenOptions: listenOpts(listen), Users: []option.TrojanUser{{Password: "inner-secret"}}, Transport: stream})
-			return in, protocol, err
-		}
+	var server *Server
+	listen := testnet.RetryAddr(t, func(listen netip.AddrPort) (err error) {
+		server, err = startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
+			logger := b.componentLogger("inbound", protocol, "carrier")
+			switch protocol {
+			case "vless":
+				in, err := VL.NewInbound(b.ctx, b.router, logger, "carrier", option.VLESSInboundOptions{ListenOptions: listenOpts(listen), Users: []option.VLESSUser{{UUID: testUUID}}, Transport: stream})
+				return in, protocol, err
+			case "vmess":
+				in, err := VM.NewInbound(b.ctx, b.router, logger, "carrier", option.VMessInboundOptions{ListenOptions: listenOpts(listen), Users: []option.VMessUser{{UUID: testUUID}}, Transport: stream})
+				return in, protocol, err
+			default:
+				in, err := TR.NewInbound(b.ctx, b.router, logger, "carrier", option.TrojanInboundOptions{ListenOptions: listenOpts(listen), Users: []option.TrojanUser{{Password: "inner-secret"}}, Transport: stream})
+				return in, protocol, err
+			}
+		})
+		return err
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	raw, _ := json.Marshal(opts)
 	return server, listen, raw
 }

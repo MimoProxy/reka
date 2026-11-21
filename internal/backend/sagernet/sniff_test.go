@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing/common/buf"
@@ -153,11 +154,11 @@ func TestSniffSOCKSHandshakeAndOriginalTarget(t *testing.T) {
 			return Fixed(out)(ctx, md)
 		}, Release: func() { released.Add(1) }}
 	})
-	listen := loopback(freePort(t))
-	inbound, err := b.NewInbound("mixed", "mixed", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var inbound *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		inbound, err = b.NewInbound("mixed", "mixed", address)
+		return err
+	})
 	defer inbound.Close()
 	target := echoServer(t)
 	dialer, err := proxy.SOCKS5("tcp", listen.String(), nil, &net.Dialer{Timeout: 500 * time.Millisecond})
@@ -250,11 +251,11 @@ func TestSniffHTTPConnectAndOptInDestinationOverride(t *testing.T) {
 			return Fixed(direct)(ctx, md)
 		}}
 	})
-	listen := loopback(freePort(t))
-	inbound, err := b.NewInbound("http", "http", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var inbound *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		inbound, err = b.NewInbound("http", "http", address)
+		return err
+	})
 	defer inbound.Close()
 	echo := echoServer(t)
 	// The IP is deliberately different from the loopback echo listener. Only
@@ -440,11 +441,11 @@ func TestSniffUDPForwardsRetainedQUICDatagrams(t *testing.T) {
 			return Fixed(direct)(ctx, md)
 		}}
 	})
-	listen := loopback(freePort(t))
-	inbound, err := b.NewInbound("socks", "socks", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var inbound *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		inbound, err = b.NewInbound("socks", "socks", address)
+		return err
+	})
 	defer inbound.Close()
 	client := New(Options{Logger: testLogger(t)})
 	defer client.Close()

@@ -34,12 +34,6 @@ func TestNativeProcessRuleRejectAndRestore(t *testing.T) {
 			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
 		}
 	}()
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := reserved.Addr().String()
-	reserved.Close()
 	profile := func(name string) []byte {
 		return []byte(fmt.Sprintf("schema-version: 1\nlog: {level: error}\nrules: [{id: process, match: {process-name: %s}, outbound: reject},{id: final, match: {all: true}, outbound: direct}]\n", strconv.Quote(name)))
 	}
@@ -48,10 +42,9 @@ func TestNativeProcessRuleRejectAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := Start(Options{StateRoot: root, Secrets: store, ControlAddress: "-", InitialProfile: profile("not-the-test-process"), InitialLocal: []byte(fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", address))})
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, address := startListening(t, func(address string) Options {
+		return Options{StateRoot: t.TempDir(), Secrets: store, ControlAddress: "-", InitialProfile: profile("not-the-test-process"), InitialLocal: []byte(fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", address))}
+	})
 	defer k.Close()
 	if message := k.Service.StartError(); message != "" {
 		t.Fatal(message)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"golang.org/x/net/proxy"
 )
 
@@ -44,35 +45,41 @@ func TestAuthenticatedMixedRulesAndCredentialRotation(t *testing.T) {
 			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
 		}
 	}()
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := reserved.Addr().String()
-	port := reserved.Addr().(*net.TCPAddr).Port
-	reserved.Close()
+	var address string
+	var port uint16
 	log := new(authTestLog)
 	e := NewEngine(EngineOptions{Backend: sagernet.Options{Logger: slog.New(slog.NewTextHandler(log, nil))}})
 	defer e.Close()
-	apply := func(password string, revision uint64) Plan {
-		t.Helper()
+	tryApply := func(password string, revision uint64) (Plan, error) {
 		profile := fmt.Sprintf("schema-version: 1\nrules: [{id: authenticated, match: {and: [{in-user: Alice}, {in-type: SOCKS5}, {in-port: %d}, {in-name: auth}]}, outbound: direct}, {match: {all: true}, outbound: reject}]\n", port)
 		local := fmt.Sprintf("listeners: [{id: auth, type: mixed, listen: %q, users: [{username: Alice, password: %q}]}]\n", address, password)
 		eff, ds := compile.Compile([]byte(profile), []byte(local), compile.Options{})
 		if ds.HasErrors() {
-			t.Fatal(ds)
+			return Plan{}, ds
 		}
 		p, err := e.Prepare(eff)
 		if err != nil {
-			t.Fatal(err)
+			return Plan{}, err
 		}
 		plan := p.Plan()
 		if _, err := e.Activate(p, revision); err != nil {
+			return Plan{}, err
+		}
+		return plan, nil
+	}
+	apply := func(password string, revision uint64) Plan {
+		t.Helper()
+		plan, err := tryApply(password, revision)
+		if err != nil {
 			t.Fatal(err)
 		}
 		return plan
 	}
-	apply("first-password", 1)
+	testnet.Retry(t, func(candidate uint16) error {
+		port, address = candidate, fmt.Sprintf("127.0.0.1:%d", candidate)
+		_, err := tryApply("first-password", 1)
+		return err
+	})
 	dial := func(password string) (net.Conn, error) {
 		d, err := proxy.SOCKS5("tcp", address, &proxy.Auth{User: "Alice", Password: password}, &net.Dialer{Timeout: time.Second})
 		if err != nil {

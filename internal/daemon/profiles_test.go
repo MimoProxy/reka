@@ -30,14 +30,25 @@ import (
 
 const profileA = "schema-version: 1\ngroups: [{id: policy, type: select, members: [direct,reject], selected: direct}]\nrules: [{match: {all: true}, outbound: policy}]\n"
 
-func profileOptions(t *testing.T, root string) Options {
+// startProfiles starts a kernel on a fresh profile root with a listener on
+// a free loopback port. adjust, when set, changes the options first. It
+// returns the root and the options, for restarting the same kernel.
+func startProfiles(t *testing.T, adjust func(*Options)) (*Kernel, string, Options) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := ln.Addr().String()
-	ln.Close()
+	var root string
+	var options Options
+	k, _ := startListening(t, func(address string) Options {
+		root = t.TempDir()
+		options = profileOptions(root, address)
+		if adjust != nil {
+			adjust(&options)
+		}
+		return options
+	})
+	return k, root, options
+}
+
+func profileOptions(root, address string) Options {
 	return Options{ProfileRoot: root, ProfileID: "alpha", ProfileResume: true, StateRoot: filepath.Join(root, "alpha"), ControlAddress: "-", DeferNetwork: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), InitialProfile: []byte(profileA), InitialLocal: []byte(fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\nnetwork: {mode: off}\n", address))}
 }
 func switchProfile(t *testing.T, k *Kernel, id, operation string) api.SwitchProfileResult {
@@ -62,12 +73,7 @@ func choose(t *testing.T, k *Kernel, member, op string) {
 	}
 }
 func TestAtomicProfilesKeepHistorySelectionsResourcesAndResume(t *testing.T) {
-	root := t.TempDir()
-	options := profileOptions(t, root)
-	k, err := Start(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, root, options := startProfiles(t, nil)
 	choose(t, k, "reject", "alpha-choice")
 	if result := switchProfile(t, k, "beta", "to-beta"); result.State != "committed" {
 		t.Fatal(result)
@@ -96,7 +102,7 @@ func TestAtomicProfilesKeepHistorySelectionsResourcesAndResume(t *testing.T) {
 		t.Fatal(result)
 	}
 	k.Close()
-	k, err = Start(options)
+	k, err := Start(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +117,7 @@ func TestAtomicProfilesKeepHistorySelectionsResourcesAndResume(t *testing.T) {
 }
 
 func TestProfilePreparationFailureKeepsOldListenerAndConnection(t *testing.T) {
-	root := t.TempDir()
-	k, err := Start(profileOptions(t, root))
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, root, _ := startProfiles(t, nil)
 	defer k.Close()
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -183,11 +185,7 @@ func TestProfilePreparationFailureKeepsOldListenerAndConnection(t *testing.T) {
 	check()
 }
 func TestProfileContextRejectsLateClientAndSlowSubscriptionCannotCrossProfiles(t *testing.T) {
-	root := t.TempDir()
-	k, err := Start(profileOptions(t, root))
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, _, _ := startProfiles(t, nil)
 	defer k.Close()
 	old, _ := k.Service.ProfileState("")
 	var started atomic.Bool
@@ -232,18 +230,14 @@ func TestProfileContextRejectsLateClientAndSlowSubscriptionCannotCrossProfiles(t
 func TestProfileSwitchCrashRecoveryAndDurableWriteFailure(t *testing.T) {
 	for _, point := range []string{"profile-switch-intent", "profile-switch-activated", "profile-switch-before-pointer"} {
 		t.Run(point, func(t *testing.T) {
-			root := t.TempDir()
-			options := profileOptions(t, root)
-			options.FailPoint = func(at string) error {
-				if at == point {
-					return service.ErrCrashed
+			k, _, options := startProfiles(t, func(options *Options) {
+				options.FailPoint = func(at string) error {
+					if at == point {
+						return service.ErrCrashed
+					}
+					return nil
 				}
-				return nil
-			}
-			k, err := Start(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			})
 			state, _ := k.Service.ProfileState("")
 			profile := profileA
 			result, err := k.Service.SwitchProfile(context.Background(), api.SwitchProfileRequest{ProfileID: "beta", BaseProfile: state.ProfileID, BaseEpoch: state.Epoch, BaseRevision: state.Revision, OperationID: "interrupted", PreserveNetwork: true, InitialProfile: &profile})
@@ -273,11 +267,7 @@ func TestProfileSwitchCrashRecoveryAndDurableWriteFailure(t *testing.T) {
 }
 
 func TestProfileArchivePreservesImmutableHistorySubscriptionsAndCapabilities(t *testing.T) {
-	root := t.TempDir()
-	k, err := Start(profileOptions(t, root))
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, root, _ := startProfiles(t, nil)
 	defer k.Close()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", "\"profile-version\"")
@@ -375,10 +365,7 @@ func TestProfileArchivePreservesImmutableHistorySubscriptionsAndCapabilities(t *
 }
 
 func TestProfileSwitchOperationRetryAndStaleSessionCannotCrossEqualRevisions(t *testing.T) {
-	k, err := Start(profileOptions(t, t.TempDir()))
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, _, _ := startProfiles(t, nil)
 	defer k.Close()
 	var response api.Message
 	session := k.Handler.NewSession(func(raw []byte) error { response = api.Message{}; return json.Unmarshal(raw, &response) })
@@ -426,12 +413,7 @@ func TestProfileSwitchOperationRetryAndStaleSessionCannotCrossEqualRevisions(t *
 }
 
 func TestProfileCommittedCursorRecoversLostFinalOperationRecord(t *testing.T) {
-	root := t.TempDir()
-	options := profileOptions(t, root)
-	kernel, err := Start(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	kernel, root, options := startProfiles(t, nil)
 	result := switchProfile(t, kernel, "beta", "lost-final-record")
 	if result.State != "committed" {
 		t.Fatal(result)
@@ -477,10 +459,7 @@ func TestManagedResourceRefreshStopsBeforeProfileSwitch(t *testing.T) {
 		close(cancelled)
 	}))
 	defer remote.Close()
-	k, err := Start(profileOptions(t, t.TempDir()))
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, _, _ := startProfiles(t, nil)
 	defer k.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()

@@ -7,10 +7,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 func TestSOCKSTLSControlsTCPAndPreservesUDP(t *testing.T) {
@@ -22,11 +25,11 @@ func TestSOCKSTLSControlsTCPAndPreservesUDP(t *testing.T) {
 	}
 	defer direct.Close()
 	backend.SetRoute(Fixed(direct))
-	listen := loopback(freePort(t))
-	inbound, err := backend.NewInbound("socks", "socks", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var inbound *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		inbound, err = backend.NewInbound("socks", "socks", address)
+		return err
+	})
 	defer inbound.Close()
 	certServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	cert := certServer.TLS.Certificates

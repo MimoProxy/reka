@@ -76,10 +76,11 @@ rules: ["RULE-SET,domains,proxy", "MATCH,DIRECT"]
 
 func TestLocalAuthenticationMaskRoundTripAndConflict(t *testing.T) {
 	env := newEnv(t)
-	local := localWith(freePort(t))
-	local = strings.TrimSuffix(local, "\n") + "\n"
-	local = strings.Replace(local, "}", ", users: [{username: Alice, password: local-private-password}]}", 1)
-	s := env.open(DefaultProfile, local)
+	var local string
+	s, _ := env.openOn(DefaultProfile, func(port int) string {
+		local = strings.Replace(localWith(port), "}", ", users: [{username: Alice, password: local-private-password}]}", 1)
+		return local
+	})
 	defer s.Close()
 	masked := s.GetConfiguration(false)
 	if strings.Contains(masked.Local, "local-private-password") || strings.Contains(masked.Local, "Alice") || !strings.Contains(masked.Local, "********") {

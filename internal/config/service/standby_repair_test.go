@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 func TestDeferredStartupAllowsAlreadyOffSecretRepairOnly(t *testing.T) {
@@ -123,11 +125,12 @@ func TestProfileSwitchWriteFailureRestoresRepairMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	address := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	targetProfile := DefaultProfile + fmt.Sprintf("listeners: [{id: ready, type: http, listen: %q}]\n", address)
-	req := api.SwitchProfileRequest{ProfileID: "ready", BaseProfile: before.ProfileID, BaseEpoch: before.Epoch,
-		BaseRevision: before.Revision, OperationID: "switch-to-ready", InitialProfile: &targetProfile}
-	injected := false
+	var (
+		req      api.SwitchProfileRequest
+		res      api.SwitchProfileResult
+		injected bool
+		attempt  int
+	)
 	s.writeActive = func(st *store.Store, active store.Active) error {
 		if err := st.WriteActive(active); err != nil {
 			return err
@@ -138,9 +141,25 @@ func TestProfileSwitchWriteFailureRestoresRepairMode(t *testing.T) {
 		}
 		return nil
 	}
-	res, err := s.SwitchProfile(context.Background(), req)
-	if err != nil || !injected || res.State != store.OpFailed || res.Degraded {
-		t.Fatalf("switch after active write error: %+v, %v", res, err)
+	// The switch binds the target listener itself. If another process takes
+	// the port first, the switch fails before the injected write and is
+	// retried on another port.
+	address := testnet.RetryAddr(t, func(listen netip.AddrPort) (err error) {
+		attempt++
+		targetProfile := DefaultProfile + fmt.Sprintf("listeners: [{id: ready, type: http, listen: %q}]\n", listen.String())
+		req = api.SwitchProfileRequest{ProfileID: "ready", BaseProfile: before.ProfileID, BaseEpoch: before.Epoch,
+			BaseRevision: before.Revision, OperationID: fmt.Sprintf("switch-to-ready-%d", attempt), InitialProfile: &targetProfile}
+		injected = false
+		if res, err = s.SwitchProfile(context.Background(), req); err != nil {
+			return err
+		}
+		if !injected && res.Error != nil && testnet.InUse(errors.New(res.Error.Message)) {
+			return errors.New(res.Error.Message)
+		}
+		return nil
+	}).String()
+	if !injected || res.State != store.OpFailed || res.Degraded {
+		t.Fatalf("switch after active write error: %+v", res)
 	}
 	after, err := s.ProfileState("")
 	if err != nil || after != before || s.StartError() != startError {

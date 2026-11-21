@@ -30,6 +30,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 func logger(t *testing.T) *slog.Logger {
@@ -37,29 +38,6 @@ func logger(t *testing.T) *slog.Logger {
 		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	// These fixtures often listen on TCP and UDP at the same port. Starting
-	// from UDP detects both Windows exclusion tables. Random explicit ports
-	// avoid walking an entire reserved TCP range with consecutive ephemeral
-	// allocations. Production listeners still report bind failures.
-	for attempt := 0; attempt < 64; attempt++ {
-		packet, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", 1024+mrand.IntN(65536-1024)))
-		if err != nil {
-			continue
-		}
-		listener, err := net.Listen("tcp", packet.LocalAddr().String())
-		port := packet.LocalAddr().(*net.UDPAddr).Port
-		packet.Close()
-		if err == nil {
-			listener.Close()
-			return port
-		}
-	}
-	t.Fatal("no common TCP/UDP fixture port")
-	return 0
 }
 
 // harness is one kernel on a temporary state root with a mixed listener.
@@ -74,14 +52,19 @@ type harness struct {
 
 func newHarness(t *testing.T, profile string) *harness {
 	t.Helper()
-	root, err := os.MkdirTemp("", "rka")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(root) })
-	sec, _ := secret.NewFileStore(filepath.Join(root, "secrets", "secrets.json"), nil)
-	h := &harness{t: t, root: root, port: freePort(t), sec: sec}
-	h.open(profile)
+	h := &harness{t: t}
+	// A refused first start is recorded in the state root, so a port that
+	// another process took first is retried from a fresh root.
+	testnet.Retry(t, func(port uint16) error {
+		root, err := os.MkdirTemp("", "rka")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(root) })
+		sec, _ := secret.NewFileStore(filepath.Join(root, "secrets", "secrets.json"), nil)
+		h.root, h.port, h.sec = root, int(port), sec
+		return h.tryOpen(profile)
+	})
 	t.Cleanup(func() { h.svc.Close() })
 	return h
 }
@@ -92,6 +75,12 @@ func (h *harness) local() string {
 
 func (h *harness) open(profile string) {
 	h.t.Helper()
+	if err := h.tryOpen(profile); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) tryOpen(profile string) error {
 	eng := generation.NewEngine(generation.EngineOptions{
 		Backend:      sagernet.Options{Logger: logger(h.t), HalfCloseTimeout: 300 * time.Millisecond, UDPTimeout: 2 * time.Second},
 		DrainTimeout: 2 * time.Minute,
@@ -105,9 +94,10 @@ func (h *harness) open(profile string) {
 		}})
 	if err != nil {
 		eng.Close()
-		h.t.Fatal(err)
+		return err
 	}
 	h.svc = svc
+	return nil
 }
 
 func (h *harness) engine() *generation.Engine { return h.svc.Engine() }
@@ -328,13 +318,13 @@ const ssMethod = "2022-blake3-aes-128-gcm"
 
 func ssServer(t *testing.T, password string) netip.AddrPort {
 	t.Helper()
-	listen := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(freePort(t)))
-	s, err := sagernet.StartShadowsocksServer(listen, ssMethod, password, logger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
-	return listen
+	return testnet.RetryAddr(t, func(listen netip.AddrPort) error {
+		s, err := sagernet.StartShadowsocksServer(listen, ssMethod, password, logger(t))
+		if err == nil {
+			t.Cleanup(func() { s.Close() })
+		}
+		return err
+	})
 }
 
 const testUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
@@ -349,15 +339,16 @@ func realityServer(t *testing.T, multiplex ...bool) (listen netip.AddrPort, outb
 	target.TLS = &tls.Config{}
 	target.StartTLS()
 	t.Cleanup(target.Close)
-	listen = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(freePort(t)))
-	s, err := sagernet.StartRealityServer(sagernet.RealityServerOptions{
-		Listen: listen, UUID: testUUID, ServerName: "reality.test", Multiplex: len(multiplex) > 0 && multiplex[0],
-		Target: target.Listener.Addr().(*net.TCPAddr).AddrPort(), PrivateKey: priv.Bytes(), ShortID: hex.EncodeToString(sid),
-	}, logger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
+	listen = testnet.RetryAddr(t, func(listen netip.AddrPort) error {
+		s, err := sagernet.StartRealityServer(sagernet.RealityServerOptions{
+			Listen: listen, UUID: testUUID, ServerName: "reality.test", Multiplex: len(multiplex) > 0 && multiplex[0],
+			Target: target.Listener.Addr().(*net.TCPAddr).AddrPort(), PrivateKey: priv.Bytes(), ShortID: hex.EncodeToString(sid),
+		}, logger(t))
+		if err == nil {
+			t.Cleanup(func() { s.Close() })
+		}
+		return err
+	})
 	outboundYAML = fmt.Sprintf(`  - id: reality
     type: vless
     server: 127.0.0.1

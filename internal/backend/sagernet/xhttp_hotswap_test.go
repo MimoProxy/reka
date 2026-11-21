@@ -13,6 +13,7 @@ import (
 	"time"
 
 	RT "github.com/MimoProxy/reka/internal/runtime"
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 func TestXHTTPHotSwapDrainsOwnedPools(t *testing.T) {
@@ -41,11 +42,11 @@ func TestXHTTPHotSwapDrainsOwnedPools(t *testing.T) {
 	}})
 	defer runtime.Close()
 	b.SetRoute(runtimeRoute(t, runtime))
-	listen := loopback(freePort(t))
-	inbound, err := b.NewMixedInbound("xhttp-test", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var inbound *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		inbound, err = b.NewMixedInbound("xhttp-test", address)
+		return err
+	})
 	defer inbound.Close()
 	target := netip.MustParseAddrPort("198.51.100.1:443")
 	first, err := socks5Connect(listen, target)

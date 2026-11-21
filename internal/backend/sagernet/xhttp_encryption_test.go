@@ -18,6 +18,7 @@ import (
 	"time"
 
 	VE "github.com/MimoProxy/reka/internal/compat/vlessenc"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	V "github.com/sagernet/sing-box/protocol/vless"
@@ -60,21 +61,21 @@ func TestXHTTPEncryptedVisionPinnedTransportTCPUDP(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer decrypt.Close()
-				port := freePort(t)
-				server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
-					ctx := context.WithValue(b.ctx, "reka.vless.decrypt.v1", func(ctx context.Context, c net.Conn) (net.Conn, error) {
-						ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-						defer cancel()
-						stop := context.AfterFunc(ctx, func() { _ = c.Close() })
-						defer stop()
-						return decrypt.Handshake(c, nil)
+				var server *Server
+				port := testnet.Retry(t, func(port uint16) (err error) {
+					server, err = startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
+						ctx := context.WithValue(b.ctx, "reka.vless.decrypt.v1", func(ctx context.Context, c net.Conn) (net.Conn, error) {
+							ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+							defer cancel()
+							stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+							defer stop()
+							return decrypt.Handshake(c, nil)
+						})
+						in, err := V.NewInbound(ctx, b.router, b.componentLogger("inbound", "vless", "xhttp-encrypted"), "xhttp-encrypted", option.VLESSInboundOptions{ListenOptions: listenOpts(loopback(port)), Users: []option.VLESSUser{{UUID: testUUID, Flow: "xtls-rprx-vision"}}})
+						return in, "vless", err
 					})
-					in, err := V.NewInbound(ctx, b.router, b.componentLogger("inbound", "vless", "xhttp-encrypted"), "xhttp-encrypted", option.VLESSInboundOptions{ListenOptions: listenOpts(loopback(port)), Users: []option.VLESSUser{{UUID: testUUID, Flow: "xtls-rprx-vision"}}})
-					return in, "vless", err
+					return err
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				defer server.Close()
 				cfg := &XHTTPConfig{Host: "xhttp.test", Path: "/encrypted", Mode: mode, ScMinPostsIntervalMs: "1"}
 				address, certificate := startXHTTPReferenceCustom(t, cfg, protocol, false, false, net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))

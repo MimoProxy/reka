@@ -16,45 +16,38 @@ import (
 	"github.com/MimoProxy/reka/internal/config/compile"
 	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/policy"
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 	"golang.org/x/net/proxy"
 )
 
 func pinFlowApply(t *testing.T, e *Engine, profile, local string, revision uint64) *Prepared {
 	t.Helper()
-	eff, ds := compile.Compile([]byte(profile), []byte(local), compile.Options{})
-	if ds.HasErrors() {
-		t.Fatal(ds)
-	}
-	p, err := e.Prepare(eff)
+	p, err := pinFlowTryApply(e, profile, local, revision)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.Activate(p, revision); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
+func pinFlowTryApply(e *Engine, profile, local string, revision uint64) (*Prepared, error) {
+	eff, ds := compile.Compile([]byte(profile), []byte(local), compile.Options{})
+	if ds.HasErrors() {
+		return nil, ds
+	}
+	p, err := e.Prepare(eff)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := e.Activate(p, revision); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
 func pinFlowDNS(t *testing.T) (string, *atomic.Int32) {
 	t.Helper()
-	var packet net.PacketConn
-	var listener net.Listener
-	for range 64 {
-		var err error
-		packet, err = net.ListenPacket("udp", "127.0.0.1:0")
-		if err != nil {
-			continue
-		}
-		listener, err = net.Listen("tcp", packet.LocalAddr().String())
-		if err == nil {
-			break
-		}
-		_ = packet.Close()
-	}
-	if listener == nil {
-		t.Fatal("no TCP/UDP DNS fixture address")
-	}
+	listener, packet := testnet.ListenTCPUDP(t)
 	queries := &atomic.Int32{}
 	handler := D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		queries.Add(1)
@@ -82,25 +75,6 @@ func pinFlowDNS(t *testing.T) (string, *atomic.Int32) {
 	return packet.LocalAddr().String(), queries
 }
 
-func pinFlowListenerAddress(t *testing.T) netip.AddrPort {
-	t.Helper()
-	for range 64 {
-		packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-		if err != nil {
-			continue
-		}
-		listener, err := net.Listen("tcp", packet.LocalAddr().String())
-		address := packet.LocalAddr().(*net.UDPAddr).AddrPort()
-		_ = packet.Close()
-		if err == nil {
-			_ = listener.Close()
-			return address
-		}
-	}
-	t.Fatal("no shared TCP/UDP fixture port")
-	return netip.AddrPort{}
-}
-
 func pinFlowWaitDrained(t *testing.T, outbound *sagernet.Outbound) {
 	t.Helper()
 	select {
@@ -125,11 +99,15 @@ func TestPreparedFlowActualDialUsesRetiredResolverAndDrainsUnrelatedNodes(t *tes
 		defer conn.Close()
 		_, _ = io.Copy(conn, conn)
 	}()
-	listen := pinFlowListenerAddress(t)
-	local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]", listen.String())
 	e := NewEngine(EngineOptions{})
 	defer e.Close()
-	old := pinFlowApply(t, e, fmt.Sprintf("schema-version: 1\nsniff: {enabled: true, timeout-ms: 2000}\noutbounds: [{id: selected, type: direct}, {id: resolver, type: direct}, {id: unrelated, type: direct}]\ndns: {nameserver: [%q]}\nrules: [{match: {all: true}, outbound: selected}]\n", "udp://"+dnsAddress+"#resolver"), local, 1)
+	var local string
+	var old *Prepared
+	listen := testnet.RetryAddr(t, func(listen netip.AddrPort) (err error) {
+		local = fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]", listen.String())
+		old, err = pinFlowTryApply(e, fmt.Sprintf("schema-version: 1\nsniff: {enabled: true, timeout-ms: 2000}\noutbounds: [{id: selected, type: direct}, {id: resolver, type: direct}, {id: unrelated, type: direct}]\ndns: {nameserver: [%q]}\nrules: [{match: {all: true}, outbound: selected}]\n", "udp://"+dnsAddress+"#resolver"), local, 1)
+		return err
+	})
 	captured := make(chan struct{})
 	var captureOnce sync.Once
 	e.backend.SetPrepareFlow(func(ctx context.Context, md sagernet.Metadata) sagernet.PreparedFlow {

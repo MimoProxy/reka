@@ -10,19 +10,19 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
-	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
@@ -60,30 +60,6 @@ func (w *testWriter) Write(p []byte) (int, error) {
 	w.t.Helper()
 	w.t.Log(string(bytes.TrimRight(p, "\n")))
 	return len(p), nil
-}
-
-func freePort(t *testing.T) uint16 {
-	t.Helper()
-	// These fixtures often listen on TCP and UDP at the same port. Starting
-	// from UDP detects both Windows exclusion tables. Random explicit ports
-	// avoid walking an entire reserved TCP range with consecutive ephemeral
-	// allocations. Production listeners still report bind failures.
-	for attempt := 0; attempt < 64; attempt++ {
-		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(1024+mrand.IntN(65536-1024)))
-		packet, err := net.ListenPacket("udp", address)
-		if err != nil {
-			continue
-		}
-		listener, err := net.Listen("tcp", packet.LocalAddr().String())
-		port := packet.LocalAddr().(*net.UDPAddr).Port
-		packet.Close()
-		if err == nil {
-			listener.Close()
-			return uint16(port)
-		}
-	}
-	t.Fatal("no common TCP/UDP fixture port")
-	return 0
 }
 
 func loopback(port uint16) netip.AddrPort {
@@ -153,11 +129,11 @@ func startClient(t *testing.T, spec any) (socks netip.AddrPort, out *Outbound) {
 	}
 	t.Cleanup(func() { out.Close() })
 	b.SetRoute(Fixed(out))
-	socks = loopback(freePort(t))
-	in, err := b.NewMixedInbound("mixed-in", socks)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Inbound
+	socks = testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		in, err = b.NewMixedInbound("mixed-in", address)
+		return err
+	})
 	t.Cleanup(func() { in.Close() })
 	return socks, out
 }
@@ -174,11 +150,12 @@ func startServer(t *testing.T, typ string, newInbound func(b *Backend, listen ne
 	}
 	t.Cleanup(func() { direct.Close() })
 	b.SetRoute(Fixed(direct))
-	listen := loopback(freePort(t))
-	if err := newInbound(b, listen); err != nil {
-		t.Fatalf("start %s server: %v", typ, err)
-	}
-	return listen
+	return testnet.RetryAddr(t, func(listen netip.AddrPort) error {
+		if err := newInbound(b, listen); err != nil {
+			return fmt.Errorf("start %s server: %w", typ, err)
+		}
+		return nil
+	})
 }
 
 func listenOptions(listen netip.AddrPort) option.ListenOptions {
@@ -426,11 +403,11 @@ func TestRouteReject(t *testing.T) {
 	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: testHalfClose})
 	t.Cleanup(func() { b.Close() })
 	b.SetRoute(Fixed(nil))
-	listen := loopback(freePort(t))
-	in, err := b.NewMixedInbound("mixed-in", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Inbound
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		in, err = b.NewMixedInbound("mixed-in", address)
+		return err
+	})
 	t.Cleanup(func() { in.Close() })
 	dialer, _ := proxy.SOCKS5("tcp", listen.String(), nil, &net.Dialer{Timeout: 5 * time.Second})
 	if c, err := dialer.Dial("tcp", echoServer(t).String()); err == nil {

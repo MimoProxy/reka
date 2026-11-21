@@ -7,19 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 )
 
 func TestDHCPDNSUsesLeaseServerAndRetriesTruncation(t *testing.T) {
-	listen, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	packet, err := net.ListenPacket("udp4", listen.Addr().String())
-	if err != nil {
-		listen.Close()
-		t.Fatal(err)
-	}
+	listen, packet := testnet.ListenTCPUDP(t)
 	udp := &D.Server{PacketConn: packet, Handler: D.HandlerFunc(func(w D.ResponseWriter, q *D.Msg) {
 		answer := new(D.Msg).SetReply(q)
 		answer.Truncated = true

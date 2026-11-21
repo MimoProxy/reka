@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
-	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/history"
 )
 
@@ -31,14 +30,9 @@ func TestRequestHistoryRecordsHTTPKeepAliveWithoutCredentialsOrBodies(t *testing
 		_, _ = io.WriteString(w, "private-response-body")
 	}))
 	defer origin.Close()
-	listener := reservedPort(t)
-	local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", listener)
-	var commit service.Result
-	if err := client.Call("CommitConfiguration", service.CommitRequest{ChangeRequest: service.ChangeRequest{
-		BaseRevision: 1, Local: &local,
-	}}, &commit); err != nil || commit.State != "committed" {
-		t.Fatal(commit, err)
-	}
+	listener := commitListener(t, client, nil, func(listen string) string {
+		return fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", listen)
+	})
 	c, err := net.DialTimeout("tcp", listener, time.Second)
 	if err != nil {
 		t.Fatal(err)
