@@ -911,13 +911,19 @@ func (s *Service) Close() {
 
 // sameInstances reports whether two compilations of the same documents
 // produce the same instances; they differ when a referenced secret
-// changed.
+// changed. Outbounds and listeners both resolve secrets, the latter for
+// their authentication users.
 func sameInstances(a, b *compile.Effective) bool {
-	if a == nil || len(a.Outbounds) != len(b.Outbounds) {
+	if a == nil || len(a.Outbounds) != len(b.Outbounds) || len(a.Listeners) != len(b.Listeners) {
 		return false
 	}
 	for i := range a.Outbounds {
 		if a.Outbounds[i].Fingerprint != b.Outbounds[i].Fingerprint {
+			return false
+		}
+	}
+	for i := range a.Listeners {
+		if a.Listeners[i].ID != b.Listeners[i].ID || a.Listeners[i].Fingerprint != b.Listeners[i].Fingerprint {
 			return false
 		}
 	}
