@@ -41,17 +41,9 @@ func TestNativeClientTrafficProbeAndResourcesOverWire(t *testing.T) {
 			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
 		}
 	}()
-	reserve, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxyAddress := reserve.Addr().String()
-	reserve.Close()
-	local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", proxyAddress)
-	var committed service.Result
-	if err := client.Call("CommitConfiguration", service.CommitRequest{ChangeRequest: service.ChangeRequest{BaseRevision: 1, Local: &local}, OperationID: "native-listener"}, &committed); err != nil || committed.State != "committed" {
-		t.Fatal(committed, err)
-	}
+	proxyAddress := commitListener(t, client, nil, func(listen string) string {
+		return fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", listen)
+	})
 	dialer, _ := proxy.SOCKS5("tcp", proxyAddress, nil, &net.Dialer{Timeout: time.Second})
 	payload := []byte("short-connection-payload")
 	for range 12 {

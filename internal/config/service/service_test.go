@@ -17,17 +17,8 @@ import (
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/internal/secret"
+	"github.com/MimoProxy/reka/internal/testnet"
 )
-
-func freePort(t testing.TB) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
-}
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -70,14 +61,44 @@ func newEnv(t testing.TB) *env {
 
 func (e *env) open(initialProfile, initialLocal string) *Service {
 	e.t.Helper()
+	s, err := e.tryOpen(initialProfile, initialLocal)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return s
+}
+
+func (e *env) tryOpen(initialProfile, initialLocal string) (*Service, error) {
 	eng := generation.NewEngine(generation.EngineOptions{Backend: backendOptions(), DrainTimeout: 5 * time.Second})
 	s, err := Open(Options{StateRoot: e.root, Secrets: e.sec, Engine: eng, Logger: quiet(),
 		InitialProfile: []byte(initialProfile), InitialLocal: []byte(initialLocal), FailPoint: e.fail})
 	if err != nil {
 		eng.Close()
-		e.t.Fatal(err)
+		return nil, err
 	}
-	return s
+	return s, nil
+}
+
+// openListening opens the service with the mixed listener of localWith on
+// a free loopback port and returns that port.
+func (e *env) openListening(initialProfile string) (*Service, int) {
+	e.t.Helper()
+	return e.openOn(initialProfile, localWith)
+}
+
+// openOn opens the service with the local document local(port). A port
+// another process took first is retried on a new port, from a fresh state
+// root because the refused first start is already recorded in the old one.
+func (e *env) openOn(initialProfile string, local func(port int) string) (*Service, int) {
+	e.t.Helper()
+	var s *Service
+	port := testnet.Retry(e.t, func(port uint16) (err error) {
+		if s, err = e.tryOpen(initialProfile, local(int(port))); testnet.InUse(err) {
+			e.root = e.t.TempDir()
+		}
+		return err
+	})
+	return s, int(port)
 }
 
 func commitProfile(t *testing.T, s *Service, base uint64, profile, op string) Result {
@@ -101,8 +122,7 @@ func selected(t *testing.T, s *Service) string {
 
 func TestCommitAndConflict(t *testing.T) {
 	e := newEnv(t)
-	port := freePort(t)
-	s := e.open(profileWith("direct"), localWith(port))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	if s.ActiveRevision() != 1 {
 		t.Fatalf("initial revision %d", s.ActiveRevision())
@@ -132,7 +152,7 @@ func TestCommitAndConflict(t *testing.T) {
 
 func TestOperationIDIdempotent(t *testing.T) {
 	e := newEnv(t)
-	s := e.open(profileWith("direct"), localWith(freePort(t)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	first := commitProfile(t, s, 1, profileWith("alt"), "op-1")
 	// The response was lost; the client retries the same request.
@@ -158,7 +178,7 @@ func TestOperationIDIdempotent(t *testing.T) {
 
 func TestInvalidKeepsActive(t *testing.T) {
 	e := newEnv(t)
-	s := e.open(profileWith("direct"), localWith(freePort(t)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	res := commitProfile(t, s, 1, "schema-version: 1\nrules:\n  - match: {all: true}\n    outbound: nowhere\n", "")
 	if res.State != store.OpRejected || len(res.Diagnostics) == 0 || res.Diagnostics[0].Line != 4 || res.Diagnostics[0].Path != "/rules/#0/outbound" {
@@ -175,8 +195,7 @@ func TestInvalidKeepsActive(t *testing.T) {
 
 func TestPortInUseFailsInPrepare(t *testing.T) {
 	e := newEnv(t)
-	port := freePort(t)
-	s := e.open(profileWith("direct"), localWith(port))
+	s, port := e.openListening(profileWith("direct"))
 	defer s.Close()
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -205,7 +224,7 @@ func TestPortInUseFailsInPrepare(t *testing.T) {
 func TestPatchKeepsComments(t *testing.T) {
 	e := newEnv(t)
 	prof := "# my profile\n" + strings.Replace(profileWith("direct"), "selected: direct", "selected: direct # pick one", 1)
-	s := e.open(prof, localWith(freePort(t)))
+	s, _ := e.openListening(prof)
 	defer s.Close()
 	res, err := s.Commit(context.Background(), CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: 1,
 		Patch: []model.Op{{Op: "set", Path: "/groups/proxy/selected", Value: []byte(`"alt"`)}}}})
@@ -226,7 +245,7 @@ func TestMaskedReadBack(t *testing.T) {
 `
 	prof = strings.Replace(prof, "outbounds:\n", "outbounds:\n  - {id: ss, type: shadowsocks, server: 192.0.2.1, port: 8388, method: aes-128-gcm, password: hunter2}\n", 1)
 	prof = strings.Replace(prof, "  - id: ss-rule\n    match: {domain: ss.test}\n    outbound: ss\n", "", 1)
-	s := e.open(prof, localWith(freePort(t)))
+	s, _ := e.openListening(prof)
 	defer s.Close()
 	cfg := s.GetConfiguration(false)
 	if strings.Contains(cfg.Profile, "hunter2") || cfg.Masked != 1 {
@@ -249,7 +268,7 @@ func TestMaskedReadBack(t *testing.T) {
 
 func TestRestoreRevision(t *testing.T) {
 	e := newEnv(t)
-	s := e.open(profileWith("direct"), localWith(freePort(t)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	commitProfile(t, s, 1, profileWith("alt"), "")
 	res, err := s.RestoreRevision(context.Background(), RestoreRequest{Revision: 1, BaseRevision: 2})
@@ -283,8 +302,7 @@ func TestCrashPoints(t *testing.T) {
 	for _, p := range points {
 		t.Run(p.name, func(t *testing.T) {
 			e := newEnv(t)
-			port := freePort(t)
-			s := e.open(profileWith("direct"), localWith(port))
+			s, port := e.openListening(profileWith("direct"))
 			e.fail = nil
 			s.opts.FailPoint = func(point string) error {
 				if point == p.name {
@@ -345,7 +363,7 @@ func ptr(s string) *string { return &s }
 
 func TestConcurrentCommits(t *testing.T) {
 	e := newEnv(t)
-	s := e.open(profileWith("direct"), localWith(freePort(t)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	const n = 8
 	results := make(chan Result, n)
@@ -377,7 +395,7 @@ func TestConcurrentCommits(t *testing.T) {
 
 func TestEvents(t *testing.T) {
 	e := newEnv(t)
-	s := e.open(profileWith("direct"), localWith(freePort(t)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	sub := s.Events().Subscribe(nil, "", 0, func() any { return "state" })
 	defer sub.Close()
@@ -412,7 +430,7 @@ func TestEvents(t *testing.T) {
 
 func TestCandidateFile(t *testing.T) {
 	e := newEnv(t)
-	s := e.open(profileWith("direct"), localWith(freePort(t)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	dir := filepath.Join(e.root, "edit")
 	c := s.NewCandidate(dir)
@@ -458,7 +476,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestInitialWaitsForSecrets(t *testing.T) {
 	e := newEnv(t)
 	prof := strings.Replace(profileWith("alt"), "outbounds:\n", "outbounds:\n  - {id: ss, type: shadowsocks, server: 192.0.2.1, port: 8388, method: aes-128-gcm, password: secret://outbounds/ss/password}\n", 1)
-	s := e.open(prof, localWith(freePort(t)))
+	s, _ := e.openListening(prof)
 	defer s.Close()
 	if s.ActiveRevision() != 1 || s.StartError() == "" {
 		t.Fatalf("revision %d, start error %q", s.ActiveRevision(), s.StartError())

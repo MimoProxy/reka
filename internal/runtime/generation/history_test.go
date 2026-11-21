@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"golang.org/x/net/proxy"
 )
 
@@ -26,32 +29,32 @@ func TestHistoryLateCloseBelongsToTheProfileThatRoutedIt(t *testing.T) {
 			_, _ = io.Copy(conn, conn)
 		}
 	}()
-	lease, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	listen := lease.Addr().String()
-	lease.Close()
-
 	engine := NewEngine(EngineOptions{ProfileID: "first"})
 	defer engine.Close()
-	profile := []byte("schema-version: 1\nrules: [{match: {all: true}, outbound: direct}]\n")
-	local := fmt.Appendf(nil, "listeners: [{id: mixed, type: mixed, listen: %q}]\n", listen)
-	eff, diagnostics := compile.Compile(profile, local, compile.Options{})
-	if eff == nil {
-		t.Fatal(diagnostics)
+	var eff *compile.Effective
+	tryActivate := func(profile string) error {
+		p, err := engine.Prepare(eff)
+		if err != nil {
+			return err
+		}
+		_, err = engine.ActivateProfile(p, 1, profile)
+		return err
 	}
 	activate := func(profile string) {
 		t.Helper()
-		p, err := engine.Prepare(eff)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := engine.ActivateProfile(p, 1, profile); err != nil {
+		if err := tryActivate(profile); err != nil {
 			t.Fatal(err)
 		}
 	}
-	activate("first")
+	listen := testnet.RetryAddr(t, func(listen netip.AddrPort) error {
+		profile := []byte("schema-version: 1\nrules: [{match: {all: true}, outbound: direct}]\n")
+		local := fmt.Appendf(nil, "listeners: [{id: mixed, type: mixed, listen: %q}]\n", listen)
+		var diagnostics model.Diagnostics
+		if eff, diagnostics = compile.Compile(profile, local, compile.Options{}); eff == nil {
+			t.Fatal(diagnostics)
+		}
+		return tryActivate("first")
+	}).String()
 	dialer, _ := proxy.SOCKS5("tcp", listen, nil, &net.Dialer{Timeout: time.Second})
 	conn, err := dialer.Dial("tcp", server.Addr().String())
 	if err != nil {

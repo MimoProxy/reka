@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 )
 
@@ -35,31 +37,26 @@ func TestPacketAddrResolvesDestinationWithNormalDNS(t *testing.T) {
 		return packet.LocalAddr().String()
 	}
 	primary, bootstrap := server("192.0.2.7", &normal), server("192.0.2.8", &proxy)
-	port, e := net.Listen("tcp", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
-	}
-	address := port.Addr().String()
-	port.Close()
-	input := fmt.Sprintf(`schema-version: 1
+	engine := NewEngine(EngineOptions{})
+	defer engine.Close()
+	testnet.RetryAddr(t, func(address netip.AddrPort) error {
+		input := fmt.Sprintf(`schema-version: 1
 outbounds: [{id: node, type: vless, server: 127.0.0.1, port: 9, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, packet-encoding: packetaddr}]
 listeners: [{id: ingress, type: socks, listen: %q, udp: true}]
 dns: {nameserver: [%q], proxy-server-nameserver: [%q]}
 rules: [{match: {all: true}, outbound: node}]
 `, address, primary, bootstrap)
-	eff, ds := compile.Compile([]byte(input), nil, compile.Options{})
-	if ds.HasErrors() {
-		t.Fatal(ds)
-	}
-	engine := NewEngine(EngineOptions{})
-	defer engine.Close()
-	prepared, e := engine.Prepare(eff)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = engine.Activate(prepared, 1); e != nil {
-		t.Fatal(e)
-	}
+		eff, ds := compile.Compile([]byte(input), nil, compile.Options{})
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		prepared, err := engine.Prepare(eff)
+		if err != nil {
+			return err
+		}
+		_, err = engine.Activate(prepared, 1)
+		return err
+	})
 	route := engine.route(context.Background(), sagernet.Metadata{Inbound: "ingress", InboundType: "socks", Network: "udp", Destination: sagernet.Destination{Domain: "packet.test", Port: 53}})
 	if route.Outbound == nil {
 		t.Fatal("route rejected")

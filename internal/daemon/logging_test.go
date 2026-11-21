@@ -29,12 +29,6 @@ func TestDefaultLoggerFollowsActiveConfiguration(t *testing.T) {
 	oldStderr := os.Stderr
 	os.Stderr = logFile
 	defer func() { os.Stderr = oldStderr; logFile.Close() }()
-	portListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := portListener.Addr().String()
-	portListener.Close()
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -53,10 +47,9 @@ func TestDefaultLoggerFollowsActiveConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := Start(Options{StateRoot: root, Secrets: secrets, ControlAddress: "-", InitialProfile: []byte("schema-version: 1\nlog: {level: error}\nrules: [{id: final, match: {all: true}, outbound: direct}]\n"), InitialLocal: []byte(fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", address))})
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, address := startListening(t, func(address string) Options {
+		return Options{StateRoot: t.TempDir(), Secrets: secrets, ControlAddress: "-", InitialProfile: []byte("schema-version: 1\nlog: {level: error}\nrules: [{id: final, match: {all: true}, outbound: direct}]\n"), InitialLocal: []byte(fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", address))}
+	})
 	defer k.Close()
 	if e := k.Service.StartError(); e != "" {
 		t.Fatal(e)

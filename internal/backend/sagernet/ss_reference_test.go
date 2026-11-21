@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 // The CI reference job builds this external peer from the separate module.
@@ -38,11 +40,11 @@ func TestSSPluginsAgainstPinnedReference(t *testing.T) {
 	cases = append(cases, SSPluginSpec{Type: "v2ray-plugin", Mode: "websocket", Mux: true, HTTPUpgrade: true, FastOpen: true})
 	for index, s := range cases {
 		t.Run(fmt.Sprintf("%02d-%s-v%d-mux%v", index, s.Type, s.Version, s.Mux), func(t *testing.T) {
-			serverAddress := loopback(freePort(t))
-			server, err := StartShadowsocksServer(serverAddress, "aes-128-gcm", "test", testLogger(t))
-			if err != nil {
-				t.Fatal(err)
-			}
+			var server *Server
+			serverAddress := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+				server, err = StartShadowsocksServer(address, "aes-128-gcm", "test", testLogger(t))
+				return err
+			})
 			defer server.Close()
 			configuration, _ := json.Marshal(map[string]any{"Username": s.Username, "VersionHint": s.VersionHint, "Script": s.RestlsScript, "KCP": s.KCP, "Type": s.Type, "Mode": s.Mode, "Version": s.Version, "Password": s.Password, "Mux": s.Mux, "TLS": s.TLS != nil, "HTTPUpgrade": s.HTTPUpgrade, "Forward": serverAddress.String()})
 			command := exec.Command(program)

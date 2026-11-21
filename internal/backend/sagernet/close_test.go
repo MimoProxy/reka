@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
@@ -198,11 +199,11 @@ func runReplaceAndClose(t *testing.T, c closeCase) closeResult {
 	var current atomic.Pointer[Outbound]
 	current.Store(a)
 	b.SetRoute(func(ctx context.Context, md Metadata) Route { return Fixed(current.Load())(ctx, md) })
-	socks := loopback(freePort(t))
-	in, err := b.NewMixedInbound("mixed-in", socks)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Inbound
+	socks := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		in, err = b.NewMixedInbound("mixed-in", address)
+		return err
+	})
 	t.Cleanup(func() { in.Close() })
 	target := echoServer(t)
 	if c.useTLS {

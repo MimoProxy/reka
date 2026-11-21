@@ -18,6 +18,7 @@ import (
 	"time"
 
 	KC "github.com/MimoProxy/reka/internal/compat/kcptun"
+	"github.com/MimoProxy/reka/internal/testnet"
 	JT "github.com/metacubex/jls-tls"
 	"github.com/metacubex/kcp-go"
 	RT "github.com/metacubex/restls-client-go"
@@ -121,12 +122,8 @@ func legacyPluginPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, 
 		}()
 		return uint16(pc.LocalAddr().(*net.UDPAddr).Port), nil
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { listener.Close() })
-	pluginUDPFront(t, listener.Addr().String(), ss.String())
+	listener, front := testnet.ListenTCPUDP(t)
+	pluginUDPFront(t, front, ss.String())
 	var handshake func(context.Context, net.Conn) (net.Conn, error)
 	var clientTLS *TLSSpec
 	target := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -183,11 +180,11 @@ func legacyPluginPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, 
 }
 
 func TestKCPPluginWrongKeyAndNetworkReset(t *testing.T) {
-	ss := loopback(freePort(t))
-	server, err := StartShadowsocksServer(ss, "aes-128-gcm", "test", testLogger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	var server *Server
+	ss := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		server, err = StartShadowsocksServer(address, "aes-128-gcm", "test", testLogger(t))
+		return err
+	})
 	defer server.Close()
 	spec := SSPluginSpec{Type: "kcptun", KCP: &KC.Config{Key: "correct-key"}}
 	port, _ := legacyPluginPeer(t, spec, ss)

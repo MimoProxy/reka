@@ -11,7 +11,6 @@ import (
 	VWS "github.com/sagernet/sing-box/transport/v2raywebsocket"
 	"github.com/sagernet/ws"
 	"io"
-	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 	S "github.com/sagernet/sing-box/common/tls"
 )
@@ -45,29 +45,11 @@ func TestECHUsesActiveProxyServerDNSAfterResolverOnlyRevision(t *testing.T) {
 			}()
 			if plugin {
 				// The Shadowsocks peer binds both transports to the same port.
-				// A TCP-only ephemeral reservation may select an occupied UDP port.
-				var listen netip.AddrPort
-				for attempts := 0; attempts < 100; attempts++ {
-					temporary, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", 1024+mrand.IntN(65536-1024)))
-					if err != nil {
-						continue
-					}
-					candidate := temporary.Addr().(*net.TCPAddr).AddrPort()
-					packet, err := net.ListenPacket("udp4", candidate.String())
-					temporary.Close()
-					if err == nil {
-						packet.Close()
-						listen = candidate
-						break
-					}
-				}
-				if !listen.IsValid() {
-					t.Fatal("could not reserve a TCP/UDP peer port")
-				}
-				server, err := Native.StartShadowsocksServer(listen, "aes-128-gcm", "test", nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				var server *Native.Server
+				listen := testnet.RetryAddr(t, func(listen netip.AddrPort) (err error) {
+					server, err = Native.StartShadowsocksServer(listen, "aes-128-gcm", "test", nil)
+					return err
+				})
 				defer server.Close()
 				ssAddress = listen.String()
 			}

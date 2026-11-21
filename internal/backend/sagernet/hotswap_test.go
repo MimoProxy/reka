@@ -7,12 +7,14 @@ package sagernet
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	rt "github.com/MimoProxy/reka/internal/runtime"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 )
@@ -63,11 +65,11 @@ func TestHotSwapUnderLoad(t *testing.T) {
 		},
 	})
 	b.SetRoute(runtimeRoute(t, runtime))
-	socks := loopback(freePort(t))
-	in, err := b.NewMixedInbound("mixed-in", socks)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Inbound
+	socks := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		in, err = b.NewMixedInbound("mixed-in", address)
+		return err
+	})
 	t.Cleanup(func() { in.Close() })
 	target := echoServer(t)
 
@@ -154,11 +156,11 @@ func TestHotSwapDrainsMultiplex(t *testing.T) {
 	})
 	t.Cleanup(runtime.Close)
 	b.SetRoute(runtimeRoute(t, runtime))
-	socks := loopback(freePort(t))
-	in, err := b.NewMixedInbound("mixed-in", socks)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Inbound
+	socks := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		in, err = b.NewMixedInbound("mixed-in", address)
+		return err
+	})
 	t.Cleanup(func() { in.Close() })
 	target := echoServer(t)
 

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	OB "github.com/sagernet/sing-box/transport/simple-obfs"
 	VWS "github.com/sagernet/sing-box/transport/v2raywebsocket"
 	ST "github.com/sagernet/sing-shadowtls"
@@ -90,12 +91,9 @@ func (c *pluginFragmentConn) Write(p []byte) (int, error) {
 	return count, nil
 }
 
-func pluginUDPFront(t *testing.T, listen, target string) {
+// pluginUDPFront relays datagrams that reach front to target.
+func pluginUDPFront(t *testing.T, front net.PacketConn, target string) {
 	t.Helper()
-	front, err := net.ListenPacket("udp4", listen)
-	if err != nil {
-		t.Fatal(err)
-	}
 	destination, err := net.ResolveUDPAddr("udp4", target)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +102,7 @@ func pluginUDPFront(t *testing.T, listen, target string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { front.Close(); up.Close() })
+	t.Cleanup(func() { up.Close() })
 	var mu sync.Mutex
 	var peer net.Addr
 	go func() {
@@ -143,12 +141,8 @@ func pluginTestPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, *T
 		return legacyPluginPeer(t, s, ss)
 	}
 	handler := pluginForwardHandler{target: ss.String()}
-	listener, err := net.Listen("tcp4", loopback(freePort(t)).String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { listener.Close() })
-	pluginUDPFront(t, listener.Addr().String(), ss.String())
+	listener, front := testnet.ListenTCPUDP(t)
+	pluginUDPFront(t, front, ss.String())
 	var connectionsMu sync.Mutex
 	var connections []net.Conn
 	track := func(c net.Conn) { connectionsMu.Lock(); connections = append(connections, c); connectionsMu.Unlock() }
@@ -357,11 +351,11 @@ func TestSSPluginsRealTCPNativeUDPAndUOT(t *testing.T) {
 	}
 	for index, s := range cases {
 		t.Run(fmt.Sprintf("%02d-%s-%s-v%d-mux%v-tls%v-fast%v", index, s.Type, s.Mode, s.Version, s.Mux, s.TLS != nil, s.FastOpen), func(t *testing.T) {
-			ssListen := loopback(freePort(t))
-			server, err := StartShadowsocksServer(ssListen, "aes-128-gcm", "test", testLogger(t))
-			if err != nil {
-				t.Fatal(err)
-			}
+			var server *Server
+			ssListen := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+				server, err = StartShadowsocksServer(address, "aes-128-gcm", "test", testLogger(t))
+				return err
+			})
 			defer server.Close()
 			s.Host, s.Path = "plugin.test", "/plugin"
 			s.Headers = http.Header{"Host": {"plugin.test"}, "X-Reka": {"node-header"}}

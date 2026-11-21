@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/adapter"
 	MX "github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/option"
@@ -53,20 +54,20 @@ func TestMultiplexOnlyTCPPreservesNativeUDPProtectAndNetworkReset(t *testing.T) 
 		for _, onlyTCP := range []bool{false, true} {
 			t.Run(protocol+"/"+map[bool]string{false: "multiplex-udp", true: "native-udp"}[onlyTCP], func(t *testing.T) {
 				var nativePackets, protected atomic.Int32
-				port := freePort(t)
-				server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
-					logger := b.componentLogger("inbound", "ss", "mux")
-					mux, err := MX.NewRouterWithOptions(b.router, logger, option.InboundMultiplexOptions{Enabled: true})
-					if err != nil {
-						return nil, "shadowsocks", err
-					}
-					route := &multiplexTestRouter{Router: b.router, mux: mux, onPacket: func() { nativePackets.Add(1) }}
-					in, err := shadowsocks.NewInbound(b.ctx, route, logger, "mux", option.ShadowsocksInboundOptions{ListenOptions: listenOpts(loopback(port)), Method: "aes-128-gcm", Password: "test"})
-					return in, "shadowsocks", err
+				var server *Server
+				port := testnet.Retry(t, func(port uint16) (err error) {
+					server, err = startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
+						logger := b.componentLogger("inbound", "ss", "mux")
+						mux, err := MX.NewRouterWithOptions(b.router, logger, option.InboundMultiplexOptions{Enabled: true})
+						if err != nil {
+							return nil, "shadowsocks", err
+						}
+						route := &multiplexTestRouter{Router: b.router, mux: mux, onPacket: func() { nativePackets.Add(1) }}
+						in, err := shadowsocks.NewInbound(b.ctx, route, logger, "mux", option.ShadowsocksInboundOptions{ListenOptions: listenOpts(loopback(port)), Method: "aes-128-gcm", Password: "test"})
+						return in, "shadowsocks", err
+					})
+					return err
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				defer server.Close()
 				b := New(Options{Logger: testLogger(t), ProtectFD: func(int) error { protected.Add(1); return nil }})
 				defer b.Close()

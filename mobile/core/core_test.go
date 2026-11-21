@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	"golang.org/x/net/proxy"
 )
 
@@ -33,9 +34,6 @@ func (h *fakeHost) OnMessage(b []byte) {
 func (h *fakeHost) count() int { h.mu.Lock(); defer h.mu.Unlock(); return len(h.events) }
 
 func TestEmbedded(t *testing.T) {
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
 	echo, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer echo.Close()
 	go func() {
@@ -49,12 +47,13 @@ func TestEmbedded(t *testing.T) {
 	}()
 	host := &fakeHost{}
 	profile := "schema-version: 1\noutbounds:\n  - {id: alt, type: direct}\ngroups:\n  - {id: proxy, type: select, members: [direct, alt]}\nrules:\n  - {match: {all: true}, outbound: proxy}\n"
-	local := fmt.Sprintf("listeners:\n  - {id: mixed, type: mixed, listen: \"127.0.0.1:%d\"}\n", port)
-	in, err := Start(Options{StateRoot: t.TempDir(), InitialProfile: []byte(profile), InitialLocal: []byte(local),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Instance
+	port := testnet.Retry(t, func(port uint16) (err error) {
+		local := fmt.Sprintf("listeners:\n  - {id: mixed, type: mixed, listen: \"127.0.0.1:%d\"}\n", port)
+		in, err = Start(Options{StateRoot: t.TempDir(), InitialProfile: []byte(profile), InitialLocal: []byte(local),
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, host)
+		return err
+	})
 	defer in.Stop()
 	call := func(id int, method, params string) map[string]any {
 		resp := in.Call([]byte(fmt.Sprintf(`{"id":%d,"method":%q,"params":%s}`, id, method, params)))

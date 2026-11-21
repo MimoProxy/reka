@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"golang.org/x/net/proxy"
 )
 
@@ -149,19 +150,12 @@ func startOwnerFixture(t *testing.T, host Host) (*Instance, string, string) {
 			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
 		}
 	}()
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := reserved.Addr().String()
-	if err = reserved.Close(); err != nil {
-		t.Fatal(err)
-	}
-	local := fmt.Sprintf("listeners: [{id: owner, type: socks, listen: %q}]", address)
-	in, err := Start(Options{StateRoot: t.TempDir(), InitialProfile: []byte("schema-version: 1\nrules: [{match: {all: true}, outbound: reject}]\n"), InitialLocal: []byte(local), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var in *Instance
+	address := testnet.RetryAddr(t, func(address netip.AddrPort) (err error) {
+		local := fmt.Sprintf("listeners: [{id: owner, type: socks, listen: %q}]", address)
+		in, err = Start(Options{StateRoot: t.TempDir(), InitialProfile: []byte("schema-version: 1\nrules: [{match: {all: true}, outbound: reject}]\n"), InitialLocal: []byte(local), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, host)
+		return err
+	}).String()
 	t.Cleanup(in.Stop)
 	ownerAPICall(t, in, 1, "Hello", map[string]any{"versions": []int{1}})
 	return in, address, echo.Addr().String()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -14,11 +15,14 @@ import (
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 	"golang.org/x/net/proxy"
 )
 
-func reservedPort(t *testing.T) string {
+// closedAddress returns a loopback address nothing listens on, for a
+// destination that must refuse connections. Nothing in the test binds it.
+func closedAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -28,6 +32,26 @@ func reservedPort(t *testing.T) string {
 	return listener.Addr().String()
 }
 
+// commitListener commits profile, when set, with the local document that
+// local builds around a mixed listener address, and returns that address. A
+// port another process took first is retried on a new port.
+func commitListener(t *testing.T, client *Client, profile *string, local func(listen string) string) string {
+	t.Helper()
+	return testnet.RetryAddr(t, func(listen netip.AddrPort) error {
+		document := local(listen.String())
+		var commit service.Result
+		if err := client.Call("CommitConfiguration", service.CommitRequest{ChangeRequest: service.ChangeRequest{
+			BaseRevision: 1, Profile: profile, Local: &document,
+		}}, &commit); err != nil {
+			return err
+		}
+		if commit.State != "committed" {
+			return fmt.Errorf("commit: %+v", commit)
+		}
+		return nil
+	}).String()
+}
+
 func TestHistoryConnectionFailureAndDNSCacheOverIPC(t *testing.T) {
 	address, _ := startServer(t)
 	client, err := Connect(address, "history-test")
@@ -35,7 +59,6 @@ func TestHistoryConnectionFailureAndDNSCacheOverIPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	serverAddress := reservedPort(t)
 	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -58,19 +81,15 @@ rules:
  - {id: block, match: {domain: "blocked.test"}, outbound: reject}
  - {match: {all: true}, outbound: direct}
 `, packet.LocalAddr().String())
-	local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", serverAddress)
-	var commit service.Result
-	if err := client.Call("CommitConfiguration", service.CommitRequest{ChangeRequest: service.ChangeRequest{
-		BaseRevision: 1, Profile: &profile, Local: &local,
-	}}, &commit); err != nil || commit.State != "committed" {
-		t.Fatal(commit, err)
-	}
+	serverAddress := commitListener(t, client, &profile, func(listen string) string {
+		return fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", listen)
+	})
 	dialer, _ := proxy.SOCKS5("tcp", serverAddress, nil, &net.Dialer{Timeout: time.Second})
 	if c, err := dialer.Dial("tcp", "blocked.test:443"); err == nil {
 		c.Close()
 		t.Fatal("known blocked domain was not rejected during the SOCKS handshake")
 	}
-	c, err := dialer.Dial("tcp", reservedPort(t))
+	c, err := dialer.Dial("tcp", closedAddress(t))
 	if err != nil {
 		t.Fatal("SOCKS handshake did not allow payload for domain recovery", err)
 	}

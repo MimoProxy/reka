@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/testnet"
 	D "github.com/miekg/dns"
 	"golang.org/x/net/proxy"
 )
@@ -61,19 +62,17 @@ func TestProcessOwnerUsesOriginalSocketWithFakeIP(t *testing.T) {
 			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
 		}
 	}()
-	freeTCP, _ := net.Listen("tcp", "127.0.0.1:0")
-	proxyAddress := freeTCP.Addr().String()
-	freeTCP.Close()
-	freeUDP, _ := net.ListenPacket("udp", "127.0.0.1:0")
-	dnsAddress := freeUDP.LocalAddr().String()
-	freeUDP.Close()
-	host := &socketOwnerHost{origin: proxyAddress, seen: make(chan string, 8)}
-	profile := fmt.Sprintf("schema-version: 1\ndns:\n nameserver: [%q]\n default-nameserver: [%q]\n listen: %q\n enhanced-mode: fake-ip\nrules:\n - {id: app, match: {process-name: other.app}, outbound: reject}\n - {id: final, match: {all: true}, outbound: direct}\n", upstream.LocalAddr().String(), upstream.LocalAddr().String(), dnsAddress)
-	local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", proxyAddress)
-	in, err := Start(Options{StateRoot: t.TempDir(), InitialProfile: []byte(profile), InitialLocal: []byte(local), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var proxyAddress, dnsAddress string
+	var host *socketOwnerHost
+	var in *Instance
+	testnet.RetryPorts(t, 2, func(ports []uint16) (err error) {
+		proxyAddress, dnsAddress = fmt.Sprintf("127.0.0.1:%d", ports[0]), fmt.Sprintf("127.0.0.1:%d", ports[1])
+		host = &socketOwnerHost{origin: proxyAddress, seen: make(chan string, 8)}
+		profile := fmt.Sprintf("schema-version: 1\ndns:\n nameserver: [%q]\n default-nameserver: [%q]\n listen: %q\n enhanced-mode: fake-ip\nrules:\n - {id: app, match: {process-name: other.app}, outbound: reject}\n - {id: final, match: {all: true}, outbound: direct}\n", upstream.LocalAddr().String(), upstream.LocalAddr().String(), dnsAddress)
+		local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\n", proxyAddress)
+		in, err = Start(Options{StateRoot: t.TempDir(), InitialProfile: []byte(profile), InitialLocal: []byte(local), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, host)
+		return err
+	})
 	defer in.Stop()
 	var hello map[string]any
 	if err = json.Unmarshal(in.Call([]byte(`{"id":1,"method":"Hello","params":{"versions":[1]}}`)), &hello); err != nil || hello["error"] != nil {

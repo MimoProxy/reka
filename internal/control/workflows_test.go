@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
-	"github.com/MimoProxy/reka/internal/config/service"
 	"github.com/MimoProxy/reka/internal/history"
 	"golang.org/x/net/proxy"
 )
@@ -23,8 +22,7 @@ func TestTemporaryRulesScenesAndArenaOverIPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	listener := reservedPort(t)
-	badHost, badPort, err := net.SplitHostPort(reservedPort(t))
+	badHost, badPort, err := net.SplitHostPort(closedAddress(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,13 +34,9 @@ rules:
   - {id: lab, match: {network-scene: lab}, outbound: direct}
   - {id: otherwise, match: {all: true}, outbound: reject}
 `, badHost, badPort)
-	local := fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\nnetwork-scenes: [{id: lab}]\n", listener)
-	var commit service.Result
-	if err := client.Call("CommitConfiguration", service.CommitRequest{ChangeRequest: service.ChangeRequest{
-		BaseRevision: 1, Profile: &profile, Local: &local,
-	}}, &commit); err != nil || commit.State != "committed" {
-		t.Fatal(commit, err)
-	}
+	listener := commitListener(t, client, &profile, func(listen string) string {
+		return fmt.Sprintf("listeners: [{id: mixed, type: mixed, listen: %q}]\nnetwork-scenes: [{id: lab}]\n", listen)
+	})
 	before := svc.GetConfiguration(true)
 	explain := func(outbound, scene, source string) {
 		t.Helper()

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	VE "github.com/MimoProxy/reka/internal/compat/vlessenc"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	V "github.com/sagernet/sing-box/protocol/vless"
@@ -81,8 +82,7 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 				}
 				defer decryption.Close()
 				encryption := "mlkem768x25519plus." + mode + ".0rtt." + public + "." + mlkemPublic + ".100-35-35"
-				port := freePort(t)
-				serverOptions := option.VLESSInboundOptions{ListenOptions: listenOpts(loopback(port)), Users: []option.VLESSUser{{UUID: testUUID, Flow: tc.flow}}}
+				serverOptions := option.VLESSInboundOptions{Users: []option.VLESSUser{{UUID: testUUID, Flow: tc.flow}}}
 				clientOptions := map[string]any{"flow": tc.flow, "packet_encoding": "xudp"}
 				if tc.mux {
 					serverOptions.Multiplex = &option.InboundMultiplexOptions{Enabled: true}
@@ -120,21 +120,23 @@ func TestEncryptedVLESSVisionTransportsTCPUDPAndWrongKey(t *testing.T) {
 						clientOptions["transport"] = transport
 					}
 				}
-				server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
-					decrypt := func(ctx context.Context, c net.Conn) (net.Conn, error) {
-						ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-						defer cancel()
-						stop := context.AfterFunc(ctx, func() { c.Close() })
-						defer stop()
-						return decryption.Handshake(c, nil)
-					}
-					ctx := context.WithValue(b.ctx, "reka.vless.decrypt.v1", decrypt)
-					in, err := V.NewInbound(ctx, b.router, b.componentLogger("inbound", "vless", "encrypted"), "encrypted", serverOptions)
-					return in, "vless", err
+				var server *Server
+				port := testnet.Retry(t, func(port uint16) (err error) {
+					serverOptions.ListenOptions = listenOpts(loopback(port))
+					server, err = startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
+						decrypt := func(ctx context.Context, c net.Conn) (net.Conn, error) {
+							ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+							defer cancel()
+							stop := context.AfterFunc(ctx, func() { c.Close() })
+							defer stop()
+							return decryption.Handshake(c, nil)
+						}
+						ctx := context.WithValue(b.ctx, "reka.vless.decrypt.v1", decrypt)
+						in, err := V.NewInbound(ctx, b.router, b.componentLogger("inbound", "vless", "encrypted"), "encrypted", serverOptions)
+						return in, "vless", err
+					})
+					return err
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				defer server.Close()
 				if tc.tlsMode == "shadow-tls" || tc.tlsMode == "restls" || tc.tlsMode == "jls" {
 					carrier := SSPluginSpec{Type: tc.tlsMode, Host: "plugin.test", Version: 3, Password: "outer-secret", Username: "outer-user", VersionHint: "tls13", ClientFingerprint: "chrome"}

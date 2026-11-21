@@ -34,6 +34,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/testnet"
 )
 
 func TestProtocolInteroperability(t *testing.T) {
@@ -101,18 +103,7 @@ func TestProtocolInteroperability(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/%s/mux-%v/v%d", tc.typ, tc.transport, tc.mux, tc.version), func(t *testing.T) {
-			port := freePort(t)
-			if tc.typ == "hysteria2" || tc.typ == "tuic" {
-				// Windows reserves different TCP and UDP ranges. A free TCP
-				// port is not evidence that a QUIC listener may bind UDP there.
-				packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-				if err != nil {
-					t.Fatal(err)
-				}
-				port = uint16(packet.LocalAddr().(*net.UDPAddr).Port)
-				packet.Close()
-			}
-			base := map[string]any{"listen": "127.0.0.1", "listen_port": port}
+			base := map[string]any{"listen": "127.0.0.1"}
 			opts := map[string]any{}
 			users := []map[string]any{{"name": "test", "uuid": uuid, "password": password}}
 			base["users"] = users
@@ -169,80 +160,82 @@ func TestProtocolInteroperability(t *testing.T) {
 			if tc.mux {
 				opts["multiplex"] = map[string]any{"enabled": true, "protocol": "smux"}
 			}
-			raw, _ := json.Marshal(base)
-			server, err := startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
-				var in adapter.Inbound
-				var err error
-				logger := b.componentLogger("inbound", tc.typ, "test")
-				var route adapter.Router = b.router
-				if tc.mux {
-					routed, err := MX.NewRouterWithOptions(b.router, logger, option.InboundMultiplexOptions{Enabled: true})
-					if err != nil {
-						return nil, tc.typ, err
+			var server *Server
+			port := testnet.Retry(t, func(port uint16) (err error) {
+				base["listen_port"] = port
+				raw, _ := json.Marshal(base)
+				server, err = startNode(testLogger(t), func(b *Backend) (adapter.Inbound, string, error) {
+					var in adapter.Inbound
+					var err error
+					logger := b.componentLogger("inbound", tc.typ, "test")
+					var route adapter.Router = b.router
+					if tc.mux {
+						routed, err := MX.NewRouterWithOptions(b.router, logger, option.InboundMultiplexOptions{Enabled: true})
+						if err != nil {
+							return nil, tc.typ, err
+						}
+						route = &multiplexTestRouter{Router: b.router, mux: routed}
 					}
-					route = &multiplexTestRouter{Router: b.router, mux: routed}
-				}
-				switch tc.typ {
-				case "shadowsocks":
-					var o option.ShadowsocksInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = shadowsocks.NewInbound(b.ctx, route, logger, "test", o)
+					switch tc.typ {
+					case "shadowsocks":
+						var o option.ShadowsocksInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = shadowsocks.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "http":
+						var o option.HTTPMixedInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = PHTTP.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "socks":
+						var o option.SocksInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = PSOCKS.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "vmess":
+						var o option.VMessInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = vmess.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "trojan":
+						var o option.TrojanInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = trojan.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "vless":
+						var o option.VLESSInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = vless.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "hysteria2":
+						var o option.Hysteria2InboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = hysteria2.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "tuic":
+						var o option.TUICInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = tuic.NewInbound(b.ctx, route, logger, "test", o)
+						}
+					case "snell":
+						var o option.SnellInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = snell.NewInbound(b.ctx, route, logger, "test", o)
+						}
 					}
-				case "http":
-					var o option.HTTPMixedInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = PHTTP.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "socks":
-					var o option.SocksInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = PSOCKS.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "vmess":
-					var o option.VMessInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = vmess.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "trojan":
-					var o option.TrojanInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = trojan.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "vless":
-					var o option.VLESSInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = vless.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "hysteria2":
-					var o option.Hysteria2InboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = hysteria2.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "tuic":
-					var o option.TUICInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = tuic.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				case "snell":
-					var o option.SnellInboundOptions
-					err = json.Unmarshal(raw, &o)
-					if err == nil {
-						in, err = snell.NewInbound(b.ctx, route, logger, "test", o)
-					}
-				}
-				return in, tc.typ, err
+					return in, tc.typ, err
+				})
+				return err
 			})
-			if err != nil {
-				t.Fatal("server", err)
-			}
 			defer server.Close()
 			b := New(Options{Logger: testLogger(t)})
 			defer b.Close()
@@ -431,11 +424,11 @@ func TestRealityTransportAndMux(t *testing.T) {
 					opts["transport"] = value
 				}
 			}
-			port := freePort(t)
-			server, err := StartRealityServer(RealityServerOptions{Listen: loopback(port), UUID: testUUID, ServerName: "reality.test", Target: address, PrivateKey: private.Bytes(), ShortID: "abcd", Transport: transport, Multiplex: typ == "smux"}, testLogger(t))
-			if err != nil {
-				t.Fatal(err)
-			}
+			var server *Server
+			port := testnet.Retry(t, func(port uint16) (err error) {
+				server, err = StartRealityServer(RealityServerOptions{Listen: loopback(port), UUID: testUUID, ServerName: "reality.test", Target: address, PrivateKey: private.Bytes(), ShortID: "abcd", Transport: transport, Multiplex: typ == "smux"}, testLogger(t))
+				return err
+			})
 			defer server.Close()
 			b := New(Options{Logger: testLogger(t)})
 			defer b.Close()

@@ -11,7 +11,7 @@ import (
 // change: compile, prepare, persistence and activation.
 func BenchmarkCommitSelection(b *testing.B) {
 	e := newEnv(b)
-	s := e.open(profileWith("direct"), localWith(freePort(b)))
+	s, _ := e.openListening(profileWith("direct"))
 	defer s.Close()
 	sel := []string{`"alt"`, `"direct"`}
 	ctx := context.Background()
