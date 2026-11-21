@@ -3,9 +3,11 @@
 package packettunnel
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/api"
@@ -36,6 +38,7 @@ type Operation struct {
 
 type ConnectionRow struct {
 	ID          uint64   `json:"id"`
+	StartMS     int64    `json:"startMs"`
 	Destination string   `json:"destination"`
 	Network     string   `json:"network"`
 	Rule        string   `json:"rule,omitempty"`
@@ -134,10 +137,12 @@ func (s *Session) connections() []ConnectionRow {
 		rows := make([]ConnectionRow, 0, len(active))
 		for _, conn := range active {
 			rows = append(rows, ConnectionRow{
-				ID: conn.ID, Network: conn.Metadata.Network, Destination: conn.Metadata.Destination.String(),
-				Outbound: conn.Outbound, Uploaded: conn.Upload, Downloaded: conn.Download,
+				ID: conn.ID, StartMS: conn.Start.UnixMilli(), Network: conn.Metadata.Network,
+				Destination: conn.Metadata.Destination.String(),
+				Outbound:    conn.Outbound, Uploaded: conn.Upload, Downloaded: conn.Download,
 			})
 		}
+		sortConnectionRows(rows)
 		return rows
 	}
 	p := s.profile
@@ -179,12 +184,22 @@ func (s *Session) connections() []ConnectionRow {
 			}
 		}
 		rows = append(rows, ConnectionRow{
-			ID: conn.ID, Destination: history.Text(destination, 255), Network: conn.Network,
+			ID: conn.ID, StartMS: conn.Start.UnixMilli(), Destination: history.Text(destination, 255), Network: conn.Network,
 			Rule: history.Text(rule, 384), Groups: groups, Outbound: display(conn.Outbound),
 			Uploaded: conn.Upload, Downloaded: conn.Download,
 		})
 	}
+	sortConnectionRows(rows)
 	return rows
+}
+
+func sortConnectionRows(rows []ConnectionRow) {
+	slices.SortFunc(rows, func(a, b ConnectionRow) int {
+		if byStart := cmp.Compare(b.StartMS, a.StartMS); byStart != 0 {
+			return byStart
+		}
+		return cmp.Compare(b.ID, a.ID)
+	})
 }
 
 func (s *Session) closeConnection(id uint64) bool {
