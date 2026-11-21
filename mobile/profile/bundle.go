@@ -65,7 +65,9 @@ type Controls struct {
 	Mode       string            `json:"mode"`
 	Selections map[string]string `json:"selections"`
 	ProfileID  string            `json:"profileID,omitempty"`
-	Secrets    secret.Store      `json:"-"`
+	// BlockQUIC overrides the profile's routing.block-quic when set.
+	BlockQUIC string       `json:"blockQuic,omitempty"`
+	Secrets   secret.Store `json:"-"`
 }
 
 func Decode(data []byte) (*Bundle, error) {
@@ -229,7 +231,17 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	if mode == "" {
 		mode = base.Routing.Mode
 	}
-	eff.Routing = model.Routing{Mode: mode, Global: global}
+	blockQUIC := controls.BlockQUIC
+	if blockQUIC == "" {
+		blockQUIC = base.Routing.BlockQUIC
+	}
+	if blockQUIC == "" {
+		blockQUIC = "off"
+	}
+	if !slices.Contains([]string{"off", "proxy", "all"}, blockQUIC) {
+		return nil, errors.New("unknown QUIC blocking mode")
+	}
+	eff.Routing = model.Routing{Mode: mode, Global: global, BlockQUIC: blockQUIC}
 	opts := router.Options{Outbounds: ids, Groups: eff.Groups, Final: base.Final}
 	var err error
 	eff.Router, err = router.New(base.Router.Rules(), opts)
