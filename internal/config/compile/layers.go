@@ -457,8 +457,12 @@ func (c *compiler) layers(profile []byte) {
 		put(doc.Mapping(), kind, merged[kind])
 	}
 	rules := sequence()
+	rulePaths := map[string][]string{}
 	for p := range c.origins {
-		if strings.HasPrefix(p, "/rules/") {
+		if rest, ok := strings.CutPrefix(p, "/rules/"); ok {
+			segment, _, _ := strings.Cut(rest, "/")
+			root := "/rules/" + segment
+			rulePaths[root] = append(rulePaths[root], p)
 			delete(c.origins, p)
 		}
 	}
@@ -480,10 +484,9 @@ func (c *compiler) layers(profile []byte) {
 			if r.Source == "" {
 				old := model.JoinPath("/rules", seg(r.ID, i))
 				dest := model.JoinPath("/rules", seg(r.ID, len(rules.Content)))
-				for p, pos := range c.ppos {
-					if p == old || strings.HasPrefix(p, old+"/") {
-						c.origins[dest+strings.TrimPrefix(p, old)] = Origin{Layer: LayerProfile, Document: model.DocProfile, Path: p, Line: pos.Line, Column: pos.Column}
-					}
+				for _, p := range rulePaths[old] {
+					pos := c.ppos[p]
+					c.origins[dest+strings.TrimPrefix(p, old)] = Origin{Layer: LayerProfile, Document: model.DocProfile, Path: p, Line: pos.Line, Column: pos.Column}
 				}
 				rules.Content = append(rules.Content, nodeCopy(item))
 				continue
@@ -592,6 +595,11 @@ func (c *compiler) layers(profile []byte) {
 			}
 		}
 		if op.Op != "remove" {
+			node := doc.Get(dest)
+			if node == nil {
+				fail(fmt.Errorf("overlay edit changed the target identity"))
+				return
+			}
 			pos := opos[path+"/value"]
 			origin := Origin{Layer: LayerOverlay, Document: model.DocOverlay, Path: path + "/value", Line: pos.Line, Column: pos.Column}
 			if hadOld {
@@ -619,7 +627,7 @@ func (c *compiler) layers(profile []byte) {
 					}
 				}
 			}
-			record(doc.Get(dest), dest, path+"/value")
+			record(node, dest, path+"/value")
 		}
 	}
 	if c.diags.HasErrors() {

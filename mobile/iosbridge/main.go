@@ -116,7 +116,11 @@ func RekaGoPrepareProfileEx(input, output, cache, optionsPath *C.char, failure *
 		ProxyControls profile.Controls `json:"proxyControls"`
 		Background    bool             `json:"background"`
 	}
-	if err != nil || len(data) > 256<<10 || json.Unmarshal(data, &options) != nil {
+	if err != nil || len(data) > 256<<10 {
+		return 0
+	}
+	if json.Unmarshal(data, &options) != nil {
+		writeValidationError(failure, capacity, &profile.ValidationError{Message: "Invalid profile options JSON"})
 		return 0
 	}
 	timeout := 75 * time.Second
@@ -154,24 +158,7 @@ func RekaGoPrepareProfileEx(input, output, cache, optionsPath *C.char, failure *
 		if !errors.As(err, &report) {
 			report = &profile.ValidationError{Message: err.Error()}
 		}
-		bounded := *report
-		bounded.Message = history.Text(bounded.Message, 512)
-		bounded.Diagnostics = bounded.Diagnostics[:min(len(bounded.Diagnostics), 40)]
-		for i := range bounded.Diagnostics {
-			bounded.Diagnostics[i].Message = history.Text(bounded.Diagnostics[i].Message, 512)
-			bounded.Diagnostics[i].Path = history.Text(bounded.Diagnostics[i].Path, 256)
-		}
-		for {
-			payload, encodeErr := json.Marshal(bounded)
-			if encodeErr == nil && len(payload) < int(capacity) {
-				writeError(failure, capacity, string(payload))
-				break
-			}
-			if len(bounded.Diagnostics) == 0 {
-				break
-			}
-			bounded.Diagnostics = bounded.Diagnostics[:len(bounded.Diagnostics)/2]
-		}
+		writeValidationError(failure, capacity, report)
 		return 0
 	}
 	return 1
@@ -322,6 +309,27 @@ func writeError(failure *C.char, capacity C.size_t, description string) {
 		buffer := unsafe.Slice((*byte)(unsafe.Pointer(failure)), int(capacity))
 		n := copy(buffer[:len(buffer)-1], description)
 		buffer[n] = 0
+	}
+}
+
+func writeValidationError(failure *C.char, capacity C.size_t, report *profile.ValidationError) {
+	bounded := *report
+	bounded.Message = history.Text(bounded.Message, 512)
+	bounded.Diagnostics = bounded.Diagnostics[:min(len(bounded.Diagnostics), 40)]
+	for i := range bounded.Diagnostics {
+		bounded.Diagnostics[i].Message = history.Text(bounded.Diagnostics[i].Message, 512)
+		bounded.Diagnostics[i].Path = history.Text(bounded.Diagnostics[i].Path, 256)
+	}
+	for {
+		payload, err := json.Marshal(bounded)
+		if err == nil && len(payload) < int(capacity) {
+			writeError(failure, capacity, string(payload))
+			return
+		}
+		if len(bounded.Diagnostics) == 0 {
+			return
+		}
+		bounded.Diagnostics = bounded.Diagnostics[:len(bounded.Diagnostics)/2]
 	}
 }
 

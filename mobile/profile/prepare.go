@@ -23,6 +23,8 @@ import (
 
 const geodataURL = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/"
 const maxAssetBytes = 32 << 20
+const dnsCacheLimit = 512
+const dnsUpstreamLimit = 2
 
 type PrepareOptions struct {
 	NodesOnly         bool                               `json:"nodesOnly"`
@@ -33,6 +35,7 @@ type PrepareOptions struct {
 	ForceProviders    bool                               `json:"forceProviders"`
 	Scenes            []SceneDefinition                  `json:"scenes"`
 	RebindSnapshot    string                             `json:"rebindSnapshot"`
+	Overlay           json.RawMessage                    `json:"overlay,omitempty"` // Overlay document for a new preparation.
 	Secrets           secret.Store                       `json:"-"`
 	ClientFor         func(string) (*http.Client, error) `json:"-"`
 }
@@ -159,6 +162,10 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if p == nil {
 		p = &preparer{}
 	}
+	patches, err := parseOverlay(p.options.Overlay)
+	if err != nil {
+		return nil, err
+	}
 	var document map[string]any
 	var positions map[string]model.Pos
 	var diagnostics model.Diagnostics
@@ -179,8 +186,10 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		}
 	}
 	bundle := &Bundle{Version: bundleVersion, Resources: make(map[string][]byte)}
+	if len(patches) > 0 {
+		bundle.Overlay = p.options.Overlay
+	}
 	if document == nil {
-		var err error
 		document, format, diagnostics, err = p.importSource(ctx, raw, bundle.Resources)
 		if err != nil {
 			return nil, err
@@ -206,7 +215,10 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	eff, compileDiagnostics := bundle.compile(p.options.Secrets)
+	eff, compileDiagnostics, patchStatuses, err := bundle.compileOverlay(ctx, patches, p.options.Secrets)
+	if err != nil {
+		return nil, err
+	}
 	for i := range compileDiagnostics {
 		d := &compileDiagnostics[i]
 		if pos, ok := positions[d.Path]; ok && d.Document == model.DocProfile {
@@ -225,6 +237,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	bundle.Summary.Format = format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = p.assets
+	bundle.Summary.Patches = patchStatuses
 	return bundle, nil
 }
 
@@ -239,11 +252,15 @@ func normalize(document map[string]any) {
 		document["dns"] = dns
 	}
 	delete(dns, "listen")
-	dns["cache-size"] = boundedNumber(dns["cache-size"], 512)
-	dns["max-concurrent-upstreams"] = boundedNumber(dns["max-concurrent-upstreams"], 2)
+	dns["cache-size"] = boundedNumber(dns["cache-size"], dnsCacheLimit)
+	dns["max-concurrent-upstreams"] = boundedNumber(dns["max-concurrent-upstreams"], dnsUpstreamLimit)
 }
 
 func rebind(path string, options PrepareOptions) (*Bundle, error) {
+	// Restore uses the overlay and patch statuses stored in the archive.
+	if _, err := parseOverlay(options.Overlay); err != nil {
+		return nil, err
+	}
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > MaxBundleBytes {
 		return nil, errors.New("cannot read prepared archive")
@@ -278,6 +295,7 @@ func rebind(path string, options PrepareOptions) (*Bundle, error) {
 	bundle.Summary.Format = original.Format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = original.Resources
+	bundle.Summary.Patches = original.Patches
 	return bundle, nil
 }
 

@@ -23,6 +23,7 @@ type Bundle struct {
 	Version   int               `json:"version"`
 	Profile   json.RawMessage   `json:"profile"`
 	Local     json.RawMessage   `json:"local,omitempty"`
+	Overlay   json.RawMessage   `json:"overlay,omitempty"` // Only patches validated during preparation.
 	Resources map[string][]byte `json:"resources,omitempty"`
 	Summary   Summary           `json:"summary"`
 }
@@ -36,6 +37,14 @@ type Summary struct {
 	Resources   []Asset           `json:"resources,omitempty"`
 	Format      string            `json:"format,omitempty"`
 	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
+	Patches     []PatchStatus     `json:"patches,omitempty"`
+}
+
+// PatchStatus reports the outcome of a patch in the submitted overlay.
+type PatchStatus struct {
+	Index   int    `json:"index"` // Zero-based index in PrepareOptions.Overlay.
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason,omitempty"` // Failure message with diagnostic codes.
 }
 
 const NodeGroup = "reka-ios-nodes"
@@ -80,7 +89,7 @@ func (b *Bundle) CompileWithSecrets(secrets secret.Store) (*compile.Effective, e
 }
 
 func (b *Bundle) compile(secrets secret.Store) (*compile.Effective, model.Diagnostics) {
-	eff, diagnostics := compile.Compile(b.Profile, b.Local, compile.Options{Secrets: secrets, ReadResource: func(hash string) ([]byte, error) {
+	eff, diagnostics := compile.Compile(b.Profile, b.Local, compile.Options{Overlay: b.Overlay, Secrets: secrets, ReadResource: func(hash string) ([]byte, error) {
 		if data := b.Resources[hash]; data != nil {
 			return data, nil
 		}
@@ -88,6 +97,13 @@ func (b *Bundle) compile(secrets secret.Store) (*compile.Effective, model.Diagno
 	}})
 	if diagnostics.HasErrors() {
 		return nil, diagnostics
+	}
+	if dns := eff.DNS; len(b.Overlay) > 0 && dns != nil &&
+		(dns.Listen != "" || dns.CacheSize != boundedNumber(dns.CacheSize, dnsCacheLimit) || dns.Concurrency != boundedNumber(dns.Concurrency, dnsUpstreamLimit)) {
+		return nil, append(diagnostics, model.Diagnostic{
+			Severity: model.SeverityError, Code: "ios.dns-limit", Path: "/dns",
+			Message: "DNS settings exceed the packet tunnel limits",
+		})
 	}
 	if len(eff.Groups) == 0 && eff.Router.Rules().Len() == 0 {
 		if err := addNodeGroup(eff); err != nil {
