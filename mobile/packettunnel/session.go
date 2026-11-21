@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/history"
@@ -52,6 +53,7 @@ type Session struct {
 	profile  *profileSession
 	events   *history.Store
 	logger   *slog.Logger
+	ranking  trafficRanking
 }
 
 func newSession() *Session {
@@ -60,8 +62,12 @@ func newSession() *Session {
 	logger := slog.New(tunnelLogHandler{events: events})
 	return &Session{
 		ctx: ctx, cancel: cancel, device: &packetDevice{endpoint: channel.New(queueSize, MTU, "")},
-		events: events, logger: logger,
+		events: events, logger: logger, ranking: trafficRanking{sinceMS: time.Now().UnixMilli()},
 	}
+}
+
+func (s *Session) backendOptions() sagernet.Options {
+	return sagernet.Options{Logger: s.logger.With("component", "core"), OnConnectionClosed: s.ranking.recordClosed}
 }
 
 func Start(node Node) (*Session, error) {
@@ -70,7 +76,7 @@ func Start(node Node) (*Session, error) {
 		return nil, errors.New("invalid Packet Tunnel node")
 	}
 	s := newSession()
-	backend := sagernet.New(sagernet.Options{Logger: s.logger.With("component", "core")})
+	backend := sagernet.New(s.backendOptions())
 	outbound, err := backend.NewOutbound("packet-tunnel", sagernet.ShadowsocksSpec{
 		Server: node.Server.String(), Port: node.Port, Method: node.Method, Password: node.Password,
 	})

@@ -6,8 +6,15 @@ import (
 	"io"
 	"net/netip"
 
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	tun "github.com/sagernet/sing-tun"
 )
+
+// ActivatePacketFlowProfile keeps the profile's immutable display names with
+// the generation so a connection can keep its labels during a profile change.
+func (e *Engine) ActivatePacketFlowProfile(p *Prepared, revision uint64, profileID string, names map[string]string) (uint64, error) {
+	return e.activateProfile(p, revision, profileID, names)
+}
 
 // AttachPacketFlow gives an already activated engine the host's packet link.
 // The host owns settings and closes the link before retiring the engine.
@@ -21,6 +28,10 @@ func (e *Engine) PacketFlowTraffic() (uint64, uint64) {
 
 func (e *Engine) PacketFlowConnections() int {
 	return e.backend.ConnectionCount()
+}
+
+func (e *Engine) WithPacketFlowConnections(visit func([]sagernet.ConnInfo)) {
+	e.backend.WithConnectionSnapshot(visit)
 }
 
 // SetPacketFlowRealDNS keeps ordinary client addresses available to the host

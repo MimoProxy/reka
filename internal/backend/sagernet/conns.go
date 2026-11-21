@@ -39,6 +39,14 @@ type tracked struct {
 	originalDestination string
 }
 
+func (c *tracked) snapshot() ConnInfo {
+	return ConnInfo{
+		ID: c.id, Metadata: c.md, Outbound: c.out.Tag(), OutboundType: c.out.Type(), Info: c.info,
+		Start: c.start, Upload: c.up.Load(), Download: c.down.Load(),
+		OriginalDestination: c.originalDestination,
+	}
+}
+
 func (b *Backend) ConnectionTrace(id uint64, profile string) (api.ConnectionTrace, bool) {
 	b.conns.mu.Lock()
 	tracked := b.conns.conns[id]
@@ -54,6 +62,8 @@ type connTable struct {
 	next  atomic.Uint64
 	mu    sync.Mutex
 	conns map[uint64]*tracked
+
+	onClosed func(ConnInfo)
 }
 
 func (t *connTable) add(c *tracked) func() {
@@ -65,25 +75,32 @@ func (t *connTable) add(c *tracked) func() {
 	t.mu.Unlock()
 	return func() {
 		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.onClosed != nil && t.conns[c.id] == c {
+			t.onClosed(c.snapshot())
+		}
 		delete(t.conns, c.id)
-		t.mu.Unlock()
 	}
 }
 
 // Connections lists the active connections, oldest first.
 func (b *Backend) Connections() []ConnInfo {
-	b.conns.mu.Lock()
-	out := make([]ConnInfo, 0, len(b.conns.conns))
-	for _, c := range b.conns.conns {
-		out = append(out, ConnInfo{
-			ID: c.id, Metadata: c.md, Outbound: c.out.Tag(), OutboundType: c.out.Type(), Info: c.info,
-			Start: c.start, Upload: c.up.Load(), Download: c.down.Load(),
-			OriginalDestination: c.originalDestination,
-		})
-	}
-	b.conns.mu.Unlock()
+	var out []ConnInfo
+	b.WithConnectionSnapshot(func(active []ConnInfo) { out = active })
 	slices.SortFunc(out, func(a, b ConnInfo) int { return int(a.ID - b.ID) })
 	return out
+}
+
+// WithConnectionSnapshot visits the unordered active connections while close
+// notifications are excluded. The callback must not access the connection table.
+func (b *Backend) WithConnectionSnapshot(visit func([]ConnInfo)) {
+	b.conns.mu.Lock()
+	defer b.conns.mu.Unlock()
+	out := make([]ConnInfo, 0, len(b.conns.conns))
+	for _, c := range b.conns.conns {
+		out = append(out, c.snapshot())
+	}
+	visit(out)
 }
 
 // ConnectionCount is the number of active connections.

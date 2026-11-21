@@ -40,6 +40,9 @@ type Options struct {
 	HistoryScope      func() history.Scope
 	ProcessInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)
 	ProcessLookup     func(context.Context, Metadata) (string, bool)
+	// OnConnectionClosed receives final counters when a relay leaves the
+	// active table. It runs under the table lock and must not call into it.
+	OnConnectionClosed func(ConnInfo)
 	// Logger receives all upstream logs. Defaults to slog.Default().
 	Logger *slog.Logger
 	// Protect, when set, is applied to every outbound socket before it
@@ -103,6 +106,7 @@ func New(opts Options) *Backend {
 		cancel:            cancel,
 		slog:              opts.Logger,
 		logger:            newLogger(opts.Logger, "backend"),
+		conns:             connTable{onClosed: opts.OnConnectionClosed},
 
 		halfCloseTimeout: opts.HalfCloseTimeout,
 	}
