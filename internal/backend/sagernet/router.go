@@ -162,7 +162,7 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 			md.InboundPort = address.Port()
 		}
 	}
-	attempt := r.backend.beginConnection(md)
+	attempt := r.backend.beginConnection(ctx, md)
 	ctx = history.WithFlow(ctx, attempt.ID)
 	prepared := r.prepareFlow(ctx, md)
 	defer prepared.Release()

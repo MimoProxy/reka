@@ -12,7 +12,7 @@ func TestUDPConnectionCloseObservesInFlightCountersOnce(t *testing.T) {
 	flow := &udpFlow{
 		s: &udpSession{b: backend}, cancel: func() {},
 		ready: make(chan struct{}), receiveDone: make(chan struct{}),
-		attempt: backend.beginConnection(Metadata{Network: "udp"}),
+		attempt: backend.beginConnection(t.Context(), Metadata{Network: "udp"}),
 	}
 	flow.untrack = backend.conns.add(&tracked{
 		id: flow.attempt.ID, out: &Outbound{tag: "direct"}, up: &flow.up, down: &flow.down,

@@ -26,8 +26,8 @@ const (
 	MTU        = 1280
 	MaxBatch   = 16
 	queueSize  = 64
-	maxTCP     = 32
-	maxUDP     = 32
+	maxTCP     = 64
+	maxUDP     = 128
 	eventRows  = 64
 	eventBytes = 96 << 10
 	Address4   = "198.18.0.1/30"
@@ -49,7 +49,7 @@ type Session struct {
 	device   *packetDevice
 	backend  *sagernet.Backend
 	outbound *sagernet.Outbound
-	tunnel   io.Closer
+	tunnel   *sagernet.PacketFlow
 	profile  *profileSession
 	events   *history.Store
 	logger   *slog.Logger
@@ -67,7 +67,7 @@ func newSession() *Session {
 }
 
 func (s *Session) backendOptions() sagernet.Options {
-	return sagernet.Options{Logger: s.logger.With("component", "core"), OnConnectionClosed: s.ranking.recordClosed}
+	return sagernet.Options{History: s.events, Logger: s.logger.With("component", "core"), OnConnectionClosed: s.ranking.recordClosed}
 }
 
 func Start(node Node) (*Session, error) {

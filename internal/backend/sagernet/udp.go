@@ -144,7 +144,7 @@ func (s *udpSession) close(err error) {
 func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || s.ctx.Err() != nil {
 		return nil
 	}
 	if f, ok := s.flows[dest]; ok {
@@ -162,7 +162,7 @@ func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 	md.Network = N.NetworkUDP
 	md.Destination = toDestination(dest)
 	ctx, cancel := context.WithCancel(s.ctx)
-	attempt := s.b.beginConnection(md)
+	attempt := s.b.beginConnection(ctx, md)
 	ctx = history.WithFlow(ctx, attempt.ID)
 	prepared := s.r.prepareFlow(ctx, md)
 	f := &udpFlow{attempt: attempt, s: s, ctx: ctx, cancel: cancel, dest: dest, md: md, prepared: prepared, sniff: prepared.Sniff, ready: make(chan struct{}), notify: make(chan struct{}, 1)}
@@ -440,6 +440,11 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 		s := f.s
 		s.mu.Lock()
 		f.failed = true
+		// Packet-flow NAT associates a transport with a single destination.
+		packetFlow := f.attempt.releasePacketFlow != nil
+		if packetFlow {
+			s.cancel()
+		}
 		if s.flows[f.dest] == f {
 			delete(s.flows, f.dest)
 		}
@@ -452,6 +457,9 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 		f.readyOnce.Do(func() { close(f.ready) })
 		s.mu.Unlock()
 		f.cancel()
+		if packetFlow {
+			_ = s.conn.Close()
+		}
 		for _, b := range pending {
 			b.Release()
 		}

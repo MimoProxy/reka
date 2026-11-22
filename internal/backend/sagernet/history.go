@@ -13,13 +13,16 @@ import (
 	"github.com/MimoProxy/reka/internal/history"
 )
 
+type packetFlowReleaseKey struct{}
+
 type connectionAttempt struct {
-	store *history.Store
-	mu    sync.Mutex
+	store             *history.Store
+	releasePacketFlow func() bool // Reports whether the flow was evicted.
+	mu                sync.Mutex
 	api.ConnectionTrace
 }
 
-func (b *Backend) beginConnection(md Metadata) *connectionAttempt {
+func (b *Backend) beginConnection(ctx context.Context, md Metadata) *connectionAttempt {
 	c := api.Connection{
 		ID: b.conns.next.Add(1), Start: time.Now(), Inbound: md.Inbound, Network: md.Network,
 		Destination: md.Destination.String(), FlowInfo: api.FlowInfo{RuleIndex: -1},
@@ -27,7 +30,8 @@ func (b *Backend) beginConnection(md Metadata) *connectionAttempt {
 	if md.Source.IsValid() {
 		c.Source = md.Source.String()
 	}
-	attempt := &connectionAttempt{store: b.history, ConnectionTrace: api.ConnectionTrace{Connection: c}}
+	release, _ := ctx.Value(packetFlowReleaseKey{}).(func() bool)
+	attempt := &connectionAttempt{store: b.history, releasePacketFlow: release, ConnectionTrace: api.ConnectionTrace{Connection: c}}
 	if b.historyScope != nil {
 		attempt.Scope = b.historyScope()
 	}
@@ -106,6 +110,9 @@ func (a *connectionAttempt) peer(addr net.Addr, direct bool) {
 }
 
 func (a *connectionAttempt) complete(reason, stage string, up, down int64) {
+	if a.releasePacketFlow != nil && a.releasePacketFlow() {
+		reason, stage = "evicted", ""
+	}
 	if a.store == nil {
 		return
 	}

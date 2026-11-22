@@ -4,6 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/netip"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/platform"
 	D "github.com/miekg/dns"
 	"github.com/sagernet/sing-box/adapter"
@@ -11,14 +20,12 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"io"
-	"net"
-	"net/netip"
-	"runtime"
-	"sync"
-	"time"
+)
 
-	"github.com/MimoProxy/reka/internal/history"
+const (
+	tunDNSConcurrency     = 64
+	tunDNSTimeout         = 6 * time.Second
+	tunDNSOverflowTimeout = 500 * time.Millisecond
 )
 
 type TUNInbound struct {
@@ -32,13 +39,16 @@ type TUNInbound struct {
 	dns    func(context.Context, *D.Msg) (*D.Msg, error)
 	slots  chan struct{}
 	wg     sync.WaitGroup
+
+	dnsOverflow    atomic.Uint64
+	dnsLastWarning atomic.Pointer[time.Time]
 }
 
 // NewTUN routes packets through the same backend, connection table and leases
 // as loopback listeners. sing-tun is the only route owner.
 func (b *Backend) NewTUN(c platform.TUNConfig, fd int, g *SocketGuard, dns func(context.Context, *D.Msg) (*D.Msg, error)) (io.Closer, string, error) {
 	ctx, cancel := context.WithCancel(b.ctx)
-	t := &TUNInbound{b: b, cfg: c, ctx: ctx, cancel: cancel, dns: dns, slots: make(chan struct{}, 64)}
+	t := &TUNInbound{b: b, cfg: c, ctx: ctx, cancel: cancel, dns: dns, slots: make(chan struct{}, tunDNSConcurrency)}
 	opts := tun.Options{MTU: uint32(c.MTU), Logger: newLogger(b.slog, "tun"), FileDescriptor: fd, InterfaceFinder: g.finder, InterfaceMonitor: g.ifMon, EXP_DisableDNSHijack: true}
 	p4, _ := netip.ParsePrefix(c.Address4)
 	opts.Inet4Address = []netip.Prefix{p4}
@@ -140,83 +150,118 @@ func (t *TUNInbound) JudgeFlow(_ uint8, _ netip.AddrPort, d netip.AddrPort, _ []
 	}
 	return tun.FlowVerdict{Action: tun.ActionAccept}
 }
-func (t *TUNInbound) NewDNSPacket(payload []byte, source, dest M.Socksaddr, writer N.PacketWriter) {
-	// Called by stacks with a DNS fast path. Bound work before spawning.
+func (t *TUNInbound) tryDNSSlot() bool {
 	select {
 	case t.slots <- struct{}{}:
+		return true
 	default:
-		return
+		return false
 	}
-	p := append([]byte{}, payload...)
-	t.wg.Add(1)
-	go func() {
-		defer t.wg.Done()
-		defer func() { <-t.slots }()
-		if b, err := t.answer(p, "udp", source, dest); err == nil {
+}
+
+func (t *TUNInbound) NewDNSPacket(payload []byte, source, dest M.Socksaddr, writer N.PacketWriter) {
+	if !t.tryDNSSlot() {
+		// Packet tunnel writes enqueue to a bounded, nonblocking link endpoint.
+		if b, err := t.answerDNSPacket(payload, source, dest, true); err == nil {
 			_ = writer.WritePacket(buf.As(b), dest)
 		}
-	}()
+		return
+	}
+	// The stack can reuse the input buffer as soon as this callback returns.
+	p := append([]byte(nil), payload...)
+	t.wg.Go(func() {
+		defer func() { <-t.slots }()
+		if b, err := t.answerDNSPacket(p, source, dest, false); err == nil {
+			_ = writer.WritePacket(buf.As(b), dest)
+		}
+	})
 }
-func (t *TUNInbound) answer(p []byte, network string, source, destination M.Socksaddr) ([]byte, error) {
+
+func (t *TUNInbound) answerDNSPacket(p []byte, source, destination M.Socksaddr, overloaded bool) ([]byte, error) {
 	q := new(D.Msg)
 	if err := q.Unpack(p); err != nil {
 		return nil, err
 	}
-	if q.Response || len(q.Question) != 1 {
-		return nil, errors.New("invalid DNS question")
-	}
-	ctx, cancel := context.WithTimeout(t.ctx, 6*time.Second)
-	defer cancel()
-	origin := history.DNSOrigin{Kind: "tun", Network: network, Client: source.String(), Requested: destination.String()}
-	m, err := t.dns(history.WithDNSOrigin(ctx, origin), q)
+	m, err := t.answerDNS(q, N.NetworkUDP, source, destination, overloaded)
 	if err != nil {
-		m = new(D.Msg)
-		m.SetRcode(q, D.RcodeServerFailure)
+		return nil, err
 	}
 	return m.Pack()
 }
+
+func (t *TUNInbound) answerDNS(q *D.Msg, network string, source, destination M.Socksaddr, overloaded bool) (*D.Msg, error) {
+	if q.Response || len(q.Question) != 1 {
+		return nil, errors.New("invalid DNS question")
+	}
+	if overloaded {
+		t.recordDNSOverflow()
+	} else {
+		ctx, cancel := context.WithTimeout(t.ctx, tunDNSTimeout)
+		defer cancel()
+		origin := history.DNSOrigin{Kind: "tun", Network: network, Client: source.String(), Requested: destination.String()}
+		if m, err := t.dns(history.WithDNSOrigin(ctx, origin), q); err == nil {
+			return m, nil
+		}
+	}
+	return new(D.Msg).SetRcode(q, D.RcodeServerFailure), nil
+}
+
+func (t *TUNInbound) recordDNSOverflow() {
+	t.dnsOverflow.Add(1)
+	last := t.dnsLastWarning.Load()
+	now := time.Now()
+	if (last == nil || now.Sub(*last) >= time.Second) && t.dnsLastWarning.CompareAndSwap(last, &now) {
+		t.b.logger.Warn("TUN DNS concurrency limit reached (limit ", cap(t.slots), ")")
+	}
+}
+
+func (t *TUNInbound) serveDNSConnection(c io.Closer, onClose N.CloseHandlerFunc, serve func(overloaded bool)) {
+	admitted := t.tryDNSSlot()
+	run := func() {
+		defer func() {
+			if admitted {
+				<-t.slots
+			}
+			_ = c.Close()
+			if onClose != nil {
+				onClose(nil)
+			}
+		}()
+		serve(!admitted)
+	}
+	if admitted {
+		t.wg.Go(run)
+	} else {
+		// sing-tun already runs these callbacks in per-connection goroutines.
+		run()
+	}
+}
+
 func (t *TUNInbound) metadata(src, dst M.Socksaddr) adapter.InboundContext {
 	return adapter.InboundContext{Inbound: "tun", InboundType: "tun", Source: src, Destination: dst, OriginDestination: dst}
 }
 func (t *TUNInbound) NewConnectionEx(ctx context.Context, c net.Conn, src, dst M.Socksaddr, onClose N.CloseHandlerFunc) {
 	if dst.Port == 53 && t.cfg.DNSHijack {
-		select {
-		case t.slots <- struct{}{}:
-		default:
-			N.CloseOnHandshakeFailure(c, onClose, errors.New("DNS busy"))
-			return
-		}
-		t.wg.Add(1)
-		go func() {
-			defer t.wg.Done()
-			defer func() {
-				<-t.slots
-				c.Close()
-				if onClose != nil {
-					onClose(nil)
-				}
-			}()
-			_ = c.SetDeadline(time.Now().Add(6 * time.Second))
+		t.serveDNSConnection(c, onClose, func(overloaded bool) {
+			timeout := tunDNSTimeout
+			if overloaded {
+				timeout = tunDNSOverflowTimeout
+			}
+			if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+				return
+			}
 			dc := &D.Conn{Conn: c}
 			for {
 				q, err := dc.ReadMsg()
 				if err != nil {
 					return
 				}
-				p, err := q.Pack()
-				if err != nil {
-					return
-				}
-				p, err = t.answer(p, "tcp", src, dst)
-				if err != nil {
-					return
-				}
-				m := new(D.Msg)
-				if m.Unpack(p) != nil || dc.WriteMsg(m) != nil {
+				reply, err := t.answerDNS(q, N.NetworkTCP, src, dst, overloaded)
+				if err != nil || dc.WriteMsg(reply) != nil || overloaded {
 					return
 				}
 			}
-		}()
+		})
 		return
 	}
 	if t.self(dst.Addr) {
@@ -227,39 +272,38 @@ func (t *TUNInbound) NewConnectionEx(ctx context.Context, c net.Conn, src, dst M
 }
 func (t *TUNInbound) NewPacketConnectionEx(ctx context.Context, c N.PacketConn, src, dst M.Socksaddr, onClose N.CloseHandlerFunc) {
 	if dst.Port == 53 && t.cfg.DNSHijack {
-		select {
-		case t.slots <- struct{}{}:
-		default:
-			N.CloseOnHandshakeFailure(c, onClose, errors.New("DNS busy"))
-			return
-		}
-		t.wg.Add(1)
-		go func() {
-			defer t.wg.Done()
-			defer func() {
-				<-t.slots
-				c.Close()
-				if onClose != nil {
-					onClose(nil)
-				}
-			}()
+		t.serveDNSConnection(c, onClose, func(overloaded bool) {
+			timeout := tunDNSTimeout
+			if overloaded {
+				timeout = tunDNSOverflowTimeout
+			}
 			for {
-				_ = c.SetReadDeadline(time.Now().Add(6 * time.Second))
+				deadline := time.Now().Add(timeout)
+				if err := c.SetReadDeadline(deadline); err != nil {
+					return
+				}
 				b := buf.NewPacket()
 				to, err := c.ReadPacket(b)
 				if err != nil {
 					b.Release()
 					return
 				}
-				p, err := t.answer(b.Bytes(), "udp", src, dst)
+				p, err := t.answerDNSPacket(b.Bytes(), src, dst, overloaded)
 				b.Release()
 				if err == nil {
+					if overloaded {
+						// NAT writers without deadlines still run off the packet dispatch path.
+						_ = c.SetWriteDeadline(deadline)
+					}
 					if err = c.WritePacket(buf.As(p), to); err != nil {
 						return
 					}
 				}
+				if overloaded {
+					return
+				}
 			}
-		}()
+		})
 		return
 	}
 	if t.self(dst.Addr) {

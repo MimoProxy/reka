@@ -10,12 +10,17 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/packettunnellab"
 	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/MimoProxy/reka/mobile/profile"
+	D "github.com/miekg/dns"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/adapters/gonet"
 	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv4"
@@ -67,6 +72,175 @@ func TestConnectionRowsSortByStartThenID(t *testing.T) {
 	if got := [3]uint64{rows[0].ID, rows[1].ID, rows[2].ID}; got != [3]uint64{2, 1, 3} {
 		t.Fatalf("connection order = %v", got)
 	}
+}
+
+func TestPacketFlowLimitDiagnostics(t *testing.T) {
+	session := startPacketFlowDiagnosticsSession(t, nil)
+	client, ctx := attachTestClient(t, session, "198.18.0.2")
+	destination := packetTestAddress("192.0.2.1", 443)
+	for range 2 {
+		conn, err := gonet.DialContextTCP(ctx, client, destination, ipv4.ProtocolNumber)
+		if err == nil {
+			conn.Close()
+			t.Fatal("TCP connection exceeded the configured limit")
+		}
+	}
+	value, err := session.RunOperation(Operation{Action: "flowLimits"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var counts map[string]uint64
+	if err := json.Unmarshal(payload, &counts); err != nil || len(counts) != 5 || counts["tcpRejected"] != 2 {
+		t.Fatalf("unexpected flow limits response %s: %v", payload, err)
+	}
+	for _, field := range []string{"udpRejected", "tcpEvicted", "udpEvicted", "dnsOverflow"} {
+		if count, ok := counts[field]; !ok || count != 0 {
+			t.Fatalf("unexpected %s in %s", field, payload)
+		}
+	}
+	value, err = session.RunOperation(Operation{Action: "logs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := value.(history.Page)
+	if len(page.Rows) != 1 || !strings.Contains(string(page.Rows[0].Data), `"level":"warn"`) ||
+		!strings.Contains(string(page.Rows[0].Data), "tcp connection limit reached (limit 0)") {
+		t.Fatalf("unexpected rejection logs: %+v", page.Rows)
+	}
+}
+
+func TestPacketTunnelDNSOverflow(t *testing.T) {
+	const limit = 64
+	started := make(chan struct{}, limit)
+	release := make(chan struct{})
+	session := startPacketFlowDiagnosticsSession(t, func(ctx context.Context, q *D.Msg) (*D.Msg, error) {
+		select {
+		case started <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		select {
+		case <-release:
+			return new(D.Msg).SetReply(q), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	client, ctx := attachTestClient(t, session, "198.18.0.2")
+	destination := packetTestAddress("192.0.2.1", 53)
+	udp, err := gonet.DialUDP(client, nil, &destination, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	udpDNS := &D.Conn{Conn: udp}
+	query := new(D.Msg).SetQuestion("example.test.", D.TypeA)
+	for i := range limit {
+		query.Id = uint16(i)
+		if err := udpDNS.WriteMsg(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.After(3 * time.Second)
+	for range limit {
+		select {
+		case <-started:
+		case <-deadline:
+			t.Fatal("DNS queries did not fill all slots")
+		}
+	}
+
+	exchange := func(conn *D.Conn, rcode int) {
+		t.Helper()
+		query.Id++
+		if err := conn.WriteMsg(query); err != nil {
+			t.Fatal(err)
+		}
+		reply, err := conn.ReadMsg()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reply.Response || reply.Id != query.Id || reply.Rcode != rcode || !slices.Equal(reply.Question, query.Question) {
+			t.Fatalf("unexpected DNS reply, want %s: %v", D.RcodeToString[rcode], reply)
+		}
+	}
+	checkOverflow := func(want uint64) {
+		t.Helper()
+		value, err := session.RunOperation(Operation{Action: "flowLimits"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := value.(sagernet.PacketFlowStats).DNSOverflow; got != want {
+			t.Fatalf("DNS overflow count = %d, want %d", got, want)
+		}
+	}
+
+	if _, err := udp.Write([]byte{0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := udpDNS.WriteMsg(new(D.Msg).SetReply(query)); err != nil {
+		t.Fatal(err)
+	}
+	_ = udpDNS.SetDeadline(time.Now().Add(time.Second))
+	for i := range 2 {
+		exchange(udpDNS, D.RcodeServerFailure)
+		checkOverflow(uint64(i + 1))
+	}
+	value, err := session.RunOperation(Operation{Action: "logs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := value.(history.Page)
+	if len(page.Rows) != 1 || !strings.Contains(string(page.Rows[0].Data), `"level":"warn"`) ||
+		!strings.Contains(string(page.Rows[0].Data), "TUN DNS concurrency limit reached (limit 64)") {
+		t.Fatalf("unexpected DNS overflow logs: %+v", page.Rows)
+	}
+
+	tcp, err := gonet.DialContextTCP(ctx, client, destination, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcp.Close()
+	tcpDNS := &D.Conn{Conn: tcp}
+	_ = tcpDNS.SetDeadline(time.Now().Add(time.Second))
+	exchange(tcpDNS, D.RcodeServerFailure)
+	checkOverflow(3)
+
+	close(release)
+	_ = udpDNS.SetDeadline(time.Now().Add(time.Second))
+	for range limit {
+		if reply, err := udpDNS.ReadMsg(); err != nil || reply.Rcode != D.RcodeSuccess {
+			t.Fatalf("unexpected blocked query reply: %v, %v", reply, err)
+		}
+	}
+	exchange(udpDNS, D.RcodeSuccess)
+	checkOverflow(3)
+}
+
+func startPacketFlowDiagnosticsSession(t *testing.T, dns func(context.Context, *D.Msg) (*D.Msg, error)) *Session {
+	t.Helper()
+	session := newSession()
+	session.backend = sagernet.New(session.backendOptions())
+	var err error
+	session.outbound, err = session.backend.NewOutbound("direct", sagernet.DirectSpec{})
+	if err != nil {
+		_ = session.backend.Close()
+		session.cancel()
+		t.Fatal(err)
+	}
+	session.tunnel, err = session.backend.AttachPacketFlow(session.device, MTU, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), 0, 0, dns)
+	if err != nil {
+		_ = session.outbound.Close()
+		_ = session.backend.Close()
+		session.cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(session.Close)
+	return session
 }
 
 type connectionStamp struct {

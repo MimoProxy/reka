@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/api"
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/router"
 )
@@ -28,6 +29,11 @@ func (s *Session) historyPage(kind history.Kind, op Operation) (history.Page, er
 
 func (s *Session) runDiagnostics(op Operation) (any, error) {
 	switch op.Action {
+	case "flowLimits":
+		if s.tunnel == nil {
+			return sagernet.PacketFlowStats{}, nil
+		}
+		return s.tunnel.Stats(), nil
 	case "connectionHistory":
 		return s.historyPage(history.Connections, op)
 	case "requestHistory":

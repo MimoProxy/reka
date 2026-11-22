@@ -50,8 +50,14 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		b.logger.ErrorContext(ctx, err)
 		return
 	}
+	stopCancel := func() {}
+	if attempt.releasePacketFlow != nil {
+		stop := context.AfterFunc(ctx, func() { _ = remote.Close() })
+		stopCancel = func() { stop() }
+	}
 	attempt.peer(remote.RemoteAddr(), out.Type() == "direct")
 	if err = N.ReportConnHandshakeSuccess(conn, remote); err != nil {
+		stopCancel()
 		attempt.complete(connectionReason(err, "error"), "handshake", 0, 0)
 		release()
 		remote.Close()
@@ -72,7 +78,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	untrackConnection := b.conns.add(&tracked{attempt: attempt, id: attempt.ID, start: time.Now(), md: toMetadata(metadata), out: out,
 		originalDestination: originalDestination,
 		info:                rt.Info, up: &up, down: &down, close: func() { manual.Store(true); closeBoth() }})
-	untrack := func() { untrackConnection(); finishProcess() }
+	untrack := func() { stopCancel(); untrackConnection(); finishProcess() }
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {
 		errMu.Lock()
