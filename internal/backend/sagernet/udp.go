@@ -62,7 +62,7 @@ type udpFlow struct {
 	rt           Route
 	remote       N.PacketConn
 	ready        chan struct{} // closed once remote is set or the dial failed
-	receiveDone  chan struct{} // allocated when final counters are observed
+	receiveDone  chan struct{} // closed when the receive loop has stopped
 	pending      []*buf.Buffer
 	pendingBytes int
 	notify       chan struct{}
@@ -309,9 +309,9 @@ func (f *udpFlow) dial() {
 		f.failed = true
 	} else {
 		f.remote = bufio.NewPacketConn(remote)
-		if s.b.conns.onClosed != nil {
-			f.receiveDone = make(chan struct{})
-		}
+		// Close waits for in-flight writes, so connection and per-app totals
+		// include every packet already delivered to the client.
+		f.receiveDone = make(chan struct{})
 	}
 	pending := f.pending
 	f.pending = nil
