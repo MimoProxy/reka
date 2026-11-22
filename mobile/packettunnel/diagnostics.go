@@ -8,6 +8,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
@@ -29,6 +30,13 @@ func (s *Session) historyPage(kind history.Kind, op Operation) (history.Page, er
 
 func (s *Session) runDiagnostics(op Operation) (any, error) {
 	switch op.Action {
+	case "profileStart":
+		if err := startRuntimeProfile(time.Duration(op.TimeoutMS) * time.Millisecond); err != nil {
+			return nil, err
+		}
+		return true, nil
+	case "profileRead":
+		return readRuntimeProfile(op.Category, op.Offset)
 	case "flowLimits":
 		var stats sagernet.PacketFlowStats
 		if s.tunnel != nil {
