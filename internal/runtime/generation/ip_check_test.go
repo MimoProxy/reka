@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"syscall"
 	"testing"
@@ -173,21 +175,44 @@ func TestLocalTargets(t *testing.T) {
 }
 
 func TestIPCheckLocalUsesAnyTarget(t *testing.T) {
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	// A middlebox that completes the TCP handshake but cannot reach the target.
+	silent, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = silent.Close() })
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
 	errs := map[string]error{
 		"192.0.2.1:443": syscall.ECONNREFUSED,
 		"192.0.2.2:443": context.DeadlineExceeded,
 		"192.0.2.3:443": syscall.ENETUNREACH,
 	}
-	dial := func(_ context.Context, _, target string) (net.Conn, error) {
+	routes := map[string]string{
+		"192.0.2.8:443": silent.Addr().String(),
+		"192.0.2.9:443": server.Listener.Addr().String(),
+	}
+	var dialer net.Dialer
+	dial := func(ctx context.Context, network, target string) (net.Conn, error) {
 		if err, ok := errs[target]; ok {
 			return nil, err
 		}
-		client, server := net.Pipe()
-		_ = server.Close()
-		return client, nil
+		return dialer.DialContext(ctx, network, routes[target])
 	}
 	if check := ipCheckLocal(context.Background(), dial, []string{"192.0.2.1:443", "192.0.2.9:443"}); check.Status != ipCheckOK || check.DelayMS == nil {
 		t.Fatalf("one working target should pass: %+v", check)
+	}
+	if check := ipCheckLocal(context.Background(), dial, []string{"192.0.2.8:443"}); check.Status != ipCheckFailed {
+		t.Fatalf("an accepted connection without a TLS answer should fail: %+v", check)
 	}
 	if check := ipCheckLocal(context.Background(), dial, []string{"192.0.2.1:443", "192.0.2.3:443", "192.0.2.2:443"}); check.Status != ipCheckFailed || check.Error != "no route" {
 		t.Fatalf("missing route should win: %+v", check)

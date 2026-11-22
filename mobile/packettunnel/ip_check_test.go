@@ -20,9 +20,6 @@ import (
 )
 
 func TestIPCheckLocalOnly(t *testing.T) {
-	server := ipCheckTestHTTPServer(t, "tcp4", "127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
 	snapshot := prepareSnapshot(t, `
 schema-version: 1
 outbounds: [{id: direct, type: direct, dialer: {proxy: reject}}]
@@ -33,7 +30,7 @@ outbounds: [{id: direct, type: direct, dialer: {proxy: reject}}]
 	}
 	t.Cleanup(session.Close)
 	var op Operation
-	if err := json.Unmarshal(fmt.Appendf(nil, `{"action":"ipCheck","local4":[%q],"local6":["[::1]:1"],"timeout_ms":1500}`, server.Listener.Addr().String()), &op); err != nil {
+	if err := json.Unmarshal(fmt.Appendf(nil, `{"action":"ipCheck","local4":[%q],"local6":["[::1]:1"],"timeout_ms":1500}`, ipCheckTestListener(t, "tcp4", "127.0.0.1:0")), &op); err != nil {
 		t.Fatal(err)
 	}
 	result := runIPCheck(t, session, op)
@@ -106,7 +103,7 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
-	op := Operation{Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL, Local4: []string{want4}, Local6: []string{want6}, TimeoutMS: 2000}
+	op := Operation{Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL, Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{ipCheckTestListener(t, "tcp6", "[::1]:0")}, TimeoutMS: 2000}
 	result := runIPCheck(t, session, op)
 	if result.DNSMode != "fake-ip" || result.IPVersion != "ipv4" {
 		t.Fatalf("unexpected DNS or IP version %+v", result)
@@ -157,7 +154,7 @@ func TestIPCheckStartsAllHTTPProbesAndReturnsAfterHeaders(t *testing.T) {
 	start := time.Now()
 	result := runIPCheck(t, session, Operation{
 		Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL,
-		Local4: []string{server.Listener.Addr().String()}, Local6: []string{local6}, TimeoutMS: 4000,
+		Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{local6}, TimeoutMS: 4000,
 	})
 	if elapsed := time.Since(start); elapsed >= 3*time.Second {
 		t.Fatalf("probe delayed by body or other checks: %s", elapsed)
@@ -268,25 +265,19 @@ func assertIPCheckOK(t *testing.T, check generation.IPCheck) {
 	}
 }
 
-// ipCheckTestListener accepts and closes connections until the test ends.
+// ipCheckTestListener serves TLS handshakes until the test ends and returns
+// its address.
 func ipCheckTestListener(t *testing.T, network, address string) string {
 	t.Helper()
 	listener, err := net.Listen(network, address)
+	if network == "tcp6" && (errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)) {
+		t.Skip("IPv6 loopback unavailable")
+	}
 	if err != nil {
-		if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT) {
-			t.Skipf("%s loopback unavailable: %v", network, err)
-		}
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: http.NotFoundHandler()}}
+	server.StartTLS()
+	t.Cleanup(server.Close)
 	return listener.Addr().String()
 }
