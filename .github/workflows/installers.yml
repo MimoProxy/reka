@@ -1,17 +1,9 @@
 name: windows installers
 
 on:
+  # Every pull request reports the required installer checks. Those without
+  # installer inputs finish them without building.
   pull_request:
-    paths:
-      - 'packaging/windows/**'
-      - 'tools/release.py'
-      - 'tools/build-overlay.py'
-      - 'tools/windows-installer-runtime.ps1'
-      - '.github/workflows/installers.yml'
-      - 'cmd/**'
-      - 'internal/**'
-      - 'go.mod'
-      - 'go.sum'
   workflow_dispatch:
     inputs:
       version:
@@ -27,28 +19,68 @@ env:
   REKA_PACKAGE_VERSION: ${{ inputs.version || '1.0.0-dev' }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      build: ${{ steps.inputs.outputs.build }}
+    steps:
+      - name: Detect installer inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo build=true >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
+          pattern='^(packaging/windows/|cmd/|internal/)|^(tools/release\.py|tools/build-overlay\.py|tools/windows-installer-runtime\.ps1|\.github/workflows/installers\.yml|go\.mod|go\.sum)$'
+          if printf '%s\n' "$files" | grep -Eq "$pattern"; then
+            echo build=true >> "$GITHUB_OUTPUT"
+          else
+            echo build=false >> "$GITHUB_OUTPUT"
+          fi
+
   installer:
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
         include:
           - {os: windows-2025, arch: amd64, inno_arch: x64compatible}
           - {os: windows-11-arm, arch: arm64, inno_arch: arm64}
-    runs-on: ${{ matrix.os }}
+    # The matrix always expands so the check names stay those branch protection
+    # requires. Without installer inputs the job runs no steps on a Linux runner.
+    runs-on: ${{ needs.changes.outputs.build == 'true' && matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 30
+    env:
+      BUILD: ${{ needs.changes.outputs.build }}
     defaults:
       run:
         shell: powershell
     steps:
+      - name: No installer inputs changed
+        if: env.BUILD != 'true'
+        shell: bash
+        run: echo "This pull request does not change installer inputs."
       - name: Preserve exact source bytes
+        if: env.BUILD == 'true'
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+        if: env.BUILD == 'true'
       - uses: actions/setup-go@v5
+        if: env.BUILD == 'true'
         with:
           go-version-file: go.mod
       - name: Stage unsigned distribution
+        if: env.BUILD == 'true'
         run: python3 tools/release.py --version "$env:REKA_PACKAGE_VERSION" --targets windows/${{ matrix.arch }} --output bin/ci-windows
       - name: Verify official compiler and build installer
+        if: env.BUILD == 'true'
         run: |
           $ErrorActionPreference='Stop'
           $ProgressPreference='SilentlyContinue'
@@ -69,11 +101,12 @@ jobs:
           $installer=Join-Path $root ("installer-${{ matrix.arch }}\reka-$version-setup.exe")
           ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+[IO.Path]::GetFileName($installer))|Set-Content -Encoding ASCII (Join-Path $root 'installer-SHA256SUMS')
       - name: Install, upgrade, owner access and uninstall
+        if: env.BUILD == 'true'
         run: |
           $ErrorActionPreference='Stop'
           ./tools/windows-installer-runtime.ps1 -Root (Join-Path $PWD 'bin\ci-windows') -Arch '${{ matrix.arch }}' -Version $env:REKA_PACKAGE_VERSION
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && env.BUILD == 'true'
         with:
           name: unsigned-windows-${{ matrix.arch }}-installer
           path: |
