@@ -203,7 +203,11 @@ func start(open func() (*packettunnel.Session, error), extension bool, failure *
 	// Packet-flow sessions run inside the VPN extension process.
 	if extension {
 		runtime.GOMAXPROCS(2)
-		debug.SetMemoryLimit(20 << 20)
+		// The limit covers all memory the Go runtime holds, not just the
+		// heap. It must sit above what the tunnel needs, or the collector
+		// runs continuously, and low enough that idle pages are returned to
+		// stay well below the extension's memory limit.
+		debug.SetMemoryLimit(28 << 20)
 	}
 	session, err := open()
 	if err != nil {
