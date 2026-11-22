@@ -2,9 +2,11 @@ package rulesdata
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/oschwald/maxminddb-golang"
-	"strings"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // ValidateDatabase checks the complete container before pinning an unused asset.
@@ -14,14 +16,11 @@ func ValidateDatabase(kind, format string, data []byte) error {
 		return fmt.Errorf("database size outside 128 MiB limit")
 	}
 	if (kind == "geoip" || kind == "asn") && format == "mmdb" {
-		db, err := maxminddb.FromBytes(data)
+		db, err := openMMDB(data)
 		if err != nil {
-			return fmt.Errorf("invalid MMDB: %w", err)
+			return err
 		}
 		defer db.Close()
-		if err = db.Verify(); err != nil {
-			return fmt.Errorf("corrupt MMDB: %w", err)
-		}
 		networks := db.Networks(maxminddb.SkipAliasedNetworks)
 		if !networks.Next() {
 			return fmt.Errorf("empty MMDB")
@@ -31,32 +30,19 @@ func ValidateDatabase(kind, format string, data []byte) error {
 			return err
 		}
 		if kind == "asn" {
-			value, ok := record.(map[string]any)
-			if !ok || value["autonomous_system_number"] == nil {
+			value, _ := record.(map[string]any)
+			if value["autonomous_system_number"] == nil {
 				return fmt.Errorf("MMDB does not contain ASN records")
 			}
-		} else {
-			valid := false
-			switch value := record.(type) {
-			case string:
-				valid = strings.TrimSpace(value) != ""
-			case map[string]any:
-				for _, key := range []string{"country", "registered_country", "represented_country"} {
-					if country, ok := value[key].(map[string]any); ok && country["iso_code"] != nil {
-						valid = true
-					}
-				}
-			}
-			if !valid {
-				return fmt.Errorf("MMDB does not contain country records")
-			}
+		} else if strings.TrimSpace(mmdbRecordCode(kind, record)) == "" {
+			return fmt.Errorf("MMDB does not contain country records")
 		}
 		return nil
 	}
-	if (kind != "geoip" && kind != "geosite") || format != "dat" {
+	if (kind != "geoip" && kind != "geosite" && kind != "asn") || format != "dat" {
 		return fmt.Errorf("unsupported database kind/format")
 	}
-	top, err := fields(data)
+	top, err := fieldsTyped(data, protowire.BytesType)
 	if err != nil {
 		return err
 	}
@@ -65,13 +51,19 @@ func ValidateDatabase(kind, format string, data []byte) error {
 		if entry.n != 1 {
 			continue
 		}
-		record, err := fields(entry.b)
+		record, err := fieldsTyped(entry.b, protowire.BytesType, protowire.BytesType, protowire.VarintType)
 		if err != nil {
 			return err
 		}
 		found := false
 		for _, field := range record {
 			if field.n == 1 && len(field.b) > 0 {
+				if kind == "asn" {
+					code, err := asnCode(string(field.b))
+					if err != nil || code != string(field.b) {
+						return fmt.Errorf("ASN DAT requires numeric codes")
+					}
+				}
 				found = true
 			}
 		}

@@ -23,17 +23,18 @@ func Decode(behavior, format, code string, data []byte) ([]router.RuleSpec, erro
 		return nil, errors.New("resource size outside limit")
 	}
 	if behavior == "asn" {
-		if format != "mmdb" {
-			return nil, errors.New("ASN requires MMDB")
+		var err error
+		code, err = asnCode(code)
+		if err != nil {
+			return nil, err
 		}
-		return decodeASN(code, data)
 	}
-	if behavior == "geoip" || behavior == "geosite" {
-		if behavior == "geoip" && format == "mmdb" {
-			return decodeMMDB(code, data)
+	if behavior == "geoip" || behavior == "geosite" || behavior == "asn" {
+		if behavior != "geosite" && format == "mmdb" {
+			return decodeNetworkDB(behavior, code, data)
 		}
 		if format != "dat" {
-			return nil, errors.New("geodata format must be dat (or mmdb for GEOIP)")
+			return nil, errors.New("geodata format must be dat (or mmdb for GeoIP and ASN)")
 		}
 		return decodeGeo(behavior, code, data)
 	}

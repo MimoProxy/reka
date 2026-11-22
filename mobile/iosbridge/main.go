@@ -131,7 +131,8 @@ func RekaGoPrepareProfileEx(input, output, cache, optionsPath *C.char, failure *
 		writeValidationError(failure, capacity, &profile.ValidationError{Message: "Invalid profile options JSON"})
 		return 0
 	}
-	timeout := 75 * time.Second
+	// Geodata databases can take more than a minute through a proxy.
+	timeout := 150 * time.Second
 	if options.Background {
 		timeout = 22 * time.Second
 	}

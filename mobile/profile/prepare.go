@@ -15,13 +15,11 @@ import (
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
-	"github.com/MimoProxy/reka/internal/rulesdata"
 	"github.com/MimoProxy/reka/internal/secret"
 	"github.com/MimoProxy/reka/internal/subscription"
 	"go.yaml.in/yaml/v3"
 )
 
-const geodataURL = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/"
 const maxAssetBytes = 32 << 20
 const dnsCacheLimit = 512
 const dnsUpstreamLimit = 2
@@ -35,6 +33,7 @@ type PrepareOptions struct {
 	ForceProviders    bool                               `json:"forceProviders"`
 	Scenes            []SceneDefinition                  `json:"scenes"`
 	RebindSnapshot    string                             `json:"rebindSnapshot"`
+	GeodataSources    map[string]string                  `json:"geodataSources,omitempty"`
 	Overlay           json.RawMessage                    `json:"overlay,omitempty"` // Overlay document for a new preparation.
 	Secrets           secret.Store                       `json:"-"`
 	ClientFor         func(string) (*http.Client, error) `json:"-"`
@@ -69,6 +68,10 @@ type Asset struct {
 	Automatic    bool     `json:"automatic,omitempty"`
 	Members      []string `json:"members,omitempty"`
 	UsesFallback bool     `json:"usesFallback,omitempty"`
+	Shared       bool     `json:"shared,omitempty"`
+	URL          string   `json:"url,omitempty"`
+	Codes        []string `json:"codes,omitempty"`
+	Size         int64    `json:"size,omitempty"`
 }
 
 type ValidationError struct {
@@ -94,6 +97,12 @@ func PrepareFile(ctx context.Context, input, output, geodataCache string) error 
 // PrepareFileWithOptions writes files under the app's candidate revision. They
 // become the last-good source and validators when the app publishes that revision.
 func PrepareFileWithOptions(ctx context.Context, input, output, cache string, options PrepareOptions) error {
+	client := subscription.HTTPClient(nil)
+	defer client.CloseIdleConnections()
+	return prepareFile(ctx, input, output, cache, options, client)
+}
+
+func prepareFile(ctx context.Context, input, output, cache string, options PrepareOptions, client *http.Client) error {
 	info, err := os.Stat(input)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > model.MaxDocumentSize {
 		return errors.New("cannot read profile")
@@ -112,8 +121,6 @@ func PrepareFileWithOptions(ctx context.Context, input, output, cache string, op
 			_ = json.Unmarshal(data, &previous)
 		}
 	}
-	client := subscription.HTTPClient(nil)
-	defer client.CloseIdleConnections()
 	fetcher := &subscription.Fetcher{Client: client, Blobs: blobs, MaxBytes: maxAssetBytes}
 	p := &preparer{options: options, cache: cache, client: client, fetcher: fetcher, batch: fetcher.Batch(previous, false)}
 	var bundle *Bundle
@@ -147,6 +154,11 @@ func PrepareFileWithOptions(ctx context.Context, input, output, cache string, op
 		return err
 	}
 	if options.OutputState != "" {
+		for key := range p.batch.Entries {
+			if strings.HasPrefix(key, "geodata/") {
+				delete(p.batch.Entries, key)
+			}
+		}
 		state, err := json.Marshal(p.batch.Entries)
 		if err != nil {
 			return errors.New("cannot encode resource state")
@@ -166,6 +178,9 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	selectors := make(geodataSelectors)
+	selectors.collectOverlay(patches)
+	var native *model.Profile
 	var document map[string]any
 	var positions map[string]model.Pos
 	var diagnostics model.Diagnostics
@@ -174,7 +189,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if root != nil && root.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(root.Content); i += 2 {
 			if root.Content[i].Value == "schema-version" {
-				_, positions, diagnostics = model.ParseProfile(raw)
+				native, positions, diagnostics = model.ParseProfile(raw)
 				if diagnostics.HasErrors() {
 					return nil, &ValidationError{"Invalid Reka profile", diagnostics}
 				}
@@ -190,7 +205,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		bundle.Overlay = p.options.Overlay
 	}
 	if document == nil {
-		document, format, diagnostics, err = p.importSource(ctx, raw, bundle.Resources)
+		document, format, diagnostics, err = p.importSource(ctx, raw, selectors, bundle.Resources)
 		if err != nil {
 			return nil, err
 		}
@@ -216,6 +231,14 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 			}
 			patches = updated
 		}
+	}
+	if native != nil {
+		selectors.collectDocument(document, bundle.Resources)
+		geodata, err := p.prepareGeodata(ctx, selectors, native.Geodata, bundle.Resources)
+		if err != nil {
+			return nil, err
+		}
+		pinGeodata(document, geodata)
 	}
 	normalize(document)
 	data, err := json.Marshal(document)
@@ -325,7 +348,7 @@ func boundedNumber(value any, limit int) int {
 	return limit
 }
 
-func (p *preparer) importSource(ctx context.Context, raw []byte, resources map[string][]byte) (map[string]any, string, model.Diagnostics, error) {
+func (p *preparer) importSource(ctx context.Context, raw []byte, selectors geodataSelectors, resources map[string][]byte) (map[string]any, string, model.Diagnostics, error) {
 	req := importer.Request{SourceID: "ios", Data: string(raw), NodesOnly: p.options.NodesOnly}
 	providers, err := importer.Providers(req)
 	if err != nil {
@@ -354,36 +377,17 @@ func (p *preparer) importSource(ctx context.Context, raw []byte, resources map[s
 		}
 		p.assets = append(p.assets, asset)
 	}
-	selectors, err := importer.GeodataSelectors(req, payloads)
+	refs, err := importer.GeodataSelectors(req, payloads)
 	if err != nil {
 		return nil, "", nil, errors.New("invalid subscription geodata reference")
 	}
-	byKind := map[string][]string{}
-	for _, selector := range selectors {
-		kind, code, _ := strings.Cut(selector, ":")
-		byKind[kind] = append(byKind[kind], code)
+	hasOverlayGeodata := len(selectors) > 0
+	for _, ref := range refs {
+		selectors.addReference(ref)
 	}
-	geodata := make(map[string][]byte, len(byKind))
-	for _, kind := range []string{"geoip", "geosite", "asn"} {
-		codes := byKind[kind]
-		if len(codes) == 0 {
-			continue
-		}
-		file := kind + ".dat"
-		if kind == "asn" {
-			file = "GeoLite2-ASN.mmdb"
-		}
-		asset := Asset{ID: "geodata/" + kind, Name: kind, Kind: "geodata", Source: "http", Automatic: true}
-		data, err := p.loadGeodata(ctx, &asset, file)
-		if err == nil && kind != "asn" {
-			data, err = rulesdata.SubsetDAT(data, codes)
-		}
-		if err != nil {
-			return nil, "", nil, assetError(asset, err)
-		}
-		geodata[kind] = data
-		resources[resource.Hash(data)] = data
-		p.assets = append(p.assets, asset)
+	geodata, err := p.prepareGeodata(ctx, selectors, nil, resources)
+	if err != nil {
+		return nil, "", nil, err
 	}
 	result := importer.ImportBundle(req, payloads, geodata)
 	if !result.Report.CanApply {
@@ -406,6 +410,9 @@ func (p *preparer) importSource(ctx context.Context, raw []byte, resources map[s
 	}
 	delete(document, "id")
 	document["schema-version"] = model.SchemaVersion
+	if hasOverlayGeodata {
+		pinGeodata(document, geodata)
+	}
 	return document, result.Report.Format, result.Report.Diagnostics, nil
 }
 
@@ -444,51 +451,22 @@ func (p *preparer) loadProvider(ctx context.Context, asset *Asset, definition im
 	}
 }
 
-func (p *preparer) loadGeodata(ctx context.Context, asset *Asset, file string) ([]byte, error) {
-	// Existing iOS versions kept one raw copy of each public geodata file.
-	// Adopt a recent copy when migrating an older installation.
-	key := asset.ID
-	if p.batch != nil && p.batch.Previous[key].Hash == "" && p.options.RefreshAsset != key {
-		path := filepath.Join(p.cache, file)
-		if info, err := os.Stat(path); err == nil && info.Size() <= maxAssetBytes && time.Since(info.ModTime()) < 7*24*time.Hour {
-			if data, err := os.ReadFile(path); err == nil && len(data) != 0 {
-				hash, err := p.fetcher.Blobs.Put(data)
-				if err == nil {
-					// A digest is required before adopting retained bytes.
-					p.batch.Entries[key] = subscription.Entry{Hash: hash, Checked: info.ModTime(), Next: info.ModTime().Add(7 * 24 * time.Hour)}
-					asset.UpdatedMS = info.ModTime().UnixMilli()
-					asset.NextMS = info.ModTime().Add(7 * 24 * time.Hour).UnixMilli()
-					return data, nil
-				}
-			}
-		}
-	}
-	return p.fetch(ctx, asset, geodataURL+file, nil, "", 7*24*3600, false, nil)
-}
-
 func (p *preparer) nativeAssets(ctx context.Context, document map[string]any, resources map[string][]byte) error {
-	for _, collection := range []string{"rule-sets", "geodata"} {
-		definitions, _ := document[collection].([]any)
-		for _, value := range definitions {
-			definition, _ := value.(map[string]any)
-			if err := p.definitionAsset(ctx, collection, definition, resources); err != nil {
-				return err
-			}
+	definitions, _ := document["rule-sets"].([]any)
+	for _, value := range definitions {
+		definition, _ := value.(map[string]any)
+		if err := p.ruleSetAsset(ctx, definition, resources); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// definitionAsset loads the resource that a rule-set or geodata definition
-// downloads or locks, stores its digest in the definition, and lists it.
-func (p *preparer) definitionAsset(ctx context.Context, collection string, definition map[string]any, resources map[string][]byte) error {
+// ruleSetAsset loads the resource a rule set downloads or locks and pins its digest.
+func (p *preparer) ruleSetAsset(ctx context.Context, definition map[string]any, resources map[string][]byte) error {
 	id, _ := definition["id"].(string)
 	hash, _ := definition["hash"].(string)
-	kind := collection
-	if collection == "rule-sets" {
-		kind = "rule"
-	}
-	asset := Asset{ID: collection + "/" + id, Name: id, Kind: kind, Source: "inline"}
+	asset := Asset{ID: "rule-sets/" + id, Name: id, Kind: "rule", Source: "inline"}
 	if id == "" {
 		return nil
 	}
@@ -521,21 +499,7 @@ func (p *preparer) definitionAsset(ctx context.Context, collection string, defin
 		}
 	} else {
 		asset.Source = "file"
-		if !resource.ValidHash(hash) {
-			return assetError(asset, errors.New("invalid resource digest"))
-		}
-		if p.fetcher != nil {
-			data, err = p.fetcher.Blobs.Read(hash)
-		}
-		if len(data) == 0 || err != nil {
-			data, err = subscription.ReadProviderFile(p.options.ProviderDirectory, filepath.Join("resources", "sha256", hash))
-		}
-		if err == nil && resource.Hash(data) != hash {
-			err = errors.New("resource digest mismatch")
-		}
-		if err == nil && p.fetcher != nil {
-			_, err = p.fetcher.Blobs.Put(data)
-		}
+		data, err = p.readLockedResource(hash)
 	}
 	if err != nil {
 		return assetError(asset, err)
@@ -545,6 +509,25 @@ func (p *preparer) definitionAsset(ctx context.Context, collection string, defin
 	resources[digest] = data
 	p.addAsset(asset)
 	return nil
+}
+
+func (p *preparer) readLockedResource(hash string) ([]byte, error) {
+	if !resource.ValidHash(hash) {
+		return nil, errors.New("invalid resource digest")
+	}
+	if p.fetcher != nil {
+		if data, err := p.fetcher.Blobs.Read(hash); err == nil && len(data) > 0 {
+			return data, nil
+		}
+	}
+	data, err := subscription.ReadProviderFile(p.options.ProviderDirectory, filepath.Join("resources", "sha256", hash))
+	if err == nil && resource.Hash(data) != hash {
+		err = errors.New("resource digest mismatch")
+	}
+	if err == nil && p.fetcher != nil {
+		_, err = p.fetcher.Blobs.Put(data)
+	}
+	return data, err
 }
 
 // addAsset lists an asset, replacing an earlier entry with the same ID.
@@ -583,9 +566,8 @@ func (p *preparer) fetch(ctx context.Context, asset *Asset, address string, head
 	old := p.batch.Previous[key]
 	force = force || p.options.RefreshAsset == asset.ID
 	same := old.Request == subscription.RequestDigest(address, headers)
-	migrated := old.Request == "" && strings.HasPrefix(asset.ID, "geodata/")
-	retain := p.options.RefreshAsset != "" || !asset.Automatic && same || migrated && time.Now().Before(old.Next)
-	if !force && (same || migrated || old.Fallback) && retain && old.Hash != "" {
+	retain := p.options.RefreshAsset != "" || !asset.Automatic && same
+	if !force && (same || old.Fallback) && retain && old.Hash != "" {
 		if data, err := p.fetcher.Blobs.Read(old.Hash); err == nil {
 			p.batch.Entries[key] = old
 			setAssetTimes(asset, old)
