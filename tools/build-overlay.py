@@ -112,8 +112,49 @@ def main():
     trojan = trojan.replace('n, err := conn.Read(key[:])', 'n, err := io.ReadFull(conn, key[:])', 1)
     patched = output / 'trojan-service-overlay.go.txt'
     patched.write_text(trojan)
+    extra_overlays.update(ios_cpu_features(output, module_env))
     target.write_text(json.dumps({'Replace': {str(source): str(REPLACEMENT), str(copy / TROJAN_FILE): str(patched), **extra_overlays}}) + '\n')
     print(target)
+
+
+IOS_CPU_CONSTRAINT = '//go:build arm64 && !linux && !freebsd && !android && (!darwin || ios) && !openbsd && !windows\n'
+IOS_CPU_SOURCE = """//go:build arm64 && ios
+
+package cpu
+
+// iOS does not let user space read CPU feature registers or sysctl. The
+// supported iOS releases run only on A12 or newer chips, which implement
+// ARMv8.3 with these extensions, so hardware AES-GCM and SHA are safe.
+func osInit() {
+	ARM64.HasAES = true
+	ARM64.HasPMULL = true
+	ARM64.HasSHA1 = true
+	ARM64.HasSHA2 = true
+	ARM64.HasCRC32 = true
+	ARM64.HasATOMICS = true
+}
+"""
+
+
+def ios_cpu_features(output, env):
+    """Report the CPU features every supported iPhone has to the Go runtime.
+
+    Without this, Go assumes none on iOS and runs AES-GCM in software.
+    """
+    goroot = Path(subprocess.check_output(['go', 'env', 'GOROOT'], cwd=ROOT, env=env, text=True).strip())
+    cpu = goroot / 'src/internal/cpu'
+    other = cpu / 'cpu_arm64_other.go'
+    source = other.read_text()
+    if source.count(IOS_CPU_CONSTRAINT) != 1:
+        if (cpu / 'cpu_arm64_ios.go').exists():
+            return {}  # This Go release detects iOS CPU features itself.
+        raise SystemExit('Review the iOS CPU feature overlay for this Go release')
+    patches = output / 'upstream-patches'
+    patched_other = patches / 'go-internal-cpu-cpu_arm64_other.go.txt'
+    patched_other.write_text(source.replace(IOS_CPU_CONSTRAINT, IOS_CPU_CONSTRAINT.replace('(!darwin || ios)', '!darwin'), 1))
+    ios = patches / 'go-internal-cpu-cpu_arm64_ios.go.txt'
+    ios.write_text(IOS_CPU_SOURCE)
+    return {str(other): str(patched_other), str(cpu / 'cpu_arm64_ios.go'): str(ios)}
 
 
 if __name__ == '__main__':
