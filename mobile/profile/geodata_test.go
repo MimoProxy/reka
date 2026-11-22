@@ -549,3 +549,30 @@ func TestPrepareFileResolvesSourceHostsThroughSystemResolver(t *testing.T) {
 		t.Fatalf("named source host was not resolved: %v", err)
 	}
 }
+
+func TestPrepareOverlayRuleSetContentsSelectGeodata(t *testing.T) {
+	for name, raw := range map[string]string{
+		"clash":  "rules: ['MATCH,DIRECT']\n",
+		"native": "schema-version: 1\nrules: [{id: final, match: {all: true}, outbound: direct}]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			server, options := newGeodataFixture(t)
+			server.bodies["/rules/service.yaml"] = []byte("payload:\n  - DOMAIN-SUFFIX,service.test\n  - IP-ASN,13335\n")
+			options.Overlay = json.RawMessage(`{"schema-version":1,"patches":[
+				{"op":"insert","path":"/rule-sets","value":{"id":"service","behavior":"classical","format":"yaml","download":{"url":"` + geodataFixtureHost + `/rules/service.yaml","interval":86400}}},
+				{"op":"insert","path":"/rules","before":"#0","value":{"id":"service-rule","match":{"rule-set":"service"},"outbound":"reject"}}
+			]}`)
+			bundle := mustPrepareGeodata(t, raw, t.TempDir(), options, server)
+			for _, status := range bundle.Summary.Patches {
+				if !status.Applied {
+					t.Fatalf("patch %d not applied: %s", status.Index, status.Reason)
+				}
+			}
+			if server.requests["/asn.mmdb"] != 1 {
+				t.Fatalf("ASN data was not loaded for the added rule set: %v", server.requests)
+			}
+			assertRoute(t, bundle, "api.service.test", "reject")
+			assertIPRoutes(t, bundle, map[string]string{"192.0.2.7": "reject", "198.51.100.3": "direct"})
+		})
+	}
+}
