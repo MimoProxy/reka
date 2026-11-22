@@ -28,7 +28,7 @@ const (
 	maxMTU     = 4064
 	MaxBatch   = 64
 	queueSize  = 1024
-	maxTCP     = 64
+	maxTCP     = 128
 	maxUDP     = 128
 	eventRows  = 64
 	eventBytes = 96 << 10
