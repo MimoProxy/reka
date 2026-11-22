@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/router"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -15,6 +16,33 @@ type wireField struct {
 	t protowire.Type
 	b []byte
 	v uint64
+}
+
+// SubsetDatabase returns a DAT containing the requested geodata selectors.
+// ASN and country MMDB networks are encoded as GeoIP DAT records.
+func SubsetDatabase(kind string, data []byte, selectors []string) ([]byte, error) {
+	if len(data) == 0 || len(data) > resource.MaxSize {
+		return nil, errors.New("database size outside limit")
+	}
+	switch kind {
+	case "asn":
+		codes := make([]string, 0, len(selectors))
+		for _, selector := range selectors {
+			code, err := asnCode(selector)
+			if err != nil {
+				return nil, err
+			}
+			codes = append(codes, code)
+		}
+		selectors = codes
+	case "geoip", "geosite":
+	default:
+		return nil, errors.New("unsupported database kind")
+	}
+	if GeodataFormat(kind, data) == "mmdb" {
+		return subsetMMDB(kind, data, selectors)
+	}
+	return SubsetDAT(data, selectors)
 }
 
 // SubsetDAT retains the country/category records required by a profile. A
@@ -129,7 +157,7 @@ func decodeGeo(behavior, selector string, data []byte) ([]router.RuleSpec, error
 			continue
 		}
 		found = true
-		if behavior == "geoip" {
+		if behavior != "geosite" {
 			if len(names) != 1 {
 				return nil, errors.New("GeoIP attributes unsupported")
 			}

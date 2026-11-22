@@ -55,7 +55,7 @@ func (p *preparer) overlayAssets(ctx context.Context, document map[string]any, p
 				continue // The compiler reports the invalid value.
 			}
 			before := definition["hash"]
-			if err := p.definitionAsset(ctx, "rule-sets", definition, resources); err != nil {
+			if err := p.ruleSetAsset(ctx, definition, resources); err != nil {
 				return nil, false, err
 			}
 			if definition["hash"] != before {
@@ -75,7 +75,7 @@ func (p *preparer) overlayAssets(ctx context.Context, document map[string]any, p
 			if !ok || downloadURL(edited) == "" || downloadURL(edited) == downloadURL(base) {
 				continue
 			}
-			if err := p.definitionAsset(ctx, "rule-sets", edited, resources); err != nil {
+			if err := p.ruleSetAsset(ctx, edited, resources); err != nil {
 				return nil, false, err
 			}
 			base["hash"] = edited["hash"]
