@@ -351,6 +351,39 @@ func (s geodataSelectors) collectOverlay(patches []model.Op) {
 	}
 }
 
+// collectOverlayRuleSets reads the geodata references in the contents of
+// classical rule sets that the overlay adds or replaces.
+func (s geodataSelectors) collectOverlayRuleSets(patches []model.Op, resources map[string][]byte) {
+	for _, patch := range patches {
+		path, err := model.SplitPath(patch.Path)
+		if err != nil || len(path) == 0 || path[0] != "rule-sets" ||
+			!(patch.Op == "insert" && len(path) == 1 || patch.Op == "set" && len(path) == 2) {
+			continue
+		}
+		var definition map[string]any
+		if json.Unmarshal(patch.Value, &definition) != nil {
+			continue
+		}
+		if behavior, _ := definition["behavior"].(string); behavior == "classical" {
+			s.collectClassical(definition, resources)
+		}
+	}
+}
+
+// merge adds the selectors of other and reports whether any was new.
+func (s geodataSelectors) merge(other geodataSelectors) bool {
+	added := false
+	for kind, codes := range other {
+		for _, code := range codes {
+			if !slices.Contains(s[kind], code) {
+				s[kind] = append(s[kind], code)
+				added = true
+			}
+		}
+	}
+	return added
+}
+
 func (s geodataSelectors) collectDocument(document map[string]any, resources map[string][]byte) {
 	for _, field := range geodataSections {
 		if field != "dns" {

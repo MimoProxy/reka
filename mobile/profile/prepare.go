@@ -238,6 +238,22 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 			}
 			patches = updated
 		}
+		// Rule sets the overlay adds or changes can reference geodata in
+		// their downloaded contents, which were unknown until now.
+		added := make(geodataSelectors)
+		added.collectOverlayRuleSets(patches, bundle.Resources)
+		if native == nil {
+			added.collectDocument(document, bundle.Resources)
+			if selectors.merge(added) {
+				geodata, err := p.prepareGeodata(ctx, selectors, nil, bundle.Resources)
+				if err != nil {
+					return nil, err
+				}
+				pinGeodata(document, geodata)
+			}
+		} else {
+			selectors.merge(added)
+		}
 	}
 	if native != nil {
 		selectors.collectDocument(document, bundle.Resources)
