@@ -205,6 +205,18 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		}
 	}
 
+	if len(patches) > 0 {
+		updated, changed, err := p.overlayAssets(ctx, document, patches, bundle.Resources)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			if bundle.Overlay, err = marshalOverlay(updated); err != nil {
+				return nil, errors.New("could not encode overlay")
+			}
+			patches = updated
+		}
+	}
 	normalize(document)
 	data, err := json.Marshal(document)
 	if err != nil {
@@ -459,71 +471,102 @@ func (p *preparer) nativeAssets(ctx context.Context, document map[string]any, re
 		definitions, _ := document[collection].([]any)
 		for _, value := range definitions {
 			definition, _ := value.(map[string]any)
-			id, _ := definition["id"].(string)
-			hash, _ := definition["hash"].(string)
-			kind := collection
-			if collection == "rule-sets" {
-				kind = "rule"
+			if err := p.definitionAsset(ctx, collection, definition, resources); err != nil {
+				return err
 			}
-			asset := Asset{ID: collection + "/" + id, Name: id, Kind: kind, Source: "inline"}
-			if id == "" {
-				continue
-			}
-			download, _ := definition["download"].(map[string]any)
-			address, _ := download["url"].(string)
-			if address == "" && hash == "" {
-				p.assets = append(p.assets, asset)
-				continue
-			}
-			var data []byte
-			var err error
-			if address != "" {
-				asset.Source = "http"
-				asset.Automatic, _ = download["automatic"].(bool)
-				interval, _ := download["interval"].(int)
-				if name, ref := secret.ParseRef(address); ref {
-					if p.options.Secrets == nil || secret.ValidName(name) != nil {
-						return assetError(asset, errors.New("resource credential unavailable"))
-					}
-					address, err = p.options.Secrets.Get(name)
-					if err != nil {
-						return assetError(asset, errors.New("resource credential unavailable"))
-					}
-					data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
-					if err != nil {
-						return assetError(asset, errors.New("protected resource download failed"))
-					}
-				} else {
-					data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
-				}
-			} else {
-				asset.Source = "file"
-				if !resource.ValidHash(hash) {
-					return assetError(asset, errors.New("invalid resource digest"))
-				}
-				if p.fetcher != nil {
-					data, err = p.fetcher.Blobs.Read(hash)
-				}
-				if len(data) == 0 || err != nil {
-					data, err = subscription.ReadProviderFile(p.options.ProviderDirectory, filepath.Join("resources", "sha256", hash))
-				}
-				if err == nil && resource.Hash(data) != hash {
-					err = errors.New("resource digest mismatch")
-				}
-				if err == nil && p.fetcher != nil {
-					_, err = p.fetcher.Blobs.Put(data)
-				}
-			}
-			if err != nil {
-				return assetError(asset, err)
-			}
-			digest := resource.Hash(data)
-			definition["hash"] = digest
-			resources[digest] = data
-			p.assets = append(p.assets, asset)
 		}
 	}
 	return nil
+}
+
+// definitionAsset loads the resource that a rule-set or geodata definition
+// downloads or locks, stores its digest in the definition, and lists it.
+func (p *preparer) definitionAsset(ctx context.Context, collection string, definition map[string]any, resources map[string][]byte) error {
+	id, _ := definition["id"].(string)
+	hash, _ := definition["hash"].(string)
+	kind := collection
+	if collection == "rule-sets" {
+		kind = "rule"
+	}
+	asset := Asset{ID: collection + "/" + id, Name: id, Kind: kind, Source: "inline"}
+	if id == "" {
+		return nil
+	}
+	download, _ := definition["download"].(map[string]any)
+	address, _ := download["url"].(string)
+	if address == "" && hash == "" {
+		p.addAsset(asset)
+		return nil
+	}
+	var data []byte
+	var err error
+	if address != "" {
+		asset.Source = "http"
+		asset.Automatic, _ = download["automatic"].(bool)
+		interval := intervalSeconds(download["interval"])
+		if name, ref := secret.ParseRef(address); ref {
+			if p.options.Secrets == nil || secret.ValidName(name) != nil {
+				return assetError(asset, errors.New("resource credential unavailable"))
+			}
+			address, err = p.options.Secrets.Get(name)
+			if err != nil {
+				return assetError(asset, errors.New("resource credential unavailable"))
+			}
+			data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
+			if err != nil {
+				return assetError(asset, errors.New("protected resource download failed"))
+			}
+		} else {
+			data, err = p.fetch(ctx, &asset, address, nil, "", interval, false, nil)
+		}
+	} else {
+		asset.Source = "file"
+		if !resource.ValidHash(hash) {
+			return assetError(asset, errors.New("invalid resource digest"))
+		}
+		if p.fetcher != nil {
+			data, err = p.fetcher.Blobs.Read(hash)
+		}
+		if len(data) == 0 || err != nil {
+			data, err = subscription.ReadProviderFile(p.options.ProviderDirectory, filepath.Join("resources", "sha256", hash))
+		}
+		if err == nil && resource.Hash(data) != hash {
+			err = errors.New("resource digest mismatch")
+		}
+		if err == nil && p.fetcher != nil {
+			_, err = p.fetcher.Blobs.Put(data)
+		}
+	}
+	if err != nil {
+		return assetError(asset, err)
+	}
+	digest := resource.Hash(data)
+	definition["hash"] = digest
+	resources[digest] = data
+	p.addAsset(asset)
+	return nil
+}
+
+// addAsset lists an asset, replacing an earlier entry with the same ID.
+func (p *preparer) addAsset(asset Asset) {
+	if i := slices.IndexFunc(p.assets, func(a Asset) bool { return a.ID == asset.ID }); i >= 0 {
+		p.assets[i] = asset
+		return
+	}
+	p.assets = append(p.assets, asset)
+}
+
+func intervalSeconds(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	}
+	return 0
 }
 
 func (p *preparer) fetch(ctx context.Context, asset *Asset, address string, headers http.Header, proxy string, interval int, force bool, fallback []byte) ([]byte, error) {
