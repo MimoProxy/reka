@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -528,5 +529,23 @@ func TestPrepareGeodataOutlastsClientTimeout(t *testing.T) {
 	client := &http.Client{Transport: slowTransport{server: server, delay: 200 * time.Millisecond}, Timeout: 50 * time.Millisecond}
 	if err := prepareFile(t.Context(), input, output, t.TempDir(), options, client); err != nil {
 		t.Fatalf("slow geodata download failed: %v", err)
+	}
+}
+
+func TestPrepareFileResolvesSourceHostsThroughSystemResolver(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(fixtureGeodata(t, "geosite.dat"))
+	}))
+	defer server.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	input, output := filepath.Join(dir, "profile.yaml"), filepath.Join(dir, "bundle.json")
+	writeFixtureFile(t, input, []byte(geositeProfile))
+	options := PrepareOptions{GeodataSources: map[string]string{"geosite": "http://localhost:" + port + "/geosite.dat"}}
+	if err := PrepareFileWithOptions(t.Context(), input, output, t.TempDir(), options); err != nil {
+		t.Fatalf("named source host was not resolved: %v", err)
 	}
 }
