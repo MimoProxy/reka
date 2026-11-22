@@ -378,6 +378,12 @@ func TestSSPluginsRealTCPNativeUDPAndUOT(t *testing.T) {
 			defer c.Close()
 			c.SetDeadline(time.Now().Add(5 * time.Second))
 			payload := bytes.Repeat([]byte("plugin"), 128<<10)
+			if s.KCP != nil && s.KCP.Crypt == "3des" {
+				// Triple DES runs in pure Go and is several times slower than the
+				// other ciphers, enough to exceed the deadline under the race
+				// detector on small CI runners. Interop needs far less data.
+				payload = payload[:64<<10]
+			}
 			done := make(chan error, 1)
 			go func() { _, err := c.Write(payload); done <- err }()
 			reply := make([]byte, len(payload))
