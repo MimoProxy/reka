@@ -593,24 +593,31 @@ func (c *compiler) outbounds(eff *Effective) {
 		}
 	}
 	for i := range eff.Outbounds {
-		identity := eff.Outbounds[i]
-		identity.Name = "" // display metadata must not rebuild a live outbound
-		if identity.Multiplex != nil {
-			m := *identity.Multiplex
-			m.Statistic = false
-			identity.Multiplex = &m
+		out := &eff.Outbounds[i]
+		if out.Dialer == nil || out.Dialer.Proxy == "" {
+			out.Fingerprint = outboundFingerprint(*out)
 		}
-		plugin, _ := json.Marshal(identity.Plugin)
-		params, _ := json.Marshal(identity.Protocol)
-		transport, _ := json.Marshal(identity.Transport)
-		headers, _ := json.Marshal(identity.Headers)
-		tlsSecrets := ""
-		if identity.TLS != nil {
-			carrier, _ := json.Marshal(identity.TLS.Carrier)
-			tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey + "\x00" + string(carrier)
-		}
-		eff.Outbounds[i].Fingerprint = fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(plugin), string(params), string(transport), string(headers), tlsSecrets)
 	}
+}
+
+func outboundFingerprint(identity Outbound) string {
+	identity.Name = "" // display metadata must not rebuild a live outbound
+	identity.Fingerprint = ""
+	if identity.Multiplex != nil {
+		m := *identity.Multiplex
+		m.Statistic = false
+		identity.Multiplex = &m
+	}
+	plugin, _ := json.Marshal(identity.Plugin)
+	params, _ := json.Marshal(identity.Protocol)
+	transport, _ := json.Marshal(identity.Transport)
+	headers, _ := json.Marshal(identity.Headers)
+	tlsSecrets := ""
+	if identity.TLS != nil {
+		carrier, _ := json.Marshal(identity.TLS.Carrier)
+		tlsSecrets = identity.TLS.Certificate + "\x00" + identity.TLS.PrivateKey + "\x00" + string(carrier)
+	}
+	return fingerprint(identity, identity.Username, identity.Password, identity.UUID, identity.Encryption, string(plugin), string(params), string(transport), string(headers), tlsSecrets)
 }
 
 func (c *compiler) hasErrorAt(path string) bool {

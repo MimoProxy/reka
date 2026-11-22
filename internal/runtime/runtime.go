@@ -41,6 +41,9 @@ type Options struct {
 	// MaxRetiring rejects a commit that would leave more resources
 	// draining than this. Zero means no limit.
 	MaxRetiring int
+	// AllowLargeReplacement applies MaxRetiring to the existing backlog
+	// when a single replacement batch exceeds that limit.
+	AllowLargeReplacement bool
 	// OnClosed, if set, is called after each retired resource is closed.
 	// forced is the number of leases still held when it was closed.
 	OnClosed func(id string, generation uint64, forced int64, err error)
@@ -139,14 +142,23 @@ func (r *Runtime[R]) CommitValue(next map[string]R, value any) (uint64, error) {
 	return r.commit(next, value, true)
 }
 
+// RetiringLimit returns the limit for a batch that retires replacing resources.
+func (r *Runtime[R]) RetiringLimit(replacing int) int {
+	limit := r.opts.MaxRetiring
+	if r.opts.AllowLargeReplacement && limit > 0 && replacing > limit {
+		limit += replacing
+	}
+	return limit
+}
+
 // WouldRetire reports how many resources committing next would retire, and
-// whether that stays within MaxRetiring. It lets a caller refuse a commit
+// whether that stays within the retirement limit. It lets a caller refuse a commit
 // before doing expensive preparation; Commit checks again.
 func (r *Runtime[R]) WouldRetire(next map[string]R) (int, bool) {
 	r.commitMu.Lock()
 	defer r.commitMu.Unlock()
 	n := len(r.dropped(r.current.Load(), next))
-	max := r.opts.MaxRetiring
+	max := r.RetiringLimit(n)
 	return n, max <= 0 || int(r.retiring.Load())+n <= max
 }
 
@@ -185,7 +197,7 @@ func (r *Runtime[R]) commit(next map[string]R, value any, setValue bool) (uint64
 	if !setValue {
 		value = old.Value
 	}
-	if max := r.opts.MaxRetiring; max > 0 && int(r.retiring.Load())+len(drop) > max {
+	if max := r.RetiringLimit(len(drop)); max > 0 && int(r.retiring.Load())+len(drop) > max {
 		return old.Generation, ErrTooManyRetiring
 	}
 

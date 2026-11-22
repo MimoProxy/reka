@@ -131,12 +131,16 @@ func (c *compiler) dns(eff *Effective) {
 	}
 	eff.DNS = cfg
 	eff.DNSMatches = matchers
+	eff.DNSFingerprint = eff.dnsFingerprint()
+}
+
+func (e *Effective) dnsFingerprint() string {
 	hashes := map[string]string{}
-	for name, r := range matchers {
+	for name, r := range e.DNSMatches {
 		hashes[name] = fingerprint(r.Rules().Rule(0))
 	}
-	eff.DNSFingerprint = fingerprint(struct {
+	return fingerprint(struct {
 		Config  *RD.Config
 		Matches map[string]string
-	}{cfg, hashes})
+	}{e.DNS, hashes})
 }

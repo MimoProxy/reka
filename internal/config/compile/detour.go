@@ -1,6 +1,7 @@
 package compile
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -8,36 +9,47 @@ import (
 	"github.com/MimoProxy/reka/internal/router"
 )
 
-// detours validates the combined outbound/group dependency graph and folds
-// every possible parent transport into a child's replacement fingerprint.
 func (c *compiler) detours(e *Effective) {
-	hasDetour := false
-	nodes := map[string]*Outbound{}
-	groups := map[string]router.Group{}
-	for i := range e.Outbounds {
-		o := &e.Outbounds[i]
-		nodes[o.ID] = o
-		hasDetour = hasDetour || o.Dialer != nil && o.Dialer.Proxy != ""
+	for _, o := range e.Outbounds {
 		if d := o.Dialer; d != nil && d.Proxy != "" && (d.Interface != "" || d.RoutingMark != 0 || d.IPVersion != "" || d.TFO || d.MPTCP) {
 			c.warnf(model.DocProfile, "/outbounds/"+o.ID+"/dialer", "outbound.detour-options", "dialer proxy uses its parent's physical socket options; set interface, routing mark, IP version, TFO and MPTCP on the parent")
 		}
 	}
-	if !hasDetour || c.diags.HasErrors() {
-		return
+	if !c.diags.HasErrors() {
+		for _, message := range e.fingerprintDetours() {
+			c.errorf(model.DocProfile, "/outbounds", "outbound.detour", "%s", message)
+		}
 	}
+}
+
+// fingerprintDetours validates the combined outbound/group dependency graph
+// and folds every possible parent transport into a child's fingerprint.
+func (e *Effective) fingerprintDetours() []string {
+	hasDetour := false
+	nodes := map[string]*Outbound{}
+	for i := range e.Outbounds {
+		o := &e.Outbounds[i]
+		nodes[o.ID] = o
+		hasDetour = hasDetour || o.Dialer != nil && o.Dialer.Proxy != ""
+	}
+	if !hasDetour {
+		return nil
+	}
+	groups := map[string]router.Group{}
 	for _, g := range e.Groups {
 		groups[g.ID] = g
 	}
 	state := map[string]int{}
 	hashes := map[string]string{}
 	stack := []string{}
+	var problems []string
 	var visit func(string) string
 	visit = func(id string) string {
 		if state[id] == 2 {
 			return hashes[id]
 		}
 		if state[id] == 1 {
-			c.errorf(model.DocProfile, "/outbounds", "outbound.detour", "cyclic dialer dependency: %s", strings.Join(append(stack, id), " -> "))
+			problems = append(problems, "cyclic dialer dependency: "+strings.Join(append(stack, id), " -> "))
 			return ""
 		}
 		state[id] = 1
@@ -56,10 +68,10 @@ func (c *compiler) detours(e *Effective) {
 			hashes[id] = o.Fingerprint
 			if o.Dialer != nil && o.Dialer.Proxy != "" {
 				parent := visit(o.Dialer.Proxy)
-				hashes[id] = fingerprint(o.Fingerprint, parent)
+				hashes[id] = fingerprint(outboundFingerprint(*o), parent)
 			}
 		} else {
-			c.errorf(model.DocProfile, "/outbounds", "outbound.detour", "dialer target %q is unavailable", id)
+			problems = append(problems, fmt.Sprintf("dialer target %q is unavailable", id))
 		}
 		state[id] = 2
 		return hashes[id]
@@ -69,14 +81,15 @@ func (c *compiler) detours(e *Effective) {
 			visit(o.ID)
 		}
 	}
-	if c.diags.HasErrors() {
-		return
+	if len(problems) > 0 {
+		return problems
 	}
 	for _, o := range nodes {
 		if o.Dialer != nil && o.Dialer.Proxy != "" {
 			o.Fingerprint = hashes[o.ID]
 		}
 	}
+	return nil
 }
 
 // DetourLeaves returns the direct possible parents of one detour (all group

@@ -22,18 +22,20 @@ import (
 const ProfileAddress4 = "172.27.255.1/30"
 
 type profileSession struct {
-	mu      sync.Mutex
-	engine  *generation.Engine
-	base    *compile.Effective
-	summary profile.Summary
-	rev     uint64
-	trace   *routeTrace
-	sets    map[string]*router.RuleSet
+	mu        sync.Mutex
+	engine    *generation.Engine
+	base      *compile.Effective
+	summary   profile.Summary
+	rev       uint64
+	ipVersion string
+	trace     *routeTrace
+	sets      map[string]*router.RuleSet
 }
 
 type ProfileStatus struct {
 	Mode      string        `json:"mode"`
 	BlockQUIC string        `json:"blockQuic,omitempty"`
+	IPVersion string        `json:"ipVersion,omitempty"`
 	Groups    []GroupStatus `json:"groups"`
 	Routes    []RouteHit    `json:"routes,omitempty"`
 }
@@ -185,6 +187,7 @@ func (p *profileSession) publish(base *compile.Effective, summary profile.Summar
 	}
 	p.rev++
 	p.base, p.summary = base, summary
+	p.ipVersion = controls.IPVersion
 	return nil
 }
 
@@ -246,7 +249,12 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 		return nil, err
 	}
 	eff, _ := p.engine.Effective()
-	status := &ProfileStatus{Mode: eff.Routing.Mode, BlockQUIC: eff.Routing.BlockQUIC, Groups: make([]GroupStatus, 0, len(eff.Groups))}
+	status := &ProfileStatus{
+		Mode:      eff.Routing.Mode,
+		BlockQUIC: eff.Routing.BlockQUIC,
+		IPVersion: p.ipVersion,
+		Groups:    make([]GroupStatus, 0, len(eff.Groups)),
+	}
 	observed := p.engine.GroupStatus()
 	for _, group := range eff.Groups {
 		row := GroupStatus{ID: group.ID, Selected: group.Selected}

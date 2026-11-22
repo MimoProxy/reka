@@ -5,16 +5,20 @@ package packettunnel
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/packettunnellab"
 	"github.com/MimoProxy/reka/internal/router"
+	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/mobile/profile"
 	"github.com/miekg/dns"
 	"github.com/sagernet/gvisor/pkg/buffer"
@@ -59,6 +63,111 @@ func TestReplaceProfileKeepsPacketFlowAndRejectsInvalidUpdate(t *testing.T) {
 	}
 	if got := outbound(); got != "reject" {
 		t.Fatalf("replaced profile routed to %q", got)
+	}
+}
+
+func TestApplyIPVersionWhilePacketFlowIsActive(t *testing.T) {
+	snapshot := prepareSnapshot(t, `
+schema-version: 1
+outbounds:
+  - {id: node, type: shadowsocks, server: proxy.test, port: 443, method: aes-128-gcm, password: example}
+  - {id: detoured, type: direct, dialer: {proxy: hop}}
+groups: [{id: hop, type: select, members: [node, direct]}]
+rules: [{match: {all: true}, outbound: direct}]
+dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [192.0.2.53]}
+`)
+	session, err := StartProfile(snapshot, profile.Controls{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	link, engine := session.tunnel, session.profile.engine
+	query := new(dns.Msg).SetQuestion("target.test.", dns.TypeAAAA)
+	check := func(version string, answers int) {
+		t.Helper()
+		status, err := session.ProfileStatus()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.IPVersion != version {
+			t.Fatalf("reported IP version %q, want %q", status.IPVersion, version)
+		}
+		data, err := json.Marshal(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version == "" {
+			if bytes.Contains(data, []byte(`"ipVersion"`)) {
+				t.Fatal("status included an empty IP version")
+			}
+		} else if !bytes.Contains(data, []byte(`"ipVersion":`+strconv.Quote(version))) {
+			t.Fatal("status JSON is missing the IP version")
+		}
+		response, err := engine.ExchangeDNS(t.Context(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Rcode != dns.RcodeSuccess || len(response.Answer) != answers {
+			t.Fatalf("unexpected AAAA response: %v", response)
+		}
+		if session.tunnel != link || session.profile.engine != engine {
+			t.Fatal("controls rebuilt the packet tunnel")
+		}
+	}
+	check("", 1)
+	direct := engine.OutboundInstance("direct")
+	node := engine.OutboundInstance("node")
+	detoured := engine.OutboundInstance("detoured")
+	var controls profile.Controls
+	if err := json.Unmarshal([]byte(`{"ipVersion":"ipv4"}`), &controls); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.ApplyControls(controls); err != nil {
+		t.Fatal(err)
+	}
+	check("ipv4", 0)
+	if direct == engine.OutboundInstance("direct") || node == engine.OutboundInstance("node") || detoured == engine.OutboundInstance("detoured") {
+		t.Fatal("IP version change did not replace all affected outbounds")
+	}
+	detoured = engine.OutboundInstance("detoured")
+	if err := session.ApplyControls(controls); err != nil {
+		t.Fatal(err)
+	}
+	if detoured != engine.OutboundInstance("detoured") {
+		t.Fatal("the same IP version did not reuse the detoured outbound")
+	}
+	if err := session.ApplyControls(profile.Controls{IPVersion: "invalid"}); err == nil {
+		t.Fatal("accepted an invalid IP version")
+	}
+	check("ipv4", 0)
+	if err := session.ApplyControls(profile.Controls{}); err != nil {
+		t.Fatal(err)
+	}
+	check("", 1)
+}
+
+func TestApplyIPVersionReplacesLargeProfile(t *testing.T) {
+	session, err := StartProfile(prepareSnapshot(t, "schema-version: 1\n"), profile.Controls{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	var input strings.Builder
+	input.WriteString("schema-version: 1\noutbounds:\n")
+	for i := range generation.DefaultMaxRetiring {
+		fmt.Fprintf(&input, "  - {id: route-%d, type: direct}\n", i)
+	}
+	input.WriteString("rules: [{match: {all: true}, outbound: direct}]\n")
+	if err := session.ReplaceProfile(prepareSnapshot(t, input.String()), profile.Controls{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.ApplyControls(profile.Controls{IPVersion: "ipv4"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := session.ProfileStatus()
+	if err != nil || status.IPVersion != "ipv4" {
+		t.Fatalf("IP version update failed: %+v, %v", status, err)
 	}
 }
 
