@@ -232,7 +232,7 @@ func startPacketFlowDiagnosticsSession(t *testing.T, dns func(context.Context, *
 		session.cancel()
 		t.Fatal(err)
 	}
-	session.tunnel, err = session.backend.AttachPacketFlow(session.device, MTU, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), 0, 0, dns)
+	session.tunnel, err = session.backend.AttachPacketFlow(session.device, session.MTU(), netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), 0, 0, dns)
 	if err != nil {
 		_ = session.outbound.Close()
 		_ = session.backend.Close()

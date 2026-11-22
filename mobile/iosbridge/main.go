@@ -78,6 +78,14 @@ func RekaGoSetNetworkInterface(id C.uint64_t, name *C.char) {
 	}
 }
 
+//export RekaGoSetMTU
+func RekaGoSetMTU(mtu C.int32_t) C.int32_t {
+	if packettunnel.SetMTU(int(mtu)) {
+		return 1
+	}
+	return 0
+}
+
 //export RekaGoStart
 func RekaGoStart(data unsafe.Pointer, length C.size_t) C.uint64_t {
 	if data == nil || length == 0 || length > 4096 {
@@ -343,7 +351,7 @@ func lookup(id C.uint64_t) *packettunnel.Session {
 //export RekaGoSubmit
 func RekaGoSubmit(id C.uint64_t, data unsafe.Pointer, length C.size_t) C.int32_t {
 	session := lookup(id)
-	if session == nil || data == nil || length == 0 || length > packettunnel.MTU {
+	if session == nil || data == nil || length == 0 || length > C.size_t(session.MTU()) {
 		return 0
 	}
 	if session.Submit(unsafe.Slice((*byte)(data), int(length))) {
@@ -358,7 +366,7 @@ func RekaGoRead(id C.uint64_t, data unsafe.Pointer, lengths *C.uint16_t, count C
 	if session == nil || data == nil || lengths == nil || count <= 0 || count > packettunnel.MaxBatch {
 		return 0
 	}
-	output := unsafe.Slice((*byte)(data), int(count)*packettunnel.MTU)
+	output := unsafe.Slice((*byte)(data), int(count)*session.MTU())
 	sizes := unsafe.Slice((*uint16)(unsafe.Pointer(lengths)), int(count))
 	return C.int32_t(session.ReadBatch(output, sizes))
 }

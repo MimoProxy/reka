@@ -104,7 +104,7 @@ func StartProfile(snapshot []byte, controls profile.Controls, trace bool) (*Sess
 	if err != nil {
 		return nil, err
 	}
-	tunnel, err := s.profile.engine.AttachPacketFlow(s.device, MTU, netip.MustParsePrefix(ProfileAddress4), netip.MustParsePrefix(Address6), maxTCP, maxUDP)
+	tunnel, err := s.profile.engine.AttachPacketFlow(s.device, s.mtu, netip.MustParsePrefix(ProfileAddress4), netip.MustParsePrefix(Address6), maxTCP, maxUDP)
 	if err != nil {
 		s.Close()
 		return nil, errors.New("could not attach profile packet flow")

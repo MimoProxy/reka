@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
@@ -23,7 +24,8 @@ import (
 )
 
 const (
-	MTU        = 1280
+	DefaultMTU = 1280
+	maxMTU     = 4064
 	MaxBatch   = 16
 	queueSize  = 64
 	maxTCP     = 64
@@ -33,6 +35,22 @@ const (
 	Address4   = "198.18.0.1/30"
 	Address6   = "fd83:7265:6b61::1/64"
 )
+
+var configuredMTU atomic.Int32
+
+func init() {
+	configuredMTU.Store(DefaultMTU)
+}
+
+// SetMTU sets the packet MTU for future sessions. It reports whether mtu is
+// in the supported range from 1280 to 4064 bytes.
+func SetMTU(mtu int) bool {
+	if mtu < DefaultMTU || mtu > maxMTU {
+		return false
+	}
+	configuredMTU.Store(int32(mtu))
+	return true
+}
 
 type Node struct {
 	Server   netip.Addr `json:"server"`
@@ -44,6 +62,7 @@ type Node struct {
 type Session struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
+	mtu      int
 	input    sync.Mutex
 	close    sync.Once
 	device   *packetDevice
@@ -57,11 +76,12 @@ type Session struct {
 }
 
 func newSession() *Session {
+	mtu := int(configuredMTU.Load())
 	ctx, cancel := context.WithCancel(context.Background())
 	events := history.NewBounded(eventRows, eventBytes, history.DNS, history.Logs, history.Connections, history.Requests)
 	logger := slog.New(tunnelLogHandler{events: events})
 	return &Session{
-		ctx: ctx, cancel: cancel, device: &packetDevice{endpoint: channel.New(queueSize, MTU, "")},
+		ctx: ctx, cancel: cancel, mtu: mtu, device: &packetDevice{endpoint: channel.New(queueSize, uint32(mtu), "")},
 		events: events, logger: logger, ranking: trafficRanking{sinceMS: time.Now().UnixMilli()},
 	}
 }
@@ -87,7 +107,7 @@ func Start(node Node) (*Session, error) {
 	}
 	backend.SetRoute(sagernet.Fixed(outbound))
 	tunnel, err := backend.AttachPacketFlow(
-		s.device, MTU, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), maxTCP, maxUDP, nil,
+		s.device, s.mtu, netip.MustParsePrefix(Address4), netip.MustParsePrefix(Address6), maxTCP, maxUDP, nil,
 	)
 	if err != nil {
 		s.cancel()
@@ -100,10 +120,13 @@ func Start(node Node) (*Session, error) {
 	return s, nil
 }
 
+// MTU returns the packet size limit and read slot size for this session.
+func (s *Session) MTU() int { return s.mtu }
+
 // Submit copies one host packet into the stack before returning. The host may
 // reuse its buffer immediately.
 func (s *Session) Submit(data []byte) bool {
-	protocol, ok := packetProtocol(data)
+	protocol, ok := packetProtocol(data, s.mtu)
 	if !ok {
 		return false
 	}
@@ -119,9 +142,10 @@ func (s *Session) Submit(data []byte) bool {
 }
 
 // ReadBatch blocks for the first packet, then drains the available packets.
-// The host provides one MTU-sized slot per length. Zero indicates shutdown.
+// The host provides one slot of s.MTU() bytes per length. Zero indicates shutdown.
 func (s *Session) ReadBatch(output []byte, lengths []uint16) int {
-	if len(lengths) == 0 || len(lengths) > MaxBatch || len(output) < len(lengths)*MTU {
+	mtu := s.mtu
+	if len(lengths) == 0 || len(lengths) > MaxBatch || len(output) < len(lengths)*mtu {
 		return 0
 	}
 	packet := s.device.endpoint.ReadContext(s.ctx)
@@ -132,8 +156,9 @@ func (s *Session) ReadBatch(output []byte, lengths []uint16) int {
 			}
 			return written
 		}
-		if packet.Size() <= MTU {
-			lengths[written] = uint16(copyPacket(output[written*MTU:], packet))
+		if packet.Size() <= mtu {
+			offset := written * mtu
+			lengths[written] = uint16(copyPacket(output[offset:offset+mtu], packet))
 			written++
 		}
 		packet.DecRef()
@@ -180,8 +205,8 @@ func (s *Session) Close() {
 	})
 }
 
-func packetProtocol(data []byte) (tcpip.NetworkProtocolNumber, bool) {
-	if len(data) == 0 || len(data) > MTU {
+func packetProtocol(data []byte, mtu int) (tcpip.NetworkProtocolNumber, bool) {
+	if len(data) == 0 || len(data) > mtu {
 		return 0, false
 	}
 	switch data[0] >> 4 {

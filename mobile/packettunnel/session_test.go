@@ -24,6 +24,7 @@ import (
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/adapters/gonet"
+	"github.com/sagernet/gvisor/pkg/tcpip/header"
 	"github.com/sagernet/gvisor/pkg/tcpip/link/channel"
 	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv4"
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
@@ -185,6 +186,9 @@ func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
+	if got := session.MTU(); got != 1280 {
+		t.Fatalf("default MTU = %d, want 1280", got)
+	}
 	client, ctx := attachTestClient(t, session, "198.18.0.2")
 
 	target := func(ip string, port uint16) tcpip.FullAddress {
@@ -249,6 +253,95 @@ func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
 	upload, download := session.Traffic()
 	if upload < uint64(len(tcpData)+len(udpData)) || download < uint64(len(tcpData)+len(udpData)) {
 		t.Fatalf("missing tunnel traffic: upload %d download %d", upload, download)
+	}
+}
+
+func TestPacketFlowConfiguredMTU(t *testing.T) {
+	const mtu, nextMTU = 4064, 1500
+	t.Cleanup(func() {
+		if !SetMTU(DefaultMTU) {
+			t.Error("could not restore default MTU")
+		}
+	})
+	if !SetMTU(mtu) {
+		t.Fatalf("rejected supported MTU %d", mtu)
+	}
+	for _, invalid := range []int{-1, 0, 1279, 4065} {
+		if SetMTU(invalid) {
+			t.Fatalf("accepted out-of-range MTU %d", invalid)
+		}
+	}
+
+	snapshot := prepareSnapshot(t, "rules: ['MATCH,REJECT']\n")
+	controls := profile.Controls{}
+	session, err := StartProfile(snapshot, controls, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if got := session.MTU(); got != mtu {
+		t.Fatalf("configured MTU = %d, want %d", got, mtu)
+	}
+	if !SetMTU(nextMTU) {
+		t.Fatalf("rejected supported MTU %d", nextMTU)
+	}
+	if err := session.ReplaceProfile(snapshot, controls); err != nil {
+		t.Fatal(err)
+	}
+	if got := session.MTU(); got != mtu {
+		t.Fatalf("active session MTU = %d, want %d", got, mtu)
+	}
+	if got := session.device.endpoint.MTU(); got != mtu {
+		t.Fatalf("active link MTU = %d, want %d", got, mtu)
+	}
+	probe, err := StartProbeProfile(snapshot, controls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	if got := probe.MTU(); got != nextMTU {
+		t.Fatalf("new probe session MTU = %d, want %d", got, nextMTU)
+	}
+
+	makePacket := func(size int) []byte {
+		data := bytes.Repeat([]byte{byte(size)}, size)
+		header.IPv6(data).Encode(&header.IPv6Fields{
+			PayloadLength:     uint16(size - header.IPv6MinimumSize),
+			TransportProtocol: tcpip.TransportProtocolNumber(header.IPv6NoNextHeaderIdentifier),
+			HopLimit:          64,
+			SrcAddr:           tun.AddressFromAddr(netip.MustParseAddr("2001:db8::2")),
+			DstAddr:           tun.AddressFromAddr(netip.MustParseAddr("2001:db8::1")),
+		})
+		return data
+	}
+	small, large, oversized := makePacket(64), makePacket(mtu), makePacket(mtu+1)
+	if !session.Submit(large) {
+		t.Fatalf("Submit rejected a %d-byte packet", len(large))
+	}
+	if session.Submit(oversized) {
+		t.Fatalf("Submit accepted a %d-byte packet", len(oversized))
+	}
+	for _, data := range [][]byte{small, oversized, large} {
+		packet := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(data)})
+		_, err := session.device.WritePacket(packet)
+		packet.DecRef()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var lengths [2]uint16
+	if got := session.ReadBatch(make([]byte, len(lengths)*DefaultMTU), lengths[:]); got != 0 {
+		t.Fatalf("ReadBatch returned %d packets with undersized slots", got)
+	}
+	output := make([]byte, len(lengths)*mtu)
+	if got := session.ReadBatch(output, lengths[:]); got != len(lengths) {
+		t.Fatalf("ReadBatch returned %d packets, want %d", got, len(lengths))
+	}
+	for slot, want := range [][]byte{small, large} {
+		offset := slot * mtu
+		if n := int(lengths[slot]); n != len(want) || !bytes.Equal(output[offset:offset+len(want)], want) {
+			t.Fatalf("read slot %d: got %d bytes, want %d matching bytes", slot, n, len(want))
+		}
 	}
 }
 
@@ -317,7 +410,8 @@ func attachTestClient(t *testing.T, session *Session, ip string) (*stack.Stack, 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	t.Cleanup(cancel)
 
-	endpoint := channel.New(64, MTU, "")
+	mtu := session.MTU()
+	endpoint := channel.New(64, uint32(mtu), "")
 	t.Cleanup(endpoint.Close)
 	client, err := tun.NewGVisorStack(endpoint)
 	if err != nil {
@@ -351,7 +445,7 @@ func attachTestClient(t *testing.T, session *Session, ip string) (*stack.Stack, 
 	})
 	go func() {
 		defer close(inputDone)
-		packet := make([]byte, MTU)
+		packet := make([]byte, mtu)
 		for {
 			p := endpoint.ReadContext(ctx)
 			if p == nil {
@@ -364,7 +458,7 @@ func attachTestClient(t *testing.T, session *Session, ip string) (*stack.Stack, 
 	}()
 	go func() {
 		defer close(outputDone)
-		packets := make([]byte, MTU*MaxBatch)
+		packets := make([]byte, mtu*MaxBatch)
 		lengths := make([]uint16, MaxBatch)
 		for {
 			count := session.ReadBatch(packets, lengths)
@@ -372,7 +466,8 @@ func attachTestClient(t *testing.T, session *Session, ip string) (*stack.Stack, 
 				return
 			}
 			for i, length := range lengths[:count] {
-				p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packets[i*MTU : i*MTU+int(length)])})
+				offset := i * mtu
+				p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packets[offset : offset+int(length)])})
 				endpoint.InjectInbound(ipv4.ProtocolNumber, p)
 				p.DecRef()
 			}
