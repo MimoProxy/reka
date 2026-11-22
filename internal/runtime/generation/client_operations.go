@@ -114,16 +114,21 @@ func pinProbeOutbounds(g *generation, snapshot *runtime.Snapshot[*sagernet.Outbo
 	return pins, nil
 }
 
-func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string, headersOnly bool) (api.ArenaSample, error) {
-	if g.dns != nil {
-		ctx = sagernet.WithLookup(ctx, func(ctx context.Context, name string) ([]netip.Addr, error) {
-			scope := "proxy"
-			if out.Type() == "direct" {
-				scope = "direct"
-			}
-			return g.dns.Lookup(ctx, name, scope)
-		})
+func (g *generation) probeLookupContext(ctx context.Context, out *sagernet.Outbound) context.Context {
+	if g.dns == nil {
+		return ctx
 	}
+	scope := "proxy"
+	if out.Type() == "direct" {
+		scope = "direct"
+	}
+	return sagernet.WithLookup(ctx, func(ctx context.Context, name string) ([]netip.Addr, error) {
+		return g.dns.Lookup(ctx, name, scope)
+	})
+}
+
+func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string, headersOnly bool) (api.ArenaSample, error) {
+	ctx = g.probeLookupContext(ctx, out)
 	transport := &http.Transport{DisableKeepAlives: true, DialContext: pin.Dial}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

@@ -16,6 +16,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
 	D "github.com/miekg/dns"
+	quic "github.com/sagernet/quic-go"
 )
 
 const (
@@ -56,6 +57,19 @@ type IPCheckResult struct {
 	DNSMode        string                 `json:"dnsMode"`
 	IPVersion      string                 `json:"ipVersion"`
 	Recommendation *IPCheckRecommendation `json:"recommendation,omitempty"`
+	QUIC           QUICCheck              `json:"quic"`
+}
+
+type QUICCheck struct {
+	Local          IPCheck             `json:"local"`
+	Node           *IPCheck            `json:"node,omitempty"`
+	BlockQUIC      string              `json:"blockQuic"`
+	Recommendation *QUICRecommendation `json:"recommendation,omitempty"`
+}
+
+type QUICRecommendation struct {
+	BlockQUIC string `json:"blockQuic"`
+	Reason    string `json:"reason"`
 }
 
 // IPCheckOptions selects what RunIPCheck measures. Empty fields use defaults.
@@ -67,17 +81,24 @@ type IPCheckOptions struct {
 	// Local4 and Local6 are IP:port TLS targets for the local check. A family
 	// works when any one of them answers a TLS handshake.
 	Local4, Local6 []string
-	TimeoutMS      int
+	// LocalQUIC and NodeQUIC are IP:port QUIC targets of either address family.
+	LocalQUIC, NodeQUIC []string
+	TimeoutMS           int
 }
 
 // Public DNS-over-HTTPS resolvers run by several providers, so that one
 // blocked provider does not make a working network look broken.
 var (
-	defaultLocal4 = []string{"223.5.5.5:443", "1.12.12.12:443", "1.1.1.1:443", "8.8.8.8:443"}
-	defaultLocal6 = []string{"[2400:3200::1]:443", "[2400:3200:baba::1]:443", "[2606:4700:4700::1111]:443", "[2001:4860:4860::8888]:443"}
+	defaultLocal4    = []string{"223.5.5.5:443", "1.12.12.12:443", "1.1.1.1:443", "8.8.8.8:443"}
+	defaultLocal6    = []string{"[2400:3200::1]:443", "[2400:3200:baba::1]:443", "[2606:4700:4700::1111]:443", "[2001:4860:4860::8888]:443"}
+	defaultLocalQUIC = []string{
+		"223.5.5.5:443", "223.6.6.6:443", "1.1.1.1:443", "8.8.8.8:443",
+		"[2400:3200::1]:443", "[2400:3200:baba::1]:443", "[2606:4700:4700::1111]:443", "[2001:4860:4860::8888]:443",
+	}
+	defaultNodeQUIC = []string{"1.1.1.1:443", "8.8.8.8:443"}
 )
 
-const maxLocalTargets = 8
+const maxIPCheckTargets = 8
 
 // RunIPCheck compares local connectivity and a single resolved leaf. The
 // batch shares one probe slot, one deadline and one set of transport pins.
@@ -93,6 +114,14 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 		return IPCheckResult{}, err
 	}
 	local6, err := localTargets(opts.Local6, defaultLocal6, false)
+	if err != nil {
+		return IPCheckResult{}, err
+	}
+	localQUIC, err := quicTargets(opts.LocalQUIC, defaultLocalQUIC)
+	if err != nil {
+		return IPCheckResult{}, err
+	}
+	nodeQUIC, err := quicTargets(opts.NodeQUIC, defaultNodeQUIC)
 	if err != nil {
 		return IPCheckResult{}, err
 	}
@@ -146,7 +175,11 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 		}
 		defer closeSniffPins(pins)
 		ctx = sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, pins), snapshot)
-		result := IPCheckResult{DNSMode: "normal", IPVersion: g.eff.IPVersionOverride}
+		result := IPCheckResult{
+			DNSMode:   "normal",
+			IPVersion: g.eff.IPVersionOverride,
+			QUIC:      QUICCheck{BlockQUIC: cmp.Or(g.eff.Routing.BlockQUIC, "off")},
+		}
 		if g.eff.DNS != nil {
 			result.DNSMode = cmp.Or(g.eff.DNS.Mode, result.DNSMode)
 		}
@@ -156,6 +189,7 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 		var wg sync.WaitGroup
 		wg.Go(func() { result.Local.IPv4 = ipCheckLocal(ctx, pins[direct].Dial, local4) })
 		wg.Go(func() { result.Local.IPv6 = ipCheckLocal(ctx, pins[direct].Dial, local6) })
+		wg.Go(func() { result.QUIC.Local = ipCheckQUIC(ctx, pins[direct].ListenPacket, localQUIC) })
 		if member != "" {
 			target, _ := g.eff.Outbound(resolved)
 			node := &IPCheckNode{Member: member, Resolved: resolved, Name: cmp.Or(target.Name, resolved), Type: target.Type}
@@ -180,6 +214,12 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 				wg.Go(func() { node.Server.IPv6 = ipCheckServer(ctx, target, "ip6", lookup, dial) })
 				wg.Go(func() { node.Exit.IPv4 = ipCheckHTTP(ctx, g, out, pins[out], url4) })
 				wg.Go(func() { node.Exit.IPv6 = ipCheckHTTP(ctx, g, out, pins[out], url6) })
+				if node.Type != model.OutboundDirect {
+					wg.Go(func() {
+						check := ipCheckQUIC(g.probeLookupContext(ctx, out), pins[out].ListenPacket, nodeQUIC)
+						result.QUIC.Node = &check
+					})
+				}
 			}
 		}
 		wg.Wait()
@@ -192,6 +232,8 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 			node = nil
 		}
 		result.Recommendation = recommendIPVersion(result.Local, node, result.DNSMode)
+		nodeWorks := node != nil && (node.Exit.IPv4.Status == ipCheckOK || node.Exit.IPv6.Status == ipCheckOK)
+		result.QUIC.Recommendation = recommendBlockQUIC(result.QUIC.Local, result.QUIC.Node, nodeWorks)
 		return result, nil
 	}
 	return IPCheckResult{}, ctx.Err()
@@ -201,7 +243,7 @@ func localTargets(targets, defaults []string, ipv4 bool) ([]string, error) {
 	if len(targets) == 0 {
 		return defaults, nil
 	}
-	if len(targets) > maxLocalTargets {
+	if len(targets) > maxIPCheckTargets {
 		return nil, errors.New("too many local check targets")
 	}
 	for _, target := range targets {
@@ -211,6 +253,24 @@ func localTargets(targets, defaults []string, ipv4 bool) ([]string, error) {
 		}
 	}
 	return targets, nil
+}
+
+func quicTargets(targets, defaults []string) ([]netip.AddrPort, error) {
+	if len(targets) == 0 {
+		targets = defaults
+	}
+	if len(targets) > maxIPCheckTargets {
+		return nil, errors.New("too many QUIC check targets")
+	}
+	addresses := make([]netip.AddrPort, len(targets))
+	for i, target := range targets {
+		addr, err := netip.ParseAddrPort(target)
+		if err != nil || addr.Port() == 0 {
+			return nil, errors.New("QUIC check targets must be IP:port")
+		}
+		addresses[i] = addr
+	}
+	return addresses, nil
 }
 
 // ipCheckLocal connects to every target at once and reports the first
@@ -263,6 +323,76 @@ func tlsReachable(ctx context.Context, dial func(context.Context, string, string
 		return nil
 	}
 	return err
+}
+
+func ipCheckQUIC(ctx context.Context, listen func(context.Context, string) (net.PacketConn, error), targets []netip.AddrPort) IPCheck {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan IPCheck, len(targets))
+	for _, target := range targets {
+		go func() { results <- ipCheckQUICTarget(ctx, listen, target) }()
+	}
+	failure := IPCheck{Status: ipCheckFailed, Error: "udp unsupported"}
+	for range targets {
+		select {
+		case check := <-results:
+			if check.Status == ipCheckOK {
+				return check
+			}
+			if failure.Error == "udp unsupported" || check.Error == "timeout" {
+				failure = check
+			}
+		case <-ctx.Done():
+			return IPCheck{Status: ipCheckFailed, Error: ipCheckError(ctx.Err(), "connection failed")}
+		}
+	}
+	return failure
+}
+
+func ipCheckQUICTarget(ctx context.Context, listen func(context.Context, string) (net.PacketConn, error), target netip.AddrPort) IPCheck {
+	start := time.Now()
+	packet, err := listen(ctx, target.String())
+	if err != nil {
+		return IPCheck{Status: ipCheckFailed, Error: "udp unsupported"}
+	}
+	probe := quicProbePacketConn{PacketConn: packet, closeOnce: sync.OnceValue(packet.Close)}
+	defer probe.Close()
+	stop := context.AfterFunc(ctx, func() { _ = probe.Close() })
+	defer stop()
+
+	tlsConfig := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
+	conn, err := quic.Dial(ctx, probe, net.UDPAddrFromAddrPort(target), tlsConfig, &quic.Config{})
+	delay := max(1, time.Since(start).Milliseconds())
+	if err == nil {
+		_ = conn.CloseWithError(0, "")
+	} else if !quicResponded(err) {
+		return IPCheck{Status: ipCheckFailed, Error: ipCheckError(cmp.Or(ctx.Err(), err), "connection failed")}
+	}
+	return IPCheck{Status: ipCheckOK, DelayMS: &delay}
+}
+
+func quicResponded(err error) bool {
+	var transport *quic.TransportError
+	var application *quic.ApplicationError
+	var version *quic.VersionNegotiationError
+	return errors.As(err, &transport) && transport.Remote ||
+		errors.As(err, &application) && application.Remote ||
+		errors.As(err, &version)
+}
+
+type quicProbePacketConn struct {
+	net.PacketConn
+	closeOnce func() error
+}
+
+func (c quicProbePacketConn) Close() error { return c.closeOnce() }
+
+func (c quicProbePacketConn) SetReadDeadline(deadline time.Time) error {
+	// Closing interrupts reads on teardown even if the proxy lacks deadline support.
+	if !deadline.IsZero() && !deadline.After(time.Now()) {
+		return c.Close()
+	}
+	return c.PacketConn.SetReadDeadline(deadline)
 }
 
 func ipCheckHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, endpoint string) IPCheck {
@@ -331,6 +461,21 @@ func ipCheckError(err error, fallback string) string {
 		return "tls"
 	default:
 		return fallback
+	}
+}
+
+func recommendBlockQUIC(local IPCheck, node *IPCheck, nodeWorks bool) *QUICRecommendation {
+	switch {
+	case local.Status == ipCheckFailed:
+		return &QUICRecommendation{BlockQUIC: "all", Reason: "local-quic-blocked"}
+	case local.Status != ipCheckOK || node == nil:
+		return nil
+	case node.Status == ipCheckOK:
+		return &QUICRecommendation{BlockQUIC: "off", Reason: "quic-ok"}
+	case node.Status == ipCheckFailed && nodeWorks:
+		return &QUICRecommendation{BlockQUIC: "proxy", Reason: "node-quic-unavailable"}
+	default:
+		return nil
 	}
 }
 

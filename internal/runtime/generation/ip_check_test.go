@@ -2,6 +2,7 @@ package generation
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -9,10 +10,43 @@ import (
 	"net/netip"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
+	quic "github.com/sagernet/quic-go"
 )
+
+func TestRecommendBlockQUIC(t *testing.T) {
+	ok := IPCheck{Status: ipCheckOK}
+	failed := IPCheck{Status: ipCheckFailed}
+	for _, tc := range []struct {
+		name      string
+		local     IPCheck
+		node      *IPCheck
+		nodeWorks bool
+		want      QUICRecommendation
+	}{
+		{"local QUIC blocked", failed, &ok, true, QUICRecommendation{"all", "local-quic-blocked"}},
+		{"node QUIC blocked", ok, &failed, true, QUICRecommendation{"proxy", "node-quic-unavailable"}},
+		{"both paths support QUIC", ok, &ok, false, QUICRecommendation{"off", "quic-ok"}},
+		{"node offline", ok, &failed, false, QUICRecommendation{}},
+		{"no node", ok, nil, false, QUICRecommendation{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := recommendBlockQUIC(tc.local, tc.node, tc.nodeWorks)
+			if tc.want.BlockQUIC == "" {
+				if got != nil {
+					t.Fatalf("unexpected recommendation %+v", got)
+				}
+				return
+			}
+			if got == nil || *got != tc.want {
+				t.Fatalf("recommendation = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestRecommendIPVersion(t *testing.T) {
 	families := func(ipv4, ipv6 string) IPFamilyChecks {
@@ -170,6 +204,94 @@ func TestLocalTargets(t *testing.T) {
 	} {
 		if _, err := localTargets(test.targets, nil, test.ipv4); err == nil {
 			t.Errorf("%s: accepted %v", name, test.targets)
+		}
+	}
+}
+
+func TestQUICTargets(t *testing.T) {
+	for _, defaults := range [][]string{defaultLocalQUIC, defaultNodeQUIC} {
+		if got, err := quicTargets(nil, defaults); err != nil || len(got) != len(defaults) {
+			t.Fatalf("defaults = %v, %v", got, err)
+		}
+	}
+	mixed := []string{"127.0.0.1:443", "[::1]:443"}
+	if got, err := quicTargets(mixed, nil); err != nil || len(got) != 2 || !got[0].Addr().Is4() || !got[1].Addr().Is6() {
+		t.Fatalf("mixed address families = %v, %v", got, err)
+	}
+	for name, targets := range map[string][]string{
+		"hostname":  {"dns.test:443"},
+		"no port":   {"127.0.0.1"},
+		"zero port": {"127.0.0.1:0"},
+		"too many":  append([]string{"127.0.0.1:443"}, defaultLocalQUIC...),
+	} {
+		if _, err := quicTargets(targets, nil); err == nil {
+			t.Errorf("%s: accepted %v", name, targets)
+		}
+	}
+}
+
+func TestIPCheckQUIC(t *testing.T) {
+	silent, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = silent.Close() })
+	silentTarget := silent.LocalAddr().(*net.UDPAddr).AddrPort()
+	var listenConfig net.ListenConfig
+	listen := func(ctx context.Context, _ string) (net.PacketConn, error) {
+		return listenConfig.ListenPacket(ctx, "udp4", "127.0.0.1:0")
+	}
+	https := httptest.NewTLSServer(http.NotFoundHandler())
+	cert := https.TLS.Certificates[0]
+	https.Close()
+	for _, protocol := range []string{"h3", "doq"} {
+		t.Run(protocol, func(t *testing.T) {
+			server, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+				Certificates: []tls.Certificate{cert}, NextProtos: []string{protocol},
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			targets := []netip.AddrPort{silentTarget, server.Addr().(*net.UDPAddr).AddrPort()}
+			if check := ipCheckQUIC(ctx, listen, targets); check.Status != ipCheckOK || check.Error != "" || check.DelayMS == nil || *check.DelayMS < 1 {
+				t.Fatalf("QUIC server should count as reachable: %+v", check)
+			}
+		})
+	}
+	t.Run("timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		if check := ipCheckQUIC(ctx, listen, []netip.AddrPort{silentTarget}); check.Status != ipCheckFailed || check.Error != "timeout" || check.DelayMS != nil {
+			t.Fatalf("silent UDP target should time out: %+v", check)
+		}
+	})
+}
+
+func TestIPCheckQUICListenFailure(t *testing.T) {
+	listen := func(context.Context, string) (net.PacketConn, error) { return nil, errors.New("no UDP transport") }
+	target := netip.MustParseAddrPort("127.0.0.1:443")
+	if check := ipCheckQUIC(t.Context(), listen, []netip.AddrPort{target}); check.Status != ipCheckFailed || check.Error != "udp unsupported" || check.DelayMS != nil {
+		t.Fatalf("UDP listener failure: %+v", check)
+	}
+}
+
+func TestQUICResponded(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{&quic.TransportError{Remote: true}, true},
+		{&quic.TransportError{}, false},
+		{&quic.ApplicationError{Remote: true}, true},
+		{&quic.ApplicationError{}, false},
+		{&quic.VersionNegotiationError{}, true},
+		{context.DeadlineExceeded, false},
+	} {
+		if got := quicResponded(tc.err); got != tc.want {
+			t.Errorf("quicResponded(%v) = %t, want %t", tc.err, got, tc.want)
 		}
 	}
 }

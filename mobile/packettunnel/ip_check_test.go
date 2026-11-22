@@ -4,33 +4,42 @@ package packettunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
+	"github.com/MimoProxy/reka/internal/testnet"
 	"github.com/MimoProxy/reka/mobile/profile"
+	quic "github.com/sagernet/quic-go"
 )
 
 func TestIPCheckLocalOnly(t *testing.T) {
 	snapshot := prepareSnapshot(t, `
 schema-version: 1
 outbounds: [{id: direct, type: direct, dialer: {proxy: reject}}]
+routing: {block-quic: proxy}
 `)
-	session, err := StartProbeProfile(snapshot, profile.Controls{})
+	session, err := StartProbeProfile(snapshot, profile.Controls{BlockQUIC: "all"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
 	var op Operation
-	if err := json.Unmarshal(fmt.Appendf(nil, `{"action":"ipCheck","local4":[%q],"local6":["[::1]:1"],"timeout_ms":1500}`, ipCheckTestListener(t, "tcp4", "127.0.0.1:0")), &op); err != nil {
+	if err := json.Unmarshal(fmt.Appendf(nil, `{
+		"action":"ipCheck","url4":"http://127.0.0.1:1","url6":"http://[::1]:1",
+		"local4":[%q],"local6":["[::1]:1"],"localQuic":[%q],"timeout_ms":1500
+	}`, ipCheckTestListener(t, "tcp4", "127.0.0.1:0"), ipCheckTestQUICListener(t)), &op); err != nil {
 		t.Fatal(err)
 	}
 	result := runIPCheck(t, session, op)
@@ -49,14 +58,26 @@ outbounds: [{id: direct, type: direct, dialer: {proxy: reject}}]
 	if err := json.Unmarshal(data, &wire); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"local", "dnsMode", "ipVersion", "recommendation"} {
+	for _, field := range []string{"local", "dnsMode", "ipVersion", "recommendation", "quic"} {
 		if _, ok := wire[field]; !ok {
 			t.Fatalf("missing %s in %s", field, data)
 		}
 	}
-	if len(wire) != 4 || string(wire["ipVersion"]) != `""` {
+	if len(wire) != 5 || string(wire["ipVersion"]) != `""` {
 		t.Fatalf("unexpected local-only JSON %s", data)
 	}
+	var quicWire map[string]json.RawMessage
+	if err := json.Unmarshal(wire["quic"], &quicWire); err != nil {
+		t.Fatal(err)
+	}
+	if len(quicWire) != 2 || string(quicWire["blockQuic"]) != `"all"` {
+		t.Fatalf("unexpected local-only QUIC JSON %s", wire["quic"])
+	}
+	var localQUIC generation.IPCheck
+	if err := json.Unmarshal(quicWire["local"], &localQUIC); err != nil {
+		t.Fatal(err)
+	}
+	assertIPCheckOK(t, localQUIC)
 }
 
 func TestIPCheckPacketFlowUsesSelectedLeaf(t *testing.T) {
@@ -103,7 +124,12 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
-	op := Operation{Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL, Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{ipCheckTestListener(t, "tcp6", "[::1]:0")}, TimeoutMS: 2000}
+	quicTarget := ipCheckTestQUICListener(t)
+	op := Operation{
+		Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL,
+		Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{ipCheckTestListener(t, "tcp6", "[::1]:0")},
+		LocalQUIC: []string{quicTarget}, NodeQUIC: []string{quicTarget}, TimeoutMS: 2000,
+	}
 	result := runIPCheck(t, session, op)
 	if result.DNSMode != "fake-ip" || result.IPVersion != "ipv4" {
 		t.Fatalf("unexpected DNS or IP version %+v", result)
@@ -121,10 +147,54 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 	if result.Recommendation == nil || result.Recommendation.IPVersion != "ipv4-prefer" || result.Recommendation.Reason != "server-ipv4-only" {
 		t.Fatalf("unexpected recommendation %+v", result.Recommendation)
 	}
+	assertIPCheckOK(t, result.QUIC.Local)
+	if result.QUIC.Node == nil || result.QUIC.Node.Status != "failed" || result.QUIC.Node.Error != "udp unsupported" {
+		t.Fatalf("unexpected node QUIC check %+v", result.QUIC.Node)
+	}
+	if rec := result.QUIC.Recommendation; result.QUIC.BlockQUIC != "off" || rec == nil || rec.BlockQUIC != "proxy" || rec.Reason != "node-quic-unavailable" {
+		t.Fatalf("unexpected QUIC settings or recommendation %+v", result.QUIC)
+	}
 	session.SetRealDNS(true)
 	op.Member = ""
 	if result := runIPCheck(t, session, op); result.DNSMode != "normal" {
 		t.Fatalf("DNS mode with real DNS enabled = %q", result.DNSMode)
+	}
+}
+
+func TestIPCheckQUICUsesSelectedUDPNode(t *testing.T) {
+	quicTarget := netip.MustParseAddrPort(ipCheckTestQUICListener(t))
+	// The node forwards an otherwise silent loopback address to the QUIC server.
+	nodeTarget := netip.MustParseAddrPort(ipCheckTestSilentUDP(t))
+	var relay *sagernet.Server
+	listen := testnet.RetryAddr(t, func(address netip.AddrPort) error {
+		var err error
+		relay, err = sagernet.StartShadowsocksTestServer(address, "aes-128-gcm", "test", nil, map[netip.AddrPort]netip.AddrPort{nodeTarget: quicTarget})
+		return err
+	})
+	t.Cleanup(func() { _ = relay.Close() })
+	snapshot := prepareSnapshot(t, fmt.Sprintf(`
+schema-version: 1
+outbounds:
+  - {id: relay, type: shadowsocks, server: 127.0.0.1, port: %d, method: aes-128-gcm, password: test, udp: true}
+groups: [{id: choice, type: select, members: [relay]}]
+`, listen.Port()))
+	session, err := StartProbeProfile(snapshot, profile.Controls{BlockQUIC: "proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(session.Close)
+	result := runIPCheck(t, session, Operation{
+		Action: "ipCheck", Member: "choice", URL4: "http://127.0.0.1:1", URL6: "http://127.0.0.1:1",
+		Local4: []string{"127.0.0.1:1"}, Local6: []string{"[::1]:1"},
+		LocalQUIC: []string{quicTarget.String()}, NodeQUIC: []string{nodeTarget.String()}, TimeoutMS: 2000,
+	})
+	if result.QUIC.Node == nil {
+		t.Fatal("missing selected node's QUIC check")
+	}
+	assertIPCheckOK(t, result.QUIC.Local)
+	assertIPCheckOK(t, *result.QUIC.Node)
+	if rec := result.QUIC.Recommendation; rec == nil || rec.BlockQUIC != "off" || rec.Reason != "quic-ok" {
+		t.Fatalf("unexpected QUIC recommendation %+v", rec)
 	}
 }
 
@@ -151,10 +221,12 @@ func TestIPCheckStartsAllHTTPProbesAndReturnsAfterHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
+	quicTarget := ipCheckTestQUICListener(t)
 	start := time.Now()
 	result := runIPCheck(t, session, Operation{
 		Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL,
-		Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{local6}, TimeoutMS: 4000,
+		Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{local6},
+		LocalQUIC: []string{quicTarget}, NodeQUIC: []string{quicTarget}, TimeoutMS: 4000,
 	})
 	if elapsed := time.Since(start); elapsed >= 3*time.Second {
 		t.Fatalf("probe delayed by body or other checks: %s", elapsed)
@@ -173,10 +245,12 @@ func TestIPCheckDirectMemberDoesNotAffectRecommendation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
+	quicTarget := ipCheckTestQUICListener(t)
 	result := runIPCheck(t, session, Operation{
 		Action: "ipCheck", Member: "direct", URL4: "http://127.0.0.1:1", URL6: "http://[::1]:1",
 		Local4:    []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")},
 		Local6:    []string{ipCheckTestListener(t, "tcp6", "[::1]:0")},
+		LocalQUIC: []string{quicTarget}, NodeQUIC: []string{quicTarget},
 		TimeoutMS: 2000,
 	})
 	if result.Node == nil || result.Node.Type != "direct" || result.Node.Exit.IPv6.Status != "failed" {
@@ -184,6 +258,10 @@ func TestIPCheckDirectMemberDoesNotAffectRecommendation(t *testing.T) {
 	}
 	if result.Recommendation == nil || result.Recommendation.Reason != "dual-ok" {
 		t.Fatalf("direct exit results should not drive the recommendation: %+v", result.Recommendation)
+	}
+	assertIPCheckOK(t, result.QUIC.Local)
+	if result.QUIC.Node != nil || result.QUIC.Recommendation != nil {
+		t.Fatalf("unexpected QUIC node check or recommendation for direct %+v", result.QUIC)
 	}
 }
 
@@ -201,9 +279,11 @@ func TestIPCheckDeadlineAndSessionCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
+	quicTarget := ipCheckTestSilentUDP(t)
 	op := Operation{
 		Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL,
-		Local4: []string{"127.0.0.1:1"}, Local6: []string{"[::1]:1"}, TimeoutMS: 250,
+		Local4: []string{"127.0.0.1:1"}, Local6: []string{"[::1]:1"},
+		LocalQUIC: []string{quicTarget}, NodeQUIC: []string{quicTarget}, TimeoutMS: 250,
 	}
 	start := time.Now()
 	result := runIPCheck(t, session, op)
@@ -214,12 +294,12 @@ func TestIPCheckDeadlineAndSessionCancellation(t *testing.T) {
 		t.Fatalf("unexpected timed out result %+v", result)
 	}
 	for _, check := range []generation.IPCheck{result.Local.IPv4, result.Local.IPv6} {
-		// Closed loopback ports refuse at once, so only the exit checks reach the deadline.
+		// Closed loopback TCP ports refuse at once.
 		if check.Status != "failed" || check.DelayMS != nil {
 			t.Fatalf("unexpected local check %+v", check)
 		}
 	}
-	for _, check := range []generation.IPCheck{result.Node.Exit.IPv4, result.Node.Exit.IPv6} {
+	for _, check := range []generation.IPCheck{result.Node.Exit.IPv4, result.Node.Exit.IPv6, result.QUIC.Local} {
 		if check.Status != "failed" || check.Error != "timeout" || check.DelayMS != nil {
 			t.Fatalf("unexpected timeout check %+v", check)
 		}
@@ -283,6 +363,31 @@ func assertIPCheckOK(t *testing.T, check generation.IPCheck) {
 	if check.Status != "ok" || check.DelayMS == nil || *check.DelayMS < 1 || check.Error != "" {
 		t.Fatalf("expected successful check with latency, got %+v", check)
 	}
+}
+
+func ipCheckTestQUICListener(t *testing.T) string {
+	t.Helper()
+	https := httptest.NewTLSServer(http.NotFoundHandler())
+	cert := https.TLS.Certificates[0]
+	https.Close()
+	listener, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert}, NextProtos: []string{"h3"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().String()
+}
+
+func ipCheckTestSilentUDP(t *testing.T) string {
+	t.Helper()
+	packet, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = packet.Close() })
+	return packet.LocalAddr().String()
 }
 
 // ipCheckTestListener serves TLS handshakes until the test ends and returns

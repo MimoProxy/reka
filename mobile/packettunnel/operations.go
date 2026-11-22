@@ -35,6 +35,8 @@ type Operation struct {
 	URL6       string               `json:"url6,omitempty"`
 	Local4     []string             `json:"local4,omitempty"`
 	Local6     []string             `json:"local6,omitempty"`
+	LocalQUIC  []string             `json:"localQuic,omitempty"`
+	NodeQUIC   []string             `json:"nodeQuic,omitempty"`
 	TimeoutMS  int                  `json:"timeout_ms,omitempty"`
 	Members    []string             `json:"members,omitempty"`
 	Rounds     int                  `json:"rounds,omitempty"`
@@ -141,7 +143,8 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 			return nil, errors.New("the operation requires a profile")
 		}
 		return s.profile.engine.RunIPCheck(s.ctx, generation.IPCheckOptions{
-			Member: op.Member, URL4: op.URL4, URL6: op.URL6, Local4: op.Local4, Local6: op.Local6, TimeoutMS: op.TimeoutMS,
+			Member: op.Member, URL4: op.URL4, URL6: op.URL6, Local4: op.Local4, Local6: op.Local6,
+			LocalQUIC: op.LocalQUIC, NodeQUIC: op.NodeQUIC, TimeoutMS: op.TimeoutMS,
 		})
 	default:
 		return s.runDiagnostics(op)
