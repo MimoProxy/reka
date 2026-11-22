@@ -241,7 +241,10 @@ func (o *Outbound) Close() error {
 }
 
 // DirectSpec dials the destination directly.
-type DirectSpec struct{}
+type DirectSpec struct {
+	// DomainStrategy uses the sing-box domain_strategy values.
+	DomainStrategy string
+}
 
 // ShadowsocksSpec is a Shadowsocks client.
 type ShadowsocksSpec struct {
@@ -323,7 +326,14 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		out = newDropOutbound(tag)
 	case DirectSpec:
 		typ = "direct"
-		out, err = direct.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.DirectOutboundOptions{})
+		var opts option.DirectOutboundOptions
+		if s.DomainStrategy != "" {
+			strategy, _ := json.Marshal(s.DomainStrategy)
+			if err = opts.DomainStrategy.UnmarshalJSON(strategy); err != nil {
+				break
+			}
+		}
+		out, err = direct.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, opts)
 	case HTTPSpec:
 		typ = "http"
 		out, err = http.NewOutbound(b.ctx, b.router, b.componentLogger("outbound", typ, tag), tag, option.HTTPOutboundOptions{

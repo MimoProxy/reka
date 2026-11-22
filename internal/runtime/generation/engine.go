@@ -178,8 +178,9 @@ func NewEngine(opts EngineOptions) *Engine {
 		e.opts.Resolver = e.backend.Resolver()
 	}
 	e.rt = runtime.NewValue[*sagernet.Outbound](nil, &generation{historyScope: history.Scope{ProfileID: opts.ProfileID}}, runtime.Options{
-		DrainTimeout: opts.DrainTimeout,
-		MaxRetiring:  opts.MaxRetiring,
+		DrainTimeout:          opts.DrainTimeout,
+		MaxRetiring:           opts.MaxRetiring,
+		AllowLargeReplacement: opts.HostPacketFlow,
 		OnClosed: func(id string, gen uint64, forced int64, err error) {
 			l := slog.Default()
 			if opts.Backend.Logger != nil {
@@ -273,10 +274,11 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 			p.Draining++
 		}
 	}
-	if cur := int(e.rt.Stats().Retiring); cur+p.Draining > e.opts.MaxRetiring {
-		p.Blocked = fmt.Sprintf("%d instances are draining and this change adds %d; the limit is %d", cur, p.Draining, e.opts.MaxRetiring)
+	retiring := int(e.rt.Stats().Retiring)
+	if limit := e.rt.RetiringLimit(p.Draining); retiring+p.Draining > limit {
+		p.Blocked = fmt.Sprintf("%d instances are draining and this change adds %d; the limit is %d", retiring, p.Draining, limit)
 	}
-	p.Draining += int(e.rt.Stats().Retiring)
+	p.Draining += retiring
 
 	for _, ch := range e.listenerChanges(eff.Listeners) {
 		p.Listeners = append(p.Listeners, ch.ResourceChange)
@@ -742,6 +744,9 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 }
 
 func specFor(o compile.Outbound) any {
+	if o.Builtin && o.Type == model.OutboundDirect {
+		return sagernet.DirectSpec{DomainStrategy: domainStrategy(o.Dialer)}
+	}
 	tls := func() *sagernet.TLSSpec {
 		if o.TLS == nil {
 			return nil
@@ -1289,12 +1294,23 @@ func (e *Engine) ListenerInstance(id string) any {
 	return nil
 }
 
+func domainStrategy(dialer *model.Dialer) string {
+	if dialer == nil {
+		return ""
+	}
+	return map[string]string{
+		"ipv4":        "ipv4_only",
+		"ipv6":        "ipv6_only",
+		"ipv4-prefer": "prefer_ipv4",
+		"ipv6-prefer": "prefer_ipv6",
+	}[dialer.IPVersion]
+}
+
 func protocolOptions(o compile.Outbound) json.RawMessage {
 	values := map[string]any{}
 	if d := o.Dialer; d != nil {
 		values["bind_interface"], values["routing_mark"], values["tcp_fast_open"], values["tcp_multi_path"] = d.Interface, d.RoutingMark, d.TFO, d.MPTCP
-		strategy := map[string]string{"ipv4": "ipv4_only", "ipv6": "ipv6_only", "ipv4-prefer": "prefer_ipv4", "ipv6-prefer": "prefer_ipv6"}[d.IPVersion]
-		if strategy != "" {
+		if strategy := domainStrategy(d); strategy != "" {
 			values["domain_strategy"] = strategy
 		}
 	}

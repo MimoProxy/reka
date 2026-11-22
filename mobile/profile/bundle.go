@@ -66,7 +66,9 @@ type Controls struct {
 	Selections map[string]string `json:"selections"`
 	ProfileID  string            `json:"profileID,omitempty"`
 	// BlockQUIC overrides the profile's routing.block-quic when set.
-	BlockQUIC string       `json:"blockQuic,omitempty"`
+	BlockQUIC string `json:"blockQuic,omitempty"`
+	// IPVersion overrides the dialer IP policy and DNS IPv6 setting when set.
+	IPVersion string       `json:"ipVersion,omitempty"`
 	Secrets   secret.Store `json:"-"`
 }
 
@@ -181,10 +183,13 @@ func Describe(eff *compile.Effective) Summary {
 	return summary
 }
 
-// ApplyControls shares the already-compiled rule index and outbound specs
-// across updates. Stable IDs are preferred; old iOS saves used display names.
+// ApplyControls shares the compiled rule index across updates. Stable IDs are
+// preferred, with display names supported for older iOS saves.
 func ApplyControls(base *compile.Effective, summary Summary, controls Controls) (*compile.Effective, error) {
-	eff := *base
+	eff, err := base.WithIPVersion(controls.IPVersion)
+	if err != nil {
+		return nil, err
+	}
 	eff.Groups = slices.Clone(base.Groups)
 	ids := make([]string, 0, len(base.Outbounds))
 	for _, outbound := range base.Outbounds {
@@ -243,7 +248,6 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	}
 	eff.Routing = model.Routing{Mode: mode, Global: global, BlockQUIC: blockQUIC}
 	opts := router.Options{Outbounds: ids, Groups: eff.Groups, Final: base.Final}
-	var err error
 	eff.Router, err = router.New(base.Router.Rules(), opts)
 	if err != nil {
 		return nil, err
@@ -251,7 +255,7 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	eff.ActiveRouter = eff.Router
 	switch mode {
 	case "rule":
-		return &eff, nil
+		return eff, nil
 	case "global":
 		opts.Final = global
 	case "direct":
@@ -264,7 +268,7 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 		return nil, err
 	}
 	eff.ActiveRouter, err = router.New(active, opts)
-	return &eff, err
+	return eff, err
 }
 
 func diagnosticError(prefix string, diagnostics model.Diagnostics) error {
