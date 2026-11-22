@@ -20,9 +20,6 @@ import (
 )
 
 func TestIPCheckLocalOnly(t *testing.T) {
-	server := ipCheckTestHTTPServer(t, "tcp4", "127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
 	snapshot := prepareSnapshot(t, `
 schema-version: 1
 outbounds: [{id: direct, type: direct, dialer: {proxy: reject}}]
@@ -33,7 +30,7 @@ outbounds: [{id: direct, type: direct, dialer: {proxy: reject}}]
 	}
 	t.Cleanup(session.Close)
 	var op Operation
-	if err := json.Unmarshal(fmt.Appendf(nil, `{"action":"ipCheck","url4":%q,"url6":"http://[::1]:0","timeout_ms":1500}`, server.URL), &op); err != nil {
+	if err := json.Unmarshal(fmt.Appendf(nil, `{"action":"ipCheck","local4":[%q],"local6":["[::1]:1"],"timeout_ms":1500}`, ipCheckTestListener(t, "tcp4", "127.0.0.1:0")), &op); err != nil {
 		t.Fatal(err)
 	}
 	result := runIPCheck(t, session, op)
@@ -106,7 +103,7 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
-	op := Operation{Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL, TimeoutMS: 2000}
+	op := Operation{Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL, Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{ipCheckTestListener(t, "tcp6", "[::1]:0")}, TimeoutMS: 2000}
 	result := runIPCheck(t, session, op)
 	if result.DNSMode != "fake-ip" || result.IPVersion != "ipv4" {
 		t.Fatalf("unexpected DNS or IP version %+v", result)
@@ -132,10 +129,11 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 }
 
 func TestIPCheckStartsAllHTTPProbesAndReturnsAfterHeaders(t *testing.T) {
+	local6 := ipCheckTestListener(t, "tcp6", "[::1]:0")
 	var requests atomic.Int32
 	all := make(chan struct{})
 	server := ipCheckTestHTTPServer(t, "tcp4", "127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requests.Add(1) == 4 {
+		if requests.Add(1) == 2 {
 			close(all)
 		}
 		select {
@@ -154,15 +152,38 @@ func TestIPCheckStartsAllHTTPProbesAndReturnsAfterHeaders(t *testing.T) {
 	}
 	t.Cleanup(session.Close)
 	start := time.Now()
-	result := runIPCheck(t, session, Operation{Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL, TimeoutMS: 4000})
+	result := runIPCheck(t, session, Operation{
+		Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL,
+		Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{local6}, TimeoutMS: 4000,
+	})
 	if elapsed := time.Since(start); elapsed >= 3*time.Second {
 		t.Fatalf("probe delayed by body or other checks: %s", elapsed)
 	}
-	if result.Node == nil || requests.Load() != 4 {
-		t.Fatalf("expected four HTTP checks, got %+v and %d requests", result, requests.Load())
+	if result.Node == nil || requests.Load() != 2 {
+		t.Fatalf("expected two HTTP exit checks, got %+v and %d requests", result, requests.Load())
 	}
 	for _, check := range []generation.IPCheck{result.Local.IPv4, result.Local.IPv6, result.Node.Exit.IPv4, result.Node.Exit.IPv6} {
 		assertIPCheckOK(t, check)
+	}
+}
+
+func TestIPCheckDirectMemberDoesNotAffectRecommendation(t *testing.T) {
+	session, err := StartProbeProfile(prepareSnapshot(t, "schema-version: 1\n"), profile.Controls{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(session.Close)
+	result := runIPCheck(t, session, Operation{
+		Action: "ipCheck", Member: "direct", URL4: "http://127.0.0.1:1", URL6: "http://[::1]:1",
+		Local4:    []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")},
+		Local6:    []string{ipCheckTestListener(t, "tcp6", "[::1]:0")},
+		TimeoutMS: 2000,
+	})
+	if result.Node == nil || result.Node.Type != "direct" || result.Node.Exit.IPv6.Status != "failed" {
+		t.Fatalf("expected a failed direct exit check, got %+v", result.Node)
+	}
+	if result.Recommendation == nil || result.Recommendation.Reason != "dual-ok" {
+		t.Fatalf("direct exit results should not drive the recommendation: %+v", result.Recommendation)
 	}
 }
 
@@ -180,7 +201,10 @@ func TestIPCheckDeadlineAndSessionCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(session.Close)
-	op := Operation{Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL, TimeoutMS: 250}
+	op := Operation{
+		Action: "ipCheck", Member: "direct", URL4: server.URL, URL6: server.URL,
+		Local4: []string{"127.0.0.1:1"}, Local6: []string{"[::1]:1"}, TimeoutMS: 250,
+	}
 	start := time.Now()
 	result := runIPCheck(t, session, op)
 	if elapsed := time.Since(start); elapsed >= time.Second {
@@ -189,7 +213,13 @@ func TestIPCheckDeadlineAndSessionCancellation(t *testing.T) {
 	if result.Recommendation != nil || result.Node == nil {
 		t.Fatalf("unexpected timed out result %+v", result)
 	}
-	for _, check := range []generation.IPCheck{result.Local.IPv4, result.Local.IPv6, result.Node.Exit.IPv4, result.Node.Exit.IPv6} {
+	for _, check := range []generation.IPCheck{result.Local.IPv4, result.Local.IPv6} {
+		// Closed loopback ports refuse at once, so only the exit checks reach the deadline.
+		if check.Status != "failed" || check.DelayMS != nil {
+			t.Fatalf("unexpected local check %+v", check)
+		}
+	}
+	for _, check := range []generation.IPCheck{result.Node.Exit.IPv4, result.Node.Exit.IPv6} {
 		if check.Status != "failed" || check.Error != "timeout" || check.DelayMS != nil {
 			t.Fatalf("unexpected timeout check %+v", check)
 		}
@@ -253,4 +283,21 @@ func assertIPCheckOK(t *testing.T, check generation.IPCheck) {
 	if check.Status != "ok" || check.DelayMS == nil || *check.DelayMS < 1 || check.Error != "" {
 		t.Fatalf("expected successful check with latency, got %+v", check)
 	}
+}
+
+// ipCheckTestListener serves TLS handshakes until the test ends and returns
+// its address.
+func ipCheckTestListener(t *testing.T, network, address string) string {
+	t.Helper()
+	listener, err := net.Listen(network, address)
+	if network == "tcp6" && (errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)) {
+		t.Skip("IPv6 loopback unavailable")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: http.NotFoundHandler()}}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return listener.Addr().String()
 }

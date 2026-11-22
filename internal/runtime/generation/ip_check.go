@@ -58,19 +58,49 @@ type IPCheckResult struct {
 	Recommendation *IPCheckRecommendation `json:"recommendation,omitempty"`
 }
 
+// IPCheckOptions selects what RunIPCheck measures. Empty fields use defaults.
+type IPCheckOptions struct {
+	// Member is the node or group to check. Empty checks the local network only.
+	Member string
+	// URL4 and URL6 are requested through the node to test its exit.
+	URL4, URL6 string
+	// Local4 and Local6 are IP:port TLS targets for the local check. A family
+	// works when any one of them answers a TLS handshake.
+	Local4, Local6 []string
+	TimeoutMS      int
+}
+
+// Public DNS-over-HTTPS resolvers run by several providers, so that one
+// blocked provider does not make a working network look broken.
+var (
+	defaultLocal4 = []string{"223.5.5.5:443", "1.12.12.12:443", "1.1.1.1:443", "8.8.8.8:443"}
+	defaultLocal6 = []string{"[2400:3200::1]:443", "[2400:3200:baba::1]:443", "[2606:4700:4700::1111]:443", "[2001:4860:4860::8888]:443"}
+)
+
+const maxLocalTargets = 8
+
 // RunIPCheck compares local connectivity and a single resolved leaf. The
 // batch shares one probe slot, one deadline and one set of transport pins.
-func (e *Engine) RunIPCheck(parent context.Context, member, url4, url6 string, timeoutMS int) (IPCheckResult, error) {
+func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPCheckResult, error) {
+	member := opts.Member
 	if len(member) > 128 {
 		return IPCheckResult{}, errors.New("ip check member is too long")
 	}
-	url4 = cmp.Or(url4, "https://1.1.1.1/cdn-cgi/trace")
-	url6 = cmp.Or(url6, "https://[2606:4700:4700::1111]/cdn-cgi/trace")
-	timeout, err := probeTimeout(url4, timeoutMS)
+	url4 := cmp.Or(opts.URL4, "https://1.1.1.1/cdn-cgi/trace")
+	url6 := cmp.Or(opts.URL6, "https://[2606:4700:4700::1111]/cdn-cgi/trace")
+	local4, err := localTargets(opts.Local4, defaultLocal4, true)
 	if err != nil {
 		return IPCheckResult{}, err
 	}
-	if _, err := probeTimeout(url6, timeoutMS); err != nil {
+	local6, err := localTargets(opts.Local6, defaultLocal6, false)
+	if err != nil {
+		return IPCheckResult{}, err
+	}
+	timeout, err := probeTimeout(url4, opts.TimeoutMS)
+	if err != nil {
+		return IPCheckResult{}, err
+	}
+	if _, err := probeTimeout(url6, opts.TimeoutMS); err != nil {
 		return IPCheckResult{}, err
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
@@ -124,8 +154,8 @@ func (e *Engine) RunIPCheck(parent context.Context, member, url4, url6 string, t
 			result.DNSMode = "normal"
 		}
 		var wg sync.WaitGroup
-		wg.Go(func() { result.Local.IPv4 = ipCheckHTTP(ctx, g, direct, pins[direct], url4) })
-		wg.Go(func() { result.Local.IPv6 = ipCheckHTTP(ctx, g, direct, pins[direct], url6) })
+		wg.Go(func() { result.Local.IPv4 = ipCheckLocal(ctx, pins[direct].Dial, local4) })
+		wg.Go(func() { result.Local.IPv6 = ipCheckLocal(ctx, pins[direct].Dial, local6) })
 		if member != "" {
 			target, _ := g.eff.Outbound(resolved)
 			node := &IPCheckNode{Member: member, Resolved: resolved, Name: cmp.Or(target.Name, resolved), Type: target.Type}
@@ -156,10 +186,83 @@ func (e *Engine) RunIPCheck(parent context.Context, member, url4, url6 string, t
 		if err := parent.Err(); err != nil {
 			return IPCheckResult{}, err
 		}
-		result.Recommendation = recommendIPVersion(result.Local, result.Node, result.DNSMode)
+		node := result.Node
+		if node != nil && node.Type == model.OutboundDirect {
+			// A group that currently resolves to direct has no node to judge.
+			node = nil
+		}
+		result.Recommendation = recommendIPVersion(result.Local, node, result.DNSMode)
 		return result, nil
 	}
 	return IPCheckResult{}, ctx.Err()
+}
+
+func localTargets(targets, defaults []string, ipv4 bool) ([]string, error) {
+	if len(targets) == 0 {
+		return defaults, nil
+	}
+	if len(targets) > maxLocalTargets {
+		return nil, errors.New("too many local check targets")
+	}
+	for _, target := range targets {
+		addr, err := netip.ParseAddrPort(target)
+		if err != nil || addr.Port() == 0 || addr.Addr().Unmap().Is4() != ipv4 {
+			return nil, errors.New("local check targets must be IP:port of one family")
+		}
+	}
+	return targets, nil
+}
+
+// ipCheckLocal connects to every target at once and reports the first
+// success. A completed TCP connection is not enough: transparent proxies and
+// other middleboxes accept connections they cannot deliver, so the target
+// must answer a TLS handshake. When all fail, a missing route wins over other
+// errors because it shows the family is absent rather than one target being
+// blocked.
+func ipCheckLocal(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), targets []string) IPCheck {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type attempt struct {
+		delay int64
+		err   error
+	}
+	results := make(chan attempt, len(targets))
+	start := time.Now()
+	for _, target := range targets {
+		go func() {
+			err := tlsReachable(ctx, dial, target)
+			results <- attempt{max(1, time.Since(start).Milliseconds()), err}
+		}()
+	}
+	var reason string
+	for range targets {
+		a := <-results
+		if a.err == nil {
+			return IPCheck{Status: ipCheckOK, DelayMS: &a.delay}
+		}
+		if category := ipCheckError(a.err, "connection failed"); reason == "" || category == "no route" {
+			reason = category
+		}
+	}
+	return IPCheck{Status: ipCheckFailed, Error: reason}
+}
+
+// tlsReachable reports whether a TLS server answers at target. A TLS alert
+// also counts, since only a real server sends one. The certificate is not
+// checked because nothing is exchanged after the handshake.
+func tlsReachable(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), target string) error {
+	conn, err := dial(ctx, "tcp", target)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	err = client.HandshakeContext(ctx)
+	var alert tls.AlertError
+	if err == nil || errors.As(err, &alert) {
+		return nil
+	}
+	return err
 }
 
 func ipCheckHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, endpoint string) IPCheck {
