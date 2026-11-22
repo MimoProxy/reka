@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -97,9 +98,15 @@ func PrepareFile(ctx context.Context, input, output, geodataCache string) error 
 // PrepareFileWithOptions writes files under the app's candidate revision. They
 // become the last-good source and validators when the app publishes that revision.
 func PrepareFileWithOptions(ctx context.Context, input, output, cache string, options PrepareOptions) error {
-	client := subscription.HTTPClient(nil)
+	client := subscription.HTTPClientWithControl(nil, systemLookup)
 	defer client.CloseIdleConnections()
 	return prepareFile(ctx, input, output, cache, options, client)
+}
+
+// systemLookup resolves through the platform resolver. The app sandbox on iOS
+// has no resolv.conf, so Go's own resolver would only query 127.0.0.1:53.
+func systemLookup(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
 }
 
 func prepareFile(ctx context.Context, input, output, cache string, options PrepareOptions, client *http.Client) error {
