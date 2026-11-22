@@ -11,6 +11,7 @@ import (
 // overridden. An empty policy keeps the compiled settings.
 func (e *Effective) WithIPVersion(ipVersion string) (*Effective, error) {
 	eff := *e
+	eff.IPVersionOverride = ipVersion
 	switch ipVersion {
 	case "":
 		return &eff, nil

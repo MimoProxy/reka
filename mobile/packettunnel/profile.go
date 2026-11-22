@@ -22,14 +22,13 @@ import (
 const ProfileAddress4 = "172.27.255.1/30"
 
 type profileSession struct {
-	mu        sync.Mutex
-	engine    *generation.Engine
-	base      *compile.Effective
-	summary   profile.Summary
-	rev       uint64
-	ipVersion string
-	trace     *routeTrace
-	sets      map[string]*router.RuleSet
+	mu      sync.Mutex
+	engine  *generation.Engine
+	base    *compile.Effective
+	summary profile.Summary
+	rev     uint64
+	trace   *routeTrace
+	sets    map[string]*router.RuleSet
 }
 
 type ProfileStatus struct {
@@ -187,7 +186,6 @@ func (p *profileSession) publish(base *compile.Effective, summary profile.Summar
 	}
 	p.rev++
 	p.base, p.summary = base, summary
-	p.ipVersion = controls.IPVersion
 	return nil
 }
 
@@ -252,7 +250,7 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 	status := &ProfileStatus{
 		Mode:      eff.Routing.Mode,
 		BlockQUIC: eff.Routing.BlockQUIC,
-		IPVersion: p.ipVersion,
+		IPVersion: eff.IPVersionOverride,
 		Groups:    make([]GroupStatus, 0, len(eff.Groups)),
 	}
 	observed := p.engine.GroupStatus()

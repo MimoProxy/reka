@@ -62,7 +62,7 @@ func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (a
 		}
 		defer closeSniffPins(pins)
 		ctx = sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, pins), snapshot)
-		sample, err := probeHTTP(ctx, g, out, pins[out], request.URL)
+		sample, err := probeHTTP(ctx, g, out, pins[out], request.URL, false)
 		if sample.StatusCode != 0 {
 			result.ResolvedOutbound, result.StatusCode, result.DelayMS = id, sample.StatusCode, sample.DelayMS
 		}
@@ -114,7 +114,7 @@ func pinProbeOutbounds(g *generation, snapshot *runtime.Snapshot[*sagernet.Outbo
 	return pins, nil
 }
 
-func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string) (api.ArenaSample, error) {
+func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string, headersOnly bool) (api.ArenaSample, error) {
 	if g.dns != nil {
 		ctx = sagernet.WithLookup(ctx, func(ctx context.Context, name string) ([]netip.Addr, error) {
 			scope := "proxy"
@@ -138,6 +138,9 @@ func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *
 	}
 	defer response.Body.Close()
 	result := api.ArenaSample{DelayMS: max(1, time.Since(start).Milliseconds()), StatusCode: response.StatusCode}
+	if headersOnly {
+		return result, nil
+	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
 		return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)

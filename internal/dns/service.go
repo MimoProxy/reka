@@ -159,14 +159,24 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	return addrs, nil
 }
 func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
+	return s.exchangeRecorded(ctx, q, scope, exchangeOptions{fake: fake})
+}
+
+type exchangeOptions struct {
+	fake        bool
+	skipHosts   bool
+	includeIPv6 bool
+}
+
+func (s *Service) exchangeRecorded(ctx context.Context, q *D.Msg, scope string, opts exchangeOptions) (*D.Msg, error) {
 	id, start := queryID.Add(1), time.Now()
 	var outcome resolutionHistory
-	m, err := s.exchange(ctx, q, scope, fake, true, id, &outcome)
+	m, err := s.exchange(ctx, q, scope, opts, id, &outcome)
 	s.record(ctx, id, 0, start, scope, q, m, outcome, err)
 	return m, err
 }
 
-func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, hosts bool, id uint64, outcome *resolutionHistory) (*D.Msg, error) {
+func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, opts exchangeOptions, id uint64, outcome *resolutionHistory) (*D.Msg, error) {
 	if len(q.Question) != 1 || q.Opcode != D.OpcodeQuery || q.IsTsig() != nil {
 		return nil, errors.New("unsupported DNS query shape")
 	}
@@ -177,11 +187,11 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 		return nil, errors.New("unsupported DNS class")
 	}
 	reply := func() *D.Msg { m := new(D.Msg); m.SetReply(q); m.RecursionAvailable = true; return m }
-	if typ == D.TypeAAAA && !s.cfg.IPv6 {
+	if typ == D.TypeAAAA && !s.cfg.IPv6 && !opts.includeIPv6 {
 		outcome.ResultSource = "filtered"
 		return reply(), nil
 	}
-	if hosts && s.cfg.UseHosts && (typ == D.TypeA || typ == D.TypeAAAA || typ == D.TypeCNAME) {
+	if !opts.skipHosts && s.cfg.UseHosts && (typ == D.TypeA || typ == D.TypeAAAA || typ == D.TypeCNAME) {
 		host, alias, err := s.resolveHost(domain, typ)
 		if err != nil {
 			return nil, err
@@ -209,7 +219,8 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 			request.Question[0].Name = D.Fqdn(alias)
 			// The alias chain has already been resolved. Skip the host table
 			// for this exchange so wildcard aliases cannot recurse forever.
-			m, err := s.exchange(ctx, request, scope, fake, false, id, outcome)
+			opts.skipHosts = true
+			m, err := s.exchange(ctx, request, scope, opts, id, outcome)
 			if err != nil {
 				return nil, err
 			}
@@ -231,7 +242,7 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, fake, ho
 			return m, nil
 		}
 	}
-	if fake && s.cfg.Mode == "fake-ip" && (typ == D.TypeA || typ == D.TypeAAAA) {
+	if opts.fake && s.cfg.Mode == "fake-ip" && (typ == D.TypeA || typ == D.TypeAAAA) {
 		matched := false
 		for _, p := range s.cfg.FakeFilter {
 			if s.Match(p, domain, netip.Addr{}) {

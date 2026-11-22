@@ -30,6 +30,8 @@ type Operation struct {
 	Rule       string               `json:"rule,omitempty"`
 	TTLSeconds int                  `json:"ttl_seconds,omitempty"`
 	URL        string               `json:"url,omitempty"`
+	URL4       string               `json:"url4,omitempty"`
+	URL6       string               `json:"url6,omitempty"`
 	TimeoutMS  int                  `json:"timeout_ms,omitempty"`
 	Members    []string             `json:"members,omitempty"`
 	Rounds     int                  `json:"rounds,omitempty"`
@@ -131,6 +133,11 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return s.historyPage(history.Logs, op)
 	case "probe":
 		return s.probe(op)
+	case "ipCheck":
+		if s.profile == nil {
+			return nil, errors.New("the operation requires a profile")
+		}
+		return s.profile.engine.RunIPCheck(s.ctx, op.Member, op.URL4, op.URL6, op.TimeoutMS)
 	default:
 		return s.runDiagnostics(op)
 	}

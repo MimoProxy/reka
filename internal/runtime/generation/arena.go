@@ -114,7 +114,7 @@ func (e *Engine) arenaSample(ctx context.Context, slots chan struct{}, timeout t
 		return api.ArenaSample{Error: arenaError(err, 0)}
 	}
 	defer release()
-	sample, err := probeHTTP(ctx, g, out, pin, endpoint)
+	sample, err := probeHTTP(ctx, g, out, pin, endpoint, false)
 	if err != nil {
 		sample.Error = arenaError(err, sample.StatusCode)
 	}

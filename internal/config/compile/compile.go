@@ -164,6 +164,9 @@ type Effective struct {
 	// RulesFingerprint changes whenever the rule list changes.
 	RulesFingerprint string `json:"rules-fingerprint"`
 
+	// IPVersionOverride is empty when the profile's IP settings are in use.
+	IPVersionOverride string `json:"-"`
+
 	Provenance map[string]Origin `json:"provenance"`
 
 	// Router is compiled once here so that validation catches every rule
