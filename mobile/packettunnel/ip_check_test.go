@@ -167,6 +167,26 @@ func TestIPCheckStartsAllHTTPProbesAndReturnsAfterHeaders(t *testing.T) {
 	}
 }
 
+func TestIPCheckDirectMemberDoesNotAffectRecommendation(t *testing.T) {
+	session, err := StartProbeProfile(prepareSnapshot(t, "schema-version: 1\n"), profile.Controls{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(session.Close)
+	result := runIPCheck(t, session, Operation{
+		Action: "ipCheck", Member: "direct", URL4: "http://127.0.0.1:1", URL6: "http://[::1]:1",
+		Local4:    []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")},
+		Local6:    []string{ipCheckTestListener(t, "tcp6", "[::1]:0")},
+		TimeoutMS: 2000,
+	})
+	if result.Node == nil || result.Node.Type != "direct" || result.Node.Exit.IPv6.Status != "failed" {
+		t.Fatalf("expected a failed direct exit check, got %+v", result.Node)
+	}
+	if result.Recommendation == nil || result.Recommendation.Reason != "dual-ok" {
+		t.Fatalf("direct exit results should not drive the recommendation: %+v", result.Recommendation)
+	}
+}
+
 func TestIPCheckDeadlineAndSessionCancellation(t *testing.T) {
 	started := make(chan struct{}, 1)
 	server := ipCheckTestHTTPServer(t, "tcp4", "127.0.0.1:0", http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {

@@ -186,7 +186,12 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 		if err := parent.Err(); err != nil {
 			return IPCheckResult{}, err
 		}
-		result.Recommendation = recommendIPVersion(result.Local, result.Node, result.DNSMode)
+		node := result.Node
+		if node != nil && node.Type == model.OutboundDirect {
+			// A group that currently resolves to direct has no node to judge.
+			node = nil
+		}
+		result.Recommendation = recommendIPVersion(result.Local, node, result.DNSMode)
 		return result, nil
 	}
 	return IPCheckResult{}, ctx.Err()
