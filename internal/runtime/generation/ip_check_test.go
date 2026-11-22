@@ -140,3 +140,59 @@ func TestIPCheckServerAddressFamily(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalTargets(t *testing.T) {
+	if got, err := localTargets(nil, defaultLocal4, true); err != nil || len(got) != len(defaultLocal4) {
+		t.Fatalf("defaults = %v, %v", got, err)
+	}
+	for _, targets := range defaultLocal4 {
+		if _, err := localTargets([]string{targets}, nil, true); err != nil {
+			t.Fatalf("default IPv4 target %s rejected: %v", targets, err)
+		}
+	}
+	for _, targets := range defaultLocal6 {
+		if _, err := localTargets([]string{targets}, nil, false); err != nil {
+			t.Fatalf("default IPv6 target %s rejected: %v", targets, err)
+		}
+	}
+	for name, test := range map[string]struct {
+		targets []string
+		ipv4    bool
+	}{
+		"hostname":     {[]string{"dns.example:443"}, true},
+		"no port":      {[]string{"192.0.2.1"}, true},
+		"zero port":    {[]string{"192.0.2.1:0"}, true},
+		"wrong family": {[]string{"[2001:db8::1]:443"}, true},
+		"mapped IPv4":  {[]string{"[::ffff:192.0.2.1]:443"}, false},
+		"too many":     {[]string{"1.0.0.1:1", "1.0.0.2:1", "1.0.0.3:1", "1.0.0.4:1", "1.0.0.5:1", "1.0.0.6:1", "1.0.0.7:1", "1.0.0.8:1", "1.0.0.9:1"}, true},
+	} {
+		if _, err := localTargets(test.targets, nil, test.ipv4); err == nil {
+			t.Errorf("%s: accepted %v", name, test.targets)
+		}
+	}
+}
+
+func TestIPCheckLocalUsesAnyTarget(t *testing.T) {
+	errs := map[string]error{
+		"192.0.2.1:443": syscall.ECONNREFUSED,
+		"192.0.2.2:443": context.DeadlineExceeded,
+		"192.0.2.3:443": syscall.ENETUNREACH,
+	}
+	dial := func(_ context.Context, _, target string) (net.Conn, error) {
+		if err, ok := errs[target]; ok {
+			return nil, err
+		}
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+	if check := ipCheckLocal(context.Background(), dial, []string{"192.0.2.1:443", "192.0.2.9:443"}); check.Status != ipCheckOK || check.DelayMS == nil {
+		t.Fatalf("one working target should pass: %+v", check)
+	}
+	if check := ipCheckLocal(context.Background(), dial, []string{"192.0.2.1:443", "192.0.2.3:443", "192.0.2.2:443"}); check.Status != ipCheckFailed || check.Error != "no route" {
+		t.Fatalf("missing route should win: %+v", check)
+	}
+	if check := ipCheckLocal(context.Background(), dial, []string{"192.0.2.1:443"}); check.Status != ipCheckFailed || check.Error != "refused" {
+		t.Fatalf("refused target: %+v", check)
+	}
+}

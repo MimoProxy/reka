@@ -12,6 +12,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/runtime/generation"
 )
 
 type Operation struct {
@@ -32,6 +33,8 @@ type Operation struct {
 	URL        string               `json:"url,omitempty"`
 	URL4       string               `json:"url4,omitempty"`
 	URL6       string               `json:"url6,omitempty"`
+	Local4     []string             `json:"local4,omitempty"`
+	Local6     []string             `json:"local6,omitempty"`
 	TimeoutMS  int                  `json:"timeout_ms,omitempty"`
 	Members    []string             `json:"members,omitempty"`
 	Rounds     int                  `json:"rounds,omitempty"`
@@ -137,7 +140,9 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		if s.profile == nil {
 			return nil, errors.New("the operation requires a profile")
 		}
-		return s.profile.engine.RunIPCheck(s.ctx, op.Member, op.URL4, op.URL6, op.TimeoutMS)
+		return s.profile.engine.RunIPCheck(s.ctx, generation.IPCheckOptions{
+			Member: op.Member, URL4: op.URL4, URL6: op.URL6, Local4: op.Local4, Local6: op.Local6, TimeoutMS: op.TimeoutMS,
+		})
 	default:
 		return s.runDiagnostics(op)
 	}
