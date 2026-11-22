@@ -94,7 +94,7 @@ func TestPacketFlowLimitDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	var counts map[string]uint64
-	if err := json.Unmarshal(payload, &counts); err != nil || len(counts) != 5 || counts["tcpRejected"] != 2 {
+	if err := json.Unmarshal(payload, &counts); err != nil || len(counts) != 7 || counts["tcpRejected"] != 2 {
 		t.Fatalf("unexpected flow limits response %s: %v", payload, err)
 	}
 	for _, field := range []string{"udpRejected", "tcpEvicted", "udpEvicted", "dnsOverflow"} {
@@ -174,7 +174,7 @@ func TestPacketTunnelDNSOverflow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := value.(sagernet.PacketFlowStats).DNSOverflow; got != want {
+		if got := value.(FlowLimits).DNSOverflow; got != want {
 			t.Fatalf("DNS overflow count = %d, want %d", got, want)
 		}
 	}

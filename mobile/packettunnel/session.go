@@ -26,8 +26,8 @@ import (
 const (
 	DefaultMTU = 1280
 	maxMTU     = 4064
-	MaxBatch   = 16
-	queueSize  = 64
+	MaxBatch   = 64
+	queueSize  = 1024
 	maxTCP     = 64
 	maxUDP     = 128
 	eventRows  = 64
@@ -241,6 +241,25 @@ func copyPacket(output []byte, packet *stack.PacketBuffer) int {
 
 type packetDevice struct {
 	endpoint *channel.Endpoint
+	// Packets the stack handed to the host queue, and those dropped because
+	// the queue was full.
+	written, dropped atomic.Uint64
+}
+
+// countingEndpoint records how many outbound packets the host queue accepts.
+type countingEndpoint struct {
+	*channel.Endpoint
+	device *packetDevice
+}
+
+func (e countingEndpoint) WritePackets(packets stack.PacketBufferList) (int, tcpip.Error) {
+	total := packets.Len()
+	n, err := e.Endpoint.WritePackets(packets)
+	e.device.written.Add(uint64(n))
+	if n < total {
+		e.device.dropped.Add(uint64(total - n))
+	}
+	return n, err
 }
 
 var _ tun.GVisorTun = (*packetDevice)(nil)
@@ -250,7 +269,7 @@ func (d *packetDevice) Start() error          { return nil }
 func (d *packetDevice) Close() error          { d.endpoint.Close(); return nil }
 
 func (d *packetDevice) NewEndpoint() (stack.LinkEndpoint, stack.NICOptions, error) {
-	return d.endpoint, stack.NICOptions{}, nil
+	return countingEndpoint{Endpoint: d.endpoint, device: d}, stack.NICOptions{}, nil
 }
 
 var errPacketFlowInterface = errors.New("packet-flow uses its link endpoint")

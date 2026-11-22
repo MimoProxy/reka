@@ -30,10 +30,11 @@ func (s *Session) historyPage(kind history.Kind, op Operation) (history.Page, er
 func (s *Session) runDiagnostics(op Operation) (any, error) {
 	switch op.Action {
 	case "flowLimits":
-		if s.tunnel == nil {
-			return sagernet.PacketFlowStats{}, nil
+		var stats sagernet.PacketFlowStats
+		if s.tunnel != nil {
+			stats = s.tunnel.Stats()
 		}
-		return s.tunnel.Stats(), nil
+		return FlowLimits{stats, s.device.written.Load(), s.device.dropped.Load()}, nil
 	case "connectionHistory":
 		return s.historyPage(history.Connections, op)
 	case "requestHistory":
@@ -255,4 +256,13 @@ func (p *profileSession) rules(op Operation) (rulePage, error) {
 		result.Next = &index
 	}
 	return result, nil
+}
+
+// FlowLimits reports connection limit decisions and the host packet queue.
+type FlowLimits struct {
+	sagernet.PacketFlowStats
+	// HostWritten and HostDropped count packets the stack sent toward the host
+	// and those dropped because the host queue was full.
+	HostWritten uint64 `json:"hostWritten"`
+	HostDropped uint64 `json:"hostDropped"`
 }
