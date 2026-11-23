@@ -65,19 +65,21 @@ type Node struct {
 }
 
 type Session struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mtu      int
-	input    sync.Mutex
-	close    sync.Once
-	device   *packetDevice
-	backend  *sagernet.Backend
-	outbound *sagernet.Outbound
-	tunnel   *sagernet.PacketFlow
-	profile  *profileSession
-	events   *history.Store
-	logger   *slog.Logger
-	ranking  trafficRanking
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mtu       int
+	input     sync.Mutex
+	close     sync.Once
+	device    *packetDevice
+	backend   *sagernet.Backend
+	outbound  *sagernet.Outbound
+	tunnel    *sagernet.PacketFlow
+	profile   *profileSession
+	events    *history.Store
+	logger    *slog.Logger
+	ranking   trafficRanking
+	guard     *memoryGuard
+	guardOnce sync.Once
 }
 
 func newSession() *Session {
@@ -190,6 +192,10 @@ func (s *Session) Traffic() (upload, download uint64) {
 
 func (s *Session) Close() {
 	s.close.Do(func() {
+		s.guardOnce.Do(func() {})
+		if s.guard != nil {
+			s.guard.stop()
+		}
 		s.cancel()
 		s.input.Lock()
 		defer s.input.Unlock()

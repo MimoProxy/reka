@@ -207,13 +207,19 @@ func start(open func() (*packettunnel.Session, error), extension bool, failure *
 		// The limit covers all memory the Go runtime holds, not just the
 		// heap. It must sit above what the tunnel needs, or the collector
 		// runs continuously, and low enough that idle pages are returned to
-		// stay well below the extension's memory limit.
+		// stay well below the extension's memory limit. sing-box's libbox
+		// uses 4/5 of 50 MB with GOGC 50; under load tests that changed
+		// nothing measurable, since tunnel memory is live data rather than
+		// collector slack, so the lower limit stays.
 		debug.SetMemoryLimit(28 << 20)
 	}
 	session, err := open()
 	if err != nil {
 		writeError(failure, capacity, err.Error())
 		return 0
+	}
+	if extension {
+		session.StartMemoryGuard()
 	}
 	lastID++
 	active.Store(&runningTunnel{id: lastID, session: session})
@@ -280,6 +286,16 @@ func RekaGoCounts(id C.uint64_t, connections, dns *C.uint32_t) C.int32_t {
 func RekaGoNetworkChanged(id C.uint64_t, available, changed C.int32_t) {
 	if session := lookup(id); session != nil {
 		session.NetworkChanged(available == 1, changed == 1)
+	}
+}
+
+// RekaGoMemoryPressure forwards a critical memory pressure notice from the
+// system to the running tunnel.
+//
+//export RekaGoMemoryPressure
+func RekaGoMemoryPressure(id C.uint64_t) {
+	if session := lookup(id); session != nil {
+		session.MemoryPressure()
 	}
 }
 
