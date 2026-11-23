@@ -192,17 +192,16 @@ func (a *connectionAttempt) dialing(start time.Time, out *Outbound) {
 	defer a.mu.Unlock()
 	if a.EndedAt.IsZero() {
 		a.DialStartedAt = start.UTC()
-		a.appendEventLocked(connectionEvent{kind: eventDial, name: out.Tag(), code: out.Type()})
+		a.appendEventAtLocked(start, connectionEvent{kind: eventDial, name: out.Tag(), code: out.Type()})
 	}
 }
 
-func (a *connectionAttempt) dialed(start time.Time, err error, addr net.Addr, direct bool) *int64 {
+func (a *connectionAttempt) dialed(start, finished time.Time, err error, observed socketDialResult, direct bool) *int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.EndedAt.IsZero() {
 		return nil
 	}
-	finished := time.Now()
 	a.DialFinishedAt = finished.UTC()
 	elapsed := finished.Sub(start)
 	ms := elapsed.Milliseconds()
@@ -213,33 +212,39 @@ func (a *connectionAttempt) dialed(start time.Time, err error, addr net.Addr, di
 	} else {
 		now := a.DialFinishedAt
 		a.ReadyAt = &now
-		event.addr = a.dialPeerLocked(addr, direct)
+		a.socketEventsLocked(observed, direct)
+		event.addr = a.ServerAddr
 	}
-	a.appendEventLocked(event)
+	a.appendEventAtLocked(finished, event)
 	return &ms
 }
 
-func (a *connectionAttempt) dialPeerLocked(addr net.Addr, direct bool) string {
-	// Some proxy streams return a synthetic destination as RemoteAddr.
-	// Report IP peers only when the connection exposes a socket address.
-	switch remote := addr.(type) {
-	case *net.TCPAddr:
-		if peer := remote.AddrPort(); peer.IsValid() {
-			address := peer.String()
-			if a.Network == N.NetworkTCP {
-				a.DialPeer = address
-				if direct {
-					a.TargetIP = peer.Addr().Unmap().String()
-				}
-			}
-			return address
+func (a *connectionAttempt) socketEventsLocked(observed socketDialResult, direct bool) {
+	if observed.muxCode != "" {
+		a.appendEventAtLocked(observed.muxAt, connectionEvent{kind: eventMux, code: observed.muxCode})
+	}
+	if observed.local.IsValid() {
+		a.LocalAddr = observed.local.String()
+		a.Interface = observed.interfaceName
+	}
+	if observed.server.IsValid() {
+		a.ServerAddr = observed.server.String()
+		if a.Network == N.NetworkTCP {
+			a.DialPeer = a.ServerAddr
 		}
-	case *net.UDPAddr:
-		if peer := remote.AddrPort(); peer.IsValid() {
-			return peer.String()
+		if direct {
+			a.TargetIP = observed.server.Addr().String()
 		}
 	}
-	return ""
+	if !observed.connect.finished.IsZero() {
+		a.appendEventAtLocked(observed.connect.started, connectionEvent{kind: eventConnect})
+		a.appendEventAtLocked(observed.connect.finished, connectionEvent{
+			kind: eventConnected, duration: observed.connect.finished.Sub(observed.connect.started), hasDuration: observed.tcp,
+		})
+	}
+	for _, tls := range observed.tls {
+		a.appendEventAtLocked(tls.finished, tls.event)
+	}
 }
 
 func (a *connectionAttempt) complete(reason, stage string, up, down int64) {

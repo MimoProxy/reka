@@ -1,6 +1,7 @@
 package sagernet
 
 import (
+	"cmp"
 	"slices"
 	"time"
 
@@ -33,6 +34,10 @@ const (
 	eventRejected
 	eventDial
 	eventServerDNS
+	eventConnect
+	eventConnected
+	eventTLS
+	eventMux
 	eventReady
 	eventDialFail
 	eventClosed
@@ -51,6 +56,10 @@ var connectionEventKinds = [...]string{
 	eventRejected:   "rejected",
 	eventDial:       "dial",
 	eventServerDNS:  "server_dns",
+	eventConnect:    "connect",
+	eventConnected:  "connected",
+	eventTLS:        "tls",
+	eventMux:        "mux",
 	eventReady:      "ready",
 	eventDialFail:   "dial_fail",
 	eventClosed:     "closed",
@@ -85,7 +94,7 @@ func (a *connectionAttempt) appendEventAtLocked(at time.Time, event connectionEv
 	switch event.kind {
 	case eventMatched, eventRuleLookup:
 		nameLimit = connectionRuleBytes
-	case eventDNS, eventServerDNS:
+	case eventDNS, eventServerDNS, eventTLS:
 		nameLimit = 255
 	}
 	event.name = history.Text(event.name, nameLimit)
@@ -112,6 +121,7 @@ func (a *connectionAttempt) snapshotLocked() api.ConnectionTrace {
 	trace.Chain = slices.Clone(trace.Chain)
 	trace.Events = make([]api.ConnEvent, len(a.events))
 	tailStart := a.EventsDropped % lastConnectionEvents
+	inOrder := true
 	for i := range trace.Events {
 		index := i
 		if i >= firstConnectionEvents && a.EventsDropped != 0 {
@@ -128,6 +138,10 @@ func (a *connectionAttempt) snapshotLocked() api.ConnectionTrace {
 		case eventRuleAddr:
 			// Reuse the unused name slot for the IPv6 address.
 			event.Peer, event.Name = stored.name, ""
+		case eventConnect:
+			event.Addr = trace.ServerAddr
+		case eventConnected:
+			event.Addr, event.Peer, event.Name = trace.ServerAddr, trace.LocalAddr, trace.Interface
 		}
 		if stored.hasDuration {
 			ms := float64((stored.duration.Microseconds()+50)/100) / 10
@@ -140,6 +154,15 @@ func (a *connectionAttempt) snapshotLocked() api.ConnectionTrace {
 			}
 		}
 		trace.Events[i] = event
+		if i > 0 && event.T < trace.Events[i-1].T {
+			inOrder = false
+		}
+	}
+	// Socket timings are added once the dial identifies the winning socket.
+	if !inOrder {
+		slices.SortStableFunc(trace.Events, func(a, b api.ConnEvent) int {
+			return cmp.Compare(a.T, b.T)
+		})
 	}
 	return trace
 }

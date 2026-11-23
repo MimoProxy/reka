@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"time"
 
 	RT "github.com/metacubex/restls-client-go"
 	M "github.com/sagernet/sing/common/metadata"
@@ -62,10 +63,12 @@ func newRestlsPlugin(base N.Dialer, dst M.Socksaddr, s SSPluginSpec) (func(conte
 			hello = *id
 		}
 		c := RT.UClient(raw, clone, hello)
+		started := time.Now()
 		if err := c.HandshakeContext(ctx); err != nil {
 			raw.Close()
 			return nil, err
 		}
+		observeTLS(ctx, raw, started, time.Now(), c.ConnectionState().ServerName, "restls")
 		return c, nil
 	}, nil
 }

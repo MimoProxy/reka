@@ -3,7 +3,6 @@ package sagernet
 import (
 	"context"
 	"errors"
-	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -294,11 +293,10 @@ func (f *udpFlow) dial() {
 	}
 	dialStart := time.Now()
 	f.attempt.dialing(dialStart, f.rt.Outbound)
-	remote, err := f.rt.Outbound.out.ListenPacket(ctx, dialDest)
-	var peer net.Addr
-	if connected, ok := remote.(interface{ RemoteAddr() net.Addr }); err == nil && ok {
-		peer = connected.RemoteAddr()
-	}
+	dialCtx, socketDial := withSocketDial(ctx)
+	remote, err := f.rt.Outbound.out.ListenPacket(dialCtx, dialDest)
+	dialFinished := time.Now()
+	observed := socketDial.finish(remote, err)
 	f.sendMu.Lock()
 	s.mu.Lock()
 	if f.failed {
@@ -309,7 +307,8 @@ func (f *udpFlow) dial() {
 		f.sendMu.Unlock()
 		return
 	}
-	f.attempt.dialed(dialStart, err, peer, false)
+	out := f.rt.Outbound
+	f.attempt.dialed(dialStart, dialFinished, err, observed, out.Type() == "direct" && out.dependencyCloser == nil)
 	if err != nil {
 		f.sendMu.Unlock()
 		f.failed = true

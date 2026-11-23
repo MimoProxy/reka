@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
@@ -68,13 +69,14 @@ func wrapMultiplex(base adapter.Outbound, spec *multiplexSpec, logger log.Contex
 	if err != nil {
 		return nil, err
 	}
-	return &multiplexOutbound{Outbound: base, client: client, onlyTCP: spec.OnlyTCP}, nil
+	return &multiplexOutbound{Outbound: base, client: client, onlyTCP: spec.OnlyTCP, h2mux: spec.Protocol == "" || spec.Protocol == "h2mux"}, nil
 }
 
 type multiplexOutbound struct {
 	adapter.Outbound
 	client   *MUX.Client
 	onlyTCP  bool
+	h2mux    bool
 	once     sync.Once
 	closeErr error
 }
@@ -90,13 +92,23 @@ func (m *multiplexOutbound) DialContext(ctx context.Context, network string, dst
 	if m.onlyTCP && N.NetworkName(network) == "udp" {
 		return m.Outbound.DialContext(ctx, network, dst)
 	}
-	return m.client.DialContext(ctx, network, dst)
+	ctx, observation := withMultiplexDial(ctx)
+	conn, err := m.client.DialContext(ctx, network, dst)
+	if observation != nil {
+		observation.finish(conn, err, m.h2mux)
+	}
+	return conn, err
 }
 func (m *multiplexOutbound) ListenPacket(ctx context.Context, dst M.Socksaddr) (net.PacketConn, error) {
 	if m.onlyTCP {
 		return m.Outbound.ListenPacket(ctx, dst)
 	}
-	return m.client.ListenPacket(ctx, dst)
+	ctx, observation := withMultiplexDial(ctx)
+	conn, err := m.client.ListenPacket(ctx, dst)
+	if observation != nil {
+		observation.finish(conn, err, m.h2mux)
+	}
+	return conn, err
 }
 func (m *multiplexOutbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if base, ok := m.Outbound.(adapter.Lifecycle); ok {
@@ -136,8 +148,63 @@ func (m *multiplexOutbound) CloseIdleConnections() {
 type multiplexDialer struct{ adapter.Outbound }
 
 func (m *multiplexDialer) DialContext(ctx context.Context, network string, dst M.Socksaddr) (net.Conn, error) {
-	return m.Outbound.DialContext(adapter.ContextForMultiplexSession(ctx), network, dst)
+	conn, err := m.Outbound.DialContext(adapter.ContextForMultiplexSession(ctx), network, dst)
+	if observation, ok := ctx.Value(multiplexDialKey{}).(*multiplexDial); ok && err == nil {
+		// sing-mux calls its dialer synchronously only when opening a carrier.
+		observation.carrier = conn
+	}
+	return conn, err
 }
 func (m *multiplexDialer) ListenPacket(ctx context.Context, dst M.Socksaddr) (net.PacketConn, error) {
 	return m.Outbound.ListenPacket(adapter.ContextForMultiplexSession(ctx), dst)
+}
+
+type multiplexDialKey struct{}
+
+type multiplexDial struct {
+	dial    *socketDial
+	carrier net.Conn
+}
+
+func withMultiplexDial(ctx context.Context) (context.Context, *multiplexDial) {
+	dial := socketDialFromContext(ctx)
+	if dial == nil {
+		return ctx, nil
+	}
+	observation := &multiplexDial{dial: dial}
+	return context.WithValue(ctx, multiplexDialKey{}, observation), observation
+}
+
+func (d *multiplexDial) finish(stream interface{ LocalAddr() net.Addr }, err error, h2mux bool) {
+	carrier := d.carrier
+	d.carrier = nil
+	if err != nil {
+		return
+	}
+	if carrier == nil {
+		d.dial.multiplex(nil, true)
+		return
+	}
+	socket := underlyingSocket(carrier)
+	if !h2mux {
+		// smux and yamux forward the carrier's local address. An open retry
+		// can select an existing session even after a fresh carrier dial.
+		got, want := nativeSocketAddress(stream.LocalAddr()), nativeSocketAddress(carrier.LocalAddr())
+		if got.IsValid() && want.IsValid() && got != want {
+			d.dial.multiplex(nil, true)
+			return
+		}
+		if socket != nil && (!got.IsValid() || got != nativeSocketAddress(socket.LocalAddr())) {
+			socket = nil
+		}
+	} else if c, ok := socket.(syscall.Conn); ok {
+		// h2mux opens its stream asynchronously and has no stream address.
+		// It closes a failed physical carrier before retrying session setup.
+		raw, err := c.SyscallConn()
+		if err != nil || raw.Control(func(uintptr) {}) != nil {
+			d.dial.multiplex(nil, true)
+			return
+		}
+	}
+	d.dial.multiplex(socket, false)
 }

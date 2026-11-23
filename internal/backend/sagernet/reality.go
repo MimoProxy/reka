@@ -184,14 +184,17 @@ func (c *realityClient) Handshake(ctx context.Context, conn net.Conn) (net.Conn,
 	aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 	copy(hello.Raw[39:], hello.SessionId)
 
+	started := time.Now()
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		return nil, err
 	}
+	finished := time.Now()
 	if !verifier.verified {
 		// Look like a browser that got a real site, then hang up.
 		go realityFallback(uConn, c.serverName, c.fingerprint)
 		return nil, errRealityVerification
 	}
+	observeTLS(ctx, conn, started, finished, uConn.ConnectionState().ServerName, "reality")
 	return &realityConn{uConn: uConn}, nil
 }
 
