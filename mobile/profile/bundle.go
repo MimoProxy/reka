@@ -46,6 +46,9 @@ type Summary struct {
 	Format      string            `json:"format,omitempty"`
 	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
 	Patches     []PatchStatus     `json:"patches,omitempty"`
+	// Global is the outbound or group global mode uses unless the controls
+	// choose another.
+	Global string `json:"global,omitempty"`
 }
 
 // PatchStatus reports the outcome of a patch in the submitted overlay.
@@ -79,6 +82,9 @@ type Controls struct {
 	BlockQUIC string `json:"blockQuic,omitempty"`
 	// IPVersion overrides the dialer IP policy and DNS IPv6 setting when set.
 	IPVersion string `json:"ipVersion,omitempty"`
+	// Global chooses the outbound or group for global mode. It is ignored
+	// unless it names one in the profile.
+	Global string `json:"global,omitempty"`
 	// FakeIPState is the App Group path opened once per session.
 	FakeIPState string       `json:"fakeIPState,omitempty"`
 	Secrets     secret.Store `json:"-"`
@@ -212,6 +218,29 @@ func addNodeGroup(eff *compile.Effective) error {
 	return err
 }
 
+// defaultGlobal picks global mode's target when the controls do not: the
+// profile's routing.global, a group named GLOBAL as in Clash, the first
+// group, then the first node.
+func defaultGlobal(base *compile.Effective, names map[string]string) string {
+	if base.Routing.Global != "" {
+		return base.Routing.Global
+	}
+	for _, group := range base.Groups {
+		if strings.EqualFold(group.ID, "GLOBAL") || strings.EqualFold(names[group.ID], "GLOBAL") {
+			return group.ID
+		}
+	}
+	if len(base.Groups) > 0 {
+		return base.Groups[0].ID
+	}
+	for _, outbound := range base.Outbounds {
+		if !outbound.Builtin && outbound.Type != "pass" && outbound.Type != "reject-drop" {
+			return outbound.ID
+		}
+	}
+	return base.Final
+}
+
 func Describe(eff *compile.Effective) Summary {
 	summary := Summary{Names: map[string]string{"direct": "DIRECT", "reject": "REJECT", "reject-drop": "REJECT-DROP", "pass": "PASS"},
 		Rules: eff.Router.Rules().Len()}
@@ -245,6 +274,7 @@ func Describe(eff *compile.Effective) Summary {
 	if summary.Outbounds == nil {
 		summary.Outbounds = []Node{}
 	}
+	summary.Global = defaultGlobal(eff, summary.Names)
 	return summary
 }
 
@@ -260,12 +290,12 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	for _, outbound := range base.Outbounds {
 		ids = append(ids, outbound.ID)
 	}
-	global := base.Routing.Global
+	global := controls.Global
+	if !slices.Contains(ids, global) && !slices.ContainsFunc(base.Groups, func(g router.Group) bool { return g.ID == global }) {
+		global = defaultGlobal(base, summary.Names)
+	}
 	for i := range eff.Groups {
 		group := &eff.Groups[i]
-		if global == "" && (strings.EqualFold(group.ID, "GLOBAL") || strings.EqualFold(summary.Names[group.ID], "GLOBAL")) {
-			global = group.ID
-		}
 		entry := summary.Groups[i]
 		if entry.Type != "select" {
 			continue
@@ -282,18 +312,6 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 					group.Selected = id
 					break
 				}
-			}
-		}
-	}
-	if global == "" && len(eff.Groups) > 0 {
-		global = eff.Groups[0].ID
-	}
-	if global == "" {
-		global = base.Final
-		for _, outbound := range base.Outbounds {
-			if !outbound.Builtin && outbound.Type != "pass" && outbound.Type != "reject-drop" {
-				global = outbound.ID
-				break
 			}
 		}
 	}

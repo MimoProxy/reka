@@ -288,3 +288,39 @@ rules: [{match: {rule-set: sites}, outbound: reject}, {match: {all: true}, outbo
 		t.Fatalf("archive rebind fetched the rule provider %d times", fetches.Load())
 	}
 }
+
+func TestControlsChooseGlobalTarget(t *testing.T) {
+	links := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@first.example.test:443?security=tls#First\n" +
+		"trojan://test-only@second.example.test:443?sni=second.example.test#Second\n"
+	bundle, err := prepare(t.Context(), []byte(links), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := bundle.Summary
+	group := summary.Groups[0]
+	if summary.Global != group.ID {
+		t.Fatalf("default global target = %q, want the first group %q", summary.Global, group.ID)
+	}
+	base, err := bundle.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := func(global string) string {
+		t.Helper()
+		config, err := ApplyControls(base, summary, Controls{Mode: "global", Global: global,
+			Selections: map[string]string{group.ID: group.Members[0]}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return config.RoutingRouter().Route(t.Context(), router.Metadata{Domain: "example.test", Network: "tcp"}, nil).Outbound
+	}
+	if got := route(group.Members[1]); got != group.Members[1] {
+		t.Fatalf("chosen global target routed to %q, want %q", got, group.Members[1])
+	}
+	if got := route("direct"); got != "direct" {
+		t.Fatalf("direct global target routed to %q", got)
+	}
+	if got := route("missing"); got != group.Members[0] {
+		t.Fatalf("unknown global target routed to %q, want the group's selection %q", got, group.Members[0])
+	}
+}
