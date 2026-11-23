@@ -3,7 +3,9 @@ package xhttp
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,35 @@ type countedReader struct {
 }
 
 func (c *countedReader) Close() error { c.closed.Add(1); return nil }
+
+func TestInitialConnectionObserverUsesFirstSelection(t *testing.T) {
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+	ready := make(chan bool, 1)
+	var addr NetAddr
+	var selected []httptrace.GotConnInfo
+	ctx := WithInitialConnObserver(t.Context(), func(info httptrace.GotConnInfo) {
+		if len(ready) != 0 || addr.RemoteAddr() != info.Conn.RemoteAddr() {
+			t.Fatal("dial readiness did not wait for the socket observation")
+		}
+		selected = append(selected, info)
+	})
+	trace := httptrace.ContextClientTrace(newAddrContext(&addr, ctx, ready))
+	trace.GotConn(httptrace.GotConnInfo{Conn: conn, Reused: true})
+	select {
+	case got := <-ready:
+		if !got {
+			t.Fatal("the first selection reported failure")
+		}
+	default:
+		t.Fatal("the first selection did not signal readiness")
+	}
+	trace.GotConn(httptrace.GotConnInfo{Conn: peer})
+	if len(selected) != 1 || selected[0].Conn != conn || !selected[0].Reused || len(ready) != 0 {
+		t.Fatalf("retry replaced the first selection: %+v", selected)
+	}
+}
 
 func TestResponseHandoffAndConcurrentClose(t *testing.T) {
 	for i := 0; i < 1000; i++ {

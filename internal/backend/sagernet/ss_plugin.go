@@ -185,9 +185,12 @@ func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, d
 			if err != nil {
 				return nil, err
 			}
+			started := time.Now()
 			conn, err := JLS.NewClient(ctx, raw, config)
 			if err != nil {
 				raw.Close()
+			} else {
+				observeTLS(ctx, raw, started, time.Now(), config.ServerName, "jls")
 			}
 			return conn, err
 		}
@@ -278,13 +281,21 @@ func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, d
 	case "shadow-tls":
 		handshake := func(ctx context.Context, c net.Conn, generator SH.TLSSessionIDGeneratorFunc) error {
 			config := tlsConfig.Clone()
+			handshakeTLS := func(conn net.Conn) (S.Conn, error) {
+				started := time.Now()
+				tlsConn, err := S.ClientHandshake(ctx, conn, config)
+				if err == nil {
+					observeTLS(ctx, c, started, time.Now(), tlsConn.ConnectionState().ServerName, "shadowtls")
+				}
+				return tlsConn, err
+			}
 			if s.Version == 2 {
 				setter, ok := c.(interface{ SetPostHandshakeConn(func(net.Conn) net.Conn) })
 				if !ok {
 					return errors.New("required ShadowTLS v2 record transition overlay is unavailable")
 				}
 				recorder := &shadowTLSV2Recorder{Conn: c}
-				tlsConn, err := S.ClientHandshake(ctx, recorder, config)
+				tlsConn, err := handshakeTLS(recorder)
 				if err != nil {
 					return err
 				}
@@ -295,17 +306,23 @@ func newSSPlugin(ctx context.Context, logger log.ContextLogger, base N.Dialer, d
 				return nil
 			}
 			if s.Version != 3 {
-				return common.Error(S.ClientHandshake(ctx, c, config))
+				return common.Error(handshakeTLS(c))
 			}
 			if customizable, ok := config.(S.WithSessionIDGenerator); ok {
 				customizable.SetSessionIDGenerator(generator)
-				return common.Error(S.ClientHandshake(ctx, c, config))
+				return common.Error(handshakeTLS(c))
 			}
 			standard, err := config.STDConfig()
 			if err != nil {
 				return err
 			}
-			return SH.DefaultTLSHandshakeFunc(s.Password, standard)(ctx, c, generator)
+			tlsHandshake := SH.DefaultTLSHandshakeFunc(s.Password, standard)
+			started := time.Now()
+			err = tlsHandshake(ctx, c, generator)
+			if err == nil {
+				observeTLS(ctx, c, started, time.Now(), standard.ServerName, "shadowtls")
+			}
+			return err
 		}
 		client, err := SH.NewClient(SH.ClientConfig{Version: s.Version, Password: s.Password, Server: dst, Dialer: base, TLSHandshake: handshake, Logger: logger})
 		if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http/httptrace"
 	"net/netip"
 	"sync/atomic"
 	"time"
@@ -124,9 +125,14 @@ func (e *xhttpEndpoint) dialTCP(ctx context.Context) (net.Conn, error) {
 		return conn, err
 	}
 	if e.tls != nil {
+		started := time.Now()
 		conn, err := ST.ClientHandshake(ctx, raw, e.tls)
 		if err != nil {
 			raw.Close()
+		} else if _, carrier := e.tls.(*carrierTLSConfig); !carrier && e.echName == "" {
+			// Custom carriers time their own handshakes. An automatic ECH
+			// lookup may be part of ClientHandshake's wall time.
+			observeTLS(ctx, raw, started, time.Now(), conn.ConnectionState().ServerName, "tls")
 		}
 		return conn, err
 	}
@@ -174,6 +180,15 @@ func (e *xhttpEndpoint) dialQUIC(ctx context.Context, cfg *quic.Config) (*quic.C
 	if err != nil {
 		raw.Close()
 		return nil, err
+	}
+	if dial := socketDialFromContext(ctx); dial != nil {
+		if socket, ok := underlyingSocket(raw).(*net.UDPConn); ok {
+			dial.mu.Lock()
+			if !dial.closed {
+				dial.quicSocket = socket
+			}
+			dial.mu.Unlock()
+		}
 	}
 	context.AfterFunc(conn.Context(), func() { _ = raw.Close() })
 	return conn, nil
@@ -291,7 +306,7 @@ func (d *xhttpOutboundDialer) DialContext(ctx context.Context, network string, _
 	if N.NetworkName(network) != "tcp" {
 		return nil, errors.New("xhttp stream requires TCP")
 	}
-	return d.client.Dial(ctx)
+	return dialXHTTP(ctx, d.client)
 }
 func (d *xhttpOutboundDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, errors.New("xhttp uses VLESS packet framing")
@@ -299,4 +314,34 @@ func (d *xhttpOutboundDialer) ListenPacket(context.Context, M.Socksaddr) (net.Pa
 
 type xhttpV2RayTransport struct{ *XC.Client }
 
-func (t *xhttpV2RayTransport) DialContext(ctx context.Context) (net.Conn, error) { return t.Dial(ctx) }
+func (t *xhttpV2RayTransport) DialContext(ctx context.Context) (net.Conn, error) {
+	return dialXHTTP(ctx, t.Client)
+}
+
+func dialXHTTP(ctx context.Context, client *XC.Client) (net.Conn, error) {
+	if dial := socketDialFromContext(ctx); dial != nil {
+		ctx = XC.WithInitialConnObserver(ctx, dial.xhttpConnSelected)
+	}
+	return client.Dial(ctx)
+}
+
+func (d *socketDial) xhttpConnSelected(info httptrace.GotConnInfo) {
+	if info.Reused {
+		d.multiplex(nil, true)
+		return
+	}
+	socket := underlyingSocket(info.Conn)
+	if socket == nil && info.Conn != nil {
+		// HTTP/3 exposes a connection view with addresses but no raw socket.
+		// Match both endpoints against the native socket opened by this dial.
+		d.mu.Lock()
+		candidate := d.quicSocket
+		d.mu.Unlock()
+		local, peer := nativeSocketAddress(info.Conn.LocalAddr()), nativeSocketAddress(info.Conn.RemoteAddr())
+		if candidate != nil && local.IsValid() && peer.IsValid() &&
+			local == nativeSocketAddress(candidate.LocalAddr()) && peer == nativeSocketAddress(candidate.RemoteAddr()) {
+			socket = candidate
+		}
+	}
+	d.multiplex(socket, false)
+}

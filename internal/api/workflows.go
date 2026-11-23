@@ -33,6 +33,9 @@ type ConnectionTrace struct {
 	DialDestination string      `json:"dial_destination,omitempty"`
 	DialPeer        string      `json:"dial_peer,omitempty"`
 	TargetIP        string      `json:"target_ip,omitempty"`
+	ServerAddr      string      `json:"server_addr,omitempty"`
+	LocalAddr       string      `json:"local_addr,omitempty"`
+	Interface       string      `json:"interface,omitempty"`
 	ReadyAt         *time.Time  `json:"ready_at,omitempty"`
 	EndedAt         time.Time   `json:"ended_at,omitzero"`
 	DurationMS      int64       `json:"duration_ms"`

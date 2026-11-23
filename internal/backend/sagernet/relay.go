@@ -39,12 +39,11 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	ctx = adapter.WithContext(ctx, &metadata)
 	dialStart := time.Now()
 	attempt.dialing(dialStart, out)
-	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
-	var peer net.Addr
-	if err == nil {
-		peer = remote.RemoteAddr()
-	}
-	observeRequestDial(ctx, attempt.dialed(dialStart, err, peer, out.Type() == "direct"))
+	dialCtx, socketDial := withSocketDial(ctx)
+	remote, err := out.out.DialContext(dialCtx, N.NetworkTCP, metadata.Destination)
+	dialFinished := time.Now()
+	observed := socketDial.finish(remote, err)
+	observeRequestDial(ctx, attempt.dialed(dialStart, dialFinished, err, observed, out.Type() == "direct" && out.dependencyCloser == nil))
 	if err != nil {
 		attempt.complete(connectionReason(err, "error"), "dial", 0, 0)
 		release()

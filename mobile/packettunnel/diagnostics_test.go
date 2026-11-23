@@ -32,9 +32,15 @@ func TestPacketTunnelTimelineLimitsLinkedRows(t *testing.T) {
 			for i := range structured {
 				structured[i] = api.ConnEvent{T: int64(i), Kind: "dial"}
 			}
+			ms := 0.2
+			structured[22] = api.ConnEvent{T: 22, Kind: "connect", Addr: "192.0.2.1:443"}
+			structured[23] = api.ConnEvent{
+				T: 23, Kind: "connected", Addr: "192.0.2.1:443", Peer: "192.0.2.2:50000", Name: "test0", MS: &ms,
+			}
 			trace := api.ConnectionTrace{
 				Connection: api.Connection{ID: id, Start: start}, EndedAt: start.Add(time.Minute),
 				Events: structured, EventsDropped: 5,
+				ServerAddr: structured[23].Addr, LocalAddr: structured[23].Peer, Interface: structured[23].Name,
 			}
 			records.RecordFlow(history.Connections, trace.Scope, start, id, trace, nil)
 			recordLinked := func(kind history.Kind, offset int) {
@@ -58,9 +64,14 @@ func TestPacketTunnelTimelineLimitsLinkedRows(t *testing.T) {
 			}
 			timeline := value.(api.ConnectionTimeline)
 			if !timeline.Truncated || timeline.Live || !slices.EqualFunc(timeline.Trace.Events, structured, func(a, b api.ConnEvent) bool {
-				return a.T == b.T && a.Kind == b.Kind
+				return a.T == b.T && a.Kind == b.Kind && a.Addr == b.Addr && a.Peer == b.Peer && a.Name == b.Name
 			}) || timeline.Trace.EventsDropped != 5 {
 				t.Fatalf("unexpected structured timeline: %+v", timeline)
+			}
+			connected := timeline.Trace.Events[23]
+			if timeline.Trace.ServerAddr != trace.ServerAddr || timeline.Trace.LocalAddr != trace.LocalAddr ||
+				timeline.Trace.Interface != trace.Interface || connected.MS == nil || *connected.MS != ms {
+				t.Fatalf("unexpected socket diagnostics: %+v", timeline.Trace)
 			}
 			wantHTTP := []int{1, 2, 3, 4, 9, 10, 11, 12}
 			events := timeline.Events

@@ -88,12 +88,32 @@ type emptyAddr string
 
 func (a emptyAddr) Network() string { return "xhttp" }
 func (a emptyAddr) String() string  { return string(a) }
-func newAddrContext(a *NetAddr, ctx context.Context) context.Context {
+
+type initialConnObserverKey struct{}
+
+// WithInitialConnObserver reports the connection selected for the initial
+// request before Dial returns. Split modes use their download request here.
+func WithInitialConnObserver(ctx context.Context, observe func(httptrace.GotConnInfo)) context.Context {
+	return context.WithValue(ctx, initialConnObserverKey{}, observe)
+}
+
+func newAddrContext(a *NetAddr, ctx context.Context, ready chan<- bool) context.Context {
+	observe, _ := ctx.Value(initialConnObserverKey{}).(func(httptrace.GotConnInfo))
+	var once sync.Once
 	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 		a.mu.Lock()
 		a.local = info.Conn.LocalAddr()
 		a.remote = info.Conn.RemoteAddr()
 		a.mu.Unlock()
+		once.Do(func() {
+			if observe != nil {
+				observe(info)
+			}
+			select {
+			case ready <- true:
+			default:
+			}
+		})
 	}})
 }
 func closeTransport(t http.RoundTripper) {

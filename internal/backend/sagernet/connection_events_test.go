@@ -71,7 +71,7 @@ func TestConnectionEventBuffer(t *testing.T) {
 	attempt.routing(time.Now())
 	attempt.setRoute(Route{}, netip.Addr{})
 	attempt.dialing(time.Now(), &Outbound{})
-	attempt.dialed(time.Now(), nil, nil, false)
+	attempt.dialed(time.Now(), time.Now(), nil, socketDialResult{}, false)
 	attempt.complete("error", "relay", 33, 44)
 	if after := attempt.trace(33, 44); !reflect.DeepEqual(closed, after) {
 		t.Fatalf("completed trace changed: %+v", after)
@@ -152,11 +152,12 @@ func TestTCPConnectionEvents(t *testing.T) {
 		fakeIP.Name != "mapped.test" || fakeIP.Addr != destination.Addr().String() ||
 		matched.Name != info.Rule || matched.Code != "" || !slices.Equal(matched.N, []int{3}) ||
 		path.Name != "leaf" || !slices.Equal(path.Path, info.Chain) ||
-		dial.Code != "direct" || dial.Name != "leaf" || ready.MS == nil || ready.Addr != peer.String() {
+		dial.Code != "direct" || dial.Name != "leaf" || ready.MS == nil || ready.Addr != "" {
 		t.Fatalf("unexpected event fields: %+v", active.Events)
 	}
 	if active.RouteStartedAt.IsZero() || active.RouteStartedAt.Before(active.SniffFinishedAt) ||
-		active.RouteStartedAt.After(active.RoutedAt) || active.DialPeer != peer.String() || active.TargetIP != peer.Addr().String() {
+		active.RouteStartedAt.After(active.RoutedAt) || active.DialPeer != "" || active.TargetIP != "" ||
+		active.ServerAddr != "" || active.LocalAddr != "" || active.Interface != "" {
 		t.Fatalf("unexpected route or dial trace: %+v", active)
 	}
 	checkSystemServerDNSEvent(t, active.Events[6])
@@ -255,7 +256,8 @@ func TestUDPConnectionEvents(t *testing.T) {
 	checkConnectionEventKinds(t, active.Events, "udp_first", "matched", "dial", "server_dns", "ready")
 	first, dial, ready := active.Events[0], active.Events[2], active.Events[4]
 	if first.Code != "tun" || first.Addr != source.String() || first.Peer != destination.String() ||
-		dial.Code != "direct" || dial.Name != "udp-leaf" || ready.MS == nil || ready.Addr != destination.String() {
+		dial.Code != "direct" || dial.Name != "udp-leaf" || ready.MS == nil || ready.Addr != "" ||
+		active.ServerAddr != "" || active.LocalAddr != "" || active.Interface != "" {
 		t.Fatalf("unexpected UDP events: %+v", active.Events)
 	}
 	checkSystemServerDNSEvent(t, active.Events[3])
@@ -370,7 +372,7 @@ func closeConnectionEventFlow(t *testing.T, backend *Backend, id uint64, done <-
 	}
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second): // Manually closed yamux streams can take several seconds to drain.
 		t.Fatal("connection did not finish closing")
 	}
 }

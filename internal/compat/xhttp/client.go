@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"net/http"
-	"net/http/httptrace"
 )
 
 // ConnIdleTimeout defines the maximum time an idle TCP session can survive in the tunnel,
@@ -341,15 +340,7 @@ func (c *Client) DialStreamOne(ctx context.Context) (net.Conn, error) {
 	stop := context.AfterFunc(ctx, reqCancel)  // temporarily connect ctx with reqCtx when dialing
 	defer stop()                               // disconnect ctx with reqCtx after dialing
 
-	addrCtx := newAddrContext(&conn.NetAddr, reqCtx)
-	streamCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
-		},
-	})
+	streamCtx := newAddrContext(&conn.NetAddr, reqCtx, gotConn)
 
 	req, err := http.NewRequestWithContext(streamCtx, c.cfg.GetNormalizedUplinkHTTPMethod(), requestURL.String(), pr)
 	if err != nil {
@@ -445,15 +436,7 @@ func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
 	stop := context.AfterFunc(ctx, reqCancel)  // temporarily connect ctx with reqCtx when dialing
 	defer stop()                               // disconnect ctx with reqCtx after dialing
 
-	addrCtx := newAddrContext(&conn.NetAddr, reqCtx)
-	downloadCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
-		},
-	})
+	downloadCtx := newAddrContext(&conn.NetAddr, reqCtx, gotConn)
 
 	downloadReq, err := http.NewRequestWithContext(
 		downloadCtx,
@@ -601,15 +584,7 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	stop := context.AfterFunc(ctx, reqCancel)  // temporarily connect ctx with reqCtx when dialing
 	defer stop()                               // disconnect ctx with reqCtx after dialing
 
-	addrCtx := newAddrContext(&conn.NetAddr, reqCtx)
-	downloadCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
-		},
-	})
+	downloadCtx := newAddrContext(&conn.NetAddr, reqCtx, gotConn)
 
 	downloadReq, err := http.NewRequestWithContext(
 		downloadCtx,
