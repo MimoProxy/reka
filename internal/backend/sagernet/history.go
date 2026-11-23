@@ -23,7 +23,8 @@ type connectionAttempt struct {
 	releasePacketFlow func() bool // Reports whether the flow was evicted.
 	mu                sync.Mutex
 	api.ConnectionTrace
-	events []connectionEvent
+	events   []connectionEvent
+	up, down rateCounter
 }
 
 func withAttempt(ctx context.Context, attempt *connectionAttempt) context.Context {
@@ -51,7 +52,10 @@ func (b *Backend) beginConnection(ctx context.Context, md Metadata) *connectionA
 		c.Source = md.Source.String()
 	}
 	release, _ := ctx.Value(packetFlowReleaseKey{}).(func() bool)
-	attempt := &connectionAttempt{store: b.history, releasePacketFlow: release, ConnectionTrace: api.ConnectionTrace{Connection: c}}
+	attempt := &connectionAttempt{
+		store: b.history, releasePacketFlow: release, ConnectionTrace: api.ConnectionTrace{Connection: c},
+		up: rateCounter{start: c.Start}, down: rateCounter{start: c.Start},
+	}
 	if b.historyScope != nil {
 		attempt.Scope = b.historyScope()
 	}
@@ -247,7 +251,19 @@ func (a *connectionAttempt) socketEventsLocked(observed socketDialResult, direct
 	}
 }
 
-func (a *connectionAttempt) complete(reason, stage string, up, down int64) {
+func (a *connectionAttempt) activeState() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.EndedAt.IsZero() {
+		return ""
+	}
+	if a.ReadyAt == nil {
+		return "connecting"
+	}
+	return "active"
+}
+
+func (a *connectionAttempt) complete(reason, stage string) {
 	if a.releasePacketFlow != nil && a.releasePacketFlow() {
 		reason, stage = "evicted", ""
 	}
@@ -259,7 +275,7 @@ func (a *connectionAttempt) complete(reason, stage string, up, down int64) {
 	a.appendEventLocked(connectionEvent{kind: eventClosed, code: reason, name: stage})
 	a.EndedAt = time.Now().UTC()
 	a.DurationMS = time.Since(a.Start).Milliseconds()
-	a.Upload, a.Download = up, down
+	a.copyTraffic(&a.ConnectionTrace)
 	a.CloseReason, a.ErrorStage = reason, stage
 	if a.store == nil {
 		a.mu.Unlock()
@@ -270,15 +286,20 @@ func (a *connectionAttempt) complete(reason, stage string, up, down int64) {
 	a.store.RecordFlow(history.Connections, trace.Scope, trace.Start, trace.ID, connectionHistoryTrace(trace), nil)
 }
 
-func (a *connectionAttempt) trace(up, down int64) api.ConnectionTrace {
+func (a *connectionAttempt) trace() api.ConnectionTrace {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	trace := a.snapshotLocked()
 	if trace.EndedAt.IsZero() {
-		trace.Upload, trace.Download = up, down
+		a.copyTraffic(&trace)
 		trace.DurationMS = time.Since(trace.Start).Milliseconds()
 	}
 	return trace
+}
+
+func (a *connectionAttempt) copyTraffic(trace *api.ConnectionTrace) {
+	trace.PeakUpBPS, trace.PeakDownBPS = a.up.Peak(), a.down.Peak()
+	trace.Upload, trace.Download = a.up.Load(), a.down.Load()
 }
 
 func connectionReason(err error, otherwise string) string {

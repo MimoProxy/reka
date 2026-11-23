@@ -21,6 +21,7 @@ type ConnInfo struct {
 	Start    time.Time
 	Upload   int64
 	Download int64
+	State    string
 
 	OriginalDestination string
 }
@@ -32,8 +33,6 @@ type tracked struct {
 	out     *Outbound
 	info    any
 	start   time.Time
-	up      *atomic.Int64
-	down    *atomic.Int64
 	close   func()
 
 	originalDestination string
@@ -42,7 +41,8 @@ type tracked struct {
 func (c *tracked) snapshot() ConnInfo {
 	return ConnInfo{
 		ID: c.id, Metadata: c.md, Outbound: c.out.Tag(), OutboundType: c.out.Type(), Info: c.info,
-		Start: c.start, Upload: c.up.Load(), Download: c.down.Load(),
+		Start: c.start, Upload: c.attempt.up.Load(), Download: c.attempt.down.Load(),
+		State:               c.attempt.activeState(),
 		OriginalDestination: c.originalDestination,
 	}
 }
@@ -51,10 +51,10 @@ func (b *Backend) ConnectionTrace(id uint64, profile string) (api.ConnectionTrac
 	b.conns.mu.Lock()
 	tracked := b.conns.conns[id]
 	b.conns.mu.Unlock()
-	if tracked == nil || tracked.attempt == nil {
+	if tracked == nil {
 		return api.ConnectionTrace{}, false
 	}
-	trace := tracked.attempt.trace(tracked.up.Load(), tracked.down.Load())
+	trace := tracked.attempt.trace()
 	return trace, trace.Scope.ProfileID == profile
 }
 
@@ -87,6 +87,8 @@ func (t *connTable) add(c *tracked) func() {
 func (b *Backend) Connections() []ConnInfo {
 	var out []ConnInfo
 	b.WithConnectionSnapshot(func(active []ConnInfo) { out = active })
+	// Ranking still needs completed connections until onClosed takes their totals.
+	out = slices.DeleteFunc(out, func(c ConnInfo) bool { return c.State == "" })
 	slices.SortFunc(out, func(a, b ConnInfo) int { return int(a.ID - b.ID) })
 	return out
 }

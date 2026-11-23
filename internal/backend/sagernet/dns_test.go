@@ -70,7 +70,7 @@ func TestDNSRouterConnectionEvents(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			events := attempt.trace(0, 0).Events
+			events := attempt.trace().Events
 			checkConnectionEventKinds(t, events, "accepted", "server_dns")
 			event := events[1]
 			if event.Name != tc.domain || event.Code != tc.source || !slices.Equal(event.N, tc.counts) || event.MS == nil {

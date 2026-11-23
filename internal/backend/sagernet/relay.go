@@ -45,7 +45,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	observed := socketDial.finish(remote, err)
 	observeRequestDial(ctx, attempt.dialed(dialStart, dialFinished, err, observed, out.Type() == "direct" && out.dependencyCloser == nil))
 	if err != nil {
-		attempt.complete(connectionReason(err, "error"), "dial", 0, 0)
+		attempt.complete(connectionReason(err, "error"), "dial")
 		release()
 		err = E.Cause(err, "open connection to ", metadata.Destination, " using outbound/", out.Type(), "[", out.Tag(), "]")
 		N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -59,7 +59,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	}
 	if err = N.ReportConnHandshakeSuccess(conn, remote); err != nil {
 		stopCancel()
-		attempt.complete(connectionReason(err, "error"), "handshake", 0, 0)
+		attempt.complete(connectionReason(err, "error"), "handshake")
 		release()
 		remote.Close()
 		N.CloseOnHandshakeFailure(conn, onClose, E.Cause(err, "report handshake success"))
@@ -72,13 +72,13 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		errMu     sync.Mutex
 		firstErr  error
 		finished  = make(chan struct{})
-		up, down  atomic.Int64
 		closeBoth = func() { common.Close(conn, remote) }
 	)
+	up, down := &attempt.up, &attempt.down
 	processTraffic, finishProcess := b.beginProcessTraffic(rt.Owner)
 	untrackConnection := b.conns.add(&tracked{attempt: attempt, id: attempt.ID, start: time.Now(), md: toMetadata(metadata), out: out,
 		originalDestination: originalDestination,
-		info:                rt.Info, up: &up, down: &down, close: func() { manual.Store(true); closeBoth() }})
+		info:                rt.Info, close: func() { manual.Store(true); closeBoth() }})
 	untrack := func() { stopCancel(); untrackConnection(); finishProcess() }
 	// finish runs once per direction; the second call tears the pair down.
 	finish := func(err error) {
@@ -101,7 +101,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 			if cause != nil && reason != "manual" && reason != "idle_timeout" {
 				stage = "relay"
 			}
-			attempt.complete(reason, stage, up.Load(), down.Load())
+			attempt.complete(reason, stage)
 			close(finished)
 			untrack()
 			release()
@@ -114,7 +114,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	// abort tears the pair down before any copy goroutine has started.
 	abort := func(err error) {
 		if !done.Swap(true) {
-			attempt.complete(connectionReason(err, "error"), "handshake", up.Load(), down.Load())
+			attempt.complete(connectionReason(err, "error"), "handshake")
 			untrack()
 			release()
 			if onClose != nil {
@@ -130,8 +130,8 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	}
 	grace := b.halfCloseTimeout
 	closeIdle := func() { drained.Store(true); closeBoth() }
-	go copyHalf(conn, remote, &up, finish, func() { watchIdle(&down, grace, finished, closeIdle) }, &b.trafficUpload, &processTraffic.upload)
-	go copyHalf(remote, conn, &down, finish, func() { watchIdle(&up, grace, finished, closeIdle) }, &b.trafficDownload, &processTraffic.download)
+	go copyHalf(conn, remote, up, finish, func() { watchIdle(down, grace, finished, closeIdle) }, &b.trafficUpload, &processTraffic.upload)
+	go copyHalf(remote, conn, down, finish, func() { watchIdle(up, grace, finished, closeIdle) }, &b.trafficDownload, &processTraffic.download)
 }
 
 // copyHalf copies source to destination, counting bytes into moved. At EOF
@@ -140,7 +140,7 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 // CloseWrite, REALITY servers mishandle TLS close_notify); closing them
 // outright would drop the reply still in flight. For those, drain is called
 // instead: the other direction keeps relaying until it goes idle.
-func copyHalf(source, destination net.Conn, moved *atomic.Int64, finish func(error), drain func(), totals ...*atomic.Uint64) {
+func copyHalf(source, destination net.Conn, moved *rateCounter, finish func(error), drain func(), totals ...*atomic.Uint64) {
 	err := copyOwned(destination, source, moved, totals...)
 	switch {
 	case err != nil:
@@ -162,7 +162,7 @@ func copyHalf(source, destination net.Conn, moved *atomic.Int64, finish func(err
 // sender stops referencing the last write. Keep a private, unpooled buffer for
 // each direction: on error it remains owned by the sender until it is done,
 // instead of being returned to a shared read-wait pool and reused by a relay.
-func copyOwned(destination io.Writer, source io.Reader, moved *atomic.Int64, totals ...*atomic.Uint64) error {
+func copyOwned(destination io.Writer, source io.Reader, moved *rateCounter, totals ...*atomic.Uint64) error {
 	buffer := make([]byte, 32*1024)
 	for {
 		n, readErr := source.Read(buffer)
@@ -192,7 +192,7 @@ func copyOwned(destination io.Writer, source io.Reader, moved *atomic.Int64, tot
 
 // watchIdle closes the pair once moved has not changed for grace, unless
 // the relay finishes first.
-func watchIdle(moved *atomic.Int64, grace time.Duration, finished <-chan struct{}, closeBoth func()) {
+func watchIdle(moved *rateCounter, grace time.Duration, finished <-chan struct{}, closeBoth func()) {
 	tick := time.NewTicker(grace / 4)
 	defer tick.Stop()
 	last, idleSince := moved.Load(), time.Now()

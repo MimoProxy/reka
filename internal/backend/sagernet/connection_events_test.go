@@ -27,20 +27,21 @@ func TestConnectionEventBuffer(t *testing.T) {
 	if size := unsafe.Sizeof(connectionEvent{}); size > 80 {
 		t.Fatalf("retained event uses %d bytes", size)
 	}
-	var attempt connectionAttempt
+	attempt := new(connectionAttempt)
 	attempt.Start = time.Now()
+	attempt.up.start, attempt.down.start = attempt.Start, attempt.Start
 	if attempt.events != nil {
 		t.Fatal("empty attempt allocated events")
 	}
 	for count := 1; count <= 30; count++ {
-		appendTestConnectionEvent(&attempt, connectionEvent{kind: eventMatched, n: [2]int32{int32(count)}, nCount: 1})
+		appendTestConnectionEvent(attempt, connectionEvent{kind: eventMatched, n: [2]int32{int32(count)}, nCount: 1})
 		switch count {
 		case 1:
 			if cap(attempt.events) != 8 {
 				t.Fatalf("initial event capacity = %d", cap(attempt.events))
 			}
 		case 24, 25, 30:
-			trace := attempt.trace(0, 0)
+			trace := attempt.trace()
 			want := make([]int, 0, 24)
 			for n := 1; n <= 20; n++ {
 				want = append(want, n)
@@ -61,19 +62,23 @@ func TestConnectionEventBuffer(t *testing.T) {
 			}
 		}
 	}
-	attempt.complete("manual", "", 11, 22)
-	closed := attempt.trace(0, 0)
+	attempt.up.Add(11)
+	attempt.down.Add(22)
+	attempt.complete("manual", "")
+	closed := attempt.trace()
 	if event := closed.Events[23]; event.Kind != "closed" || event.Code != "manual" || closed.EventsDropped != 7 {
 		t.Fatalf("after completion, last event = %+v, dropped = %d", event, closed.EventsDropped)
 	}
-	appendTestConnectionEvent(&attempt, connectionEvent{kind: eventDial})
+	appendTestConnectionEvent(attempt, connectionEvent{kind: eventDial})
 	attempt.sniffing(time.Now(), Metadata{Protocol: "tls"}, sniffObservation{protocol: "tls"})
 	attempt.routing(time.Now())
 	attempt.setRoute(Route{}, netip.Addr{})
 	attempt.dialing(time.Now(), &Outbound{})
 	attempt.dialed(time.Now(), time.Now(), nil, socketDialResult{}, false)
-	attempt.complete("error", "relay", 33, 44)
-	if after := attempt.trace(33, 44); !reflect.DeepEqual(closed, after) {
+	attempt.up.Add(33)
+	attempt.down.Add(44)
+	attempt.complete("error", "relay")
+	if after := attempt.trace(); !reflect.DeepEqual(closed, after) {
 		t.Fatalf("completed trace changed: %+v", after)
 	}
 }
@@ -93,7 +98,7 @@ func TestConnectionEventSnapshotsConcurrent(t *testing.T) {
 	}
 	close(start)
 	for range writes {
-		trace := attempt.trace(0, 0)
+		trace := attempt.trace()
 		if count := len(trace.Events); count == 0 || count > 24 || trace.Events[0].Kind != "accepted" {
 			t.Errorf("invalid concurrent snapshot with %d events", count)
 			break
@@ -106,7 +111,7 @@ func TestConnectionEventSnapshotsConcurrent(t *testing.T) {
 		}
 	}
 	workers.Wait()
-	trace := attempt.trace(0, 0)
+	trace := attempt.trace()
 	if trace.EventsDropped != 1+writers*writes-24 {
 		t.Fatalf("concurrent appends dropped %d events", trace.EventsDropped)
 	}
@@ -137,7 +142,10 @@ func TestTCPConnectionEvents(t *testing.T) {
 	metadata := adapter.InboundContext{Inbound: "mixed-in", InboundType: "mixed", Source: M.SocksaddrFromNetIP(source), Destination: M.SocksaddrFromNetIP(destination)}
 	done := make(chan struct{})
 	go backend.router.RouteConnectionEx(t.Context(), local, metadata, func(error) { close(done) })
-	passConnectionEventPayload(t, client, target, "GET / HTTP/1.1\r\nHost: sniff.test\r\n\r\n")
+	const request = "GET / HTTP/1.1\r\nHost: sniff.test\r\n\r\n"
+	const reply = "HTTP/1.1 204 No Content\r\n\r\n"
+	passConnectionEventPayload(t, client, target, request)
+	passConnectionEventPayload(t, target, client, reply)
 	id := backend.conns.next.Load()
 	active, ok := backend.ConnectionTrace(id, "")
 	if !ok || !active.EndedAt.IsZero() {
@@ -165,6 +173,9 @@ func TestTCPConnectionEvents(t *testing.T) {
 	path.Path[0], matched.N[0] = "changed", -1
 	closeConnectionEventFlow(t, backend, id, done)
 	closed := readClosedConnectionEventTrace(t, records, id)
+	if closed.PeakUpBPS != int64(len(request)) || closed.PeakDownBPS != int64(len(reply)) {
+		t.Fatalf("TCP history peaks = %d up, %d down", closed.PeakUpBPS, closed.PeakDownBPS)
+	}
 	checkConnectionEventKinds(t, closed.Events, append(want, "closed")...)
 	if event := closed.Events[len(closed.Events)-1]; event.Code != "manual" || event.Name != "" ||
 		!slices.Equal(closed.Events[4].Path, info.Chain) || !slices.Equal(closed.Events[3].N, []int{3}) {
@@ -247,7 +258,9 @@ func TestUDPConnectionEvents(t *testing.T) {
 	backend.SetRoute(func(context.Context, Metadata) Route { return Route{Outbound: out} })
 	md := adapter.InboundContext{InboundType: "tun", Source: M.SocksaddrFromNetIP(source)}
 	backend.router.RoutePacketConnectionEx(t.Context(), bufio.NewPacketConn(eventTestPacketConn{eventTestConn{local, addr}}), md, nil)
-	passConnectionEventPayload(t, client, target, "datagram")
+	const request, reply = "datagram", "reply"
+	passConnectionEventPayload(t, client, target, request)
+	passConnectionEventPayload(t, target, client, reply)
 	id := backend.conns.next.Load()
 	active, ok := backend.ConnectionTrace(id, "")
 	if !ok || active.RouteStartedAt.IsZero() || active.RouteStartedAt.After(active.RoutedAt) {
@@ -263,6 +276,9 @@ func TestUDPConnectionEvents(t *testing.T) {
 	checkSystemServerDNSEvent(t, active.Events[3])
 	closeConnectionEventFlow(t, backend, id, done)
 	closed := readClosedConnectionEventTrace(t, records, id)
+	if closed.PeakUpBPS != int64(len(request)) || closed.PeakDownBPS != int64(len(reply)) {
+		t.Fatalf("UDP history peaks = %d up, %d down", closed.PeakUpBPS, closed.PeakDownBPS)
+	}
 	checkConnectionEventKinds(t, closed.Events, "udp_first", "matched", "dial", "server_dns", "ready", "closed")
 }
 
@@ -292,7 +308,9 @@ func TestConnectionEventHistoryRowSize(t *testing.T) {
 			kind: eventReady, addr: "[2001:db8::1]:443", duration: 1250 * time.Microsecond, hasDuration: true,
 		})
 	}
-	attempt.complete("eof", "", 1024, 2048)
+	attempt.up.Add(1024)
+	attempt.down.Add(2048)
+	attempt.complete("eof", "")
 	persisted := readClosedConnectionEventTrace(t, records, attempt.ID)
 	if len(persisted.Events) != 24 {
 		t.Fatalf("persisted events = %d", len(persisted.Events))

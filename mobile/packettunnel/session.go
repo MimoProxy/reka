@@ -30,10 +30,15 @@ const (
 	queueSize  = 1024
 	maxTCP     = 128
 	maxUDP     = 128
-	eventRows  = 64
-	eventBytes = 96 << 10
 	Address4   = "198.18.0.1/30"
 	Address6   = "fd83:7265:6b61::1/64"
+
+	// Packet Tunnel has a memory budget of roughly 50 MB. Sing-box's libbox
+	// keeps 1000 closed connection summaries without event timelines. Keep
+	// 64 rows here, with enough bytes for connection rows of about 3 KiB.
+	eventRows            = 64
+	eventBytes           = 96 << 10
+	connectionEventBytes = 192 << 10
 )
 
 var configuredMTU atomic.Int32
@@ -78,7 +83,10 @@ type Session struct {
 func newSession() *Session {
 	mtu := int(configuredMTU.Load())
 	ctx, cancel := context.WithCancel(context.Background())
-	events := history.NewBounded(eventRows, eventBytes, history.DNS, history.Logs, history.Connections, history.Requests)
+	events := history.NewBoundedByKind(eventRows, map[history.Kind]int{
+		history.DNS: eventBytes, history.Logs: eventBytes,
+		history.Connections: connectionEventBytes, history.Requests: eventBytes,
+	})
 	logger := slog.New(tunnelLogHandler{events: events})
 	return &Session{
 		ctx: ctx, cancel: cancel, mtu: mtu, device: &packetDevice{endpoint: channel.New(queueSize, uint32(mtu), "")},

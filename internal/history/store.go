@@ -77,13 +77,13 @@ type bucket struct {
 func (b *bucket) at(i int) *entry { return &b.rows[(b.first+i)%len(b.rows)] }
 
 type Store struct {
-	mu      sync.Mutex
-	epoch   string
-	buckets map[Kind]*bucket
-	cleared map[Kind]map[string]time.Time
-	kinds   map[Kind]bool
-	rows    int
-	bytes   int
+	mu           sync.Mutex
+	epoch        string
+	buckets      map[Kind]*bucket
+	cleared      map[Kind]map[string]time.Time
+	kindBytes    map[Kind]int
+	rows         int
+	defaultBytes int
 }
 
 func New() *Store {
@@ -93,14 +93,31 @@ func New() *Store {
 // NewBounded caps each enabled history independently. With no kinds provided
 // it records all kinds, as the native controller has always done.
 func NewBounded(rows, bytes int, kinds ...Kind) *Store {
+	if len(kinds) == 0 {
+		return newStore(rows, bytes, nil)
+	}
+	limits := make(map[Kind]int, len(kinds))
+	for _, kind := range kinds {
+		limits[kind] = max(1, bytes)
+	}
+	return newStore(rows, 0, limits)
+}
+
+// NewBoundedByKind records only the given kinds, each with its own byte limit
+// and the same row limit.
+func NewBoundedByKind(rows int, bytes map[Kind]int) *Store {
+	limits := make(map[Kind]int, len(bytes))
+	for kind, limit := range bytes {
+		limits[kind] = max(1, limit)
+	}
+	return newStore(rows, 0, limits)
+}
+
+func newStore(rows, bytes int, kindBytes map[Kind]int) *Store {
 	var epoch [8]byte
 	_, _ = rand.Read(epoch[:])
-	allowed := make(map[Kind]bool, len(kinds))
-	for _, kind := range kinds {
-		allowed[kind] = true
-	}
 	return &Store{epoch: hex.EncodeToString(epoch[:]), buckets: make(map[Kind]*bucket),
-		cleared: make(map[Kind]map[string]time.Time), kinds: allowed, rows: max(1, rows), bytes: max(1, bytes)}
+		cleared: make(map[Kind]map[string]time.Time), kindBytes: kindBytes, rows: max(1, rows), defaultBytes: max(1, bytes)}
 }
 
 func (s *Store) Record(kind Kind, scope Scope, started time.Time, summary, detail any) {
@@ -109,8 +126,15 @@ func (s *Store) Record(kind Kind, scope Scope, started time.Time, summary, detai
 
 // RecordFlow adds a summary and its exact connection ID to the bounded history.
 func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint64, summary, detail any) {
-	if s == nil || len(s.kinds) > 0 && !s.kinds[kind] {
+	if s == nil {
 		return
+	}
+	limit := s.defaultBytes
+	if s.kindBytes != nil {
+		limit = s.kindBytes[kind]
+		if limit == 0 {
+			return
+		}
 	}
 	data, err := json.Marshal(summary)
 	if err == nil && len(data) > rowBytes {
@@ -132,7 +156,7 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 	// Search the summary only. A detail can include authorized body previews.
 	search := strings.ToLower(string(data))
 	size := len(data) + len(private) + len(search) + len(scope.ProfileID) + 128
-	if size > s.bytes {
+	if size > limit {
 		return
 	}
 	s.mu.Lock()
@@ -147,7 +171,7 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 		b = &bucket{rows: make([]entry, s.rows)}
 		s.buckets[kind] = b
 	}
-	for b.count == len(b.rows) || size > s.bytes-b.bytes {
+	for b.count == len(b.rows) || size > limit-b.bytes {
 		old := b.at(0)
 		b.bytes -= old.size
 		b.floor = old.seq

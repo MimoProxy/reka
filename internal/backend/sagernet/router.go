@@ -179,7 +179,7 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	if rt.Outbound == nil {
 		attempt.setRoute(rt, md.Destination.Addr)
 		bindRequestConnection(ctx, attempt)
-		attempt.complete(connectionReason(ctx.Err(), "rejected"), "route", 0, 0)
+		attempt.complete(connectionReason(ctx.Err(), "rejected"), "route")
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
 		r.backend.logger.DebugContext(ctx, "reject ", metadata.Destination)
 		return
