@@ -87,7 +87,9 @@ func (c *compiler) layers(profile []byte) {
 	doc, _ := model.LoadDoc(model.DocProfile, profile)
 	*doc.Mapping() = *nodeCopy(doc.Mapping())
 	byID := map[string]*yaml.Node{}
-	c.sourceHashes = map[string]string{}
+	if !c.opts.OmitProvenance {
+		c.sourceHashes = map[string]string{}
+	}
 	resourcePositions := map[string]model.Positions{}
 	for path, pos := range spos {
 		parts, err := model.SplitPath(path)
@@ -136,8 +138,10 @@ func (c *compiler) layers(profile []byte) {
 		n := nodeCopy(sourceDoc.Get(model.JoinPath("/sources", seg("", i))))
 		byID[src.ID] = n
 		localTargets[src.ID] = map[string]bool{}
-		sum := sha256.Sum256(model.Format(n))
-		c.sourceHashes[src.ID] = hex.EncodeToString(sum[:])
+		if c.sourceHashes != nil {
+			sum := sha256.Sum256(model.Format(n))
+			c.sourceHashes[src.ID] = hex.EncodeToString(sum[:])
+		}
 		// Require stable IDs before namespacing. Anonymous source rules would
 		// otherwise change identity whenever the subscription reorders them.
 		for _, kind := range []string{"outbounds", "groups", "rules", "rule-sets", "sub-rules"} {

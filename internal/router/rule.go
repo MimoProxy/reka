@@ -244,42 +244,23 @@ func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 	}
 	for _, v := range spec.Values {
 		switch spec.Kind {
-		case KindDomain, KindDomainSuffix:
-			d := NormalizeDomain(strings.TrimPrefix(v, "."))
-			if d == "" || strings.ContainsAny(d, " /,") {
-				return nil, fail(v, fmt.Errorf("not a domain"))
-			}
-			r.strs = append(r.strs, d)
-		case KindDomainKeyword:
-			if v == "" {
-				return nil, fail(v, fmt.Errorf("empty keyword"))
-			}
-			r.strs = append(r.strs, strings.ToLower(v))
-		case KindDomainPattern:
-			pattern := strings.ToLower(v)
-			if err := ValidDomainPattern(pattern); err != nil {
-				return nil, fail(v, err)
-			}
-			if strings.HasPrefix(pattern, ".") && !strings.ContainsAny(pattern, "*+") {
-				r.strs = append(r.strs, pattern[1:])
-				continue
-			}
-			prefix, body := "", pattern
-			if strings.HasPrefix(body, "+.") {
-				prefix = "(?:.+\\.)?"
-				body = body[2:]
-			} else if strings.HasPrefix(body, ".") {
-				prefix = ".+\\."
-				body = body[1:]
-			}
-			expr := prefix + strings.ReplaceAll(regexp.QuoteMeta(body), `\*`, `[^.]+`)
-			re, err := regexp.Compile("^" + expr + "$")
+		case KindDomain, KindDomainSuffix, KindDomainKeyword, KindDomainPattern, KindDomainRegex:
+			value, err := normalizeDomainRuleValue(spec.Kind, v)
 			if err != nil {
 				return nil, fail(v, err)
 			}
-			r.regexps = append(r.regexps, re)
-		case KindDomainRegex:
-			re, err := regexp.Compile(v)
+			switch spec.Kind {
+			case KindDomain, KindDomainSuffix, KindDomainKeyword:
+				r.strs = append(r.strs, value)
+				continue
+			case KindDomainPattern:
+				if isStrictDomainSuffix(value) {
+					r.strs = append(r.strs, value[1:])
+					continue
+				}
+				value = domainPatternExpression(value)
+			}
+			re, err := regexp.Compile(value)
 			if err != nil {
 				return nil, fail(v, err)
 			}
@@ -334,6 +315,41 @@ func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 		r.ipset = set
 	}
 	return r, nil
+}
+
+func normalizeDomainRuleValue(kind Kind, value string) (string, error) {
+	switch kind {
+	case KindDomain, KindDomainSuffix:
+		domain := NormalizeDomain(strings.TrimPrefix(value, "."))
+		if domain == "" || strings.ContainsAny(domain, " /,") {
+			return "", fmt.Errorf("not a domain")
+		}
+		return domain, nil
+	case KindDomainKeyword:
+		if value == "" {
+			return "", fmt.Errorf("empty keyword")
+		}
+		return strings.ToLower(value), nil
+	case KindDomainPattern:
+		pattern := strings.ToLower(value)
+		return pattern, ValidDomainPattern(pattern)
+	default:
+		return value, nil
+	}
+}
+
+func isStrictDomainSuffix(pattern string) bool {
+	return strings.HasPrefix(pattern, ".") && !strings.ContainsAny(pattern, "*+")
+}
+
+func domainPatternExpression(pattern string) string {
+	prefix, body := "", pattern
+	if strings.HasPrefix(body, "+.") {
+		prefix, body = "(?:.+\\.)?", body[2:]
+	} else if strings.HasPrefix(body, ".") {
+		prefix, body = ".+\\.", body[1:]
+	}
+	return "^" + prefix + strings.ReplaceAll(regexp.QuoteMeta(body), `\*`, `[^.]+`) + "$"
 }
 
 // parsePrefix accepts a CIDR or a bare address (as a host prefix).

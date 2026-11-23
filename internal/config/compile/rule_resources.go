@@ -18,14 +18,20 @@ type compiledResource struct {
 	set  *router.RuleSet
 	hash string
 }
+
+const maxRuleResourceBytes = 384 << 20
+
 type ruleCompiler struct {
-	c        *compiler
-	defs     map[string]model.RuleSet
-	done     map[string]compiledResource
-	visiting map[string]bool
-	blobs    map[string][]byte
-	bytes    int
-	entries  int
+	c              *compiler
+	defs           map[string]model.RuleSet
+	done           map[string]compiledResource
+	visiting       map[string]bool
+	blobs          map[string][]byte
+	precompiled    map[string]int
+	coveredGeosite map[string]bool
+	pendingGeosite []model.GeoDatabase
+	bytes          int
+	entries        int
 }
 
 func (r *ruleCompiler) condition(m model.Match, depth int) (router.RuleSpec, error) {
@@ -122,43 +128,12 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 	}
 	r.visiting[id] = true
 	defer delete(r.visiting, id)
-	var specs []router.RuleSpec
 	if def.Hash != "" {
 		if len(def.Entries) > 0 || !resource.ValidHash(def.Hash) || r.c.opts.ReadResource == nil {
 			return compiledResource{}, errors.New("rule-set requires one locked resource or inline entries")
 		}
-		data := r.blobs[def.Hash]
-		if data == nil {
-			var err error
-			data, err = r.c.opts.ReadResource(def.Hash)
-			if err != nil {
-				return compiledResource{}, fmt.Errorf("locked rule resource unavailable: %w", err)
-			}
-			if resource.Hash(data) != def.Hash {
-				return compiledResource{}, errors.New("rule resource hash mismatch")
-			}
-			r.bytes += len(data)
-			if r.bytes > 384<<20 {
-				return compiledResource{}, errors.New("total rule resource bytes exceed 384 MiB")
-			}
-			r.blobs[def.Hash] = data
-		}
-		var err error
-		specs, err = rulesdata.Decode(def.Behavior, def.Format, def.Code, data)
-		if err != nil {
-			return compiledResource{}, err
-		}
-	} else {
-		if def.Behavior != "" || def.Format != "" || def.Code != "" || len(def.References) > 0 {
-			return compiledResource{}, errors.New("inline rule-set cannot specify resource metadata")
-		}
-		for _, m := range def.Entries {
-			s, err := r.condition(m, depth+1)
-			if err != nil {
-				return compiledResource{}, err
-			}
-			specs = append(specs, s)
-		}
+	} else if def.Behavior != "" || def.Format != "" || def.Code != "" || len(def.References) > 0 {
+		return compiledResource{}, errors.New("inline rule-set cannot specify resource metadata")
 	}
 	aliases := map[string]string{}
 	for _, ref := range def.References {
@@ -179,42 +154,197 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 			mapRefs(&s.Children[i])
 		}
 	}
-	for i := range specs {
-		mapRefs(&specs[i])
+	definition := def
+	definition.Download = nil
+	encoded, _ := json.Marshal(definition)
+	digest := sha256.New()
+	digest.Write(encoded)
+	// The definition covers inline values and the locked resource digest.
+	// Include resolved dependencies so a nested resource update is visible.
+	var hashRefs func(router.RuleSpec)
+	hashRefs = func(spec router.RuleSpec) {
+		if spec.ResourceHash != "" {
+			digest.Write([]byte(spec.ResourceHash))
+		}
+		for _, child := range spec.Children {
+			hashRefs(child)
+		}
 	}
-	for i, s := range specs {
-		v, err := r.resolve(s, depth+1)
+	addEntries := func(n int) error {
+		if n > rulesdata.MaxEntries*2-r.entries {
+			return errors.New("total rule entries exceed limit")
+		}
+		r.entries += n
+		return nil
+	}
+	resolve := func(spec router.RuleSpec) (router.RuleSpec, error) {
+		resolved, err := r.resolve(spec, depth+1)
+		if err == nil {
+			hashRefs(resolved)
+		}
+		return resolved, err
+	}
+	remember := func(set *router.RuleSet, cacheKey string, data []byte) compiledResource {
+		v := compiledResource{set, hex.EncodeToString(digest.Sum(nil))}
+		r.done[id] = v
+		if record := r.c.opts.RecordPrecompiledRuleSet; record != nil && len(data) > 0 {
+			record(cacheKey, data)
+		}
+		return v
+	}
+
+	var cacheKey string
+	if r.c.opts.ReadPrecompiledRuleSet != nil || r.c.opts.RecordPrecompiledRuleSet != nil {
+		cacheKey = resource.Hash(encoded)
+	}
+	if read := r.c.opts.ReadPrecompiledRuleSet; read != nil {
+		cached, data := read(cacheKey)
+		if cached != nil && (cached.SourceSize > 0) == (def.Hash != "") && r.acceptCachedSize(def.Hash, cached.SourceSize) {
+			if err := addEntries(cached.Entries); err != nil {
+				return compiledResource{}, err
+			}
+			set, err := cached.Build(func(index int, spec router.RuleSpec) (router.RuleSpec, error) {
+				if def.Hash == "" {
+					if index >= len(def.Entries) {
+						return spec, errors.New("invalid cached inline rule index")
+					}
+					var err error
+					spec, err = r.condition(def.Entries[index], depth+1)
+					if err != nil {
+						return spec, err
+					}
+				}
+				return resolve(spec)
+			})
+			if err != nil {
+				return compiledResource{}, err
+			}
+			if strings.HasPrefix(id, "geosite:") && def.Behavior == "geosite" && def.Format == "dat" {
+				r.coveredGeosite[def.Hash] = true
+			}
+			return remember(set, cacheKey, data), nil
+		}
+	}
+	var builder router.ConditionSetBuilder
+	add := func(spec router.RuleSpec) error {
+		if err := addEntries(1 + len(spec.Values)); err != nil {
+			return err
+		}
+		mapRefs(&spec)
+		spec, err := resolve(spec)
+		if err != nil {
+			return err
+		}
+		return builder.Add(spec)
+	}
+	var sourceSize int
+	if def.Hash != "" {
+		data, err := r.readBlob(def.Hash)
 		if err != nil {
 			return compiledResource{}, err
 		}
-		specs[i] = v
-	}
-	for _, s := range specs {
-		r.entries += 1 + len(s.Values)
-		if r.entries > rulesdata.MaxEntries*2 {
-			return compiledResource{}, errors.New("total rule entries exceed limit")
+		sourceSize = len(data)
+		err = rulesdata.Walk(def.Behavior, def.Format, def.Code, data, add, func(kind router.Kind, value string) error {
+			if err := addEntries(2); err != nil {
+				return err
+			}
+			return builder.AddDomain(kind, value)
+		}, func(count int) {
+			builder.GrowDomains(min(count, (rulesdata.MaxEntries*2-r.entries)/2))
+		})
+		if err != nil {
+			return compiledResource{}, err
+		}
+	} else {
+		for _, m := range def.Entries {
+			spec, err := r.condition(m, depth+1)
+			if err == nil {
+				err = add(spec)
+			}
+			if err != nil {
+				return compiledResource{}, err
+			}
 		}
 	}
-	set, err := router.CompileRules(specs)
+	set, err := builder.Build()
 	if err != nil {
 		return compiledResource{}, err
 	}
-	fingerprintDefinition := def
-	fingerprintDefinition.Download = nil
-	b, _ := json.Marshal(struct {
-		Definition model.RuleSet
-		Specs      []router.RuleSpec
-	}{fingerprintDefinition, specs})
-	sum := sha256.Sum256(b)
-	v := compiledResource{set, hex.EncodeToString(sum[:])}
-	r.done[id] = v
-	return v, nil
+	var encodedSet []byte
+	if r.c.opts.RecordPrecompiledRuleSet != nil {
+		encodedSet, _ = set.MarshalPrecompiledRuleSet(sourceSize)
+	}
+	return remember(set, cacheKey, encodedSet), nil
 }
+
+func (r *ruleCompiler) acceptCachedSize(hash string, size int) bool {
+	if hash == "" {
+		return true
+	}
+	if data := r.blobs[hash]; data != nil {
+		return len(data) == size
+	}
+	if n, ok := r.precompiled[hash]; ok {
+		return n == size
+	}
+	if size > maxRuleResourceBytes-r.bytes {
+		return false
+	}
+	r.precompiled[hash] = size
+	r.bytes += size
+	return true
+}
+
+func (r *ruleCompiler) readBlob(hash string) ([]byte, error) {
+	if data := r.blobs[hash]; data != nil {
+		return data, nil
+	}
+	data, err := r.c.opts.ReadResource(hash)
+	if err != nil {
+		return nil, fmt.Errorf("locked rule resource unavailable: %w", err)
+	}
+	if resource.Hash(data) != hash {
+		return nil, errors.New("rule resource hash mismatch")
+	}
+	size := len(data) - r.precompiled[hash]
+	if size > maxRuleResourceBytes-r.bytes {
+		return nil, errors.New("total rule resource bytes exceed 384 MiB")
+	}
+	r.bytes += size
+	delete(r.precompiled, hash)
+	r.blobs[hash] = data
+	return data, nil
+}
+
+func (r *ruleCompiler) validateDatabase(db model.GeoDatabase) {
+	data, err := r.readBlob(db.Hash)
+	if err == nil {
+		err = rulesdata.ValidateDatabase(db.ID, db.Format, data)
+	}
+	if err != nil {
+		r.c.errorf(model.DocProfile, model.JoinPath("/geodata", db.ID), "geodata.resource", "%s", err)
+	}
+}
+
+func (r *ruleCompiler) validateDeferredGeosite() {
+	for _, db := range r.pendingGeosite {
+		// Preparation already validated the DAT. Check it again if it was
+		// needed for fallback or no cached selector covered the database.
+		if !r.coveredGeosite[db.Hash] || r.blobs[db.Hash] != nil {
+			r.validateDatabase(db)
+		}
+	}
+}
+
 func (c *compiler) prepareRuleResources() *ruleCompiler {
 	if c.ruleResources != nil {
 		return c.ruleResources
 	}
 	r := &ruleCompiler{c: c, defs: map[string]model.RuleSet{}, done: map[string]compiledResource{}, visiting: map[string]bool{}, blobs: map[string][]byte{}}
+	if c.opts.ReadPrecompiledRuleSet != nil {
+		r.precompiled = make(map[string]int)
+		r.coveredGeosite = make(map[string]bool)
+	}
 	c.ruleResources = r
 	seenDB := map[string]bool{}
 	for _, db := range c.profile.Geodata {
@@ -230,24 +360,11 @@ func (c *compiler) prepareRuleResources() *ruleCompiler {
 			c.errorf(model.DocProfile, path, "geodata.resource", "locked database required")
 			continue
 		}
-		data, err := c.opts.ReadResource(db.Hash)
-		if err == nil && resource.Hash(data) != db.Hash {
-			err = errors.New("database hash mismatch")
+		if c.opts.ReadPrecompiledRuleSet != nil && db.ID == "geosite" && db.Format == "dat" {
+			r.pendingGeosite = append(r.pendingGeosite, db)
+		} else {
+			r.validateDatabase(db)
 		}
-		if err == nil {
-			err = rulesdata.ValidateDatabase(db.ID, db.Format, data)
-		}
-		if err != nil {
-			c.errorf(model.DocProfile, path, "geodata.resource", "%s", err)
-			continue
-		}
-		if r.blobs[db.Hash] == nil {
-			r.blobs[db.Hash] = data
-			r.bytes += len(data)
-		}
-	}
-	if r.bytes > 384<<20 {
-		c.errorf(model.DocProfile, "/geodata", "geodata.limit", "total resources exceed 384 MiB")
 	}
 	for i, def := range c.profile.RuleSets {
 		if err := validateDownload(def.Download); err != nil {

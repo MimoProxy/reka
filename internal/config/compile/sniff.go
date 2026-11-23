@@ -23,7 +23,7 @@ func (c *compiler) sniff(eff *Effective) {
 	if !hasKey(positions, "/sniff/enabled") {
 		v.Enabled = true
 		eff.SniffForRouting = len(v.Rules) == 0 && !v.OverrideDestination
-		eff.Provenance["/sniff/enabled"] = Origin{Layer: LayerDefault}
+		eff.setOrigin("/sniff/enabled", Origin{Layer: LayerDefault})
 	}
 	v.Protocols = slices.Clone(v.Protocols)
 	if len(v.Protocols) == 0 {

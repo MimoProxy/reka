@@ -161,6 +161,26 @@ func (b *Bundle) refreshSources(ctx context.Context, options PrepareOptions) err
 	for _, set := range append(own.RuleSets, own.Geodata...) {
 		kept[set.Hash] = true
 	}
+	patches, err := parseOverlay(b.Overlay)
+	if err != nil {
+		return err
+	}
+	for _, patch := range patches {
+		path, err := model.SplitPath(patch.Path)
+		if err != nil || len(path) == 0 || path[0] != "rule-sets" {
+			continue
+		}
+		var set pinned
+		switch {
+		case patch.Op == "insert" && len(path) == 1, patch.Op == "set" && len(path) == 2:
+			_ = json.Unmarshal(patch.Value, &set)
+		case patch.Op == "set" && len(path) == 3 && path[2] == "hash":
+			_ = json.Unmarshal(patch.Value, &set.Hash)
+		}
+		if set.Hash != "" {
+			kept[set.Hash] = true
+		}
+	}
 	for _, source := range previous.Sources {
 		for _, set := range source.RuleSets {
 			if !kept[set.Hash] {

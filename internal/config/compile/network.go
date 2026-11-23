@@ -13,10 +13,10 @@ func (c *compiler) network(e *Effective) {
 		return
 	}
 	e.Network = n
-	e.Provenance["/network"] = Origin{Layer: LayerDefault}
+	e.setOrigin("/network", Origin{Layer: LayerDefault})
 	for path, pos := range c.lpos {
 		if path == "/network" || len(path) > 9 && path[:9] == "/network/" {
-			e.Provenance[path] = Origin{Layer: LayerLocal, Document: model.DocLocal, Path: path, Line: pos.Line, Column: pos.Column}
+			e.setOrigin(path, Origin{Layer: LayerLocal, Document: model.DocLocal, Path: path, Line: pos.Line, Column: pos.Column})
 		}
 	}
 	if n.Mode == "system-proxy" {

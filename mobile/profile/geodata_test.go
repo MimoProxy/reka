@@ -264,7 +264,7 @@ rules:
 
 	locked := lockedGeodata(t, bundle)
 	wantCodes := map[string][]string{"geoip": {"cn"}, "geosite": {"test", "test@cn"}, "asn": {"64512"}}
-	if len(locked) != 3 || len(bundle.Resources) != 3 {
+	if len(locked) != 3 || bundle.Precompiled == nil || len(bundle.Precompiled.Sets) != 2 || len(bundle.Resources) != 5 {
 		t.Fatalf("unexpected geodata resources: %+v", bundle.Summary.Resources)
 	}
 	for _, asset := range bundle.Summary.Resources {
@@ -366,6 +366,9 @@ rules:
 	]}`)
 	bundle := mustPrepareGeodata(t, raw, t.TempDir(), options, server)
 	checkPatchStatuses(t, bundle.Summary.Patches, "", "")
+	if bundle.Precompiled == nil || len(bundle.Precompiled.Sets) != 1 {
+		t.Fatal("expected a precompiled selector for the applied overlay")
+	}
 	assertRoute(t, bundle, "x.suffix.test", "reject")
 	assertRoute(t, bundle, "exact.test", "direct")
 	if server.requests["/geosite.dat"] != 1 || server.requests["/geoip.dat"] != 1 {

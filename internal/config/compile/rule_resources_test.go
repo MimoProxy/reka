@@ -99,6 +99,43 @@ func TestLockedRuleResourceHashAndFingerprint(t *testing.T) {
 		}
 	}
 }
+
+func TestClassicalRuleSetTracksResolvedResource(t *testing.T) {
+	classical := []byte("DOMAIN,first.test\nGEOSITE,category\nDOMAIN-SUFFIX,last.test\n")
+	compileList := func(domain string) *Effective {
+		t.Helper()
+		data := []byte(domain + "\n")
+		classicalHash, dataHash := resource.Hash(classical), resource.Hash(data)
+		profile := fmt.Appendf(nil, `schema-version: 1
+rule-sets:
+ - id: provider
+   behavior: classical
+   format: text
+   hash: %s
+   references: [{name: "geosite:category", to: category}]
+ - {id: category, behavior: domain, format: text, hash: %s}
+rules: [{id: use, match: {rule-set: provider}, outbound: reject}]
+`, classicalHash, dataHash)
+		blobs := map[string][]byte{classicalHash: classical, dataHash: data}
+		eff, ds := Compile(profile, nil, Options{EstimateRuleMemory: true, ReadResource: func(hash string) ([]byte, error) { return blobs[hash], nil }})
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		for _, name := range []string{"first.test", domain, "x.last.test"} {
+			if got := eff.Router.Route(t.Context(), router.Metadata{Domain: name}, nil); got.Outbound != "reject" {
+				t.Fatalf("%s matched %s", name, got.Outbound)
+			}
+		}
+		return eff
+	}
+	a, b := compileList("alpha.test"), compileList("bravo.test")
+	if a.RulesFingerprint == b.RulesFingerprint {
+		t.Fatal("changing a nested resource did not change the provider fingerprint")
+	}
+	if a.RuleMemory.Bytes == 0 || a.RuleMemory != b.RuleMemory {
+		t.Fatalf("rule memory estimate depends on the profile's spelling: %+v, %+v", a.RuleMemory, b.RuleMemory)
+	}
+}
 func TestSourceRuleResourcesNamespacesAndOverlay(t *testing.T) {
 	source := "schema-version: 1\nsources:\n - id: airport\n"
 	for _, line := range strings.Split(strings.TrimSuffix(logicProfile, "\n"), "\n") {

@@ -145,7 +145,7 @@ func (b *Bundle) compileOverlay(ctx context.Context, patches []model.Op, secrets
 	if err := ctx.Err(); err != nil {
 		return nil, nil, nil, err
 	}
-	eff, diagnostics := b.compile(secrets)
+	eff, diagnostics := b.compileForPreparation(secrets)
 	if len(patches) == 0 {
 		return eff, diagnostics, nil, nil
 	}
@@ -170,9 +170,10 @@ func (b *Bundle) compileOverlay(ctx context.Context, patches []model.Op, secrets
 			}
 			candidate.Overlay = raw
 		}
-		eff, diagnostics := candidate.compile(secrets)
+		eff, diagnostics := candidate.compileForPreparation(secrets)
 		if !diagnostics.HasErrors() {
 			b.Overlay = candidate.Overlay
+			b.Resources, b.Precompiled = candidate.Resources, candidate.Precompiled
 		}
 		return eff, diagnostics, nil
 	}
