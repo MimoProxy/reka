@@ -38,3 +38,22 @@ func (e *Engine) WithPacketFlowConnections(visit func([]sagernet.ConnInfo)) {
 func (e *Engine) SetPacketFlowRealDNS(real bool) {
 	e.packetFlowRealDNS.Store(real)
 }
+
+// ClosePacketFlowConnectionsBefore closes connections routed by a generation
+// older than gen and reports how many it closed. Connections hold leases on
+// their generation's outbounds, so closing them lets a retired generation be
+// released without waiting for the drain timeout.
+func (e *Engine) ClosePacketFlowConnectionsBefore(gen uint64) int {
+	var ids []uint64
+	e.backend.WithConnectionSnapshot(func(conns []sagernet.ConnInfo) {
+		for _, c := range conns {
+			if info, ok := c.Info.(*FlowInfo); ok && info.Generation < gen {
+				ids = append(ids, c.ID)
+			}
+		}
+	})
+	if len(ids) == 0 {
+		return 0
+	}
+	return e.backend.CloseConnections(ids)
+}

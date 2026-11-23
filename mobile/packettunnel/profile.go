@@ -168,25 +168,33 @@ func (s *Session) SetRealDNS(real bool) {
 }
 
 func (p *profileSession) publish(base *compile.Effective, summary profile.Summary, controls profile.Controls) error {
+	_, _, err := p.activate(base, summary, controls)
+	return err
+}
+
+// activate publishes a new generation and reports whether it belongs to a
+// different profile than the one it replaces.
+func (p *profileSession) activate(base *compile.Effective, summary profile.Summary, controls profile.Controls) (uint64, bool, error) {
 	eff, err := profile.ApplyControls(base, summary, controls)
 	if err != nil {
-		return errors.New("invalid policy or routing mode")
+		return 0, false, errors.New("invalid policy or routing mode")
 	}
 	prepared, err := p.engine.Prepare(eff)
 	if err != nil {
-		return errors.New("could not prepare profile outbounds or DNS")
+		return 0, false, errors.New("could not prepare profile outbounds or DNS")
 	}
 	_, scope := p.engine.History()
 	profileID := controls.ProfileID
 	if profileID == "" {
 		profileID = scope.ProfileID
 	}
-	if _, err := p.engine.ActivatePacketFlowProfile(prepared, p.rev+1, profileID, summary.Names); err != nil {
-		return errors.New("could not activate profile")
+	gen, err := p.engine.ActivatePacketFlowProfile(prepared, p.rev+1, profileID, summary.Names)
+	if err != nil {
+		return 0, false, errors.New("could not activate profile")
 	}
 	p.rev++
 	p.base, p.summary = base, summary
-	return nil
+	return gen, profileID != scope.ProfileID, nil
 }
 
 func (s *Session) ApplyControls(controls profile.Controls) error {
@@ -227,9 +235,21 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
-	if err := p.publish(base, profile.Describe(base), controls); err != nil {
+	gen, switched, err := p.activate(base, profile.Describe(base), controls)
+	if err != nil {
 		s.logger.Warn("Profile refresh could not be applied")
 		return err
+	}
+	if switched {
+		// A different profile replaces every route, so its connections would
+		// be rerouted on reconnect anyway; sing-box restarts the whole service
+		// here. Waiting up to the drain timeout would keep the previous
+		// profile and the buffers of its busy connections in memory while
+		// the next switch compiles. Refreshes of the same profile keep
+		// draining.
+		if closed := p.engine.ClosePacketFlowConnectionsBefore(gen); closed > 0 {
+			s.logger.Info("Closed connections of the previous profile", "count", closed)
+		}
 	}
 	p.sets = collectRuleSets(base.Router.Rules())
 	s.logger.Info("Profile refreshed")
