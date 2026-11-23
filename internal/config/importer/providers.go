@@ -515,7 +515,7 @@ func ImportProviders(req Request, payloads map[string][]byte) Result {
 			for _, name := range sortedNames(keys) {
 				refs = append(refs, object{"name": name, "to": req.resourceNames[name]})
 			}
-			req.ruleSets = append(req.ruleSets, object{"id": p.ID, "behavior": p.Behavior, "format": p.Format, "hash": resource.Hash(data), "references": refs})
+			req.ruleSets = append(req.ruleSets, object{"id": p.ID, "name": p.Name, "behavior": p.Behavior, "format": p.Format, "hash": resource.Hash(data), "references": refs})
 		}
 	}
 	var checkRefs func(router.RuleSpec) bool
@@ -630,7 +630,7 @@ func Import(req Request) Result {
 						for _, s := range specs {
 							entries = append(entries, nativeMatch(s))
 						}
-						defs = append(defs, object{"id": p.ID, "entries": entries})
+						defs = append(defs, object{"id": p.ID, "name": p.Name, "entries": entries})
 					}
 					src["rule-sets"] = defs
 					result.Source, _ = json.Marshal(src)
