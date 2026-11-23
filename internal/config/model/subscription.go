@@ -10,6 +10,12 @@ import (
 
 var headerName = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
+// IsSRSGeodataID reports whether id names one GeoIP or GeoSite category.
+func IsSRSGeodataID(id string) bool {
+	kind, code, _ := strings.Cut(id, ":")
+	return (kind == "geoip" || kind == "geosite") && code != "" && code == strings.TrimSpace(code) && code == strings.ToLower(code)
+}
+
 func ValidSubscription(s *Subscription) error {
 	if s == nil {
 		return nil
@@ -45,8 +51,8 @@ func ValidSubscription(s *Subscription) error {
 	}
 	assets := map[string]bool{}
 	for _, a := range s.Geodata {
-		if (a.ID != "geoip" && a.ID != "geosite" && a.ID != "asn") || assets[a.ID] {
-			return errors.New("geodata IDs must be unique geoip, geosite or asn")
+		if (a.ID != "geoip" && a.ID != "geosite" && a.ID != "asn" && !IsSRSGeodataID(a.ID)) || assets[a.ID] {
+			return errors.New("geodata IDs must be unique geoip, geosite, asn or lowercase kind:code for SRS")
 		}
 		assets[a.ID] = true
 		if err := ValidSubscription(&Subscription{URL: a.URL}); err != nil {

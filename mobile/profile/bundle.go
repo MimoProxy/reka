@@ -24,14 +24,16 @@ const MaxBundleBytes = 4 << 20
 var errBundleTooLarge = errors.New("prepared rules and resources exceed the 4 MiB extension configuration budget")
 
 type Bundle struct {
-	Version     int                  `json:"version"`
-	Profile     json.RawMessage      `json:"profile"`
-	Local       json.RawMessage      `json:"local,omitempty"`
-	Sources     json.RawMessage      `json:"sources,omitempty"`
-	Overlay     json.RawMessage      `json:"overlay,omitempty"` // Only patches validated during preparation.
-	Resources   map[string][]byte    `json:"resources,omitempty"`
-	Precompiled *precompiledRuleSets `json:"precompiled-rule-sets,omitempty"`
-	Summary     Summary              `json:"summary"`
+	Version             int                  `json:"version"`
+	Profile             json.RawMessage      `json:"profile"`
+	Local               json.RawMessage      `json:"local,omitempty"`
+	Sources             json.RawMessage      `json:"sources,omitempty"`
+	Overlay             json.RawMessage      `json:"overlay,omitempty"` // Only patches validated during preparation.
+	Resources           map[string][]byte    `json:"resources,omitempty"`
+	Precompiled         *precompiledRuleSets `json:"precompiled-rule-sets,omitempty"`
+	OmittedResources    []string             `json:"omitted-rule-resources,omitempty"`
+	Summary             Summary              `json:"summary"`
+	precompiledCoverage map[string][]string
 }
 
 type Summary struct {
@@ -115,20 +117,40 @@ func (b *Bundle) CompileWithSecrets(secrets secret.Store) (*compile.Effective, e
 }
 
 func (b *Bundle) compileEffective(opts compile.Options) (*compile.Effective, error) {
+	var needsPreparation bool
+	if len(b.OmittedResources) > 0 {
+		read := opts.ReadResource
+		opts.ReadResource = func(hash string) ([]byte, error) {
+			data, err := read(hash)
+			needsPreparation = needsPreparation || errors.Is(err, errSnapshotNeedsPreparation)
+			return data, err
+		}
+	}
 	eff, diagnostics := b.compile(opts)
 	if diagnostics.HasErrors() {
+		if needsPreparation {
+			return nil, errSnapshotNeedsPreparation
+		}
 		return nil, diagnosticError("invalid profile", diagnostics)
 	}
 	return eff, nil
 }
 
 var errSnapshotResource = errors.New("rule resource is missing or invalid in this snapshot")
+var errSnapshotNeedsPreparation = errors.New("prepare the profile again because precompiled rules cannot be loaded and their original resources were omitted")
 
 func (b *Bundle) readResource(hash string) ([]byte, error) {
 	if data := b.Resources[hash]; data != nil {
 		return data, nil
 	}
-	return nil, errSnapshotResource
+	return nil, b.missingResource(hash)
+}
+
+func (b *Bundle) missingResource(hash string) error {
+	if slices.Contains(b.OmittedResources, hash) {
+		return errSnapshotNeedsPreparation
+	}
+	return errSnapshotResource
 }
 
 func (b *Bundle) compileOptions(read func(string) ([]byte, error), secrets secret.Store, estimateMemory bool) compile.Options {

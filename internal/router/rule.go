@@ -9,7 +9,6 @@ package router
 
 import (
 	"fmt"
-	"go4.org/netipx"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dlclark/regexp2"
+	"go4.org/netipx"
 )
 
 // Kind is a rule condition type.
@@ -118,6 +118,7 @@ type RuleSpec struct {
 	ResourceHash string     `json:",omitempty"`
 	Kind         Kind
 	Values       []string
+	compact      *compactRuleValues
 	// NoResolve keeps an IP rule from resolving a domain destination; the
 	// rule then only matches destinations that already are addresses.
 	NoResolve bool
@@ -139,7 +140,11 @@ func (r RuleSpec) render(action bool) string {
 		}
 	} else if r.Kind != KindMatch {
 		b.WriteByte(',')
-		b.WriteString(strings.Join(r.Values, "|"))
+		if r.compact != nil {
+			b.WriteString("<binary>")
+		} else {
+			b.WriteString(strings.Join(r.Values, "|"))
+		}
 	}
 	if action {
 		b.WriteByte(',')
@@ -236,11 +241,15 @@ func compileRuleDepth(index int, spec RuleSpec, depth int) (*rule, error) {
 		}
 		return r, nil
 	}
-	if len(spec.Values) == 0 {
-		return nil, fail("", fmt.Errorf("%s needs at least one value", spec.Kind))
-	}
 	if spec.NoResolve && !spec.Kind.usesDestinationIP() && spec.Kind != KindSrcIPCIDR {
 		return nil, fail("", fmt.Errorf("no-resolve only applies to ip-cidr rules"))
+	}
+	if spec.compact != nil {
+		r.ipset = spec.compact.addresses
+		return r, nil
+	}
+	if len(spec.Values) == 0 {
+		return nil, fail("", fmt.Errorf("%s needs at least one value", spec.Kind))
 	}
 	for _, v := range spec.Values {
 		switch spec.Kind {

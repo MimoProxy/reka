@@ -407,7 +407,7 @@ type ResourceDownload struct {
 	Automatic bool   `yaml:"automatic"`
 }
 
-// GeoDatabase pins a complete database, independently of the rules selecting it.
+// GeoDatabase pins a whole DAT/MMDB or an SRS selector identified by kind:code.
 type GeoDatabase struct {
 	ID       string            `yaml:"id"`
 	Format   string            `yaml:"format"`

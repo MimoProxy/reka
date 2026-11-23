@@ -15,6 +15,7 @@ type domainSet struct {
 	keywords []string
 	regexps  []*regexp.Regexp
 	bytes    uint64
+	singKeys bool // SRS stores sing's original keys.
 }
 
 type domainSetBuilder struct {
@@ -90,7 +91,10 @@ func (s *domainSet) match(name string) bool {
 		return false
 	}
 	if s.names != nil || s.plus != nil {
-		key := domainKey(name)
+		key := name
+		if !s.singKeys {
+			key = domainKey(name)
+		}
 		if s.names != nil && s.names.Match(key) {
 			return true
 		}

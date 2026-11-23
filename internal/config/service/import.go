@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
@@ -59,7 +60,7 @@ func (s *Service) convertImport(req importer.Request) (importer.Result, error) {
 	if len(req.ProviderResources) == 0 && len(req.GeodataResources) == 0 {
 		return importer.Import(req), nil
 	}
-	if len(req.ProviderResources) > 1024 || len(req.GeodataResources) > 3 {
+	if len(req.ProviderResources) > 1024 || len(req.GeodataResources) > 1024 {
 		return importer.Result{}, fmt.Errorf("too many import resources")
 	}
 	providers, err := importer.Providers(req)
@@ -116,8 +117,8 @@ func (s *Service) convertImport(req importer.Request) (importer.Result, error) {
 		payloads[id] = data
 	}
 	for key, hash := range req.GeodataResources {
-		if key != "geoip" && key != "geosite" && key != "asn" {
-			return importer.Result{}, fmt.Errorf("geodata key must be geoip, geosite or asn")
+		if key != "geoip" && key != "geosite" && key != "asn" && !model.IsSRSGeodataID(key) {
+			return importer.Result{}, fmt.Errorf("geodata key must be geoip, geosite, asn or lowercase kind:code for SRS")
 		}
 		data, err := read(hash)
 		if err != nil {

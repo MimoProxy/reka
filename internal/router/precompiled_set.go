@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 
+	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/klauspost/compress/zstd"
 	"github.com/sagernet/sing/common/domain"
 )
@@ -32,6 +33,11 @@ var errPrecompiledSet = errors.New("invalid precompiled rule set")
 // Like SRS, the body includes serialized sing matchers.
 // Ordered display rows and general conditions follow their block boundaries.
 func (rs *RuleSet) MarshalPrecompiledRuleSet(sourceSize int) ([]byte, error) {
+	return rs.MarshalPrecompiledRuleSetWithin(sourceSize, 0)
+}
+
+// MarshalPrecompiledRuleSetWithin skips artifacts that exceed the reader's expanded limit.
+func (rs *RuleSet) MarshalPrecompiledRuleSetWithin(sourceSize, maxBytes int) ([]byte, error) {
 	m := rs.members
 	if m == nil || m.packed != nil || !slices.ContainsFunc(m.blocks, func(b conditionBlock) bool { return b.domains != nil }) {
 		return nil, nil
@@ -117,6 +123,9 @@ func (rs *RuleSet) MarshalPrecompiledRuleSet(sourceSize int) ([]byte, error) {
 			}
 		}
 	}
+	if maxBytes > 0 && body.Len() > maxBytes {
+		return nil, nil
+	}
 	z, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression),
 		zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(precompiledWindow), zstd.WithSingleSegment(false))
 	if err != nil {
@@ -167,7 +176,7 @@ func ReadPrecompiledRuleSet(raw io.Reader, maxBytes, maxEntries int) (*Precompil
 	r := &precompiledReader{bufio.NewReader(limited), maxBytes}
 
 	var p PrecompiledRuleSet
-	if p.SourceSize, err = r.number(maxBytes); err != nil {
+	if p.SourceSize, err = r.number(resource.MaxSize); err != nil {
 		return nil, err
 	}
 	rows, err := r.number(maxEntries)

@@ -282,12 +282,13 @@ rules: ["RULE-SET,blocked,REJECT"]
 func TestPrepareBoundsCombinedSourceResources(t *testing.T) {
 	options := PrepareOptions{Sources: make(map[string]string)}
 	for _, id := range []string{"s-first", "s-second"} {
-		data := bytes.Repeat([]byte{'x'}, MaxBundleBytes/2)
-		copy(data, id)
+		line := []byte("# " + id + " " + strings.Repeat("x", 60) + "\n")
+		data := bytes.Repeat(line, MaxBundleBytes/2/len(line))
+		data = append(data, "192.0.2.0/24\n"...)
 		hash := resource.Hash(data)
 		bundle := &Bundle{
 			Version: bundleVersion, Resources: map[string][]byte{hash: data},
-			Profile: json.RawMessage(fmt.Sprintf(`{"schema-version":1,"rule-sets":[{"id":"sites","behavior":"domain","format":"text","hash":%q}]}`, hash)),
+			Profile: json.RawMessage(fmt.Sprintf(`{"schema-version":1,"rule-sets":[{"id":"sites","behavior":"ipcidr","format":"text","hash":%q}]}`, hash)),
 		}
 		options.Sources[id] = writeSourceBundle(t, bundle)
 	}
@@ -296,7 +297,10 @@ imports:
   - {source: s-first, rule-sets: true}
   - {source: s-second, rule-sets: true}
 `)
-	if _, err := prepare(t.Context(), raw, &preparer{options: options}); !errors.Is(err, errBundleTooLarge) {
+	dir := t.TempDir()
+	input, output := filepath.Join(dir, "profile.yaml"), filepath.Join(dir, "prepared.json")
+	writeFixtureFile(t, input, raw)
+	if err := PrepareFileWithOptions(t.Context(), input, output, dir, options); !errors.Is(err, errBundleTooLarge) {
 		t.Fatalf("expected a combined source size error, got %v", err)
 	}
 }

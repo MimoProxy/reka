@@ -36,11 +36,11 @@ func Decode(behavior, format, code string, data []byte) ([]router.RuleSpec, erro
 		}
 		specs[i].Values = append(specs[i].Values, value)
 		return nil
-	}, nil, router.ParseClashCondition)
+	}, nil, nil, router.ParseClashCondition)
 	if err != nil {
 		return nil, err
 	}
-	if behavior != "classical" {
+	if behavior != "classical" || format == "srs" {
 		_, err = router.CompileRules(specs)
 	}
 	return specs, err
@@ -49,14 +49,37 @@ func Decode(behavior, format, code string, data []byte) ([]router.RuleSpec, erro
 // Walk decodes a resource for compilation. GeoSite domains arrive as single
 // values so the caller can store them without allocating RuleSpecs. The
 // caller validates conditions and resolves references before using the set.
-// reserve, if set, receives the size of unfiltered GeoSite categories.
+// reserve receives the size of unfiltered GeoSite categories, if set.
 func Walk(behavior, format, code string, data []byte, visit func(router.RuleSpec) error, domain func(router.Kind, string) error, reserve func(int)) error {
-	return walk(behavior, format, code, data, visit, domain, reserve, router.ParseClashSetCondition)
+	return WalkWithBudget(behavior, format, code, data, visit, domain, reserve, nil)
 }
 
-func walk(behavior, format, code string, data []byte, visit func(router.RuleSpec) error, domain func(router.Kind, string) error, reserve func(int), parseClassical func(string) (router.RuleSpec, error)) error {
+// WalkWithBudget also charges entries to a shared budget across resources.
+func WalkWithBudget(behavior, format, code string, data []byte, visit func(router.RuleSpec) error, domain func(router.Kind, string) error, reserve func(int), account func(int) error) error {
+	return walk(behavior, format, code, data, visit, domain, reserve, account, router.ParseClashSetCondition)
+}
+
+func walk(behavior, format, code string, data []byte, visit func(router.RuleSpec) error, domain func(router.Kind, string) error, reserve func(int), account func(int) error, parseClassical func(string) (router.RuleSpec, error)) error {
 	if len(data) == 0 || len(data) > resource.MaxSize {
 		return errors.New("resource size outside limit")
+	}
+	if format == "srs" {
+		return walkSRS(behavior, data, visit, account)
+	}
+	if account != nil {
+		add, addDomain := visit, domain
+		visit = func(spec router.RuleSpec) error {
+			if err := account(1 + len(spec.Values)); err != nil {
+				return err
+			}
+			return add(spec)
+		}
+		domain = func(kind router.Kind, value string) error {
+			if err := account(2); err != nil {
+				return err
+			}
+			return addDomain(kind, value)
+		}
 	}
 	if behavior == "asn" {
 		var err error
@@ -79,7 +102,7 @@ func walk(behavior, format, code string, data []byte, visit func(router.RuleSpec
 			return nil
 		}
 		if format != "dat" {
-			return errors.New("geodata format must be dat (or mmdb for GeoIP and ASN)")
+			return errors.New("geodata format must be dat, srs for GeoSite or GeoIP, or mmdb for GeoIP or ASN")
 		}
 		return decodeGeo(behavior, code, data, visit, domain, reserve)
 	}

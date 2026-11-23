@@ -24,12 +24,15 @@ const maxRuleResourceBytes = 384 << 20
 type ruleCompiler struct {
 	c              *compiler
 	defs           map[string]model.RuleSet
+	databases      map[string]model.GeoDatabase
 	done           map[string]compiledResource
 	visiting       map[string]bool
 	blobs          map[string][]byte
 	precompiled    map[string]int
 	coveredGeosite map[string]bool
 	pendingGeosite []model.GeoDatabase
+	pendingSRS     []model.GeoDatabase
+	coverage       map[string][]string // nil entries require the original blob.
 	bytes          int
 	entries        int
 }
@@ -103,6 +106,12 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 	if depth > 32 {
 		return compiledResource{}, errors.New("rule reference depth exceeds 32")
 	}
+	kind, code, qualified := strings.Cut(id, ":")
+	geo := qualified && (kind == "geoip" || kind == "geosite" || kind == "asn")
+	if geo {
+		code = strings.ToLower(strings.TrimSpace(code))
+		id = kind + ":" + code
+	}
 	if v, ok := r.done[id]; ok {
 		return v, nil
 	}
@@ -110,17 +119,15 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 		return compiledResource{}, fmt.Errorf("rule-set reference cycle at %q", id)
 	}
 	def, ok := r.defs[id]
-	if !ok {
-		kind, code, found := strings.Cut(id, ":")
-		if found && (kind == "geoip" || kind == "geosite" || kind == "asn") {
-			for _, db := range r.c.profile.Geodata {
-				if db.ID == kind {
-					def = model.RuleSet{ID: id, Behavior: kind, Format: db.Format, Hash: db.Hash, Code: code}
-					r.defs[id] = def
-					ok = true
-					break
-				}
-			}
+	if !ok && geo {
+		db, exists := r.databases[id]
+		if !exists {
+			db, exists = r.databases[kind]
+		}
+		if exists {
+			def = model.RuleSet{ID: id, Behavior: kind, Format: db.Format, Hash: db.Hash, Code: code}
+			r.defs[id] = def
+			ok = true
 		}
 	}
 	if !ok {
@@ -190,14 +197,23 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 		if record := r.c.opts.RecordPrecompiledRuleSet; record != nil && len(data) > 0 {
 			record(cacheKey, data)
 		}
+		if r.coverage != nil && def.Hash != "" {
+			keys, recorded := r.coverage[def.Hash]
+			if len(data) == 0 {
+				r.coverage[def.Hash] = nil
+			} else if !recorded || keys != nil {
+				r.coverage[def.Hash] = append(keys, cacheKey)
+			}
+		}
 		return v
 	}
+	implicitGeoSite := strings.HasPrefix(id, "geosite:") && def.Behavior == "geosite" && def.Format == "dat"
 
 	var cacheKey string
-	if r.c.opts.ReadPrecompiledRuleSet != nil || r.c.opts.RecordPrecompiledRuleSet != nil {
+	if def.Format != "srs" && (r.c.opts.ReadPrecompiledRuleSet != nil || r.c.opts.RecordPrecompiledRuleSet != nil) {
 		cacheKey = resource.Hash(encoded)
 	}
-	if read := r.c.opts.ReadPrecompiledRuleSet; read != nil {
+	if read := r.c.opts.ReadPrecompiledRuleSet; read != nil && cacheKey != "" {
 		cached, data := read(cacheKey)
 		if cached != nil && (cached.SourceSize > 0) == (def.Hash != "") && r.acceptCachedSize(def.Hash, cached.SourceSize) {
 			if err := addEntries(cached.Entries); err != nil {
@@ -219,7 +235,7 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 			if err != nil {
 				return compiledResource{}, err
 			}
-			if strings.HasPrefix(id, "geosite:") && def.Behavior == "geosite" && def.Format == "dat" {
+			if implicitGeoSite {
 				r.coveredGeosite[def.Hash] = true
 			}
 			return remember(set, cacheKey, data), nil
@@ -227,9 +243,6 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 	}
 	var builder router.ConditionSetBuilder
 	add := func(spec router.RuleSpec) error {
-		if err := addEntries(1 + len(spec.Values)); err != nil {
-			return err
-		}
 		mapRefs(&spec)
 		spec, err := resolve(spec)
 		if err != nil {
@@ -244,20 +257,24 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 			return compiledResource{}, err
 		}
 		sourceSize = len(data)
-		err = rulesdata.Walk(def.Behavior, def.Format, def.Code, data, add, func(kind router.Kind, value string) error {
-			if err := addEntries(2); err != nil {
-				return err
-			}
+		visit := add
+		if def.Format == "srs" {
+			visit = builder.Add
+		}
+		err = rulesdata.WalkWithBudget(def.Behavior, def.Format, def.Code, data, visit, func(kind router.Kind, value string) error {
 			return builder.AddDomain(kind, value)
 		}, func(count int) {
 			builder.GrowDomains(min(count, (rulesdata.MaxEntries*2-r.entries)/2))
-		})
+		}, addEntries)
 		if err != nil {
 			return compiledResource{}, err
 		}
 	} else {
 		for _, m := range def.Entries {
 			spec, err := r.condition(m, depth+1)
+			if err == nil {
+				err = addEntries(1 + len(spec.Values))
+			}
 			if err == nil {
 				err = add(spec)
 			}
@@ -271,8 +288,11 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 		return compiledResource{}, err
 	}
 	var encodedSet []byte
-	if r.c.opts.RecordPrecompiledRuleSet != nil {
-		encodedSet, _ = set.MarshalPrecompiledRuleSet(sourceSize)
+	if r.c.opts.RecordPrecompiledRuleSet != nil && cacheKey != "" {
+		encodedSet, _ = set.MarshalPrecompiledRuleSetWithin(sourceSize, r.c.opts.MaxPrecompiledRuleBytes)
+		if len(encodedSet) > 0 && implicitGeoSite {
+			r.coveredGeosite[def.Hash] = true
+		}
 	}
 	return remember(set, cacheKey, encodedSet), nil
 }
@@ -316,7 +336,10 @@ func (r *ruleCompiler) readBlob(hash string) ([]byte, error) {
 	return data, nil
 }
 
-func (r *ruleCompiler) validateDatabase(db model.GeoDatabase) {
+func (r *ruleCompiler) validateDatabase(db model.GeoDatabase, covered bool) {
+	if r.coverage != nil && !covered {
+		r.coverage[db.Hash] = nil
+	}
 	data, err := r.readBlob(db.Hash)
 	if err == nil {
 		err = rulesdata.ValidateDatabase(db.ID, db.Format, data)
@@ -326,12 +349,18 @@ func (r *ruleCompiler) validateDatabase(db model.GeoDatabase) {
 	}
 }
 
-func (r *ruleCompiler) validateDeferredGeosite() {
+func (r *ruleCompiler) validateDeferredDatabases() {
 	for _, db := range r.pendingGeosite {
 		// Preparation already validated the DAT. Check it again if it was
 		// needed for fallback or no cached selector covered the database.
-		if !r.coveredGeosite[db.Hash] || r.blobs[db.Hash] != nil {
-			r.validateDatabase(db)
+		covered := r.coveredGeosite[db.Hash]
+		if !covered || r.blobs[db.Hash] != nil {
+			r.validateDatabase(db, covered)
+		}
+	}
+	for _, db := range r.pendingSRS {
+		if r.done[db.ID].set == nil {
+			r.validateDatabase(db, false)
 		}
 	}
 }
@@ -340,10 +369,15 @@ func (c *compiler) prepareRuleResources() *ruleCompiler {
 	if c.ruleResources != nil {
 		return c.ruleResources
 	}
-	r := &ruleCompiler{c: c, defs: map[string]model.RuleSet{}, done: map[string]compiledResource{}, visiting: map[string]bool{}, blobs: map[string][]byte{}}
+	r := &ruleCompiler{c: c, defs: map[string]model.RuleSet{}, databases: map[string]model.GeoDatabase{}, done: map[string]compiledResource{}, visiting: map[string]bool{}, blobs: map[string][]byte{}}
 	if c.opts.ReadPrecompiledRuleSet != nil {
 		r.precompiled = make(map[string]int)
+	}
+	if c.opts.ReadPrecompiledRuleSet != nil || c.opts.RecordPrecompiledRuleSet != nil {
 		r.coveredGeosite = make(map[string]bool)
+	}
+	if c.opts.RecordPrecompiledCoverage != nil {
+		r.coverage = make(map[string][]string)
 	}
 	c.ruleResources = r
 	seenDB := map[string]bool{}
@@ -360,11 +394,18 @@ func (c *compiler) prepareRuleResources() *ruleCompiler {
 			c.errorf(model.DocProfile, path, "geodata.resource", "locked database required")
 			continue
 		}
-		if c.opts.ReadPrecompiledRuleSet != nil && db.ID == "geosite" && db.Format == "dat" {
+		if db.Format == "srs" {
+			if !model.IsSRSGeodataID(db.ID) {
+				c.errorf(model.DocProfile, path, "geodata.resource", "SRS database ID must be a lowercase geoip:code or geosite:code")
+				continue
+			}
+			r.pendingSRS = append(r.pendingSRS, db)
+		} else if r.coveredGeosite != nil && db.ID == "geosite" && db.Format == "dat" {
 			r.pendingGeosite = append(r.pendingGeosite, db)
 		} else {
-			r.validateDatabase(db)
+			r.validateDatabase(db, false)
 		}
+		r.databases[db.ID] = db
 	}
 	for i, def := range c.profile.RuleSets {
 		if err := validateDownload(def.Download); err != nil {

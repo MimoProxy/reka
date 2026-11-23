@@ -20,11 +20,17 @@ func ImportBundle(req Request, payloads, geodata map[string][]byte) Result {
 	req.resourceNames = map[string]string{}
 	for _, ref := range refs {
 		kind, code, _ := strings.Cut(ref, ":")
-		data := geodata[kind]
+		data, perCode := geodata[ref]
+		if !perCode {
+			data = geodata[kind]
+		}
 		if len(data) == 0 {
 			return invalidBundle(req, fmt.Errorf("missing explicit %s resource", kind))
 		}
 		format := rulesdata.GeodataFormat(kind, data)
+		if perCode && format != "srs" || !perCode && format == "srs" {
+			return invalidBundle(req, fmt.Errorf("%s requires SRS for a per-code resource or DAT/MMDB for a whole database", ref))
+		}
 		if _, err := rulesdata.Decode(kind, format, code, data); err != nil {
 			return invalidBundle(req, err)
 		}
@@ -115,7 +121,7 @@ func GeodataSelectors(req Request, payloads map[string][]byte) ([]string, error)
 		return nil, err
 	}
 	for _, p := range ps {
-		if p.Kind == "rule" && p.Behavior == "classical" {
+		if p.Kind == "rule" && p.Behavior == "classical" && p.Format != "srs" {
 			specs, e := rulesdata.Decode(p.Behavior, p.Format, "", payloads[p.ID])
 			if e != nil {
 				return nil, e

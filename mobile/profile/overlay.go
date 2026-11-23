@@ -174,6 +174,7 @@ func (b *Bundle) compileOverlay(ctx context.Context, patches []model.Op, secrets
 		if !diagnostics.HasErrors() {
 			b.Overlay = candidate.Overlay
 			b.Resources, b.Precompiled = candidate.Resources, candidate.Precompiled
+			b.precompiledCoverage = candidate.precompiledCoverage
 		}
 		return eff, diagnostics, nil
 	}
