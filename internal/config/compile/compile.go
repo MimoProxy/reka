@@ -256,7 +256,8 @@ func (c *compiler) warnf(doc, path, code, format string, args ...any) {
 func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics) {
 	c := &compiler{opts: opts}
 	var d1, d2 model.Diagnostics
-	c.profile, c.ppos, d1 = model.ParseProfile(profile)
+	var doc *model.Doc
+	c.profile, c.ppos, doc, d1 = model.ParseProfileDoc(profile)
 	c.local, c.lpos, d2 = model.ParseLocal(local)
 	c.diags = append(append(c.diags, d1...), d2...)
 	if c.diags.HasErrors() {
@@ -267,7 +268,7 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 		needsLayers = needsLayers || rule.Source != ""
 	}
 	if needsLayers {
-		c.layers(profile)
+		c.layers(doc)
 	}
 	if c.diags.HasErrors() {
 		return nil, c.diags

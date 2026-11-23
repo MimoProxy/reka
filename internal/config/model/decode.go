@@ -29,6 +29,16 @@ var lineRE = regexp.MustCompile(`line (\d+)`)
 // ParseNode parses one YAML document and returns its root node (a mapping,
 // or nil for an empty document). Multiple documents are an error.
 func ParseNode(doc string, data []byte) (*yaml.Node, Diagnostics) {
+	root, diags := parseDocument(doc, data)
+	if diags.HasErrors() || root == nil {
+		return nil, diags
+	}
+	return documentMapping(doc, root)
+}
+
+// parseDocument parses one YAML document and returns its document node, or
+// nil for empty input.
+func parseDocument(doc string, data []byte) (*yaml.Node, Diagnostics) {
 	if len(data) > MaxDocumentSize {
 		return nil, Diagnostics{{Severity: SeverityError, Code: "yaml.size", Document: doc,
 			Message: fmt.Sprintf("document is larger than %d bytes", MaxDocumentSize)}}
@@ -48,6 +58,12 @@ func ParseNode(doc string, data []byte) (*yaml.Node, Diagnostics) {
 	} else if !errors.Is(err, io.EOF) {
 		return nil, Diagnostics{syntaxDiag(doc, err)}
 	}
+	return &root, nil
+}
+
+// documentMapping returns the root mapping of a document node, or nil for an
+// empty document.
+func documentMapping(doc string, root *yaml.Node) (*yaml.Node, Diagnostics) {
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
 		return nil, nil
 	}
@@ -75,6 +91,37 @@ func syntaxDiag(doc string, err error) Diagnostic {
 func ParseProfile(data []byte) (*Profile, Positions, Diagnostics) {
 	p := &Profile{}
 	pos, diags := decodeDocument(DocProfile, data, p, true)
+	return p, pos, diags
+}
+
+// ParseProfileDoc parses a profile once and returns both its decoded form
+// and an editable document over the same parse.
+func ParseProfileDoc(data []byte) (*Profile, Positions, *Doc, Diagnostics) {
+	p := &Profile{}
+	root, diags := parseDocument(DocProfile, data)
+	if diags.HasErrors() {
+		return p, nil, nil, diags
+	}
+	var mapping *yaml.Node
+	if root != nil {
+		if mapping, diags = documentMapping(DocProfile, root); diags.HasErrors() {
+			return p, nil, nil, diags
+		}
+	}
+	if mapping == nil {
+		return p, Positions{}, nil, Diagnostics{{Severity: SeverityError, Code: "schema.version", Document: DocProfile,
+			Message: "empty document; schema-version is required"}}
+	}
+	pos, diags := DecodeNode(DocProfile, mapping, p)
+	return p, pos, &Doc{name: DocProfile, root: root}, diags
+}
+
+// DecodeProfileNode decodes a profile mapping that is already in memory,
+// such as one assembled from several documents, with the same checks
+// ParseProfile applies after parsing.
+func DecodeProfileNode(mapping *yaml.Node) (*Profile, Positions, Diagnostics) {
+	p := &Profile{}
+	pos, diags := DecodeNode(DocProfile, mapping, p)
 	return p, pos, diags
 }
 

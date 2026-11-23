@@ -22,12 +22,16 @@ type Doc struct {
 // LoadDoc parses data for structural editing. An empty document becomes
 // an empty mapping.
 func LoadDoc(name string, data []byte) (*Doc, Diagnostics) {
-	if _, diags := ParseNode(name, data); diags.HasErrors() {
+	parsed, diags := parseDocument(name, data)
+	if diags.HasErrors() {
 		return nil, diags
 	}
 	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, Diagnostics{syntaxDiag(name, err)}
+	if parsed != nil {
+		if _, diags := documentMapping(name, parsed); diags.HasErrors() {
+			return nil, diags
+		}
+		root = *parsed
 	}
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 ||
 		(root.Content[0].Kind == yaml.ScalarNode && root.Content[0].Tag == "!!null") {

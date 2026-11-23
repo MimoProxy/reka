@@ -58,7 +58,7 @@ func sequence() *yaml.Node       { return &yaml.Node{Kind: yaml.SequenceNode, Ta
 
 // layers constructs a private node tree. The four input documents are never
 // mutated, and all runtime validation still goes through the profile compiler.
-func (c *compiler) layers(profile []byte) {
+func (c *compiler) layers(doc *model.Doc) {
 	sources, spos, sd := model.ParseSources(c.opts.Sources)
 	overlay, opos, od := model.ParseOverlay(c.opts.Overlay)
 	c.diags = append(c.diags, sd...)
@@ -84,7 +84,7 @@ func (c *compiler) layers(profile []byte) {
 		})
 	}
 	sourceDoc, _ := model.LoadDoc(model.DocSources, c.opts.Sources)
-	doc, _ := model.LoadDoc(model.DocProfile, profile)
+	// doc is the profile's own parse, which c.profile no longer references.
 	*doc.Mapping() = *nodeCopy(doc.Mapping())
 	byID := map[string]*yaml.Node{}
 	if !c.opts.OmitProvenance {
@@ -638,7 +638,10 @@ func (c *compiler) layers(profile []byte) {
 		return
 	}
 	var diags model.Diagnostics
-	c.profile, c.ppos, diags = model.ParseProfile(doc.Bytes())
+	// Decode the merged tree directly. Rendering and parsing it again cost
+	// several times the profile's size in allocations, which a mobile
+	// packet tunnel pays on every profile switch.
+	c.profile, c.ppos, diags = model.DecodeProfileNode(doc.Mapping())
 	for i, r := range c.profile.Rules {
 		if r.Source != "" {
 			c.errorf(model.DocProfile, model.JoinPath("/rules", seg(r.ID, i), "source"), "source.rule", "overlay cannot introduce source markers")
