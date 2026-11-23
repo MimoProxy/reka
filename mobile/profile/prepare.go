@@ -38,6 +38,13 @@ type PrepareOptions struct {
 	Overlay           json.RawMessage                    `json:"overlay,omitempty"` // Overlay document for a new preparation.
 	Secrets           secret.Store                       `json:"-"`
 	ClientFor         func(string) (*http.Client, error) `json:"-"`
+	// Sources maps source IDs to prepared bundles of subscriptions. Only the
+	// sources a native profile imports are read.
+	Sources map[string]string `json:"sources,omitempty"`
+	// RefreshSources makes a rebind read Sources again instead of keeping the
+	// archived copies, so a subscription update reaches the profiles that
+	// import it without fetching their own resources.
+	RefreshSources bool `json:"refreshSources,omitempty"`
 }
 
 type SceneDefinition struct {
@@ -132,7 +139,7 @@ func prepareFile(ctx context.Context, input, output, cache string, options Prepa
 	p := &preparer{options: options, cache: cache, client: client, fetcher: fetcher, batch: fetcher.Batch(previous, false)}
 	var bundle *Bundle
 	if options.RebindSnapshot != "" {
-		bundle, err = rebind(options.RebindSnapshot, options)
+		bundle, err = rebind(ctx, options.RebindSnapshot, options)
 		if err == nil {
 			for hash, data := range bundle.Resources {
 				if !resource.ValidHash(hash) || resource.Hash(data) != hash {
@@ -155,7 +162,7 @@ func prepareFile(ctx context.Context, input, output, cache string, options Prepa
 	}
 	data, err := json.Marshal(bundle)
 	if err != nil || len(data) > MaxBundleBytes {
-		return errors.New("prepared rules and resources exceed the 4 MiB extension configuration budget")
+		return errBundleTooLarge
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -221,6 +228,9 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 			for _, field := range []string{"rules", "sub-rules", "rule-sets", "geodata", "routing", "dns"} {
 				delete(document, field)
 			}
+		}
+		if err := bundle.prepareSources(ctx, native, p.options); err != nil {
+			return nil, err
 		}
 		if err := p.nativeAssets(ctx, document, bundle.Resources); err != nil {
 			return nil, err
@@ -314,16 +324,12 @@ func normalize(document map[string]any) {
 	dns["max-concurrent-upstreams"] = boundedNumber(dns["max-concurrent-upstreams"], dnsUpstreamLimit)
 }
 
-func rebind(path string, options PrepareOptions) (*Bundle, error) {
+func rebind(ctx context.Context, path string, options PrepareOptions) (*Bundle, error) {
 	// Restore uses the overlay and patch statuses stored in the archive.
 	if _, err := parseOverlay(options.Overlay); err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > MaxBundleBytes {
-		return nil, errors.New("cannot read prepared archive")
-	}
-	raw, err := os.ReadFile(path)
+	raw, err := readBundleFile(path)
 	if err != nil {
 		return nil, errors.New("cannot read prepared archive")
 	}
@@ -339,6 +345,11 @@ func rebind(path string, options PrepareOptions) (*Bundle, error) {
 	bundle.Profile, err = json.Marshal(document)
 	if err != nil {
 		return nil, err
+	}
+	if options.RefreshSources {
+		if err := bundle.refreshSources(ctx, options); err != nil {
+			return nil, err
+		}
 	}
 	bundle.Local, err = sceneSettings(options.Scenes)
 	if err != nil {

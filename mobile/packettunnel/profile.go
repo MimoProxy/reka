@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -257,6 +258,9 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 		}
 	}
 	p.sets = collectRuleSets(base.Router.Rules())
+	// Hand the old profile's pages back right away. Go returns freed memory
+	// lazily, and iOS counts it against the extension until then.
+	debug.FreeOSMemory()
 	s.logger.Info("Profile refreshed")
 	return nil
 }
