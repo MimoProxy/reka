@@ -162,8 +162,10 @@ func copyHalf(source, destination net.Conn, moved *rateCounter, finish func(erro
 // sender stops referencing the last write. Keep a private, unpooled buffer for
 // each direction: on error it remains owned by the sender until it is done,
 // instead of being returned to a shared read-wait pool and reused by a relay.
+// The size follows sing's relay buffer: 32 KiB, or 16 KiB in with_low_memory
+// builds, which sing-box uses for its iOS library.
 func copyOwned(destination io.Writer, source io.Reader, moved *rateCounter, totals ...*atomic.Uint64) error {
-	buffer := make([]byte, 32*1024)
+	buffer := make([]byte, buf.BufferSize)
 	for {
 		n, readErr := source.Read(buffer)
 		if n > 0 {
