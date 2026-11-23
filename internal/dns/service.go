@@ -171,7 +171,16 @@ type exchangeOptions struct {
 func (s *Service) exchangeRecorded(ctx context.Context, q *D.Msg, scope string, opts exchangeOptions) (*D.Msg, error) {
 	id, start := queryID.Add(1), time.Now()
 	var outcome resolutionHistory
-	m, err := s.exchange(ctx, q, scope, opts, id, &outcome)
+	observe := history.DNSObserver(ctx)
+	exchangeCtx := ctx
+	if observe != nil {
+		// Bootstrap queries and background refreshes have their own results.
+		exchangeCtx = history.WithDNSObserver(ctx, nil)
+	}
+	m, err := s.exchange(exchangeCtx, q, scope, opts, id, &outcome)
+	if observe != nil {
+		defer observe(exchangeObservation(q, m, start, outcome.ResultSource, err))
+	}
 	s.record(ctx, id, 0, start, scope, q, m, outcome, err)
 	return m, err
 }

@@ -137,6 +137,8 @@ type evaluation struct {
 	addrs           []netip.Addr
 	dialAddr        netip.Addr
 	resolveErr      error
+	lookupRule      int
+	lookupOverride  *RuleSpec
 	processDone     bool
 	process         string
 	processOK       bool
@@ -158,9 +160,11 @@ func (e *evaluation) destinationAddr(index int) (netip.Addr, bool) {
 		if e.env == nil {
 			e.resolveErr = errors.New("no resolver")
 		} else {
+			e.lookupRule = index
 			e.addrs, e.resolveErr = e.env.Resolve(e.ctx, e.md.Domain)
 		}
 		if errors.Is(e.resolveErr, ErrNoLookup) {
+			e.lookupRule = -1
 			e.stopped, e.stoppedAt = true, index
 			return netip.Addr{}, false
 		}
@@ -221,9 +225,14 @@ func (e *evaluation) match(index int, r *rule) bool {
 		return r.spec.Kind == KindAnd
 	case KindRuleSet:
 		old := e.noResolve
+		resolved := e.resolved
 		e.noResolve = old || r.spec.NoResolve
 		matched := r.spec.Set.first(e) >= 0
 		e.noResolve = old
+		if !resolved && e.lookupRule >= 0 {
+			// Attribute a member's lookup to the rule that referenced the set.
+			e.lookupRule = index
+		}
 		if e.stopped {
 			e.stoppedAt = index
 		}
@@ -552,7 +561,19 @@ type Decision struct {
 	// ResolveError is set when that failed (ip rules then did not match).
 	Resolved     []netip.Addr
 	ResolveError error
-	Process      string
+	// LookupRule is the position of the rule that first triggered a lookup,
+	// in the saved rules or the supplied overrides, or -1 without a lookup.
+	LookupRule     int
+	lookupRuleSpec *RuleSpec
+	Process        string
+}
+
+// LookupRuleSpec returns the rule that triggered the lookup, if any.
+func (d Decision) LookupRuleSpec() RuleSpec {
+	if d.lookupRuleSpec != nil {
+		return *d.lookupRuleSpec
+	}
+	return RuleSpec{}
 }
 
 // Route evaluates md. It never returns an error for a connection: a
@@ -565,7 +586,7 @@ func (r *Router) Route(ctx context.Context, md Metadata, env Env) Decision {
 // PASS target falls through. The indexed first match remains the normal path;
 // only rules after an actual PASS need a linear continuation.
 func (r *Router) RouteWithResolver(ctx context.Context, md Metadata, env Env, resolve func(*Decision)) Decision {
-	e := &evaluation{ctx: ctx, md: &md, env: env}
+	e := &evaluation{ctx: ctx, md: &md, env: env, lookupRule: -1}
 	return r.decideWithPass(e, resolve)
 }
 func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision {
@@ -589,7 +610,7 @@ func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision
 				break
 			}
 			if e.stopped {
-				return Decision{RuleIndex: -1}
+				return Decision{RuleIndex: -1, LookupRule: -1}
 			}
 		}
 		index = next
@@ -604,7 +625,16 @@ func (r *Router) decide(e *evaluation, index int) Decision {
 }
 
 func (r *Router) decideTarget(e *evaluation, index int, spec RuleSpec, target string) Decision {
-	d := Decision{RuleIndex: index, Rule: spec, Target: target, Resolved: e.addrs, ResolveError: e.resolveErr, Process: e.process}
+	d := Decision{
+		RuleIndex: index, Rule: spec, Target: target, Resolved: e.addrs, ResolveError: e.resolveErr,
+		LookupRule: e.lookupRule, Process: e.process,
+	}
+	if e.lookupRule >= 0 {
+		d.lookupRuleSpec = e.lookupOverride
+		if d.lookupRuleSpec == nil {
+			d.lookupRuleSpec = &r.rules.rules[e.lookupRule].spec
+		}
+	}
 	if d.Target == "" {
 		return d
 	}
@@ -645,15 +675,20 @@ func (r *Router) OverrideActive(rule TimedRule, at time.Time) bool {
 }
 
 func (r *Router) ExplainWithOverrides(ctx context.Context, md Metadata, env Env, resolve func(*Decision), overrides []TimedRule, at time.Time) Explanation {
-	e := &evaluation{ctx: ctx, md: &md, env: env}
-	for _, override := range overrides {
+	e := &evaluation{ctx: ctx, md: &md, env: env, lookupRule: -1}
+	for i, override := range overrides {
 		if !r.OverrideActive(override, at) {
 			continue
 		}
 		spec := override.Match.Rule(0)
+		resolved := e.resolved
 		index := override.Match.first(e)
 		if e.stopped {
-			return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: -1, StoppedRule: spec}
+			return Explanation{Decision: Decision{RuleIndex: -1, LookupRule: -1}, Undetermined: true, StoppedAt: -1, StoppedRule: spec}
+		}
+		if !resolved && e.lookupRule >= 0 {
+			e.lookupOverride = &override.Match.rules[e.lookupRule].spec
+			e.lookupRule = i
 		}
 		if index < 0 {
 			continue
@@ -669,7 +704,7 @@ func (r *Router) ExplainWithOverrides(ctx context.Context, md Metadata, env Env,
 	}
 	d := r.decideWithPass(e, resolve)
 	if e.stopped {
-		return Explanation{Decision: Decision{RuleIndex: -1}, Undetermined: true, StoppedAt: e.stoppedAt, StoppedRule: r.rules.Rule(e.stoppedAt)}
+		return Explanation{Decision: Decision{RuleIndex: -1, LookupRule: -1}, Undetermined: true, StoppedAt: e.stoppedAt, StoppedRule: r.rules.Rule(e.stoppedAt)}
 	}
 	return Explanation{Decision: d}
 }

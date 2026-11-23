@@ -16,6 +16,7 @@ import (
 )
 
 type packetFlowReleaseKey struct{}
+type connectionAttemptKey struct{}
 
 type connectionAttempt struct {
 	store             *history.Store
@@ -23,6 +24,22 @@ type connectionAttempt struct {
 	mu                sync.Mutex
 	api.ConnectionTrace
 	events []connectionEvent
+}
+
+func withAttempt(ctx context.Context, attempt *connectionAttempt) context.Context {
+	if attempt != nil {
+		ctx = history.WithFlow(ctx, attempt.ID)
+	}
+	return context.WithValue(ctx, connectionAttemptKey{}, attempt)
+}
+
+func attemptFromContext(ctx context.Context) *connectionAttempt {
+	attempt, _ := ctx.Value(connectionAttemptKey{}).(*connectionAttempt)
+	// Detached DNS refreshes clear the flow ID while retaining other values.
+	if attempt != nil && history.Flow(ctx) == attempt.ID {
+		return attempt
+	}
+	return nil
 }
 
 func (b *Backend) beginConnection(ctx context.Context, md Metadata) *connectionAttempt {
@@ -66,8 +83,11 @@ func (a *connectionAttempt) setRoute(rt Route, originalAddr netip.Addr) {
 	if rt.Scope.Generation != 0 {
 		a.Scope = rt.Scope
 	}
+	var lookup *api.RuleLookupInfo
 	if info, ok := rt.Info.(*api.FlowInfo); ok {
 		a.FlowInfo = *info
+		lookup = info.RuleLookup
+		a.FlowInfo.RuleLookup = nil
 		a.FlowInfo.Rule = history.Text(info.Rule, connectionRuleBytes)
 		a.FlowInfo.ProcessPath = history.Text(info.ProcessPath, 512)
 		a.FlowInfo.Chain = make([]string, min(32, len(info.Chain)))
@@ -83,7 +103,16 @@ func (a *connectionAttempt) setRoute(rt Route, originalAddr netip.Addr) {
 		a.DialDestination = rt.Destination.String()
 	}
 	if a.DestinationDomain != "" && originalAddr.IsValid() {
-		a.appendEventLocked(connectionEvent{kind: eventFakeIP, name: a.DestinationDomain, addr: originalAddr.String()})
+		event := connectionEvent{kind: eventFakeIP, name: a.DestinationDomain, addr: originalAddr.String()}
+		if lookup != nil {
+			// The mapped domain was recovered before the timed rule lookup.
+			a.appendEventAtLocked(lookup.StartedAt, event)
+		} else {
+			a.appendEventLocked(event)
+		}
+	}
+	if lookup != nil {
+		a.ruleLookupEventsLocked(lookup)
 	}
 	matched := connectionEvent{kind: eventMatched, n: [2]int32{int32(a.RuleIndex)}, nCount: 1}
 	if a.RuleSource == "temporary" {
@@ -103,6 +132,42 @@ func (a *connectionAttempt) setRoute(rt Route, originalAddr netip.Addr) {
 		}
 		a.appendEventLocked(connectionEvent{kind: eventRejected, code: reason})
 	}
+}
+
+func (a *connectionAttempt) ruleLookupEventsLocked(lookup *api.RuleLookupInfo) {
+	a.appendEventAtLocked(lookup.StartedAt, connectionEvent{kind: eventRuleLookup, name: lookup.Rule})
+	addresses := lookup.Addresses
+	failed := lookup.Err != nil || !addresses.IPv4.IsValid() && !addresses.IPv6.IsValid()
+	code := lookup.Source
+	if failed {
+		code = "error"
+	}
+	a.appendEventAtLocked(lookup.FinishedAt, connectionEvent{
+		kind: eventDNS, name: lookup.Domain, code: code,
+		n: [2]int32{int32(addresses.Counts[0]), int32(addresses.Counts[1])}, nCount: 2,
+		duration: lookup.FinishedAt.Sub(lookup.StartedAt), hasDuration: true,
+	})
+	if failed {
+		return
+	}
+	event := connectionEvent{kind: eventRuleAddr}
+	if addresses.IPv4.IsValid() {
+		event.addr = addresses.IPv4.String()
+	}
+	if addresses.IPv6.IsValid() {
+		event.name = addresses.IPv6.String()
+	}
+	a.appendEventAtLocked(lookup.FinishedAt, event)
+}
+
+func (a *connectionAttempt) serverDNS(domain, source string, counts [2]int, duration time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.appendEventLocked(connectionEvent{
+		kind: eventServerDNS, name: domain, code: source,
+		n: [2]int32{int32(counts[0]), int32(counts[1])}, nCount: 2,
+		duration: duration, hasDuration: true,
+	})
 }
 
 func (a *connectionAttempt) sniffing(start time.Time, md Metadata, observed sniffObservation) {

@@ -32,7 +32,7 @@ func TestLogicalOrderShortCircuitAndExplain(t *testing.T) {
 		r := mustRouter(t, []RuleSpec{spec}, nil)
 		env := &fakeEnv{noLookup: true}
 		exp := r.Explain(context.Background(), Metadata{Network: "tcp", Domain: "x.test"}, env)
-		if !exp.Undetermined || exp.StoppedAt != 0 || env.resolves != 1 {
+		if !exp.Undetermined || exp.StoppedAt != 0 || exp.LookupRule != -1 || env.resolves != 1 {
 			t.Fatal(syntax, exp, env.resolves)
 		}
 	}

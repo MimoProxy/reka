@@ -82,17 +82,17 @@ func TestIPRulesResolve(t *testing.T) {
 	}, nil)
 	ctx := context.Background()
 	d := r.Route(ctx, Metadata{Domain: "lan.test"}, env)
-	if d.Outbound != "proxy" || env.resolves != 1 {
+	if d.Outbound != "proxy" || env.resolves != 1 || d.LookupRule != 1 || d.LookupRuleSpec().String() != "IP-CIDR,192.168.0.0/16,proxy" {
 		t.Fatalf("got %+v after %d resolves", d, env.resolves)
 	}
 	// A failed lookup makes ip rules not match; it does not pick a target.
 	d = r.Route(ctx, Metadata{Domain: "unknown.test"}, env)
-	if d.Outbound != "direct" || d.ResolveError == nil {
+	if d.Outbound != "direct" || d.ResolveError == nil || d.LookupRule != 1 {
 		t.Fatalf("unresolvable: %+v", d)
 	}
 	// no-resolve rules see addresses only.
 	d = r.Route(ctx, Metadata{Addr: netip.MustParseAddr("10.1.2.3")}, env)
-	if d.Outbound != "reject" {
+	if d.Outbound != "reject" || d.LookupRule != -1 {
 		t.Fatalf("address destination: %+v", d)
 	}
 	// IPv4-mapped destinations match IPv4 prefixes.
@@ -121,6 +121,74 @@ func TestNoResolveBeforeDomainMatch(t *testing.T) {
 	}, nil)
 	if d := r.Route(context.Background(), Metadata{Domain: "a.test"}, env); d.Outbound != "proxy" || env.resolves != 0 {
 		t.Fatalf("got %+v, %d resolves", d, env.resolves)
+	}
+}
+
+func TestLookupRuleAttribution(t *testing.T) {
+	matchIP := RuleSpec{Kind: KindIPCIDR, Values: []string{"192.0.2.0/24"}, Target: "proxy"}
+	missIP := RuleSpec{Kind: KindIPCIDR, Values: []string{"198.51.100.0/24"}, Target: "proxy"}
+	noResolve := matchIP
+	noResolve.NoResolve = true
+	passIP := matchIP
+	passIP.Target = "pass"
+	passDomain := RuleSpec{Kind: KindDomain, Values: []string{"resolve.test"}, Target: "pass"}
+	fallback := RuleSpec{Kind: KindMatch, Target: "direct"}
+	members, err := CompileRules([]RuleSpec{{Kind: KindDomain, Values: []string{"other.test"}}, matchIP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := RuleSpec{Kind: KindRuleSet, Values: []string{"lan"}, Set: members, Target: "proxy"}
+	unmatched := RuleSpec{Kind: KindDomain, Values: []string{"other.test"}, Target: "direct"}
+	for _, tc := range []struct {
+		name      string
+		rules     []RuleSpec
+		overrides []RuleSpec
+		matched   int
+		lookup    int
+		trigger   RuleSpec
+		temporary bool
+	}{
+		{name: "rule set", rules: []RuleSpec{unmatched, unmatched, set}, matched: 2, lookup: 2, trigger: set},
+		{name: "no resolve", rules: []RuleSpec{noResolve, fallback}, matched: 1, lookup: -1},
+		{name: "after pass", rules: []RuleSpec{passDomain, missIP, matchIP}, matched: 2, lookup: 1, trigger: missIP},
+		{name: "at pass", rules: []RuleSpec{passIP, matchIP}, matched: 1, lookup: 0, trigger: passIP},
+		{name: "temporary match", rules: []RuleSpec{fallback}, overrides: []RuleSpec{unmatched, matchIP}, matched: -1, lookup: 1, trigger: matchIP, temporary: true},
+		{name: "temporary miss", rules: []RuleSpec{matchIP}, overrides: []RuleSpec{unmatched, missIP}, matched: 0, lookup: 1, trigger: missIP},
+		{name: "saved rule after override", rules: []RuleSpec{matchIP}, overrides: []RuleSpec{noResolve}, matched: 0, lookup: 0, trigger: matchIP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mustRouter(t, tc.rules, nil, "direct", "proxy", "pass")
+			env := &fakeEnv{addrs: map[string][]netip.Addr{"resolve.test": {netip.MustParseAddr("192.0.2.8")}}}
+			md := Metadata{Domain: "resolve.test"}
+			now := time.Now()
+			var overrides []TimedRule
+			for _, spec := range tc.overrides {
+				match, err := CompileRules([]RuleSpec{spec})
+				if err != nil {
+					t.Fatal(err)
+				}
+				overrides = append(overrides, TimedRule{Match: match, ExpiresAt: now.Add(time.Minute)})
+			}
+			var d Decision
+			if len(overrides) == 0 {
+				d = r.Route(t.Context(), md, env)
+			} else {
+				d = r.ExplainWithOverrides(t.Context(), md, env, nil, overrides, now).Decision
+			}
+			if d.RuleIndex != tc.matched || d.Temporary != tc.temporary || d.LookupRule != tc.lookup {
+				t.Fatalf("unexpected decision: %+v", d)
+			}
+			if d.LookupRuleSpec().String() != tc.trigger.String() {
+				t.Fatalf("trigger = %s, want %s", d.LookupRuleSpec(), tc.trigger)
+			}
+			wantCalls := 0
+			if tc.lookup >= 0 {
+				wantCalls = 1
+			}
+			if env.resolves != wantCalls {
+				t.Fatalf("lookup calls = %d, want %d", env.resolves, wantCalls)
+			}
+		})
 	}
 }
 

@@ -163,7 +163,7 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 		}
 	}
 	attempt := r.backend.beginConnection(ctx, md)
-	ctx = history.WithFlow(ctx, attempt.ID)
+	ctx = withAttempt(ctx, attempt)
 	prepared := r.prepareFlow(ctx, md)
 	defer prepared.Release()
 	if _, debugBridge := conn.(*debugBridge); !debugBridge && prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {

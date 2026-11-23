@@ -801,9 +801,13 @@ type lookupEnv struct {
 	e   *Engine
 	md  sagernet.Metadata
 
-	resolved   bool
-	addrs      []netip.Addr
-	err        error
+	resolved bool
+	addrs    []netip.Addr
+	err      error
+
+	observeLookup bool
+	ruleLookup    *api.RuleLookupInfo
+
 	processOff bool
 	procDone   bool
 	proc       string
@@ -812,17 +816,52 @@ type lookupEnv struct {
 }
 
 func (l *lookupEnv) Resolve(ctx context.Context, domain string) ([]netip.Addr, error) {
-	if !l.resolved {
-		l.resolved = true
-		ctx, cancel := context.WithTimeout(ctx, defaultLookup)
-		defer cancel()
-		if l.dns != nil {
-			l.addrs, l.err = l.dns.Lookup(ctx, domain, "normal")
-		} else {
-			l.addrs, l.err = l.e.opts.Resolver.LookupNetIP(ctx, "ip", domain)
+	if l.resolved {
+		return l.addrs, l.err
+	}
+	l.resolved = true
+	ctx, cancel := context.WithTimeout(ctx, defaultLookup)
+	defer cancel()
+	var sources *history.DNSLookupSources
+	var start time.Time
+	if l.observeLookup {
+		sources = new(history.DNSLookupSources)
+		ctx = history.WithDNSObserver(ctx, sources.Observe)
+		start = time.Now()
+	}
+	l.addrs, l.err = l.lookupDomain(ctx, domain)
+	if sources != nil {
+		finished := time.Now()
+		answers := history.SummarizeDNSAddresses(l.addrs)
+		preferred := answers.IPv4
+		if !preferred.IsValid() {
+			preferred = answers.IPv6
+		}
+		l.ruleLookup = &api.RuleLookupInfo{
+			Domain: domain, Source: sources.ForAddress(preferred),
+			StartedAt: start, FinishedAt: finished, Addresses: answers, Err: l.err,
 		}
 	}
 	return l.addrs, l.err
+}
+
+func (l *lookupEnv) lookupDomain(ctx context.Context, domain string) ([]netip.Addr, error) {
+	if l.dns != nil {
+		return l.dns.Lookup(ctx, domain, "normal")
+	}
+	observe := history.DNSObserver(ctx)
+	var start time.Time
+	if observe != nil {
+		start = time.Now()
+	}
+	addrs, err := l.e.opts.Resolver.LookupNetIP(ctx, "ip", domain)
+	if observe != nil {
+		observe(history.DNSObservation{
+			Name: domain, Type: "IP", Source: "system", Answers: len(addrs),
+			Duration: time.Since(start), AddressAnswers: history.SummarizeDNSAddresses(addrs).Counts, Err: err,
+		})
+	}
+	return addrs, err
 }
 
 func (l *lookupEnv) Process(ctx context.Context) (string, bool) {
@@ -922,12 +961,13 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			}
 		}
 	}
-	env := &lookupEnv{e: e, md: md}
+	env := &lookupEnv{e: e, md: md, observeLookup: true}
 	isQUIC := md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
 	var (
-		dec          router.Decision
+		dec          = router.Decision{LookupRule: -1}
 		g            *generation
 		rejectReason string
+		ruleLookup   *api.RuleLookupInfo
 	)
 	genNo, out, release, ok, err := acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
 		g = s.Value.(*generation)
@@ -942,7 +982,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			udpAllowed = e.opts.HostPacketFlow || g.eff.Network.Mode == "tun"
 		}
 		if md.Network == "udp" && !udpAllowed {
-			dec = router.Decision{RuleIndex: -1, Outbound: model.OutboundReject}
+			dec = router.Decision{RuleIndex: -1, LookupRule: -1, Outbound: model.OutboundReject}
 			return nil, false
 		}
 		env.dns = g.dns
@@ -965,6 +1005,11 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			dec = g.router.RouteWithResolver(ctx, routeMD, env, resolve)
 		} else {
 			dec = g.router.ExplainWithOverrides(ctx, routeMD, env, resolve, state.temporary, state.at).Decision
+		}
+		if ruleLookup == nil && env.ruleLookup != nil && dec.LookupRule >= 0 {
+			// If acquisition retries, the cached lookup keeps its original trigger.
+			ruleLookup = env.ruleLookup
+			ruleLookup.Rule = dec.LookupRuleSpec().String()
 		}
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
@@ -998,7 +1043,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	info := &FlowInfo{
 		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
 		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
-		NetworkScene: state.scene, RejectReason: rejectReason,
+		NetworkScene: state.scene, RejectReason: rejectReason, RuleLookup: ruleLookup,
 	}
 	if dec.Temporary {
 		info.RuleSource = "temporary"
@@ -1049,6 +1094,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		result.Owner = sagernet.ProcessInfo{PID: env.owner.PID, Path: env.owner.Path, UID: env.owner.UID, UIDKnown: env.owner.UIDKnown}
 	}
 	if md.Network == "udp" && md.Destination.Domain != "" && g.packetAddr[dec.Outbound] {
+		env.observeLookup = false
 		addresses, err := env.Resolve(ctx, md.Destination.Domain)
 		if err != nil || len(addresses) == 0 {
 			release()

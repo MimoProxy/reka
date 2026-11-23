@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"time"
 
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -13,9 +15,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// dnsRouter answers the upstream dialer's lookups for domain server
-// addresses. For now it uses the system resolver; Reka's DNS service
-// (nameserver policy, fake IP, bootstrap) will replace it.
+// dnsRouter resolves names for the dialer using the flow's DNS policy
+// when provided, or the system resolver otherwise.
 type dnsRouter struct {
 	resolver *net.Resolver
 }
@@ -24,7 +25,7 @@ var _ adapter.DNSRouter = (*dnsRouter)(nil)
 
 func (r *dnsRouter) Start(adapter.StartStage, *adapter.Scope) error { return nil }
 
-func (r *dnsRouter) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
+func (r *dnsRouter) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) (addrs []netip.Addr, err error) {
 	network := "ip"
 	switch options.Strategy {
 	case C.DomainStrategyIPv4Only:
@@ -32,9 +33,27 @@ func (r *dnsRouter) Lookup(ctx context.Context, domain string, options adapter.D
 	case C.DomainStrategyIPv6Only:
 		network = "ip6"
 	}
-	var addrs []netip.Addr
-	var err error
-	if fn, ok := ctx.Value(lookupKey{}).(LookupFunc); ok {
+	fn, _ := ctx.Value(lookupKey{}).(LookupFunc)
+	if attempt := attemptFromContext(ctx); attempt != nil {
+		start := time.Now()
+		var sources *history.DNSLookupSources
+		if fn != nil {
+			sources = new(history.DNSLookupSources)
+			ctx = history.WithDNSObserver(ctx, sources.Observe)
+		}
+		defer func() {
+			elapsed := time.Since(start)
+			code := "system"
+			switch {
+			case err != nil || len(addrs) == 0:
+				code = "error"
+			case sources != nil:
+				code = sources.ForAddress(addrs[0])
+			}
+			attempt.serverDNS(domain, code, history.SummarizeDNSAddresses(addrs).Counts, elapsed)
+		}()
+	}
+	if fn != nil {
 		addrs, err = fn(ctx, domain)
 	} else {
 		addrs, err = r.resolver.LookupNetIP(ctx, network, domain)

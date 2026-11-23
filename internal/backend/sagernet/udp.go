@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/MimoProxy/reka/internal/history"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/sniff"
 	"github.com/sagernet/sing/common/buf"
@@ -164,7 +163,7 @@ func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 	md.Destination = toDestination(dest)
 	ctx, cancel := context.WithCancel(s.ctx)
 	attempt := s.b.beginConnection(ctx, md)
-	ctx = history.WithFlow(ctx, attempt.ID)
+	ctx = withAttempt(ctx, attempt)
 	prepared := s.r.prepareFlow(ctx, md)
 	f := &udpFlow{attempt: attempt, s: s, ctx: ctx, cancel: cancel, dest: dest, md: md, prepared: prepared, sniff: prepared.Sniff, ready: make(chan struct{}), notify: make(chan struct{}, 1)}
 	f.touch()
