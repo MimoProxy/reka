@@ -17,7 +17,7 @@ proxies:
   - {name: Node A, type: ss, server: a.example.test, port: 443, cipher: aes-128-gcm, password: example-a}
   - {name: Node B, type: ss, server: b.example.test, port: 443, cipher: aes-128-gcm, password: example-b}
 proxy-groups:
-  - {name: Main, type: select, proxies: [Node A, Node B]}
+  - {name: Main, type: select, proxies: [Node A, Node B], icon: "https://icons.example.test/main.png"}
   - {name: Services, type: select, proxies: [Main, DIRECT]}
 rules:
   - DOMAIN-SUFFIX,local.example.test,DIRECT
@@ -35,6 +35,9 @@ rules:
 	}
 	summary, ruleSet := bundle.Summary, eff.Router.Rules()
 	mainGroup, services := summary.Groups[0], summary.Groups[1]
+	if mainGroup.Icon != "https://icons.example.test/main.png" || services.Icon != "" {
+		t.Fatalf("group icons = %q, %q", mainGroup.Icon, services.Icon)
+	}
 	updated, err := ApplyControls(eff, summary, Controls{Mode: "rule", Selections: map[string]string{"Main": "Node B"}})
 	if err != nil {
 		t.Fatal(err)

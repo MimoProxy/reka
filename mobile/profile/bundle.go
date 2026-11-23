@@ -59,6 +59,8 @@ type Group struct {
 	Type     string   `json:"type"`
 	Members  []string `json:"members"`
 	Selected string   `json:"selected"`
+	// Icon is the group's configured icon URL, for clients to display.
+	Icon string `json:"icon,omitempty"`
 }
 
 type Controls struct {
@@ -169,10 +171,11 @@ func Describe(eff *compile.Effective) Summary {
 				break
 			}
 		}
-		if name := eff.GroupMetadata[group.ID].Name; name != "" {
-			summary.Names[group.ID] = name
+		meta := eff.GroupMetadata[group.ID]
+		if meta.Name != "" {
+			summary.Names[group.ID] = meta.Name
 		}
-		summary.Groups = append(summary.Groups, Group{ID: group.ID, Type: kind, Members: group.Members, Selected: group.Selected})
+		summary.Groups = append(summary.Groups, Group{ID: group.ID, Type: kind, Members: group.Members, Selected: group.Selected, Icon: meta.Icon})
 	}
 	if summary.Groups == nil {
 		summary.Groups = []Group{}
