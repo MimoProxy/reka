@@ -3,6 +3,7 @@ package sagernet
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -181,14 +182,16 @@ func (f *udpFlow) routeAndDial() {
 	md := f.md
 	if prepared.Sniff.Enabled && prepared.Sniff.protocol("quic") && f.s.r.takeSniffSlot() {
 		start := time.Now()
-		md = f.sniffQUIC(md, prepared.Sniff)
-		f.attempt.sniffing(start, md)
+		var observed sniffObservation
+		md, observed = f.sniffQUIC(md, prepared.Sniff)
+		f.attempt.sniffing(start, md, observed)
 		f.s.r.releaseSniffSlot()
 	}
 	if f.ctx.Err() != nil {
 		f.closeWithReason(connectionReason(f.ctx.Err(), "cancelled"), "route")
 		return
 	}
+	f.attempt.routing(time.Now())
 	rt := prepared.pick(f.ctx, md)
 	prepared.Release()
 	if prepared.Sniff.OverrideDestination && md.SniffedDomain != "" && rt.Outbound != nil {
@@ -203,7 +206,7 @@ func (f *udpFlow) routeAndDial() {
 		}
 		return
 	}
-	f.attempt.setRoute(rt)
+	f.attempt.setRoute(rt, md.Destination.Addr)
 	if rt.Outbound == nil {
 		f.s.rejected[f.dest] = time.Now()
 		f.s.mu.Unlock()
@@ -222,7 +225,7 @@ func (f *udpFlow) routeAndDial() {
 // sniffQUIC examines only packets retained in the ordinary flow queue. Each
 // datagram is copied before parsing so closing the flow can release buffers
 // immediately. The sing-box parser carries fragmented CRYPTO state in parsed.
-func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) Metadata {
+func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) (Metadata, sniffObservation) {
 	timer := time.NewTimer(o.Timeout)
 	defer timer.Stop()
 	var parsed adapter.InboundContext
@@ -230,22 +233,22 @@ func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) Metadata {
 	for index < o.MaxPackets && total < o.MaxBytes {
 		select {
 		case <-f.ctx.Done():
-			return md
+			return md, sniffObservation{}
 		case <-timer.C:
-			return md
+			return md, sniffObservation{}
 		default:
 		}
 		f.s.mu.Lock()
 		if f.failed {
 			f.s.mu.Unlock()
-			return md
+			return md, sniffObservation{}
 		}
 		var packet []byte
 		if index < len(f.pending) {
 			b := f.pending[index]
 			if b.Len() > o.MaxBytes-total {
 				f.s.mu.Unlock()
-				return md
+				return md, sniffObservation{}
 			}
 			packet = make([]byte, b.Len())
 			copy(packet, b.Bytes())
@@ -254,9 +257,9 @@ func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) Metadata {
 		if packet == nil {
 			select {
 			case <-f.ctx.Done():
-				return md
+				return md, sniffObservation{}
 			case <-timer.C:
-				return md
+				return md, sniffObservation{}
 			case <-f.notify:
 				continue
 			}
@@ -268,10 +271,10 @@ func (f *udpFlow) sniffQUIC(md Metadata, o SniffOptions) Metadata {
 			return sniffResult(md, parsed, o)
 		}
 		if !errors.Is(err, sniff.ErrNeedMoreData) {
-			return md
+			return md, sniffObservation{}
 		}
 	}
-	return md
+	return md, sniffObservation{}
 }
 
 func (f *udpFlow) dial() {
@@ -291,8 +294,12 @@ func (f *udpFlow) dial() {
 		dialDest = M.ParseSocksaddr(f.rt.Destination.String())
 	}
 	dialStart := time.Now()
-	f.attempt.dialing(dialStart)
+	f.attempt.dialing(dialStart, f.rt.Outbound)
 	remote, err := f.rt.Outbound.out.ListenPacket(ctx, dialDest)
+	var peer net.Addr
+	if connected, ok := remote.(interface{ RemoteAddr() net.Addr }); err == nil && ok {
+		peer = connected.RemoteAddr()
+	}
 	f.sendMu.Lock()
 	s.mu.Lock()
 	if f.failed {
@@ -303,7 +310,7 @@ func (f *udpFlow) dial() {
 		f.sendMu.Unlock()
 		return
 	}
-	f.attempt.dialed(dialStart, err)
+	f.attempt.dialed(dialStart, err, peer, false)
 	if err != nil {
 		f.sendMu.Unlock()
 		f.failed = true

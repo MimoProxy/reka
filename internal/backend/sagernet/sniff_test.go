@@ -68,9 +68,12 @@ func TestSniffStreamFragmentedAndReplay(t *testing.T) {
 				}
 			}()
 			original := Destination{Addr: netip.MustParseAddr("192.0.2.4"), Port: 443}
-			conn, md := sniffStream(context.Background(), server, Metadata{Destination: original}, SniffOptions{Enabled: true, Timeout: time.Second})
+			conn, md, observed := sniffStream(context.Background(), server, Metadata{Destination: original}, SniffOptions{Enabled: true, Timeout: time.Second})
 			if md.SniffedDomain != "fragmented.example" || md.Protocol != tc.protocol || md.Destination != original {
 				t.Fatalf("sniff result changed original target or lost hint: %+v", md)
+			}
+			if observed.protocol != tc.protocol || observed.domain != md.SniffedDomain {
+				t.Fatalf("unexpected sniff observation: %+v", observed)
 			}
 			got, err := io.ReadAll(conn)
 			if err != nil || !bytes.Equal(got, tc.payload) {
@@ -90,9 +93,12 @@ func TestSniffStreamBudgetCancellationAndServerFirst(t *testing.T) {
 		defer server.Close()
 		payload := []byte("GET /incomplete HTTP/1.1\r\nHost: example.test\r\n\r\n")
 		go func() { _, _ = client.Write(payload); client.Close() }()
-		conn, md := sniffStream(context.Background(), server, Metadata{}, SniffOptions{Enabled: true, MaxBytes: 12})
+		conn, md, observed := sniffStream(context.Background(), server, Metadata{Protocol: "dns"}, SniffOptions{Enabled: true, MaxBytes: 12})
 		if md.SniffedDomain != "" {
 			t.Fatal("unread host guessed")
+		}
+		if observed != (sniffObservation{}) || md.Protocol != "dns" {
+			t.Fatalf("unexpected sniff result: %+v, %+v", md, observed)
 		}
 		if replay := conn.(*sniffReplayConn); len(replay.prefix) > 12 {
 			t.Fatal("byte budget exceeded")
@@ -110,7 +116,7 @@ func TestSniffStreamBudgetCancellationAndServerFirst(t *testing.T) {
 		timer := time.AfterFunc(20*time.Millisecond, cancel)
 		defer timer.Stop()
 		start := time.Now()
-		_, md := sniffStream(ctx, server, Metadata{}, SniffOptions{Enabled: true, Timeout: time.Second})
+		_, md, _ := sniffStream(ctx, server, Metadata{}, SniffOptions{Enabled: true, Timeout: time.Second})
 		if time.Since(start) > 500*time.Millisecond || md.SniffedDomain != "" {
 			t.Fatal("cancelled sniff retained a blocking read")
 		}
@@ -120,7 +126,7 @@ func TestSniffStreamBudgetCancellationAndServerFirst(t *testing.T) {
 		defer client.Close()
 		defer server.Close()
 		start := time.Now()
-		conn, _ := sniffStream(context.Background(), server, Metadata{Destination: Destination{Port: 25}}, SniffOptions{Enabled: true, Timeout: time.Second})
+		conn, _, _ := sniffStream(context.Background(), server, Metadata{Destination: Destination{Port: 25}}, SniffOptions{Enabled: true, Timeout: time.Second})
 		if conn != server || time.Since(start) > 100*time.Millisecond {
 			t.Fatal("server-first connection waited for a client payload")
 		}
@@ -129,7 +135,7 @@ func TestSniffStreamBudgetCancellationAndServerFirst(t *testing.T) {
 		client, server := net.Pipe()
 		defer client.Close()
 		go func() { _, _ = client.Write([]byte("bad")) }()
-		conn, _ := sniffStream(context.Background(), server, Metadata{}, SniffOptions{Enabled: true})
+		conn, _, _ := sniffStream(context.Background(), server, Metadata{}, SniffOptions{Enabled: true})
 		conn.Close()
 		if conn.(*sniffReplayConn).prefix != nil {
 			t.Fatal("closed replay retained its prefix")
@@ -369,7 +375,7 @@ func TestSniffQUICFragmentedPacketsAndBudgets(t *testing.T) {
 					b.Release()
 				}
 			}()
-			md := f.sniffQUIC(Metadata{Destination: Destination{Addr: netip.MustParseAddr("192.0.2.3"), Port: 443}}, SniffOptions{Timeout: time.Second, MaxPackets: tc.maxPackets, MaxBytes: tc.maxBytes})
+			md, _ := f.sniffQUIC(Metadata{Destination: Destination{Addr: netip.MustParseAddr("192.0.2.3"), Port: 443}}, SniffOptions{Timeout: time.Second, MaxPackets: tc.maxPackets, MaxBytes: tc.maxBytes})
 			if md.SniffedDomain != tc.wantDomain || !md.Destination.Addr.IsValid() {
 				t.Fatalf("unexpected QUIC routing hint: %+v", md)
 			}
@@ -494,7 +500,7 @@ func TestSniffDiscardedDomainReplaysPayload(t *testing.T) {
 	}()
 	options := SniffOptions{Enabled: true, OverrideDestination: true, Timeout: time.Second,
 		SkipDomain: func(domain string) bool { return domain == "private.example" }}
-	conn, md := sniffStream(context.Background(), server, Metadata{Destination: Destination{Port: 80}}, options)
+	conn, md, _ := sniffStream(context.Background(), server, Metadata{Destination: Destination{Port: 80}}, options)
 	replayed, err := io.ReadAll(conn)
 	if err != nil || !bytes.Equal(replayed, data) || md.SniffedDomain != "" || md.Protocol != "" {
 		t.Fatalf("excluded result or replay was incorrect: %+v, %q, %v", md, replayed, err)

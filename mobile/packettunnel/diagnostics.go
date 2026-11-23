@@ -82,11 +82,7 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 		if !ok {
 			return nil, errors.New("connection history has expired")
 		}
-		if len(timeline.Events) > 24 {
-			trimmed := append([]api.TimelineEvent(nil), timeline.Events[:12]...)
-			timeline.Events = append(trimmed, timeline.Events[len(timeline.Events)-12:]...)
-			timeline.Truncated = true
-		}
+		trimTimelineEvents(&timeline)
 		// Keep linked summaries small. DNS and HTTP details can be requested
 		// independently through the corresponding history page.
 		for i := range timeline.Events {
@@ -166,6 +162,38 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 		return true, nil
 	default:
 		return nil, errors.New("unknown packet tunnel operation")
+	}
+}
+
+func trimTimelineEvents(timeline *api.ConnectionTimeline) {
+	const httpKeepEachEnd = 4
+	const timelineKeepEachEnd = 12
+	httpCount := 0
+	for _, event := range timeline.Events {
+		if event.Stage == "http" {
+			httpCount++
+		}
+	}
+	if httpCount > 2*httpKeepEachEnd {
+		// Trim HTTP first to leave room for the other rows.
+		kept := timeline.Events[:0]
+		seen := 0
+		for _, event := range timeline.Events {
+			if event.Stage == "http" {
+				seen++
+				if seen > httpKeepEachEnd && seen <= httpCount-httpKeepEachEnd {
+					continue
+				}
+			}
+			kept = append(kept, event)
+		}
+		clear(timeline.Events[len(kept):])
+		timeline.Events = kept
+		timeline.Truncated = true
+	}
+	if len(timeline.Events) > 2*timelineKeepEachEnd {
+		timeline.Events = slices.Delete(timeline.Events, timelineKeepEachEnd, len(timeline.Events)-timelineKeepEachEnd)
+		timeline.Truncated = true
 	}
 }
 

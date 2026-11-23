@@ -113,6 +113,12 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 		return
 	}
 	data, err := json.Marshal(summary)
+	if err == nil && len(data) > rowBytes {
+		// Some summaries can reuse fields that are already present in the row.
+		if compact, ok := summary.(interface{ CompactHistorySummary() any }); ok {
+			data, err = json.Marshal(compact.CompactHistorySummary())
+		}
+	}
 	if err != nil || len(data) > rowBytes {
 		return
 	}

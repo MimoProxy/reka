@@ -38,10 +38,13 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	ctx = WithLookup(ctx, observeRequestLookup(ctx, rt.Lookup))
 	ctx = adapter.WithContext(ctx, &metadata)
 	dialStart := time.Now()
-	attempt.dialing(dialStart)
+	attempt.dialing(dialStart, out)
 	remote, err := out.out.DialContext(ctx, N.NetworkTCP, metadata.Destination)
-	attempt.dialed(dialStart, err)
-	observeRequestDial(ctx, attempt.DialMS)
+	var peer net.Addr
+	if err == nil {
+		peer = remote.RemoteAddr()
+	}
+	observeRequestDial(ctx, attempt.dialed(dialStart, err, peer, out.Type() == "direct"))
 	if err != nil {
 		attempt.complete(connectionReason(err, "error"), "dial", 0, 0)
 		release()
@@ -55,7 +58,6 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		stop := context.AfterFunc(ctx, func() { _ = remote.Close() })
 		stopCancel = func() { stop() }
 	}
-	attempt.peer(remote.RemoteAddr(), out.Type() == "direct")
 	if err = N.ReportConnHandshakeSuccess(conn, remote); err != nil {
 		stopCancel()
 		attempt.complete(connectionReason(err, "error"), "handshake", 0, 0)

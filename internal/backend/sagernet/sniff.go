@@ -129,32 +129,39 @@ func (o SniffOptions) streamEligible(md Metadata) bool {
 	return !sniff.Skip(&adapter.InboundContext{Destination: M.Socksaddr{Port: md.Destination.Port}})
 }
 
-func sniffResult(md Metadata, parsed adapter.InboundContext, options SniffOptions) Metadata {
+type sniffObservation struct {
+	protocol string
+	domain   string
+}
+
+func sniffResult(md Metadata, parsed adapter.InboundContext, options SniffOptions) (Metadata, sniffObservation) {
 	domain := strings.ToLower(strings.TrimSuffix(parsed.Domain, "."))
 	if options.SkipDomain != nil && options.SkipDomain(domain) {
-		return md
+		return md, sniffObservation{}
 	}
+	observed := sniffObservation{protocol: parsed.Protocol}
 	md.Protocol = parsed.Protocol
 	if _, err := netip.ParseAddr(domain); domain != "" && err != nil && M.IsDomainName(domain) {
 		md.SniffedDomain = domain
+		observed.domain = domain
 	}
-	return md
+	return md, observed
 }
 
 // sniffStream retains every read byte, including malformed/unknown input and
 // partial records at the timeout. The wrapper forwards half-close operations
 // and releases its prefix when consumed or closed.
-func sniffStream(ctx context.Context, conn net.Conn, md Metadata, o SniffOptions) (net.Conn, Metadata) {
+func sniffStream(ctx context.Context, conn net.Conn, md Metadata, o SniffOptions) (net.Conn, Metadata, sniffObservation) {
 	o = o.normalized()
 	if !o.streamEligible(md) {
-		return conn, md
+		return conn, md, sniffObservation{}
 	}
 	deadline := time.Now().Add(o.Timeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
 	if err := conn.SetReadDeadline(deadline); err != nil {
-		return conn, md
+		return conn, md, sniffObservation{}
 	}
 	cancelled := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
@@ -168,6 +175,7 @@ func sniffStream(ctx context.Context, conn net.Conn, md Metadata, o SniffOptions
 		_ = conn.SetReadDeadline(time.Time{})
 	}()
 	var prefix []byte
+	var observed sniffObservation
 	for len(prefix) < o.MaxBytes && ctx.Err() == nil {
 		chunk := make([]byte, min(4096, o.MaxBytes-len(prefix)))
 		n, readErr := conn.Read(chunk)
@@ -188,7 +196,7 @@ func sniffStream(ctx context.Context, conn net.Conn, md Metadata, o SniffOptions
 				parseErr = errors.New("unrecognized stream")
 			}
 			if parseErr == nil {
-				md = sniffResult(md, parsed, o)
+				md, observed = sniffResult(md, parsed, o)
 				break
 			}
 			if !errors.Is(parseErr, sniff.ErrNeedMoreData) && !errors.Is(parseErr, io.ErrUnexpectedEOF) && !errors.Is(parseErr, io.EOF) {
@@ -200,9 +208,9 @@ func sniffStream(ctx context.Context, conn net.Conn, md Metadata, o SniffOptions
 		}
 	}
 	if len(prefix) == 0 {
-		return conn, md
+		return conn, md, observed
 	}
-	return &sniffReplayConn{Conn: conn, prefix: prefix}, md
+	return &sniffReplayConn{Conn: conn, prefix: prefix}, md, observed
 }
 
 type sniffReplayConn struct {
