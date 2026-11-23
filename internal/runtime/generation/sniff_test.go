@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"testing"
-	"time"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
@@ -27,7 +26,7 @@ func TestRouteReportsFakeIPDomainAlongsideSniffedDomain(t *testing.T) {
 	if _, err := e.Activate(p, 1); err != nil {
 		t.Fatal(err)
 	}
-	ip, err := e.fake.Allocate(1, "mapped.test", netip.MustParsePrefix("198.18.0.0/16"), time.Minute)
+	ip, err := e.fake.Allocate(1, "mapped.test", netip.MustParsePrefix("198.18.0.0/16"))
 	if err != nil {
 		t.Fatal(err)
 	}

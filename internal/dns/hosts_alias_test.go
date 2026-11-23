@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	D "github.com/miekg/dns"
@@ -54,30 +55,38 @@ func TestHostsAliasCyclesAndInvalidValues(t *testing.T) {
 }
 
 func TestWireFakeTTLAndMappingLifetime(t *testing.T) {
-	for _, wireTTL := range []int{0, 1, 120} {
-		pool := NewFakePool(8)
-		s, err := New(Config{Nameservers: []string{"192.0.2.1"}, Mode: "fake-ip", TTL: &wireTTL}, Options{Pool: pool, Generation: 1})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(s.Retire)
-		before := time.Now()
-		m, err := s.Exchange(context.Background(), query("mapping.test"), "normal", true)
-		if err != nil || len(m.Answer) != 1 || m.Answer[0].Header().Ttl != uint32(wireTTL) {
-			t.Fatalf("DNS TTL %d: %v %v", wireTTL, m, err)
-		}
-		ip, _ := netip.AddrFromSlice(m.Answer[0].(*D.A).A)
-		ip = ip.Unmap()
-		domain, release, ok := pool.Acquire(ip)
-		if !ok || domain != "mapping.test" {
-			t.Fatalf("DNS TTL %d produced an unusable mapping", wireTTL)
-		}
-		release()
-		if remaining := pool.entries[ip].expires.Sub(before); remaining < time.Duration(max(60, wireTTL))*time.Second {
-			t.Fatalf("DNS TTL %d gave a mapping for only %v", wireTTL, remaining)
-		}
-	}
-	if (Config{}).FakeTTL() != 60 {
-		t.Fatal("omitted TTL default changed")
+	for _, tc := range []struct {
+		name     string
+		wireTTL  int
+		explicit bool
+	}{
+		{name: "default", wireTTL: 1},
+		{name: "explicit zero", wireTTL: 0, explicit: true},
+		{name: "explicit nonzero", wireTTL: 120, explicit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pool := NewFakePool(8)
+				cfg := Config{Nameservers: []string{"192.0.2.1"}, Mode: "fake-ip"}
+				if tc.explicit {
+					cfg.TTL = &tc.wireTTL
+				}
+				if got := cfg.FakeTTL(); got != tc.wireTTL {
+					t.Fatalf("FakeTTL = %d, want %d", got, tc.wireTTL)
+				}
+				s, err := New(cfg, Options{Pool: pool, Generation: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Retire()
+				m, err := s.Exchange(t.Context(), query("mapping.test"), "normal", true)
+				if err != nil || len(m.Answer) != 1 || m.Answer[0].Header().Ttl != uint32(tc.wireTTL) {
+					t.Fatalf("DNS TTL %d: %v %v", tc.wireTTL, m, err)
+				}
+				ip, _ := netip.AddrFromSlice(m.Answer[0].(*D.A).A)
+				time.Sleep(max(time.Minute, time.Duration(tc.wireTTL)*time.Second) + time.Second)
+				checkFakeMapping(t, pool, ip.Unmap(), "mapping.test")
+			})
+		})
 	}
 }

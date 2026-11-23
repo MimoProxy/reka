@@ -84,7 +84,7 @@ rules:
 		{domain: "missing.test", source: "error", rule: "MATCH,egress", counts: []int{0, 0}},
 	} {
 		t.Run(tc.domain, func(t *testing.T) {
-			target, err := engine.fake.Allocate(resolver.Generation(), tc.domain, fakeRange, time.Minute)
+			target, err := engine.fake.Allocate(resolver.Generation(), tc.domain, fakeRange)
 			if err != nil {
 				t.Fatal(err)
 			}

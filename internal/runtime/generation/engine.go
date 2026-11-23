@@ -138,6 +138,7 @@ func NewEngine(opts EngineOptions) *Engine {
 
 	e := &Engine{opts: opts, listeners: map[string]*listener{}}
 	if opts.HostPacketFlow {
+		// Keep the pool within the iOS Packet Tunnel memory budget.
 		e.fake = RD.NewFakePool(2048)
 		e.history = opts.PacketHistory
 	} else {
@@ -1312,6 +1313,7 @@ func (e *Engine) Close() {
 	e.backend.CloseConnections(nil)
 	e.rt.Close()
 	e.backend.Close()
+	e.fake.Close()
 }
 
 // ListenerAddr returns where a listener is bound (for tests and status).

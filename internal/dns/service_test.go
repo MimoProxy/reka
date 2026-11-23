@@ -80,36 +80,6 @@ func TestNegativeCacheTTLAndQuestionIsolation(t *testing.T) {
 		t.Fatal("negative TTL ignored")
 	}
 }
-func TestFakeGenerationsRangesAndLease(t *testing.T) {
-	p := NewFakePool(8)
-	prefix := netip.MustParsePrefix("198.18.0.0/29")
-	a, err := p.Allocate(1, "old.test", prefix, 30*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name, release, ok := p.Acquire(a)
-	if !ok || name != "old.test" {
-		t.Fatal(name)
-	}
-	time.Sleep(40 * time.Millisecond)
-	b, _ := p.Allocate(2, "new.test", prefix, time.Second)
-	if a == b {
-		t.Fatal("leased old address reused")
-	}
-	name, r2, ok := p.Acquire(a)
-	if !ok || name != "old.test" {
-		t.Fatal("retired mapping lost")
-	}
-	r2()
-	release()
-	c, _ := p.Allocate(3, "new-range.test", netip.MustParsePrefix("198.19.0.0/29"), time.Second)
-	if prefix.Contains(c) {
-		t.Fatal(c)
-	}
-	if _, _, ok := p.Acquire(a); ok {
-		t.Fatal("expired mapping retained after leases drained")
-	}
-}
 func TestDNSCycleValidation(t *testing.T) {
 	for _, c := range []Config{{Nameservers: []string{"1.1.1.1"}, Bootstrap: []string{"https://host.test/dns-query"}}, {Nameservers: []string{"1.1.1.1"}, Proxy: []string{"1.1.1.1#proxy"}}} {
 		if Validate(&c) == nil {
