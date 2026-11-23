@@ -291,6 +291,8 @@ type Connection struct {
 
 	// OriginalDestination is set when the active destination was rewritten.
 	OriginalDestination string `json:"original_destination,omitempty"`
+	// State is used by the Packet Tunnel connection list.
+	State string `json:"-"`
 }
 
 // RuntimeStatus is a summary of the running state.

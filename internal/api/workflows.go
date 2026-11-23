@@ -39,6 +39,8 @@ type ConnectionTrace struct {
 	ReadyAt         *time.Time  `json:"ready_at,omitempty"`
 	EndedAt         time.Time   `json:"ended_at,omitzero"`
 	DurationMS      int64       `json:"duration_ms"`
+	PeakUpBPS       int64       `json:"peak_up_bps,omitempty"`
+	PeakDownBPS     int64       `json:"peak_down_bps,omitempty"`
 	DialMS          *int64      `json:"dial_ms,omitempty"`
 	CloseReason     string      `json:"close_reason,omitempty"`
 	ErrorStage      string      `json:"error_stage,omitempty"`

@@ -70,7 +70,6 @@ type udpFlow struct {
 	failed       bool
 
 	processTraffic *processTrafficCounter
-	up, down       atomic.Int64
 	last           atomic.Int64
 	once           sync.Once
 	untrack        func()
@@ -214,7 +213,7 @@ func (f *udpFlow) routeAndDial() {
 	f.md, f.rt = md, rt
 	var finishProcess func()
 	f.processTraffic, finishProcess = f.s.b.beginProcessTraffic(rt.Owner)
-	untrack := f.s.b.conns.add(&tracked{attempt: f.attempt, id: f.attempt.ID, start: time.Now(), md: md, out: rt.Outbound, info: rt.Info, up: &f.up, down: &f.down, close: f.close})
+	untrack := f.s.b.conns.add(&tracked{attempt: f.attempt, id: f.attempt.ID, start: time.Now(), md: md, out: rt.Outbound, info: rt.Info, close: f.close})
 	f.untrack = func() { untrack(); finishProcess() }
 	f.s.mu.Unlock()
 	f.dial()
@@ -400,7 +399,7 @@ func (f *udpFlow) writeLocked(b *buf.Buffer) {
 		f.closeWithReason(connectionReason(err, "error"), "relay")
 		return
 	}
-	f.up.Add(n)
+	f.attempt.up.Add(n)
 	f.s.b.trafficUpload.Add(uint64(n))
 	f.processTraffic.upload.Add(uint64(n))
 }
@@ -432,7 +431,7 @@ func (f *udpFlow) receive() {
 			f.s.close(err)
 			return
 		}
-		f.down.Add(n)
+		f.attempt.down.Add(n)
 		f.s.b.trafficDownload.Add(uint64(n))
 		f.processTraffic.download.Add(uint64(n))
 	}
@@ -472,7 +471,7 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 			remote.Close()
 		}
 		finish := func() {
-			f.attempt.complete(reason, stage, f.up.Load(), f.down.Load())
+			f.attempt.complete(reason, stage)
 			if untrack != nil {
 				untrack()
 			}

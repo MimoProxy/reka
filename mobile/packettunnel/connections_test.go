@@ -66,11 +66,65 @@ func TestConnectionsIncludeStartTime(t *testing.T) {
 	}
 }
 
+func TestConnectionsIncludeProtocolAndState(t *testing.T) {
+	// The drop outbound keeps a flow open in memory for the listing.
+	const config = `schema-version: 1
+groups: [{id: egress, type: select, members: [reject-drop]}]
+rules: [{match: {all: true}, outbound: egress}]
+sniff: {enabled: true, protocols: [http]}
+`
+	session, err := StartProfile(prepareSnapshot(t, config), profile.Controls{Mode: "rule"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ctx := attachTestClient(t, session, "172.27.255.2")
+	destination := packetTestAddress("192.0.2.1", 443)
+	conn, err := gonet.DialContextTCP(ctx, client, destination, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: sniff.test\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	var rows []connectionStamp
+	waitPacketTest(t, "the active connection", func() bool {
+		rows = readConnectionRows(t, session)
+		return len(rows) == 1
+	})
+	if rows[0].Protocol != "http" || rows[0].State != "active" {
+		t.Fatalf("unexpected active connection: %+v", rows[0])
+	}
+	if closed, err := session.RunOperation(Operation{Action: "close", ID: rows[0].ID}); err != nil || closed != true {
+		t.Fatalf("close returned %v, %v", closed, err)
+	}
+	waitPacketTest(t, "the connection to leave the list", func() bool {
+		return len(readConnectionRows(t, session)) == 0
+	})
+}
+
 func TestConnectionRowsSortByStartThenID(t *testing.T) {
 	rows := []ConnectionRow{{ID: 1, StartMS: 20}, {ID: 3, StartMS: 15}, {ID: 2, StartMS: 20}}
 	sortConnectionRows(rows)
 	if got := [3]uint64{rows[0].ID, rows[1].ID, rows[2].ID}; got != [3]uint64{2, 1, 3} {
 		t.Fatalf("connection order = %v", got)
+	}
+}
+
+func TestConnectionRowJSON(t *testing.T) {
+	rows := []ConnectionRow{{State: "connecting"}, {State: "active", Protocol: "quic"}}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields[0]["state"]) != `"connecting"` || fields[0]["protocol"] != nil ||
+		string(fields[1]["state"]) != `"active"` || string(fields[1]["protocol"]) != `"quic"` {
+		t.Fatalf("unexpected connection row fields: %s", data)
 	}
 }
 
@@ -244,8 +298,10 @@ func startPacketFlowDiagnosticsSession(t *testing.T, dns func(context.Context, *
 }
 
 type connectionStamp struct {
-	ID      uint64 `json:"id"`
-	StartMS int64  `json:"startMs"`
+	ID       uint64 `json:"id"`
+	StartMS  int64  `json:"startMs"`
+	Protocol string `json:"protocol"`
+	State    string `json:"state"`
 }
 
 func readConnectionRows(t *testing.T, session *Session) []connectionStamp {

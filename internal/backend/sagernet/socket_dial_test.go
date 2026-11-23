@@ -133,7 +133,7 @@ func TestSocketEventsUseRecordedTimesAndEndpoints(t *testing.T) {
 			event:    connectionEvent{kind: eventTLS, code: "tls", name: "proxy.test", duration: 3 * time.Millisecond, hasDuration: true},
 		}},
 	}, true)
-	trace := attempt.trace(0, 0)
+	trace := attempt.trace()
 	checkConnectionEventKinds(t, trace.Events, "accepted", "dial", "connect", "connected", "server_dns", "tls", "ready")
 	connect, connected, tls := trace.Events[2], trace.Events[3], trace.Events[5]
 	if connect.T != 2000 || connected.T != 4000 || connected.MS == nil || *connected.MS != 2 ||
@@ -154,7 +154,7 @@ func TestSocketDialReuseKeepsOnlyMuxEvent(t *testing.T) {
 	observation.multiplex(nil, false)
 	observation.xhttpConnSelected(httptrace.GotConnInfo{Reused: true})
 	attempt.dialed(start, time.Now(), nil, observation.finish(nil, nil), false)
-	trace := attempt.trace(0, 0)
+	trace := attempt.trace()
 	checkConnectionEventKinds(t, trace.Events, "accepted", "dial", "mux", "ready")
 	checkSocketTraceMux(t, trace, "reuse")
 }
@@ -329,7 +329,7 @@ func TestSocketTraceLoopbackXHTTPReuse(t *testing.T) {
 		}
 		defer conn.Close()
 		attempt.dialed(start, finished, nil, observed, false)
-		trace := attempt.trace(0, 0)
+		trace := attempt.trace()
 		checkSocketTraceMux(t, trace, code)
 		if i == 0 {
 			checkTCPSocketTrace(t, trace, peer)

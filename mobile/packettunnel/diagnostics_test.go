@@ -4,6 +4,7 @@ package packettunnel
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,33 @@ import (
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 )
+
+func TestPacketTunnelHistoryLimits(t *testing.T) {
+	session := newSession()
+	t.Cleanup(session.cancel)
+	t.Cleanup(session.device.endpoint.Close)
+	// Two copies of the JSON string and 128 bytes of overhead use 4 KiB.
+	large := strings.Repeat("x", 1982)
+	now := time.Now()
+	for _, kind := range []history.Kind{history.Connections, history.DNS, history.Logs, history.Requests} {
+		for range 70 {
+			session.events.Record(kind, history.Scope{}, now, "small", nil)
+		}
+		if got := session.events.Count(kind); got != 64 {
+			t.Fatalf("%s history retained %d small rows, want 64", kind, got)
+		}
+		for range 70 {
+			session.events.Record(kind, history.Scope{}, now, large, nil)
+		}
+	}
+	for kind, want := range map[history.Kind]int{
+		history.Connections: 48, history.DNS: 24, history.Logs: 24, history.Requests: 24,
+	} {
+		if got := session.events.Count(kind); got != want {
+			t.Errorf("%s history retained %d large rows, want %d", kind, got, want)
+		}
+	}
+}
 
 func TestPacketTunnelTimelineLimitsLinkedRows(t *testing.T) {
 	for _, tt := range []struct {

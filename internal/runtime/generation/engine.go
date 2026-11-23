@@ -1239,10 +1239,13 @@ func (e *Engine) Connections() []Connection {
 			ID: c.ID, Inbound: c.Metadata.Inbound, Network: c.Metadata.Network,
 			Source: c.Metadata.Source.String(), Destination: c.Metadata.Destination.String(),
 			Outbound: c.Outbound, Start: c.Start, Upload: c.Upload, Download: c.Download,
-			OriginalDestination: c.OriginalDestination,
+			OriginalDestination: c.OriginalDestination, State: c.State,
 		}
 		if fi, ok := c.Info.(*FlowInfo); ok {
 			conn.FlowInfo = *fi
+		}
+		if conn.Protocol == "" {
+			conn.Protocol = c.Metadata.Protocol
 		}
 		out = append(out, conn)
 	}

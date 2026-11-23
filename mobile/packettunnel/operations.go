@@ -49,6 +49,8 @@ type ConnectionRow struct {
 	StartMS     int64    `json:"startMs"`
 	Destination string   `json:"destination"`
 	Network     string   `json:"network"`
+	Protocol    string   `json:"protocol,omitempty"`
+	State       string   `json:"state,omitempty"`
 	Rule        string   `json:"rule,omitempty"`
 	Groups      []string `json:"groups,omitempty"`
 	Outbound    string   `json:"outbound"`
@@ -159,8 +161,8 @@ func (s *Session) connections() []ConnectionRow {
 		for _, conn := range active {
 			rows = append(rows, ConnectionRow{
 				ID: conn.ID, StartMS: conn.Start.UnixMilli(), Network: conn.Metadata.Network,
-				Destination: conn.Metadata.Destination.String(),
-				Outbound:    conn.Outbound, Uploaded: conn.Upload, Downloaded: conn.Download,
+				Destination: conn.Metadata.Destination.String(), Protocol: conn.Metadata.Protocol, State: conn.State,
+				Outbound: conn.Outbound, Uploaded: conn.Upload, Downloaded: conn.Download,
 			})
 		}
 		sortConnectionRows(rows)
@@ -205,6 +207,7 @@ func (s *Session) connections() []ConnectionRow {
 		}
 		rows = append(rows, ConnectionRow{
 			ID: conn.ID, StartMS: conn.Start.UnixMilli(), Destination: history.Text(destination, 255), Network: conn.Network,
+			Protocol: conn.Protocol, State: conn.State,
 			Rule: history.Text(rule, 384), Groups: groups, Outbound: connectionDisplayName(conn.Outbound, conn.OutboundName),
 			Uploaded: conn.Upload, Downloaded: conn.Download,
 		})
