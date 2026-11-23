@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"strings"
 
@@ -19,10 +21,13 @@ import (
 const bundleVersion = 1
 const MaxBundleBytes = 4 << 20
 
+var errBundleTooLarge = errors.New("prepared rules and resources exceed the 4 MiB extension configuration budget")
+
 type Bundle struct {
 	Version   int               `json:"version"`
 	Profile   json.RawMessage   `json:"profile"`
 	Local     json.RawMessage   `json:"local,omitempty"`
+	Sources   json.RawMessage   `json:"sources,omitempty"`
 	Overlay   json.RawMessage   `json:"overlay,omitempty"` // Only patches validated during preparation.
 	Resources map[string][]byte `json:"resources,omitempty"`
 	Summary   Summary           `json:"summary"`
@@ -76,6 +81,22 @@ type Controls struct {
 	Secrets     secret.Store `json:"-"`
 }
 
+func readBundleFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > MaxBundleBytes {
+		return nil, errors.New("invalid snapshot file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() || info.Size() > MaxBundleBytes {
+		return nil, errors.New("invalid snapshot file")
+	}
+	return io.ReadAll(io.LimitReader(file, MaxBundleBytes+1))
+}
+
 func Decode(data []byte) (*Bundle, error) {
 	var bundle Bundle
 	if len(data) > MaxBundleBytes || json.Unmarshal(data, &bundle) != nil || bundle.Version != bundleVersion {
@@ -97,12 +118,17 @@ func (b *Bundle) CompileWithSecrets(secrets secret.Store) (*compile.Effective, e
 }
 
 func (b *Bundle) compile(secrets secret.Store) (*compile.Effective, model.Diagnostics) {
-	eff, diagnostics := compile.Compile(b.Profile, b.Local, compile.Options{Overlay: b.Overlay, Secrets: secrets, ReadResource: func(hash string) ([]byte, error) {
-		if data := b.Resources[hash]; data != nil {
-			return data, nil
-		}
-		return nil, errors.New("rule resource is missing from this snapshot")
-	}})
+	eff, diagnostics := compile.Compile(b.Profile, b.Local, compile.Options{
+		Sources: b.Sources,
+		Overlay: b.Overlay,
+		Secrets: secrets,
+		ReadResource: func(hash string) ([]byte, error) {
+			if data := b.Resources[hash]; data != nil {
+				return data, nil
+			}
+			return nil, errors.New("rule resource is missing from this snapshot")
+		},
+	})
 	if diagnostics.HasErrors() {
 		return nil, diagnostics
 	}
