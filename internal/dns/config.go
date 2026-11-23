@@ -229,7 +229,8 @@ func Validate(c *Config) error {
 // FakeTTL distinguishes an omitted value from an explicit zero response TTL.
 func (c Config) FakeTTL() int {
 	if c.TTL == nil {
-		return 60
+		// Match mihomo's short default so clients refresh addresses after eviction.
+		return 1
 	}
 	return *c.TTL
 }

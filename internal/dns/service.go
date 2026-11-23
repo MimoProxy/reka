@@ -270,16 +270,12 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, opts exc
 				r = s.cfg.FakeRange6
 			}
 			prefix, _ := netip.ParsePrefix(r)
-			ttl := s.cfg.FakeTTL()
-			// Allow clients that have already resolved an address to finish
-			// dialing it after a short wire TTL expires.
-			lease := max(time.Minute, time.Duration(ttl)*time.Second)
-			ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix, lease)
+			ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix)
 			if err != nil {
 				return nil, err
 			}
 			m := reply()
-			m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(ttl))}
+			m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(s.cfg.FakeTTL()))}
 			return m, nil
 		}
 	}

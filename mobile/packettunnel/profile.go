@@ -152,6 +152,11 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 		opts.ObserveRoute = p.trace.record
 	}
 	p.engine = generation.NewEngine(opts)
+	if controls.FakeIPState != "" {
+		if err := p.engine.DNSState(controls.FakeIPState); err != nil {
+			s.logger.Warn("Could not restore fake IP state", "err", err)
+		}
+	}
 	if err := p.publish(p.base, p.summary, controls); err != nil {
 		s.cancel()
 		p.engine.Close()

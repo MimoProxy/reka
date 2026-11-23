@@ -70,8 +70,10 @@ type Controls struct {
 	// BlockQUIC overrides the profile's routing.block-quic when set.
 	BlockQUIC string `json:"blockQuic,omitempty"`
 	// IPVersion overrides the dialer IP policy and DNS IPv6 setting when set.
-	IPVersion string       `json:"ipVersion,omitempty"`
-	Secrets   secret.Store `json:"-"`
+	IPVersion string `json:"ipVersion,omitempty"`
+	// FakeIPState is the App Group path opened once per session.
+	FakeIPState string       `json:"fakeIPState,omitempty"`
+	Secrets     secret.Store `json:"-"`
 }
 
 func Decode(data []byte) (*Bundle, error) {
