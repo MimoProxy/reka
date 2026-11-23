@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/router"
 )
@@ -77,6 +79,12 @@ rules: ['AND,((RULE-SET,sites),(NETWORK,TCP)),REJECT', 'GEOIP,CN,DIRECT,no-resol
 	eff, ds := compile.Compile(profile, nil, compile.Options{Sources: []byte(result.Preview(true).Sources), ReadResource: func(h string) ([]byte, error) { return blobs[h], nil }})
 	if ds.HasErrors() {
 		t.Fatal(ds)
+	}
+	sources, _, ds := model.ParseSources([]byte(result.Preview(true).Sources))
+	if ds.HasErrors() || !slices.ContainsFunc(sources.Sources[0].RuleSets, func(set model.RuleSet) bool {
+		return set.ID == ps[0].ID && set.Name == "sites"
+	}) {
+		t.Fatalf("the rule provider name was not kept: %v", ds)
 	}
 	if got := eff.Router.Route(context.Background(), router.Metadata{Domain: "x.suffix.test", Network: "tcp"}, nil); got.Outbound != "reject" || got.RuleIndex != 0 {
 		t.Fatal(got)

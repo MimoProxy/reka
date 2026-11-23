@@ -281,14 +281,16 @@ type Control struct {
 
 // RuleSet pins external bytes or carries explicit inline condition entries.
 type RuleSet struct {
-	Download   *ResourceDownload `yaml:"download"`
-	ID         string            `yaml:"id"`
-	Behavior   string            `yaml:"behavior"`
-	Format     string            `yaml:"format"`
-	Hash       string            `yaml:"hash"`
-	Code       string            `yaml:"code"`
-	Entries    []Match           `yaml:"entries"`
-	References []RuleReference   `yaml:"references"`
+	Download *ResourceDownload `yaml:"download"`
+	ID       string            `yaml:"id"`
+	// Name is shown to the user in place of the ID. It does not affect routing.
+	Name       string          `yaml:"name"`
+	Behavior   string          `yaml:"behavior"`
+	Format     string          `yaml:"format"`
+	Hash       string          `yaml:"hash"`
+	Code       string          `yaml:"code"`
+	Entries    []Match         `yaml:"entries"`
+	References []RuleReference `yaml:"references"`
 }
 type SubRules struct {
 	ID    string `yaml:"id"`
