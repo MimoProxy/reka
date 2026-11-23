@@ -38,6 +38,7 @@ type Operation struct {
 	LocalQUIC  []string             `json:"localQuic,omitempty"`
 	NodeQUIC   []string             `json:"nodeQuic,omitempty"`
 	TimeoutMS  int                  `json:"timeout_ms,omitempty"`
+	Unified    bool                 `json:"unified,omitempty"`
 	Members    []string             `json:"members,omitempty"`
 	Rounds     int                  `json:"rounds,omitempty"`
 	DNS        *api.DNSQueryRequest `json:"dns,omitempty"`
@@ -247,7 +248,7 @@ func (s *Session) probe(op Operation) (Latency, error) {
 		op.URL = "https://www.gstatic.com/generate_204"
 	}
 	result, err := s.profile.engine.ProbeOutbound(s.ctx, api.ProbeRequest{
-		Outbound: member, URL: op.URL, TimeoutMS: op.TimeoutMS,
+		Outbound: member, URL: op.URL, TimeoutMS: op.TimeoutMS, Unified: op.Unified,
 	})
 	latency := Latency{Member: member, Resolved: result.ResolvedOutbound, Status: result.StatusCode}
 	if err == nil {

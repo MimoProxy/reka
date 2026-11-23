@@ -13,6 +13,9 @@ type ProbeRequest struct {
 	Outbound  string `json:"outbound"`
 	URL       string `json:"url"`
 	TimeoutMS int    `json:"timeout_ms"`
+	// Unified reports the second request on a reused connection, leaving out
+	// the TCP, TLS and proxy handshakes.
+	Unified bool `json:"unified,omitempty"`
 }
 
 type ProbeResult struct {

@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -78,6 +79,27 @@ func TestNativeClientTrafficProbeAndResourcesOverWire(t *testing.T) {
 	var probe api.ProbeResult
 	if err := client.Call("ProbeOutbound", api.ProbeRequest{Outbound: "alt", URL: server.URL, TimeoutMS: 1000}, &probe); err != nil || probe.ResolvedOutbound != "alt" || probe.StatusCode != 204 || probe.DelayMS < 1 {
 		t.Fatal(probe, err)
+	}
+	// The first request on each connection is slow; a unified probe reports
+	// only the second request, which reuses the connection.
+	type requestsKey struct{}
+	slow := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if count := r.Context().Value(requestsKey{}).(*int); *count == 0 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		*r.Context().Value(requestsKey{}).(*int)++
+		w.WriteHeader(204)
+	}))
+	slow.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+		return context.WithValue(ctx, requestsKey{}, new(int))
+	}
+	slow.Start()
+	defer slow.Close()
+	if err := client.Call("ProbeOutbound", api.ProbeRequest{Outbound: "alt", URL: slow.URL, TimeoutMS: 2000}, &probe); err != nil || probe.DelayMS < 300 {
+		t.Fatal("probe without connection reuse", probe, err)
+	}
+	if err := client.Call("ProbeOutbound", api.ProbeRequest{Outbound: "alt", URL: slow.URL, TimeoutMS: 2000, Unified: true}, &probe); err != nil || probe.StatusCode != 204 || probe.DelayMS >= 300 {
+		t.Fatal("unified probe", probe, err)
 	}
 	after := svc.GetConfiguration(true)
 	if before.Revision != after.Revision || before.Profile != after.Profile || before.Overlay != after.Overlay {
