@@ -7,23 +7,55 @@ import (
 	"github.com/MimoProxy/reka/internal/history"
 )
 
+// ConnEvent is one step in a connection's life. T is microseconds since
+// the connection started. Fields are optional and depend on Kind.
+type ConnEvent struct {
+	T    int64    `json:"t"`
+	Kind string   `json:"k"`
+	Code string   `json:"code,omitempty"`
+	Name string   `json:"name,omitempty"`
+	Addr string   `json:"addr,omitempty"`
+	Peer string   `json:"peer,omitempty"`
+	Path []string `json:"path,omitempty"`
+	MS   *float64 `json:"ms,omitempty"` // Elapsed milliseconds rounded to a tenth.
+	N    []int    `json:"n,omitempty"`
+}
+
 type ConnectionTrace struct {
 	history.Scope
 	Connection
-	SniffStartedAt  time.Time  `json:"sniff_started_at,omitzero"`
-	SniffFinishedAt time.Time  `json:"sniff_finished_at,omitzero"`
-	RoutedAt        time.Time  `json:"routed_at,omitzero"`
-	DialStartedAt   time.Time  `json:"dial_started_at,omitzero"`
-	DialFinishedAt  time.Time  `json:"dial_finished_at,omitzero"`
-	DialDestination string     `json:"dial_destination,omitempty"`
-	DialPeer        string     `json:"dial_peer,omitempty"`
-	TargetIP        string     `json:"target_ip,omitempty"`
-	ReadyAt         *time.Time `json:"ready_at,omitempty"`
-	EndedAt         time.Time  `json:"ended_at,omitzero"`
-	DurationMS      int64      `json:"duration_ms"`
-	DialMS          *int64     `json:"dial_ms,omitempty"`
-	CloseReason     string     `json:"close_reason,omitempty"`
-	ErrorStage      string     `json:"error_stage,omitempty"`
+	SniffStartedAt  time.Time   `json:"sniff_started_at,omitzero"`
+	SniffFinishedAt time.Time   `json:"sniff_finished_at,omitzero"`
+	RouteStartedAt  time.Time   `json:"route_started_at,omitzero"`
+	RoutedAt        time.Time   `json:"routed_at,omitzero"`
+	DialStartedAt   time.Time   `json:"dial_started_at,omitzero"`
+	DialFinishedAt  time.Time   `json:"dial_finished_at,omitzero"`
+	DialDestination string      `json:"dial_destination,omitempty"`
+	DialPeer        string      `json:"dial_peer,omitempty"`
+	TargetIP        string      `json:"target_ip,omitempty"`
+	ReadyAt         *time.Time  `json:"ready_at,omitempty"`
+	EndedAt         time.Time   `json:"ended_at,omitzero"`
+	DurationMS      int64       `json:"duration_ms"`
+	DialMS          *int64      `json:"dial_ms,omitempty"`
+	CloseReason     string      `json:"close_reason,omitempty"`
+	ErrorStage      string      `json:"error_stage,omitempty"`
+	Events          []ConnEvent `json:"events,omitempty"`
+	EventsDropped   int         `json:"events_dropped,omitempty"`
+}
+
+func (trace *ConnectionTrace) UnmarshalJSON(data []byte) error {
+	type connectionTraceJSON ConnectionTrace
+	if err := json.Unmarshal(data, (*connectionTraceJSON)(trace)); err != nil {
+		return err
+	}
+	// Large history rows may store the route path once in Chain.
+	for i := range trace.Events {
+		event := &trace.Events[i]
+		if event.Kind == "path" && event.Path == nil {
+			event.Path = trace.Chain
+		}
+	}
+	return nil
 }
 
 type TimelineRequest struct {

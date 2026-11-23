@@ -5,12 +5,14 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
+	N "github.com/sagernet/sing/common/network"
 )
 
 type packetFlowReleaseKey struct{}
@@ -20,6 +22,7 @@ type connectionAttempt struct {
 	releasePacketFlow func() bool // Reports whether the flow was evicted.
 	mu                sync.Mutex
 	api.ConnectionTrace
+	events []connectionEvent
 }
 
 func (b *Backend) beginConnection(ctx context.Context, md Metadata) *connectionAttempt {
@@ -35,23 +38,41 @@ func (b *Backend) beginConnection(ctx context.Context, md Metadata) *connectionA
 	if b.historyScope != nil {
 		attempt.Scope = b.historyScope()
 	}
+	kind := eventAccepted
+	if md.Network == N.NetworkUDP {
+		kind = eventUDPFirst
+	}
+	attempt.mu.Lock()
+	attempt.appendEventLocked(connectionEvent{kind: kind, code: md.InboundType})
+	attempt.mu.Unlock()
 	return attempt
 }
 
-func (a *connectionAttempt) setRoute(rt Route) {
+func (a *connectionAttempt) routing(start time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.EndedAt.IsZero() {
+		a.RouteStartedAt = start.UTC()
+	}
+}
+
+func (a *connectionAttempt) setRoute(rt Route, originalAddr netip.Addr) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.EndedAt.IsZero() {
+		return
+	}
 	a.RoutedAt = time.Now().UTC()
 	if rt.Scope.Generation != 0 {
 		a.Scope = rt.Scope
 	}
 	if info, ok := rt.Info.(*api.FlowInfo); ok {
 		a.FlowInfo = *info
-		a.FlowInfo.Rule = history.Text(info.Rule, 512)
+		a.FlowInfo.Rule = history.Text(info.Rule, connectionRuleBytes)
 		a.FlowInfo.ProcessPath = history.Text(info.ProcessPath, 512)
 		a.FlowInfo.Chain = make([]string, min(32, len(info.Chain)))
 		for i := range a.FlowInfo.Chain {
-			a.FlowInfo.Chain[i] = history.Text(info.Chain[i], 128)
+			a.FlowInfo.Chain[i] = history.Text(info.Chain[i], connectionLabelBytes)
 		}
 		a.Outbound = info.Outbound
 	} else if rt.Outbound != nil {
@@ -61,75 +82,128 @@ func (a *connectionAttempt) setRoute(rt Route) {
 	if rt.Destination != nil {
 		a.DialDestination = rt.Destination.String()
 	}
+	if a.DestinationDomain != "" && originalAddr.IsValid() {
+		a.appendEventLocked(connectionEvent{kind: eventFakeIP, name: a.DestinationDomain, addr: originalAddr.String()})
+	}
+	matched := connectionEvent{kind: eventMatched, n: [2]int32{int32(a.RuleIndex)}, nCount: 1}
+	if a.RuleSource == "temporary" {
+		matched.code = a.RuleSource
+	}
+	if a.RuleIndex >= 0 || matched.code != "" {
+		matched.name = a.Rule
+	}
+	a.appendEventLocked(matched)
+	if len(a.Chain) != 0 {
+		a.appendEventLocked(connectionEvent{kind: eventPath, name: a.Outbound})
+	}
+	if rt.Outbound == nil {
+		reason := a.RejectReason
+		if reason == "" {
+			reason = "reject"
+		}
+		a.appendEventLocked(connectionEvent{kind: eventRejected, code: reason})
+	}
 }
 
-func (a *connectionAttempt) sniffing(start time.Time, md Metadata) {
+func (a *connectionAttempt) sniffing(start time.Time, md Metadata, observed sniffObservation) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.EndedAt.IsZero() {
 		return
 	}
-	a.SniffStartedAt, a.SniffFinishedAt = start.UTC(), time.Now().UTC()
+	finished := time.Now()
+	a.SniffStartedAt, a.SniffFinishedAt = start.UTC(), finished.UTC()
 	a.SniffedDomain, a.Protocol = md.SniffedDomain, md.Protocol
+	if observed != (sniffObservation{}) {
+		a.appendEventLocked(connectionEvent{
+			kind: eventSniffed, code: observed.protocol, name: observed.domain,
+			duration: finished.Sub(start), hasDuration: true,
+		})
+	}
 }
 
-func (a *connectionAttempt) dialing(start time.Time) {
+func (a *connectionAttempt) dialing(start time.Time, out *Outbound) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.EndedAt.IsZero() {
 		a.DialStartedAt = start.UTC()
+		a.appendEventLocked(connectionEvent{kind: eventDial, name: out.Tag(), code: out.Type()})
 	}
 }
 
-func (a *connectionAttempt) dialed(start time.Time, err error) {
+func (a *connectionAttempt) dialed(start time.Time, err error, addr net.Addr, direct bool) *int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.DialFinishedAt = time.Now().UTC()
-	ms := time.Since(start).Milliseconds()
+	if !a.EndedAt.IsZero() {
+		return nil
+	}
+	finished := time.Now()
+	a.DialFinishedAt = finished.UTC()
+	elapsed := finished.Sub(start)
+	ms := elapsed.Milliseconds()
 	a.DialMS = &ms
-	if err == nil {
+	event := connectionEvent{kind: eventReady, duration: elapsed, hasDuration: true}
+	if err != nil {
+		event.kind, event.code = eventDialFail, connectionReason(err, "error")
+	} else {
 		now := a.DialFinishedAt
 		a.ReadyAt = &now
+		event.addr = a.dialPeerLocked(addr, direct)
 	}
+	a.appendEventLocked(event)
+	return &ms
 }
 
-func (a *connectionAttempt) peer(addr net.Addr, direct bool) {
+func (a *connectionAttempt) dialPeerLocked(addr net.Addr, direct bool) string {
 	// Some proxy streams return a synthetic destination as RemoteAddr.
 	// Report IP peers only when the connection exposes a socket address.
-	if remote, ok := addr.(*net.TCPAddr); ok {
-		peer := remote.AddrPort()
-		if peer.IsValid() {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			a.DialPeer = peer.String()
-			if direct {
-				a.TargetIP = peer.Addr().Unmap().String()
+	switch remote := addr.(type) {
+	case *net.TCPAddr:
+		if peer := remote.AddrPort(); peer.IsValid() {
+			address := peer.String()
+			if a.Network == N.NetworkTCP {
+				a.DialPeer = address
+				if direct {
+					a.TargetIP = peer.Addr().Unmap().String()
+				}
 			}
+			return address
+		}
+	case *net.UDPAddr:
+		if peer := remote.AddrPort(); peer.IsValid() {
+			return peer.String()
 		}
 	}
+	return ""
 }
 
 func (a *connectionAttempt) complete(reason, stage string, up, down int64) {
 	if a.releasePacketFlow != nil && a.releasePacketFlow() {
 		reason, stage = "evicted", ""
 	}
-	if a.store == nil {
+	a.mu.Lock()
+	if !a.EndedAt.IsZero() {
+		a.mu.Unlock()
 		return
 	}
-	a.mu.Lock()
+	a.appendEventLocked(connectionEvent{kind: eventClosed, code: reason, name: stage})
 	a.EndedAt = time.Now().UTC()
 	a.DurationMS = time.Since(a.Start).Milliseconds()
 	a.Upload, a.Download = up, down
 	a.CloseReason, a.ErrorStage = reason, stage
-	trace := a.ConnectionTrace
+	if a.store == nil {
+		a.mu.Unlock()
+		return
+	}
+	trace := a.snapshotLocked()
 	a.mu.Unlock()
-	a.store.RecordFlow(history.Connections, trace.Scope, trace.Start, trace.ID, trace, nil)
+	a.store.RecordFlow(history.Connections, trace.Scope, trace.Start, trace.ID, connectionHistoryTrace(trace), nil)
 }
 
 func (a *connectionAttempt) trace(up, down int64) api.ConnectionTrace {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	trace := a.ConnectionTrace
+	trace := a.snapshotLocked()
 	if trace.EndedAt.IsZero() {
 		trace.Upload, trace.Download = up, down
 		trace.DurationMS = time.Since(trace.Start).Milliseconds()

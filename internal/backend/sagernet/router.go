@@ -168,14 +168,16 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	defer prepared.Release()
 	if _, debugBridge := conn.(*debugBridge); !debugBridge && prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
 		start := time.Now()
-		conn, md = sniffStream(ctx, conn, md, prepared.Sniff)
-		attempt.sniffing(start, md)
+		var observed sniffObservation
+		conn, md, observed = sniffStream(ctx, conn, md, prepared.Sniff)
+		attempt.sniffing(start, md, observed)
 		r.releaseSniffSlot()
 	}
+	attempt.routing(time.Now())
 	rt := prepared.pick(ctx, md)
 	prepared.Release()
 	if rt.Outbound == nil {
-		attempt.setRoute(rt)
+		attempt.setRoute(rt, md.Destination.Addr)
 		bindRequestConnection(ctx, attempt)
 		attempt.complete(connectionReason(ctx.Err(), "rejected"), "route", 0, 0)
 		N.CloseOnHandshakeFailure(conn, onClose, errRejected)
@@ -187,7 +189,7 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 		rt.Destination = &destination
 	}
 	metadata.Domain, metadata.Protocol = md.SniffedDomain, md.Protocol
-	attempt.setRoute(rt)
+	attempt.setRoute(rt, md.Destination.Addr)
 	bindRequestConnection(ctx, attempt)
 	r.backend.relayTCP(ctx, rt, conn, metadata, onClose, attempt)
 }
