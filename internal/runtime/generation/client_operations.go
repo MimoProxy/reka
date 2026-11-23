@@ -36,13 +36,15 @@ func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (a
 	if request.Outbound == "" {
 		return result, errors.New("probe outbound is required")
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Waiting for a slot does not count against the probe's own timeout, so
+	// a batch of probes started together measures each one fairly.
 	release, err := e.takeProbeSlot(ctx)
 	if err != nil {
 		return result, err
 	}
 	defer release()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for ctx.Err() == nil {
 		snapshot, g := e.current()
 		if g.eff == nil || g.router == nil {
@@ -62,7 +64,12 @@ func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (a
 		}
 		defer closeSniffPins(pins)
 		ctx = sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, pins), snapshot)
-		sample, err := probeHTTP(ctx, g, out, pins[out], request.URL, false)
+		var sample api.ArenaSample
+		if request.Unified {
+			sample, err = probeUnified(ctx, g, out, pins[out], request.URL)
+		} else {
+			sample, err = probeHTTP(ctx, g, out, pins[out], request.URL, false)
+		}
 		if sample.StatusCode != 0 {
 			result.ResolvedOutbound, result.StatusCode, result.DelayMS = id, sample.StatusCode, sample.DelayMS
 		}
@@ -75,7 +82,8 @@ func (e *Engine) takeProbeSlot(ctx context.Context) (func(), error) {
 	e.probeOnce.Do(func() {
 		limit := 16
 		if e.opts.HostPacketFlow {
-			limit = 2
+			// Matches the batch size sing-box and mihomo use for latency tests.
+			limit = 10
 		}
 		e.probeSlots = make(chan struct{}, limit)
 	})
@@ -146,6 +154,43 @@ func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *
 	if headersOnly {
 		return result, nil
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)
+	}
+	return result, nil
+}
+
+// probeUnified sends the request twice over one kept-alive connection and
+// reports the second round trip. If the second request fails, for example
+// because the server closed the connection, the first result stands.
+func probeUnified(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string) (api.ArenaSample, error) {
+	ctx = g.probeLookupContext(ctx, out)
+	transport := &http.Transport{DialContext: pin.Dial, MaxIdleConnsPerHost: 1}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	first, err := probeRequest(ctx, client, url)
+	if err != nil {
+		return first, err
+	}
+	if second, err := probeRequest(ctx, client, url); err == nil {
+		return second, nil
+	}
+	return first, nil
+}
+
+func probeRequest(ctx context.Context, client *http.Client, url string) (api.ArenaSample, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return api.ArenaSample{}, err
+	}
+	start := time.Now()
+	response, err := client.Do(req)
+	if err != nil {
+		return api.ArenaSample{}, err
+	}
+	defer response.Body.Close()
+	result := api.ArenaSample{DelayMS: max(1, time.Since(start).Milliseconds()), StatusCode: response.StatusCode}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
 		return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)
