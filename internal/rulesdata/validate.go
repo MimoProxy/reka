@@ -42,21 +42,13 @@ func ValidateDatabase(kind, format string, data []byte) error {
 	if (kind != "geoip" && kind != "geosite" && kind != "asn") || format != "dat" {
 		return fmt.Errorf("unsupported database kind/format")
 	}
-	top, err := fieldsTyped(data, protowire.BytesType)
-	if err != nil {
-		return err
-	}
 	count := 0
-	for _, entry := range top {
+	err := walkFields(data, []protowire.Type{protowire.BytesType}, func(entry wireField) error {
 		if entry.n != 1 {
-			continue
-		}
-		record, err := fieldsTyped(entry.b, protowire.BytesType, protowire.BytesType, protowire.VarintType)
-		if err != nil {
-			return err
+			return nil
 		}
 		found := false
-		for _, field := range record {
+		err := walkFields(entry.b, []protowire.Type{protowire.BytesType, protowire.BytesType, protowire.VarintType}, func(field wireField) error {
 			if field.n == 1 && len(field.b) > 0 {
 				if kind == "asn" {
 					code, err := asnCode(string(field.b))
@@ -66,11 +58,19 @@ func ValidateDatabase(kind, format string, data []byte) error {
 				}
 				found = true
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 		if !found {
 			return fmt.Errorf("database record has no code")
 		}
 		count++
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	if count == 0 {
 		return fmt.Errorf("empty database")

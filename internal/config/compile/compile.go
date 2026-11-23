@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -36,12 +37,19 @@ type Options struct {
 	ReadResource func(string) ([]byte, error)
 	Sources      []byte
 	Overlay      []byte
+	// Precompiled rule sets are optional and keyed by the locked definition.
+	ReadPrecompiledRuleSet   func(string) (*router.PrecompiledRuleSet, []byte)
+	RecordPrecompiledRuleSet func(string, []byte)
 	// Secrets resolves "secret://" references. Nil makes every reference
 	// an error.
 	Secrets secret.Store
 	// ProcessLookup reports whether this platform can find the process
 	// owning a connection; without it process-name rules never match.
 	ProcessLookup bool
+	// EstimateRuleMemory includes a structural size estimate for preparation.
+	EstimateRuleMemory bool
+	// OmitProvenance skips editor provenance and source digests in the result.
+	OmitProvenance bool
 }
 
 // Layers, in composition order.
@@ -162,7 +170,8 @@ type Effective struct {
 	// Final is the target when no rule matches.
 	Final string `json:"final"`
 	// RulesFingerprint changes whenever the rule list changes.
-	RulesFingerprint string `json:"rules-fingerprint"`
+	RulesFingerprint string             `json:"rules-fingerprint"`
+	RuleMemory       RuleMemoryEstimate `json:"-"`
 
 	// IPVersionOverride is empty when the profile's IP settings are in use.
 	IPVersionOverride string `json:"-"`
@@ -186,6 +195,12 @@ func (e *Effective) OriginOf(path string) (Origin, bool) {
 			return Origin{}, false
 		}
 		p = p[:i]
+	}
+}
+
+func (e *Effective) setOrigin(path string, origin Origin) {
+	if e.Provenance != nil {
+		e.Provenance[path] = origin
 	}
 }
 
@@ -254,6 +269,9 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 		return nil, c.diags
 	}
 	eff := c.compose()
+	if c.ruleResources != nil {
+		c.ruleResources.validateDeferredGeosite()
+	}
 	for i, d := range c.diags {
 		if d.Document == model.DocProfile {
 			if o, ok := originAt(c.origins, d.Path); ok {
@@ -263,6 +281,9 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	}
 	if c.diags.HasErrors() {
 		return nil, c.diags
+	}
+	if opts.EstimateRuleMemory {
+		eff.RuleMemory = c.estimateRuleMemory(eff)
 	}
 	return eff, c.diags
 }
@@ -289,14 +310,15 @@ func (c *compiler) checkID(doc, path, id string) bool {
 }
 
 func (c *compiler) compose() *Effective {
-	eff := &Effective{Provenance: map[string]Origin{}, Final: model.OutboundDirect, SourceHashes: c.sourceHashes}
-	for p, pos := range c.ppos {
-		eff.Provenance[p] = Origin{Layer: LayerProfile, Line: pos.Line, Column: pos.Column}
-	}
-	if c.origins != nil {
-		eff.Provenance = make(map[string]Origin, len(c.origins))
-		for p, o := range c.origins {
-			eff.Provenance[p] = o
+	eff := &Effective{Final: model.OutboundDirect, SourceHashes: c.sourceHashes}
+	if !c.opts.OmitProvenance {
+		if c.origins != nil {
+			eff.Provenance = maps.Clone(c.origins)
+		} else {
+			eff.Provenance = make(map[string]Origin, len(c.ppos))
+			for p, pos := range c.ppos {
+				eff.Provenance[p] = Origin{Layer: LayerProfile, Line: pos.Line, Column: pos.Column}
+			}
 		}
 	}
 
@@ -561,7 +583,7 @@ func (c *compiler) outbounds(eff *Effective) {
 	for _, b := range []string{model.OutboundDirect, model.OutboundReject} {
 		if !seen[b] {
 			eff.Outbounds = append(eff.Outbounds, Outbound{ID: b, Type: b, UDP: b == model.OutboundDirect, Builtin: true})
-			eff.Provenance["/outbounds/"+b] = Origin{Layer: LayerDefault}
+			eff.setOrigin("/outbounds/"+b, Origin{Layer: LayerDefault})
 		}
 	}
 	for _, action := range []string{"pass", "reject-drop"} {
@@ -904,8 +926,8 @@ func (c *compiler) rules(eff *Effective) {
 	rc := c.prepareRuleResources()
 	c.validateSubRules(rc, eff)
 	c.expandSubRules()
-	for path, origin := range c.origins {
-		eff.Provenance[path] = origin
+	if eff.Provenance != nil {
+		maps.Copy(eff.Provenance, c.origins)
 	}
 	if c.diags.HasErrors() {
 		return
@@ -980,7 +1002,7 @@ func (c *compiler) rules(eff *Effective) {
 		c.warnf(doc, "/rules", "rule.no-final", "no match-all rule; connections no rule matches go direct")
 	}
 	if len(c.profile.Rules) == 0 {
-		eff.Provenance["/final"] = Origin{Layer: LayerDefault}
+		eff.setOrigin("/final", Origin{Layer: LayerDefault})
 	}
 	eff.RulesFingerprint = hex.EncodeToString(h.Sum(nil))[:16]
 }
@@ -1034,15 +1056,15 @@ func (c *compiler) listenersAndLocal(eff *Effective) {
 		eff.Listeners = append(eff.Listeners, lst)
 	}
 	if listeners == nil {
-		eff.Provenance["/listeners"] = Origin{Layer: LayerDefault}
+		eff.setOrigin("/listeners", Origin{Layer: LayerDefault})
 	}
 
 	eff.LogLevel = "info"
-	eff.Provenance["/log/level"] = Origin{Layer: LayerDefault}
+	eff.setOrigin("/log/level", Origin{Layer: LayerDefault})
 	if c.profile.Log != nil && c.profile.Log.Level != "" {
 		eff.LogLevel = c.profile.Log.Level
 		p := c.ppos["/log/level"]
-		eff.Provenance["/log/level"] = Origin{Layer: LayerProfile, Line: p.Line, Column: p.Column}
+		eff.setOrigin("/log/level", Origin{Layer: LayerProfile, Line: p.Line, Column: p.Column})
 	}
 	levelDoc := model.DocProfile
 	if c.local.Log != nil && c.local.Log.Level != "" {
@@ -1065,6 +1087,9 @@ func hasKey(pos model.Positions, path string) bool {
 
 // override records that the local layer replaced everything under prefix.
 func (c *compiler) override(eff *Effective, prefix string) {
+	if eff.Provenance == nil {
+		return
+	}
 	var replaced *Origin
 	for p, o := range eff.Provenance {
 		if p == prefix || strings.HasPrefix(p, prefix+"/") {

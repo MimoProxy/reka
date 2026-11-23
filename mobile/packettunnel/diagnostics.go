@@ -214,24 +214,15 @@ func collectRuleSets(root *router.RuleSet) map[string]*router.RuleSet {
 	found := make(map[string]*router.RuleSet)
 	seen := make(map[*router.RuleSet]bool)
 	var visitSet func(*router.RuleSet)
-	var visitRule func(router.RuleSpec)
-	visitRule = func(rule router.RuleSpec) {
-		if rule.Set != nil && len(rule.Values) > 0 {
-			found[rule.Values[0]] = rule.Set
-			visitSet(rule.Set)
-		}
-		for _, child := range rule.Children {
-			visitRule(child)
-		}
-	}
 	visitSet = func(set *router.RuleSet) {
 		if set == nil || seen[set] {
 			return
 		}
 		seen[set] = true
-		for i := range set.Len() {
-			visitRule(set.Rule(i))
-		}
+		set.VisitReferences(func(id string, child *router.RuleSet) {
+			found[id] = child
+			visitSet(child)
+		})
 	}
 	visitSet(root)
 	return found

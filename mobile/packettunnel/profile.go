@@ -126,11 +126,7 @@ func (s *Session) ProviderClient(name string) (*http.Client, error) {
 }
 
 func openProfileSession(snapshot []byte, controls profile.Controls, trace, probeOnly bool) (*Session, error) {
-	bundle, err := profile.Decode(snapshot)
-	if err != nil {
-		return nil, err
-	}
-	base, err := bundle.CompileWithSecrets(controls.Secrets)
+	base, err := profile.CompileSnapshot(snapshot, controls.Secrets)
 	if err != nil {
 		return nil, err
 	}
@@ -228,16 +224,18 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	if p == nil {
 		return errors.New("tunnel is not using a profile")
 	}
-	bundle, err := profile.Decode(snapshot)
-	if err != nil {
-		return err
-	}
-	base, err := bundle.CompileWithSecrets(controls.Secrets)
-	if err != nil {
-		return err
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	// Reclaim pages from the previous switch before allocating the new profile.
+	debug.FreeOSMemory()
+	defer debug.FreeOSMemory()
+	base, err := profile.CompileSnapshot(snapshot, controls.Secrets)
+	if err != nil {
+		return err
+	}
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
@@ -258,9 +256,6 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 		}
 	}
 	p.sets = collectRuleSets(base.Router.Rules())
-	// Hand the old profile's pages back right away. Go returns freed memory
-	// lazily, and iOS counts it against the extension until then.
-	debug.FreeOSMemory()
 	s.logger.Info("Profile refreshed")
 	return nil
 }

@@ -60,8 +60,12 @@ var clashKinds = map[string]Kind{"DOMAIN": KindDomain, "DOMAIN-SUFFIX": KindDoma
 
 // ParseClashCondition parses an actionless classical rule or logical operand.
 // External references remain unresolved for the configuration compiler.
-func ParseClashCondition(s string) (RuleSpec, error) { return parseCondition(s, 0) }
-func parseCondition(s string, depth int) (RuleSpec, error) {
+func ParseClashCondition(s string) (RuleSpec, error) { return parseCondition(s, 0, true) }
+
+// ParseClashSetCondition defers value validation to ConditionSetBuilder.
+func ParseClashSetCondition(s string) (RuleSpec, error) { return parseCondition(s, 0, false) }
+
+func parseCondition(s string, depth int, validate bool) (RuleSpec, error) {
 	var r RuleSpec
 	if depth > 32 {
 		return r, fmt.Errorf("condition nesting exceeds 32")
@@ -79,8 +83,11 @@ func parseCondition(s string, depth int) (RuleSpec, error) {
 	if head, payload, ok := strings.Cut(s, ","); ok && opaqueRegexKind(head) != 0 {
 		kind := opaqueRegexKind(head)
 		r = RuleSpec{Kind: kind, Values: []string{strings.TrimSpace(payload)}}
-		_, err := compileRule(0, r)
-		return r, err
+		if validate {
+			_, err := compileRule(0, r)
+			return r, err
+		}
+		return r, nil
 	}
 	parts, err := SplitClash(s)
 	if err != nil || len(parts) == 0 {
@@ -106,7 +113,7 @@ func parseCondition(s string, depth int) (RuleSpec, error) {
 			if !strings.HasPrefix(a, "(") || !strings.HasSuffix(a, ")") {
 				return r, fmt.Errorf("logical operand needs parentheses")
 			}
-			child, e := parseCondition(a, depth+1)
+			child, e := parseCondition(a, depth+1, validate)
 			if e != nil {
 				return r, e
 			}
@@ -143,6 +150,9 @@ func parseCondition(s string, depth int) (RuleSpec, error) {
 	}
 	if k == KindNetwork {
 		r.Values[0] = strings.ToLower(args[0])
+	}
+	if !validate {
+		return r, nil
 	}
 	if r.Kind == KindRuleSet {
 		r.Set = &RuleSet{}

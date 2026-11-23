@@ -141,7 +141,7 @@ func prepareFile(ctx context.Context, input, output, cache string, options Prepa
 	if options.RebindSnapshot != "" {
 		bundle, err = rebind(ctx, options.RebindSnapshot, options)
 		if err == nil {
-			for hash, data := range bundle.Resources {
+			for hash, data := range bundle.originalResources() {
 				if !resource.ValidHash(hash) || resource.Hash(data) != hash {
 					return errors.New("archive resource digest mismatch")
 				}
@@ -160,7 +160,7 @@ func prepareFile(ctx context.Context, input, output, cache string, options Prepa
 	if options.RefreshAsset != "" && !slices.ContainsFunc(bundle.Summary.Resources, func(a Asset) bool { return a.ID == options.RefreshAsset }) {
 		return errors.New("the selected resource is no longer referenced")
 	}
-	data, err := json.Marshal(bundle)
+	data, err := marshalPreparedBundle(bundle)
 	if err != nil || len(data) > MaxBundleBytes {
 		return errBundleTooLarge
 	}
@@ -287,6 +287,9 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !compileDiagnostics.HasErrors() {
+		compileDiagnostics = appendRuleMemoryDiagnostic(compileDiagnostics, eff.RuleMemory)
+	}
 	for i := range compileDiagnostics {
 		d := &compileDiagnostics[i]
 		if pos, ok := positions[d.Path]; ok && d.Document == model.DocProfile {
@@ -299,7 +302,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	}
 	diagnostics = append(diagnostics, compileDiagnostics...)
 	if diagnostics.HasErrors() {
-		return nil, &ValidationError{"Invalid profile", diagnostics}
+		return nil, preparationValidationError(diagnostics)
 	}
 	bundle.Summary = Describe(eff)
 	bundle.Summary.Format = format
@@ -355,9 +358,12 @@ func rebind(ctx context.Context, path string, options PrepareOptions) (*Bundle, 
 	if err != nil {
 		return nil, err
 	}
-	eff, diagnostics := bundle.compile(options.Secrets)
+	eff, diagnostics := bundle.compileForPreparation(options.Secrets)
+	if !diagnostics.HasErrors() {
+		diagnostics = appendRuleMemoryDiagnostic(diagnostics, eff.RuleMemory)
+	}
 	if diagnostics.HasErrors() {
-		return nil, &ValidationError{"Invalid profile", diagnostics}
+		return nil, preparationValidationError(diagnostics)
 	}
 	original := bundle.Summary
 	bundle.Summary = Describe(eff)

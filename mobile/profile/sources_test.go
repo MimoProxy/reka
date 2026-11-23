@@ -155,15 +155,18 @@ rule-providers:
     payload: ["DOMAIN-SUFFIX,blocked.test", "GEOSITE,test"]
 rules: ["RULE-SET,blocked,REJECT"]
 `
-	server, options := newGeodataFixture(t)
-	source := mustPrepareGeodata(t, subscription, t.TempDir(), options, server)
-	if len(source.Resources) != 2 {
-		t.Fatalf("expected a rule provider and geodata slice, got %d resources", len(source.Resources))
+	server, geodataOptions := newGeodataFixture(t)
+	source := mustPrepareGeodata(t, subscription, t.TempDir(), geodataOptions, server)
+	if source.Precompiled == nil || len(source.Precompiled.Sets) != 2 || len(source.Resources) != 4 {
+		t.Fatalf("expected both source rule sets and their precompiled forms, got %d resources", len(source.Resources))
 	}
 	want := maps.Clone(source.Resources)
+	for _, hash := range source.Precompiled.Sets {
+		delete(want, hash)
+	}
 	unused := []byte("unused.test\n")
 	source.Resources[resource.Hash(unused)] = unused
-	options = PrepareOptions{Sources: map[string]string{"s-test": writeSourceBundle(t, source)}}
+	options := PrepareOptions{Sources: map[string]string{"s-test": writeSourceBundle(t, source)}}
 
 	nodes, _ := prepareSourceFixture(t, nodeSourceImport, options)
 	if len(nodes.Resources) != 0 {
@@ -176,8 +179,13 @@ rules:
   - {match: {all: true}, outbound: direct}
 `, importer.StableID("rule", "blocked"))
 	bundle, snapshot := prepareSourceFixture(t, raw, options)
-	if !maps.EqualFunc(bundle.Resources, want, bytes.Equal) {
-		t.Fatalf("expected only the imported rule provider and geodata slice, got %d resources", len(bundle.Resources))
+	if bundle.Precompiled == nil || len(bundle.Precompiled.Sets) != 2 || len(bundle.Resources) != 4 {
+		t.Fatalf("expected both imported rule sets and their precompiled forms, got %d resources", len(bundle.Resources))
+	}
+	for hash, data := range want {
+		if !bytes.Equal(bundle.Resources[hash], data) {
+			t.Fatal("an original imported resource is missing")
+		}
 	}
 	assertRoute(t, bundle, "sub.blocked.test", "reject")
 	assertRoute(t, bundle, "sub.suffix.test", "reject")
@@ -195,6 +203,30 @@ rules:
 		t.Fatal("the archive did not preserve the sources and rule resources")
 	}
 	assertRoute(t, rebound, "sub.suffix.test", "reject")
+
+	server.bodies["/geosite.dat"] = bytes.ReplaceAll(server.bodies["/geosite.dat"], []byte("suffix.test"), []byte("second.test"))
+	updated := mustPrepareGeodata(t, subscription, t.TempDir(), geodataOptions, server)
+	options.Sources["s-test"] = writeSourceBundle(t, updated)
+	options.RefreshSources = true
+	refreshed, _ := prepareSourceFixture(t, raw, options)
+	if refreshed.Precompiled == nil || len(refreshed.Precompiled.Sets) != 2 || len(refreshed.Resources) != 4 ||
+		maps.Equal(refreshed.Precompiled.Sets, rebound.Precompiled.Sets) {
+		t.Fatal("the imported provider was not recompiled")
+	}
+	assertRoute(t, refreshed, "sub.blocked.test", "reject")
+	assertRoute(t, refreshed, "sub.second.test", "reject")
+	assertRoute(t, refreshed, "sub.suffix.test", "direct")
+	before, err := rebound.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := refreshed.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.RulesFingerprint == after.RulesFingerprint {
+		t.Fatal("the cached provider fingerprint missed its updated dependency")
+	}
 }
 
 func TestPrepareRejectsUnreadableSourceBundles(t *testing.T) {
@@ -216,6 +248,35 @@ func TestPrepareRejectsUnreadableSourceBundles(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRebindKeepsOverlayPinnedSourceResource(t *testing.T) {
+	const subscription = `rule-providers:
+  blocked: {type: inline, behavior: domain, payload: [old.test]}
+rules: ["RULE-SET,blocked,REJECT"]
+`
+	first, oldPath := prepareSourceFixture(t, subscription, PrepareOptions{})
+	_, nextPath := prepareSourceFixture(t, strings.ReplaceAll(subscription, "old.test", "new.test"), PrepareOptions{})
+	source, _, diagnostics := model.ParseProfile(first.Profile)
+	if diagnostics.HasErrors() || len(source.RuleSets) != 1 {
+		t.Fatal("expected one locked provider", diagnostics)
+	}
+	def := source.RuleSets[0]
+	id := "s-test/" + def.ID
+	overlay := json.RawMessage(fmt.Appendf(nil, `{"schema-version":1,"patches":[{"op":"set","path":%q,"value":%q}]}`,
+		model.JoinPath("/rule-sets", id, "hash"), def.Hash))
+	raw := fmt.Sprintf("schema-version: 1\nimports: [{source: s-test, rule-sets: true}]\nrules: [{match: {rule-set: %s}, outbound: reject}]\n", id)
+	opts := PrepareOptions{Sources: map[string]string{"s-test": oldPath}, Overlay: overlay}
+	_, archive := prepareSourceFixture(t, raw, opts)
+	opts.Sources["s-test"] = nextPath
+	opts.RebindSnapshot, opts.RefreshSources = archive, true
+	refreshed, _ := prepareSourceFixture(t, raw, opts)
+	if refreshed.Precompiled == nil || refreshed.Resources[def.Hash] == nil {
+		t.Fatal("source refresh removed the pinned original")
+	}
+	refreshed.Precompiled = nil
+	assertRoute(t, refreshed, "old.test", "reject")
+	assertRoute(t, refreshed, "new.test", "direct")
 }
 
 func TestPrepareBoundsCombinedSourceResources(t *testing.T) {

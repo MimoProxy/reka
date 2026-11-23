@@ -47,7 +47,7 @@ func decodeNetworkDB(kind, code string, data []byte) ([]router.RuleSpec, error) 
 	for _, prefix := range networks {
 		prefixes = append(prefixes, prefix.String())
 	}
-	return checked([]router.RuleSpec{{Kind: router.KindIPCIDR, Values: prefixes}})
+	return []router.RuleSpec{{Kind: router.KindIPCIDR, Values: prefixes}}, nil
 }
 
 func subsetMMDB(kind string, data []byte, selectors []string) ([]byte, error) {

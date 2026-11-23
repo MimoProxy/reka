@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-// RuleSet is a compiled, immutable rule list with its domain index. It can
-// be shared by routers that differ only in group selections.
+// RuleSet is an immutable ordered rule list or a referenced condition set.
 type RuleSet struct {
 	maxDepth int
 	rules    []*rule
+	members  *conditionSet
 	// exact and suffix map a normalized domain to the first rule position
 	// that lists it. Only the first matters: a later rule with the same
 	// key can never win.
@@ -85,10 +85,45 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 }
 
 // Len is the number of rules.
-func (rs *RuleSet) Len() int { return len(rs.rules) }
+func (rs *RuleSet) Len() int {
+	if rs.members != nil {
+		return len(rs.members.rows)
+	}
+	return len(rs.rules)
+}
 
 // Rule returns the spec at position i.
-func (rs *RuleSet) Rule(i int) RuleSpec { return rs.rules[i].spec }
+func (rs *RuleSet) Rule(i int) RuleSpec {
+	if rs.members != nil {
+		return rs.members.rule(i)
+	}
+	return rs.rules[i].spec
+}
+
+// VisitReferences visits direct references, including those in logical
+// operands. Callers can follow each referenced set if they need its children.
+func (rs *RuleSet) VisitReferences(visit func(string, *RuleSet)) {
+	var walk func(RuleSpec)
+	walk = func(spec RuleSpec) {
+		if spec.Set != nil && len(spec.Values) > 0 {
+			visit(spec.Values[0], spec.Set)
+		}
+		for _, child := range spec.Children {
+			walk(child)
+		}
+	}
+	if rs.members != nil {
+		for _, block := range rs.members.blocks {
+			if block.general != nil {
+				walk(block.general.spec)
+			}
+		}
+		return
+	}
+	for _, r := range rs.rules {
+		walk(r.spec)
+	}
+}
 
 // NeedsProcess reports whether any rule matches on the process name.
 func (rs *RuleSet) NeedsProcess() bool { return rs.hasProcess }
@@ -227,7 +262,7 @@ func (e *evaluation) match(index int, r *rule) bool {
 		old := e.noResolve
 		resolved := e.resolved
 		e.noResolve = old || r.spec.NoResolve
-		matched := r.spec.Set.first(e) >= 0
+		matched := r.spec.Set.matches(e)
 		e.noResolve = old
 		if !resolved && e.lookupRule >= 0 {
 			// Attribute a member's lookup to the rule that referenced the set.
@@ -483,6 +518,9 @@ func New(rules *RuleSet, opts Options) (*Router, error) {
 		}
 	}
 	if rules != nil {
+		if rules.members != nil {
+			return nil, errors.New("router requires an ordered rule list")
+		}
 		for i := range rules.rules {
 			if t := rules.rules[i].spec.Target; !r.exists(t) {
 				return nil, &RuleError{Index: i, Err: fmt.Errorf("unknown target %q", t)}
