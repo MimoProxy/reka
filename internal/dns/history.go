@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -59,6 +60,40 @@ var queryID atomic.Uint64
 
 // SetHistoryScope is called before the containing configuration is published.
 func (s *Service) SetHistoryScope(scope history.Scope) { s.historyScope = scope }
+
+func exchangeObservation(q, m *D.Msg, start time.Time, source string, err error) history.DNSObservation {
+	obs := history.DNSObservation{Source: source, Duration: time.Since(start), Err: err}
+	if len(q.Question) == 1 {
+		obs.Name = q.Question[0].Name
+		obs.Type = displayType(q.Question[0].Qtype)
+	}
+	switch {
+	case err != nil:
+		obs.Source = "error"
+	case obs.Source == "":
+		obs.Source = "upstream"
+	}
+	if m != nil {
+		obs.Answers = len(m.Answer)
+		for _, rr := range m.Answer {
+			var ip net.IP
+			switch answer := rr.(type) {
+			case *D.A:
+				ip = answer.A
+			case *D.AAAA:
+				ip = answer.AAAA
+			}
+			addr, _ := netip.AddrFromSlice(ip)
+			switch {
+			case addr.Unmap().Is4():
+				obs.AddressAnswers[0]++
+			case addr.Is6():
+				obs.AddressAnswers[1]++
+			}
+		}
+	}
+	return obs
+}
 
 func (s *Service) record(ctx context.Context, id, parent uint64, start time.Time, scope string, q, m *D.Msg, outcome resolutionHistory, err error) {
 	if s.opts.History == nil || len(q.Question) != 1 {

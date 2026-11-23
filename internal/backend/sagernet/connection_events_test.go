@@ -119,7 +119,9 @@ func TestTCPConnectionEvents(t *testing.T) {
 	client, local := connectionEventPipe(t)
 	remote, target := connectionEventPipe(t)
 	peer := netip.MustParseAddrPort("203.0.113.1:443")
-	out := &Outbound{tag: "leaf", typ: "direct", out: eventTestOutbound{conn: eventTestConn{remote, net.TCPAddrFromAddrPort(peer)}}}
+	out := &Outbound{tag: "leaf", typ: "direct", out: eventTestOutbound{
+		conn: eventTestConn{remote, net.TCPAddrFromAddrPort(peer)}, dns: &dnsRouter{resolver: backend.Resolver()},
+	}}
 	info := &api.FlowInfo{
 		DestinationDomain: "mapped.test", RuleIndex: 3, Rule: "DOMAIN,mapped.test,group",
 		Chain: []string{"group", "leaf"}, Outbound: "leaf",
@@ -141,10 +143,10 @@ func TestTCPConnectionEvents(t *testing.T) {
 	if !ok || !active.EndedAt.IsZero() {
 		t.Fatalf("missing active connection trace: %+v", active)
 	}
-	want := []string{"accepted", "sniffed", "fakeip", "matched", "path", "dial", "ready"}
+	want := []string{"accepted", "sniffed", "fakeip", "matched", "path", "dial", "server_dns", "ready"}
 	checkConnectionEventKinds(t, active.Events, want...)
 	accepted, sniffed, fakeIP, matched, path, dial, ready :=
-		active.Events[0], active.Events[1], active.Events[2], active.Events[3], active.Events[4], active.Events[5], active.Events[6]
+		active.Events[0], active.Events[1], active.Events[2], active.Events[3], active.Events[4], active.Events[5], active.Events[7]
 	if accepted.Code != "mixed" || accepted.Addr != source.String() || accepted.Peer != destination.String() ||
 		sniffed.Code != "http" || sniffed.Name != "sniff.test" || sniffed.MS == nil ||
 		fakeIP.Name != "mapped.test" || fakeIP.Addr != destination.Addr().String() ||
@@ -157,12 +159,13 @@ func TestTCPConnectionEvents(t *testing.T) {
 		active.RouteStartedAt.After(active.RoutedAt) || active.DialPeer != peer.String() || active.TargetIP != peer.Addr().String() {
 		t.Fatalf("unexpected route or dial trace: %+v", active)
 	}
+	checkSystemServerDNSEvent(t, active.Events[6])
 	// A snapshot can be edited independently of live state and history.
 	path.Path[0], matched.N[0] = "changed", -1
 	closeConnectionEventFlow(t, backend, id, done)
 	closed := readClosedConnectionEventTrace(t, records, id)
 	checkConnectionEventKinds(t, closed.Events, append(want, "closed")...)
-	if closed.Events[7].Code != "manual" || closed.Events[7].Name != "" ||
+	if event := closed.Events[len(closed.Events)-1]; event.Code != "manual" || event.Name != "" ||
 		!slices.Equal(closed.Events[4].Path, info.Chain) || !slices.Equal(closed.Events[3].N, []int{3}) {
 		t.Fatalf("unexpected persisted events: %+v", closed.Events)
 	}
@@ -237,7 +240,9 @@ func TestUDPConnectionEvents(t *testing.T) {
 	source := netip.MustParseAddrPort("192.0.2.2:12345")
 	destination := netip.MustParseAddrPort("203.0.113.1:53")
 	addr := net.UDPAddrFromAddrPort(destination)
-	out := &Outbound{tag: "udp-leaf", typ: "direct", out: eventTestOutbound{packet: eventTestPacketConn{eventTestConn{remote, addr}}}}
+	out := &Outbound{tag: "udp-leaf", typ: "direct", out: eventTestOutbound{
+		packet: eventTestPacketConn{eventTestConn{remote, addr}}, dns: &dnsRouter{resolver: backend.Resolver()},
+	}}
 	backend.SetRoute(func(context.Context, Metadata) Route { return Route{Outbound: out} })
 	md := adapter.InboundContext{InboundType: "tun", Source: M.SocksaddrFromNetIP(source)}
 	backend.router.RoutePacketConnectionEx(t.Context(), bufio.NewPacketConn(eventTestPacketConn{eventTestConn{local, addr}}), md, nil)
@@ -247,15 +252,23 @@ func TestUDPConnectionEvents(t *testing.T) {
 	if !ok || active.RouteStartedAt.IsZero() || active.RouteStartedAt.After(active.RoutedAt) {
 		t.Fatalf("missing active UDP route: %+v", active)
 	}
-	checkConnectionEventKinds(t, active.Events, "udp_first", "matched", "dial", "ready")
-	first, dial, ready := active.Events[0], active.Events[2], active.Events[3]
+	checkConnectionEventKinds(t, active.Events, "udp_first", "matched", "dial", "server_dns", "ready")
+	first, dial, ready := active.Events[0], active.Events[2], active.Events[4]
 	if first.Code != "tun" || first.Addr != source.String() || first.Peer != destination.String() ||
 		dial.Code != "direct" || dial.Name != "udp-leaf" || ready.MS == nil || ready.Addr != destination.String() {
 		t.Fatalf("unexpected UDP events: %+v", active.Events)
 	}
+	checkSystemServerDNSEvent(t, active.Events[3])
 	closeConnectionEventFlow(t, backend, id, done)
 	closed := readClosedConnectionEventTrace(t, records, id)
-	checkConnectionEventKinds(t, closed.Events, "udp_first", "matched", "dial", "ready", "closed")
+	checkConnectionEventKinds(t, closed.Events, "udp_first", "matched", "dial", "server_dns", "ready", "closed")
+}
+
+func checkSystemServerDNSEvent(t *testing.T, event api.ConnEvent) {
+	t.Helper()
+	if event.Name != "127.0.0.1" || event.Code != "system" || event.MS == nil || !slices.Equal(event.N, []int{1, 0}) {
+		t.Fatalf("unexpected server DNS event: %+v", event)
+	}
 }
 
 func TestConnectionEventHistoryRowSize(t *testing.T) {
@@ -367,14 +380,29 @@ type eventTestOutbound struct {
 	conn   net.Conn
 	packet net.PacketConn
 	err    error
+	dns    *dnsRouter
 }
 
-func (o eventTestOutbound) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
+func (o eventTestOutbound) DialContext(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
+	if err := o.resolveServer(ctx); err != nil {
+		return nil, err
+	}
 	return o.conn, o.err
 }
 
-func (o eventTestOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+func (o eventTestOutbound) ListenPacket(ctx context.Context, _ M.Socksaddr) (net.PacketConn, error) {
+	if err := o.resolveServer(ctx); err != nil {
+		return nil, err
+	}
 	return o.packet, o.err
+}
+
+func (o eventTestOutbound) resolveServer(ctx context.Context) error {
+	if o.dns == nil {
+		return nil
+	}
+	_, err := o.dns.Lookup(ctx, "127.0.0.1", adapter.DNSQueryOptions{})
+	return err
 }
 
 type eventTestConn struct {

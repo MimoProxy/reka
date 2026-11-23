@@ -25,27 +25,35 @@ const (
 	eventUDPFirst
 	eventSniffed
 	eventFakeIP
+	eventRuleLookup
+	eventDNS
+	eventRuleAddr
 	eventMatched
 	eventPath
 	eventRejected
 	eventDial
+	eventServerDNS
 	eventReady
 	eventDialFail
 	eventClosed
 )
 
 var connectionEventKinds = [...]string{
-	eventAccepted: "accepted",
-	eventUDPFirst: "udp_first",
-	eventSniffed:  "sniffed",
-	eventFakeIP:   "fakeip",
-	eventMatched:  "matched",
-	eventPath:     "path",
-	eventRejected: "rejected",
-	eventDial:     "dial",
-	eventReady:    "ready",
-	eventDialFail: "dial_fail",
-	eventClosed:   "closed",
+	eventAccepted:   "accepted",
+	eventUDPFirst:   "udp_first",
+	eventSniffed:    "sniffed",
+	eventFakeIP:     "fakeip",
+	eventRuleLookup: "rule_lookup",
+	eventDNS:        "dns",
+	eventRuleAddr:   "rule_addr",
+	eventMatched:    "matched",
+	eventPath:       "path",
+	eventRejected:   "rejected",
+	eventDial:       "dial",
+	eventServerDNS:  "server_dns",
+	eventReady:      "ready",
+	eventDialFail:   "dial_fail",
+	eventClosed:     "closed",
 }
 
 // The first endpoints and the route path already live in the trace. Reuse
@@ -63,15 +71,22 @@ type connectionEvent struct {
 }
 
 func (a *connectionAttempt) appendEventLocked(event connectionEvent) {
+	a.appendEventAtLocked(time.Now(), event)
+}
+
+func (a *connectionAttempt) appendEventAtLocked(at time.Time, event connectionEvent) {
 	if !a.EndedAt.IsZero() {
 		return
 	}
-	event.atUS = time.Since(a.Start).Microseconds()
+	event.atUS = max(0, at.Sub(a.Start).Microseconds())
 	event.code = history.Text(event.code, connectionLabelBytes)
 	event.addr = history.Text(event.addr, connectionLabelBytes)
 	nameLimit := connectionLabelBytes
-	if event.kind == eventMatched {
+	switch event.kind {
+	case eventMatched, eventRuleLookup:
 		nameLimit = connectionRuleBytes
+	case eventDNS, eventServerDNS:
+		nameLimit = 255
 	}
 	event.name = history.Text(event.name, nameLimit)
 	if len(a.events) == maxConnectionEvents {
@@ -110,6 +125,9 @@ func (a *connectionAttempt) snapshotLocked() api.ConnectionTrace {
 			event.Peer = history.Text(trace.Destination, connectionLabelBytes)
 		case eventPath:
 			event.Path = trace.Chain
+		case eventRuleAddr:
+			// Reuse the unused name slot for the IPv6 address.
+			event.Peer, event.Name = stored.name, ""
 		}
 		if stored.hasDuration {
 			ms := float64((stored.duration.Microseconds()+50)/100) / 10

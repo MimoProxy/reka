@@ -16,6 +16,24 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+func TestLookupEnvObservesSystemDNSOnce(t *testing.T) {
+	env := &lookupEnv{e: &Engine{opts: EngineOptions{Resolver: &net.Resolver{}}}}
+	var observations []history.DNSObservation
+	ctx := history.WithDNSObserver(t.Context(), func(o history.DNSObservation) { observations = append(observations, o) })
+	for range 2 {
+		if _, err := env.Resolve(ctx, "127.0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(observations) != 1 {
+		t.Fatalf("system lookup observations = %v", observations)
+	}
+	o := observations[0]
+	if o.Name != "127.0.0.1" || o.Source != "system" || o.Answers != 1 || o.AddressAnswers != [2]int{1, 0} || o.Err != nil {
+		t.Fatalf("unexpected system observation: %+v", o)
+	}
+}
+
 func TestHistoryLateCloseBelongsToTheProfileThatRoutedIt(t *testing.T) {
 	server, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

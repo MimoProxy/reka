@@ -68,6 +68,10 @@ func (c *leasedConn) Close() error {
 // (DNS upstreams, downloads). The connection holds a lease, so a replaced
 // outbound drains before it closes.
 func (o *Outbound) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if attemptFromContext(ctx) != nil {
+		// Kernel-owned dials may supply shared DNS transports for many flows.
+		ctx = withAttempt(ctx, nil)
+	}
 	if pins, ok := ctx.Value(pinnedOutboundsKey{}).(map[*Outbound]*PinnedOutbound); ok {
 		if pin := pins[o]; pin != nil {
 			return pin.Dial(ctx, network, address)

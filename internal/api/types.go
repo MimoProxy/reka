@@ -8,6 +8,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/platform"
 )
 
@@ -220,9 +221,19 @@ type FlowInfo struct {
 	// DestinationDomain includes names recovered from Fake IP mappings.
 	DestinationDomain string `json:"destination_domain,omitempty"`
 
+	// RuleLookup carries routing diagnostics to the connection event recorder.
+	RuleLookup *RuleLookupInfo `json:"-"`
+
 	// Display names captured from the packet-flow profile that routed this flow.
 	PolicyName   string `json:"-"`
 	OutboundName string `json:"-"`
+}
+
+type RuleLookupInfo struct {
+	Rule, Domain, Source  string
+	StartedAt, FinishedAt time.Time
+	Addresses             history.DNSAddresses
+	Err                   error
 }
 
 // ExplainRequest describes a hypothetical connection.
