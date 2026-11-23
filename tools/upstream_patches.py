@@ -784,3 +784,21 @@ def darwin_owner_pid(source):
     return replace(source, '\t\towner := &adapter.ConnectionOwner{\n\t\t\tUserId: entry.uid,', '\t\towner := &adapter.ConnectionOwner{\n\t\t\tProcessID: entry.pid,\n\t\t\tUserId: entry.uid,')
 
 MODULES['github.com/sagernet/sing-box'][1]['common/process/searcher_darwin_shared.go'] = ('efcd094a24fd1a30e96251441f0ad1e1f624eec10733145c436c56ef093351e5', darwin_owner_pid)
+
+
+# The gVisor TCP forwarder turns a zero receive window into gVisor's 1 MiB
+# default and applies it to every accepted endpoint, overriding the stack's
+# receive buffer range (32 KiB default, 128 KiB maximum on iOS). Each upload
+# that outruns its proxy then buffers up to 1 MiB in the Packet Tunnel. Use
+# the stack's configured default instead; desktop stacks keep 1 MiB.
+def forwarder_receive_window(source):
+    return replace(source, '\tforwarder.forwarder = tcp.NewForwarder(stack, 0, 1024, forwarder.Forward)', '''\trcvWnd := 0
+\tvar receiveBuffer tcpip.TCPReceiveBufferSizeRangeOption
+\tif stack.TransportProtocolOption(tcp.ProtocolNumber, &receiveBuffer) == nil {
+\t\trcvWnd = receiveBuffer.Default
+\t}
+\tforwarder.forwarder = tcp.NewForwarder(stack, rcvWnd, 1024, forwarder.Forward)''')
+
+MODULES['github.com/sagernet/sing-tun'] = ('v0.9.7-0.20261023115432-040db71fcd33', {
+'stack_gvisor_tcp.go': ('418df41fb175d37e7dc8eccea85b5e75052dee29c39c527f6be58a837982e955', forwarder_receive_window),
+})
