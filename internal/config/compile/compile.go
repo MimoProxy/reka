@@ -40,6 +40,10 @@ type Options struct {
 	// Precompiled rule sets are optional and keyed by the locked definition.
 	ReadPrecompiledRuleSet   func(string) (*router.PrecompiledRuleSet, []byte)
 	RecordPrecompiledRuleSet func(string, []byte)
+	// RecordPrecompiledCoverage receives source hashes and all keys needed to omit each source.
+	RecordPrecompiledCoverage func(string, []string)
+	// MaxPrecompiledRuleBytes bounds the expanded cache body during preparation.
+	MaxPrecompiledRuleBytes int
 	// Secrets resolves "secret://" references. Nil makes every reference
 	// an error.
 	Secrets secret.Store
@@ -270,7 +274,7 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	}
 	eff := c.compose()
 	if c.ruleResources != nil {
-		c.ruleResources.validateDeferredGeosite()
+		c.ruleResources.validateDeferredDatabases()
 	}
 	for i, d := range c.diags {
 		if d.Document == model.DocProfile {
@@ -281,6 +285,13 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	}
 	if c.diags.HasErrors() {
 		return nil, c.diags
+	}
+	if c.ruleResources != nil && opts.RecordPrecompiledCoverage != nil {
+		for hash, keys := range c.ruleResources.coverage {
+			if len(keys) > 0 {
+				opts.RecordPrecompiledCoverage(hash, keys)
+			}
+		}
 	}
 	if opts.EstimateRuleMemory {
 		eff.RuleMemory = c.estimateRuleMemory(eff)

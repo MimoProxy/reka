@@ -51,6 +51,9 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 		rs.hasDomain = rs.hasDomain || matchesDomain(r)
 		switch spec.Kind {
 		case KindDomain:
+			if spec.compact != nil {
+				rs.others = append(rs.others, i)
+			}
 			for _, d := range r.strs {
 				if _, ok := rs.exact[d]; !ok {
 					rs.exact[d] = i
@@ -281,6 +284,9 @@ func (e *evaluation) match(index int, r *rule) bool {
 	case KindMatch:
 		return true
 	case KindDomain:
+		if r.spec.compact != nil {
+			return r.spec.compact.domains.match(md.Domain)
+		}
 		return md.Domain != "" && slices.Contains(r.strs, md.Domain)
 	case KindDomainSuffix:
 		if md.Domain == "" {

@@ -57,7 +57,7 @@ func CompileSnapshot(data []byte, secrets secret.Store) (*compile.Effective, err
 		if raw := rawResource(hash); raw != nil && json.Unmarshal(raw, &value) == nil && value != nil {
 			return value, nil
 		}
-		return nil, errSnapshotResource
+		return nil, bundle.missingResource(hash)
 	}
 	opts := bundle.compileOptions(read, secrets, false)
 	opts.ReadPrecompiledRuleSet = bundle.Precompiled.reader(func(hash string) (*router.PrecompiledRuleSet, []byte) {

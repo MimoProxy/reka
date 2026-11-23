@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 
 const (
 	geodataURL       = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/"
+	geodataSRSURL    = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/"
 	geodataStateFile = "geodata-state.json"
 	geodataInterval  = 7 * 24 * time.Hour
 	// geodataRefreshWindow lets the other profiles of one refresh reuse a download.
@@ -40,7 +42,8 @@ var (
 func (p *preparer) prepareGeodata(ctx context.Context, selectors geodataSelectors, declared []model.GeoDatabase, resources map[string][]byte) (map[string][]byte, error) {
 	definitions := make(map[string]model.GeoDatabase, len(declared))
 	for _, db := range declared {
-		if len(selectors[db.ID]) == 0 {
+		kind, code, perCode := strings.Cut(db.ID, ":")
+		if len(selectors[kind]) == 0 || perCode && !slices.Contains(selectors[kind], code) {
 			continue
 		}
 		if _, exists := definitions[db.ID]; exists {
@@ -48,7 +51,11 @@ func (p *preparer) prepareGeodata(ctx context.Context, selectors geodataSelector
 		}
 		definitions[db.ID] = db
 	}
-	slicesByKind := make(map[string][]byte, len(selectors))
+	locked := make(map[string][]byte)
+	pin := func(id string, data []byte) {
+		locked[id] = data
+		resources[resource.Hash(data)] = data
+	}
 	for _, kind := range geodataKinds {
 		codes := selectors[kind]
 		if len(codes) == 0 {
@@ -56,20 +63,28 @@ func (p *preparer) prepareGeodata(ctx context.Context, selectors geodataSelector
 		}
 		slices.Sort(codes)
 		asset := Asset{ID: "geodata/" + kind, Name: kind, Kind: "geodata", Codes: slices.Compact(codes)}
-		full, err := p.geodataResource(ctx, &asset, definitions[kind])
-		if err != nil {
-			return nil, assetError(asset, err)
+		var remaining []string
+		for _, code := range asset.Codes {
+			ref := kind + ":" + code
+			db, ok := definitions[ref]
+			if !ok {
+				remaining = append(remaining, code)
+				continue
+			}
+			data, err := p.prepareGeodataCode(ctx, &asset, code, db)
+			if err != nil {
+				return nil, err
+			}
+			pin(ref, data)
 		}
-		asset.Size = int64(len(full))
-		data, err := rulesdata.SubsetDatabase(kind, full, asset.Codes)
-		if err != nil {
-			return nil, assetError(asset, err)
+		if len(remaining) > 0 {
+			if err := p.prepareGeodataSource(ctx, &asset, remaining, definitions[kind], pin); err != nil {
+				return nil, err
+			}
 		}
-		slicesByKind[kind] = data
-		resources[resource.Hash(data)] = data
 		p.addAsset(asset)
 	}
-	return slicesByKind, nil
+	return locked, nil
 }
 
 func pinGeodata(document map[string]any, geodata map[string][]byte) {
@@ -78,65 +93,173 @@ func pinGeodata(document map[string]any, geodata map[string][]byte) {
 		return
 	}
 	definitions := make([]map[string]string, 0, len(geodata))
-	for _, kind := range geodataKinds {
-		if data := geodata[kind]; len(data) > 0 {
-			definitions = append(definitions, map[string]string{"id": kind, "format": "dat", "hash": resource.Hash(data)})
+	for _, id := range slices.Sorted(maps.Keys(geodata)) {
+		data := geodata[id]
+		format := "dat"
+		if strings.Contains(id, ":") {
+			format = "srs"
 		}
+		definitions = append(definitions, map[string]string{"id": id, "format": format, "hash": resource.Hash(data)})
 	}
 	document["geodata"] = definitions
 }
 
-func (p *preparer) geodataResource(ctx context.Context, asset *Asset, db model.GeoDatabase) ([]byte, error) {
+type geodataSource struct {
+	hash, address, legacyFile string
+	interval                  int
+	automatic, protected      bool
+}
+
+func (p *preparer) geodataSource(kind string, db model.GeoDatabase) (geodataSource, error) {
 	if db.Download == nil && db.Hash != "" {
-		asset.Source = "file"
-		return p.readLockedResource(db.Hash)
+		return geodataSource{hash: db.Hash}, nil
 	}
 
-	file := asset.Name + ".dat"
-	if asset.Name == "asn" {
+	file := kind + ".dat"
+	if kind == "asn" {
 		file = "GeoLite2-ASN.mmdb"
 	}
-	address := p.options.GeodataSources[asset.Name]
+	address := p.options.GeodataSources[kind]
 	if address == "" {
 		address = geodataURL + file
+		if kind != "asn" {
+			address = geodataSRSURL + kind + "/{code}.srs"
+		}
 	}
-	asset.Source, asset.Shared, asset.Automatic = "http", true, true
-	interval := int(geodataInterval / time.Second)
-	protected := false
+	source := geodataSource{address: address, interval: int(geodataInterval / time.Second), automatic: true}
 	if download := db.Download; download != nil {
-		address, asset.Automatic = download.URL, download.Automatic
+		source.address, source.automatic = download.URL, download.Automatic
 		if download.Interval != 0 {
-			interval = download.Interval
+			source.interval = download.Interval
 		}
-		if interval < 300 || interval > int(geodataInterval/time.Second) {
-			return nil, errors.New("resource update interval must be 300–604800 seconds")
+		if source.interval < 300 || source.interval > int(geodataInterval/time.Second) {
+			return geodataSource{}, errors.New("resource update interval must be 300–604800 seconds")
 		}
-		if name, ref := secret.ParseRef(address); ref {
-			protected = true
+		if name, ref := secret.ParseRef(source.address); ref {
+			source.protected = true
 			if p.options.Secrets == nil || secret.ValidName(name) != nil {
-				return nil, errors.New("resource credential unavailable")
+				return geodataSource{}, errors.New("resource credential unavailable")
 			}
 			var err error
-			address, err = p.options.Secrets.Get(name)
+			source.address, err = p.options.Secrets.Get(name)
 			if err != nil {
-				return nil, errors.New("resource credential unavailable")
+				return geodataSource{}, errors.New("resource credential unavailable")
 			}
 		}
 	}
+	// The app's URL parser can percent-encode braces in a saved template.
+	source.address = strings.ReplaceAll(source.address, "%7Bcode%7D", "{code}")
+	if source.address == geodataURL+file {
+		source.legacyFile = file
+	}
+	return source, nil
+}
+
+func (p *preparer) prepareGeodataSource(ctx context.Context, asset *Asset, codes []string, db model.GeoDatabase, pin func(string, []byte)) error {
+	source, err := p.geodataSource(asset.Name, db)
+	if err != nil {
+		return assetError(*asset, err)
+	}
+	if strings.Contains(source.address, "{code}") {
+		if asset.Name == "asn" {
+			return assetError(*asset, errors.New("ASN requires a DAT or MMDB database"))
+		}
+		byFile := make(map[string][]byte)
+		for _, code := range codes {
+			file := geodataFileCode(asset.Name, code)
+			data := byFile[file]
+			if data == nil {
+				data, err = p.loadGeodataCode(ctx, asset, code, source)
+				if err != nil {
+					return err
+				}
+				byFile[file] = data
+			}
+			pin(asset.Name+":"+code, data)
+		}
+		return nil
+	}
+	part := Asset{ID: asset.ID, Name: asset.Name, Kind: asset.Kind, Codes: codes}
+	full, err := p.loadGeodata(ctx, &part, asset.Name, "", source)
+	if err != nil {
+		return assetError(part, err)
+	}
+	data, err := rulesdata.SubsetDatabase(asset.Name, full, codes)
+	if err != nil {
+		return assetError(part, err)
+	}
+	part.Size = int64(len(full))
+	mergeGeodataAsset(asset, part)
+	pin(asset.Name, data)
+	return nil
+}
+
+func (p *preparer) prepareGeodataCode(ctx context.Context, asset *Asset, code string, db model.GeoDatabase) ([]byte, error) {
+	source, err := p.geodataSource(asset.Name, db)
+	if err != nil {
+		return nil, assetError(*asset, err)
+	}
+	return p.loadGeodataCode(ctx, asset, code, source)
+}
+
+func geodataFileCode(kind, code string) string {
+	if kind == "geoip" && code == "lan" {
+		return "private"
+	}
+	return code
+}
+
+func (p *preparer) loadGeodataCode(ctx context.Context, group *Asset, code string, source geodataSource) ([]byte, error) {
+	part := Asset{ID: group.ID + "/" + geodataFileCode(group.Name, code), Name: group.Name + ":" + code, Kind: group.Kind}
+	data, err := p.loadGeodata(ctx, &part, group.Name, code, source)
+	if err != nil {
+		return nil, assetError(part, err)
+	}
+	part.Size = int64(len(data))
+	mergeGeodataAsset(group, part)
+	return data, nil
+}
+
+func mergeGeodataAsset(group *Asset, part Asset) {
+	if group.Source == "" {
+		group.Source, group.URL = part.Source, part.URL
+	}
+	if group.URL != part.URL {
+		group.URL = ""
+	}
+	if part.Shared {
+		group.Source = part.Source
+	}
+	group.Shared = group.Shared || part.Shared
+	group.Automatic = group.Automatic || part.Automatic
+	group.UsesFallback = group.UsesFallback || part.UsesFallback
+	group.Size += part.Size
+	if part.UpdatedMS != 0 && (group.UpdatedMS == 0 || part.UpdatedMS < group.UpdatedMS) {
+		group.UpdatedMS = part.UpdatedMS
+	}
+	if part.NextMS != 0 && (group.NextMS == 0 || part.NextMS < group.NextMS) {
+		group.NextMS = part.NextMS
+	}
+}
+
+func (p *preparer) loadGeodata(ctx context.Context, asset *Asset, kind, code string, source geodataSource) ([]byte, error) {
+	if source.hash != "" {
+		asset.Source = "file"
+		return p.readLockedResource(source.hash)
+	}
+	address := strings.ReplaceAll(source.address, "{code}", url.PathEscape(geodataFileCode(kind, code)))
 	if !subscription.ValidURL(address) {
 		return nil, errors.New("invalid geodata source URL")
 	}
 	parsed, _ := url.Parse(address)
-	if !protected && parsed.User == nil && parsed.RawQuery == "" {
-		asset.URL = address
+	if !source.protected && parsed.User == nil && parsed.RawQuery == "" {
+		asset.URL = source.address
 	}
-	if address != geodataURL+file {
-		file = "" // Legacy files came from the default source.
-	}
-	return p.loadSharedGeodata(ctx, asset, address, interval, file)
+	asset.Source, asset.Shared, asset.Automatic = "http", true, source.automatic
+	return p.loadSharedGeodata(ctx, asset, kind, address, source.interval, source.legacyFile, code != "")
 }
 
-func (p *preparer) loadSharedGeodata(ctx context.Context, asset *Asset, address string, interval int, legacyFile string) ([]byte, error) {
+func (p *preparer) loadSharedGeodata(ctx context.Context, asset *Asset, kind, address string, interval int, legacyFile string, perCode bool) ([]byte, error) {
 	if p.fetcher == nil || p.batch == nil {
 		return nil, errors.New("resource download unavailable")
 	}
@@ -174,7 +297,8 @@ func (p *preparer) loadSharedGeodata(ctx context.Context, asset *Asset, address 
 	changed := !exists
 	// A refresh shared by several profiles downloads once. The rest of the
 	// batch adopts the database checked moments earlier.
-	force := p.options.RefreshAsset == asset.ID && !(exists && time.Since(entry.Checked) < geodataRefreshWindow)
+	refresh := p.options.RefreshAsset == asset.ID || perCode && p.options.RefreshAsset == "geodata/"+kind
+	force := refresh && !(exists && time.Since(entry.Checked) < geodataRefreshWindow)
 	if len(cached) == 0 || force || exists && !time.Now().Before(entry.Next) {
 		fetcher := *p.fetcher
 		// Databases take far longer to download than a profile, especially
@@ -188,8 +312,11 @@ func (p *preparer) loadSharedGeodata(ctx context.Context, asset *Asset, address 
 			previous.Hash = ""
 		}
 		fetcher.ValidateBody = func(data []byte) error {
-			kind := asset.Name
-			if err := rulesdata.ValidateDatabase(kind, rulesdata.GeodataFormat(kind, data), data); err != nil {
+			format := rulesdata.GeodataFormat(kind, data)
+			if perCode {
+				format = "srs"
+			}
+			if err := rulesdata.ValidateDatabase(kind, format, data); err != nil {
 				return err
 			}
 			if previous.Hash == "" && resource.ValidHash(entry.Hash) && resource.Hash(data) == entry.Hash {
@@ -204,6 +331,8 @@ func (p *preparer) loadSharedGeodata(ctx context.Context, asset *Asset, address 
 			data, entry, changed = fresh, batch.Entries[key], true
 		} else if ctx.Err() != nil {
 			return nil, ctx.Err()
+		} else if perCode && subscription.Code(err) == "http_status_404" {
+			return nil, fmt.Errorf("%s SRS file not found (HTTP 404)", asset.Name)
 		} else if len(cached) == 0 {
 			return nil, err
 		}
@@ -427,6 +556,9 @@ func (s geodataSelectors) collectDocument(document map[string]any, resources map
 
 func (s geodataSelectors) collectClassical(def map[string]any, resources map[string][]byte) {
 	format, _ := def["format"].(string)
+	if format == "srs" {
+		return
+	}
 	hash, _ := def["hash"].(string)
 	specs, err := rulesdata.Decode("classical", format, "", resources[hash])
 	if err != nil {

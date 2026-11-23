@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
 )
 
-func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, options PrepareOptions) error {
+func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error)) error {
 	if len(profile.Imports) == 0 || len(options.Sources) == 0 {
 		return nil
 	}
@@ -28,7 +29,7 @@ func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, opt
 		Sources       []json.RawMessage `json:"sources"`
 	}{SchemaVersion: model.SchemaVersion}
 	seen := make(map[string]bool)
-	size := 0
+	size, resourceBytes := 0, 0
 	for _, imp := range profile.Imports {
 		path, ok := options.Sources[imp.Source]
 		if !ok || seen[imp.Source] {
@@ -37,7 +38,7 @@ func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, opt
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, resources, err := loadSource(imp.Source, path, importedKeys(imp, ruleSources[imp.Source]), imp.RuleSets || ruleSources[imp.Source])
+		entry, resources, err := loadSource(imp.Source, path, importedKeys(imp, ruleSources[imp.Source]), read)
 		if err != nil {
 			return fmt.Errorf("cannot read source %s: %w", imp.Source, err)
 		}
@@ -45,12 +46,14 @@ func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, opt
 		for hash, data := range resources {
 			if _, exists := b.Resources[hash]; !exists {
 				b.Resources[hash] = data
-				size += len(data)
+				resourceBytes += len(data)
 			}
 		}
-		// Raw resources are smaller than their final base64 representation.
 		if size > MaxBundleBytes {
 			return errBundleTooLarge
+		}
+		if resourceBytes > maxAssetBytes {
+			return errors.New("imported rule resources exceed 32 MiB")
 		}
 		document.Sources = append(document.Sources, entry)
 		seen[imp.Source] = true
@@ -89,7 +92,7 @@ func importedKeys(imp model.Import, marker bool) []string {
 	return keys
 }
 
-func loadSource(id, path string, keys []string, ruleSets bool) (json.RawMessage, map[string][]byte, error) {
+func loadSource(id, path string, keys []string, read func(string) ([]byte, error)) (json.RawMessage, map[string][]byte, error) {
 	raw, err := readBundleFile(path)
 	if err != nil {
 		return nil, nil, errors.New("snapshot file is unreadable, not regular, or too large")
@@ -111,7 +114,7 @@ func loadSource(id, path string, keys []string, ruleSets bool) (json.RawMessage,
 		}
 	}
 	encoded, err := json.Marshal(entry)
-	if err != nil || !ruleSets || len(entry["rule-sets"]) == 0 {
+	if err != nil || len(entry["rule-sets"]) == 0 {
 		return encoded, nil, err
 	}
 	var sets []struct {
@@ -127,6 +130,12 @@ func loadSource(id, path string, keys []string, ruleSets bool) (json.RawMessage,
 			continue
 		}
 		data := bundle.Resources[set.Hash]
+		if data == nil && slices.Contains(bundle.OmittedResources, set.Hash) {
+			data, err = read(set.Hash)
+			if err != nil || len(data) == 0 {
+				return nil, nil, errSnapshotNeedsPreparation
+			}
+		}
 		if data == nil || !resource.ValidHash(set.Hash) || resource.Hash(data) != set.Hash {
 			return nil, nil, errors.New("missing or invalid locked rule resource")
 		}
@@ -137,7 +146,7 @@ func loadSource(id, path string, keys []string, ruleSets bool) (json.RawMessage,
 
 // refreshSources replaces the archived copies of imported sources with the
 // bundles in options. Resources that only the old copies used are dropped.
-func (b *Bundle) refreshSources(ctx context.Context, options PrepareOptions) error {
+func (b *Bundle) refreshSources(ctx context.Context, options PrepareOptions, read func(string) ([]byte, error)) error {
 	profile, _, diagnostics := model.ParseProfile(b.Profile)
 	if diagnostics.HasErrors() {
 		return &ValidationError{"Invalid profile", diagnostics}
@@ -181,16 +190,19 @@ func (b *Bundle) refreshSources(ctx context.Context, options PrepareOptions) err
 			kept[set.Hash] = true
 		}
 	}
+	removed := make(map[string]bool)
 	for _, source := range previous.Sources {
 		for _, set := range source.RuleSets {
 			if !kept[set.Hash] {
 				delete(b.Resources, set.Hash)
+				removed[set.Hash] = true
 			}
 		}
 	}
+	b.OmittedResources = slices.DeleteFunc(b.OmittedResources, func(hash string) bool { return removed[hash] })
 	if b.Resources == nil {
 		b.Resources = make(map[string][]byte)
 	}
 	b.Sources = nil
-	return b.prepareSources(ctx, profile, options)
+	return b.prepareSources(ctx, profile, options, read)
 }

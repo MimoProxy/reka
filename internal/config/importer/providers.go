@@ -265,7 +265,7 @@ func Providers(req Request) ([]Provider, error) {
 				if v := get(n, "format"); v != nil {
 					p.Format = text(v)
 				}
-				if p.Format != "yaml" && p.Format != "text" && p.Format != "mrs" {
+				if p.Format != "yaml" && p.Format != "text" && p.Format != "mrs" && p.Format != "srs" {
 					return nil, errors.New("provider_format_invalid")
 				}
 			}
@@ -531,7 +531,7 @@ func ImportProviders(req Request, payloads map[string][]byte) Result {
 		return true
 	}
 	for _, p := range providers {
-		if p.Kind == "rule" && p.Behavior == "classical" {
+		if p.Kind == "rule" && p.Behavior == "classical" && p.Format != "srs" {
 			specs, e := rulesdata.Decode(p.Behavior, p.Format, "", payloads[p.ID])
 			if e != nil {
 				return invalidBundle(req, e)

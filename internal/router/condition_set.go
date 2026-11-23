@@ -48,7 +48,7 @@ func (b *ConditionSetBuilder) GrowDomains(count int) {
 }
 
 func (b *ConditionSetBuilder) Add(spec RuleSpec) error {
-	if spec.ID == "" && spec.Target == "" && spec.Set == nil && spec.ResourceHash == "" &&
+	if spec.ID == "" && spec.Target == "" && spec.Set == nil && spec.ResourceHash == "" && spec.compact == nil &&
 		len(spec.Children) == 0 && !spec.NoResolve && !spec.IPInverse && isDomainKind(spec.Kind) {
 		return b.AddDomain(spec.Kind, spec.Values...)
 	}

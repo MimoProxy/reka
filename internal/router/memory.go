@@ -57,7 +57,9 @@ func compiledRuleMemory(r *rule, seenRegexps map[*regexp.Regexp]bool) uint64 {
 	bytes := uint64(unsafe.Sizeof(*r)) + uint64(len(spec.ID)+len(spec.Target)+len(spec.ResourceHash))
 	bytes += stringSliceMemory(spec.Values) + stringSliceMemory(r.strs) + sliceMemory(spec.Children) + sliceMemory(r.children)
 	bytes += sliceMemory(r.ports) + sliceMemory(r.uidRanges) + sliceMemory(r.prefixes)
-	if r.ipset != nil {
+	if spec.compact != nil {
+		bytes += uint64(unsafe.Sizeof(*spec.compact)) + spec.compact.bytes
+	} else if r.ipset != nil {
 		// Each prefix contributes at most one range before the set merges it.
 		bytes += uint64(unsafe.Sizeof(*r.ipset)) + uint64(len(r.prefixes))*uint64(unsafe.Sizeof(netipx.IPRange{}))
 	}

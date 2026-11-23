@@ -12,10 +12,14 @@ import (
 
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/oschwald/maxminddb-golang"
+	"github.com/sagernet/sing-box/common/srs"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func GeodataFormat(kind string, data []byte) string {
+	if (kind == "geoip" || kind == "geosite") && bytes.HasPrefix(data, srs.MagicBytes[:]) {
+		return "srs"
+	}
 	if (kind == "geoip" || kind == "asn") && bytes.Contains(data[max(0, len(data)-128*1024):], []byte("\xab\xcd\xefMaxMind.com")) {
 		return "mmdb"
 	}

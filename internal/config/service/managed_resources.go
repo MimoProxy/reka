@@ -299,6 +299,9 @@ func (m *RefreshManager) fetchManaged(ctx context.Context, def managedDefinition
 			_, err = rulesdata.Decode(def.behavior, def.format, def.code, data)
 		}
 		if err != nil {
+			if code := rulesdata.SRSCompatibilityCode(err); code != "" {
+				return &subscription.Error{Code: code}
+			}
 			return &subscription.Error{Code: "resource_invalid"}
 		}
 		return nil
@@ -353,7 +356,11 @@ func (s *Service) InstallManagedResource(ctx context.Context, req api.InstallMan
 	}
 	switch req.Kind {
 	case "geodata":
-		if req.ID != "geoip" && req.ID != "geosite" && req.ID != "asn" {
+		if req.Format == "srs" {
+			if !model.IsSRSGeodataID(req.ID) {
+				return Result{}, errf(CodeBadRequest, "SRS database ID must be a lowercase geoip:code or geosite:code")
+			}
+		} else if req.ID != "geoip" && req.ID != "geosite" && req.ID != "asn" {
 			return Result{}, errf(CodeBadRequest, "geodata ID must be geoip, geosite or asn")
 		}
 	case "rule-set":

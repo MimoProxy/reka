@@ -15,6 +15,14 @@ func ValidateDatabase(kind, format string, data []byte) error {
 	if len(data) == 0 || len(data) > resource.MaxSize {
 		return fmt.Errorf("database size outside 128 MiB limit")
 	}
+	if format == "srs" {
+		kind, code, _ := strings.Cut(kind, ":")
+		if kind != "geoip" && kind != "geosite" {
+			return fmt.Errorf("unsupported SRS database kind %q", kind)
+		}
+		_, err := Decode(kind, format, code, data)
+		return err
+	}
 	if (kind == "geoip" || kind == "asn") && format == "mmdb" {
 		db, err := openMMDB(data)
 		if err != nil {

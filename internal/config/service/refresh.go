@@ -15,6 +15,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/resource"
+	"github.com/MimoProxy/reka/internal/rulesdata"
 	"github.com/MimoProxy/reka/internal/secret"
 	"github.com/MimoProxy/reka/internal/subscription"
 )
@@ -529,6 +530,9 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 		}
 		if err := importer.ValidateProvider(p, data); err != nil {
 			if p.Kind == "rule" {
+				if code := rulesdata.SRSCompatibilityCode(err); code != "" {
+					return fail(code)
+				}
 				return fail("rule_resource_invalid")
 			}
 			return fail(err.Error())
@@ -549,8 +553,15 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 			if e != nil {
 				return fail("credentials_unavailable")
 			}
+			fetcher.ValidateBody = nil
+			if model.IsSRSGeodataID(a.ID) {
+				fetcher.ValidateBody = func(data []byte) error { return rulesdata.ValidateDatabase(a.ID, "srs", data) }
+			}
 			data, e := batch.Fetch(ctx, a.ID, "geodata", a.ID, url, nil, interval)
 			if e != nil {
+				if code := rulesdata.SRSCompatibilityCode(e); code != "" {
+					return fail(code)
+				}
 				return fail(subscription.Code(e))
 			}
 			geo[a.ID] = data

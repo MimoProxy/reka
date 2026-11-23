@@ -33,6 +33,9 @@ type geodataFixtureHTTP struct {
 	mu       sync.Mutex
 	bodies   map[string][]byte
 	requests map[string]int
+	status   map[string]int
+	etags    map[string]string
+	checks   map[string]int
 }
 
 func fixtureGeodata(t *testing.T, file string) []byte {
@@ -61,7 +64,17 @@ func (s *geodataFixtureHTTP) RoundTrip(req *http.Request) (*http.Response, error
 	defer s.mu.Unlock()
 	s.requests[req.URL.Path]++
 	w := httptest.NewRecorder()
-	if data := s.bodies[req.URL.Path]; data != nil {
+	if etag := s.etags[req.URL.Path]; etag != "" {
+		w.Header().Set("ETag", etag)
+		if req.Header.Get("If-None-Match") == etag {
+			s.checks[req.URL.Path]++
+			w.WriteHeader(http.StatusNotModified)
+			return w.Result(), nil
+		}
+	}
+	if status := s.status[req.URL.Path]; status != 0 {
+		w.WriteHeader(status)
+	} else if data := s.bodies[req.URL.Path]; data != nil {
 		_, _ = w.Write(data)
 	} else {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -426,7 +439,7 @@ func TestPrepareMigratesLegacyGeodata(t *testing.T) {
 	t.Run("raw cache", func(t *testing.T) {
 		server, options := newGeodataFixture(t)
 		cache := t.TempDir()
-		options.GeodataSources = nil
+		options.GeodataSources["geosite"] = geodataURL + "geosite.dat"
 		writeFixtureFile(t, filepath.Join(cache, "geosite.dat"), server.bodies["/geosite.dat"])
 		bundle := mustPrepareGeodata(t, geositeProfile, cache, options, server)
 		if len(server.requests) != 0 || len(sharedState(t, cache)) != 1 || bundle.Summary.Resources[0].URL != geodataURL+"geosite.dat" {

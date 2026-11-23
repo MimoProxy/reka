@@ -139,7 +139,7 @@ func prepareFile(ctx context.Context, input, output, cache string, options Prepa
 	p := &preparer{options: options, cache: cache, client: client, fetcher: fetcher, batch: fetcher.Batch(previous, false)}
 	var bundle *Bundle
 	if options.RebindSnapshot != "" {
-		bundle, err = rebind(ctx, options.RebindSnapshot, options)
+		bundle, err = rebind(ctx, options.RebindSnapshot, options, p.readLockedResource)
 		if err == nil {
 			for hash, data := range bundle.originalResources() {
 				if !resource.ValidHash(hash) || resource.Hash(data) != hash {
@@ -160,9 +160,16 @@ func prepareFile(ctx context.Context, input, output, cache string, options Prepa
 	if options.RefreshAsset != "" && !slices.ContainsFunc(bundle.Summary.Resources, func(a Asset) bool { return a.ID == options.RefreshAsset }) {
 		return errors.New("the selected resource is no longer referenced")
 	}
-	data, err := marshalPreparedBundle(bundle)
-	if err != nil || len(data) > MaxBundleBytes {
-		return errBundleTooLarge
+	data, omitted, err := marshalPreparedBundle(bundle)
+	if err != nil {
+		return err
+	}
+	for _, hash := range omitted {
+		if original := bundle.Resources[hash]; original != nil {
+			if saved, err := blobs.Put(original); err != nil || saved != hash {
+				return errors.New("cannot cache original rule resource")
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -229,7 +236,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 				delete(document, field)
 			}
 		}
-		if err := bundle.prepareSources(ctx, native, p.options); err != nil {
+		if err := bundle.prepareSources(ctx, native, p.options, p.readLockedResource); err != nil {
 			return nil, err
 		}
 		if err := p.nativeAssets(ctx, document, bundle.Resources); err != nil {
@@ -327,7 +334,7 @@ func normalize(document map[string]any) {
 	dns["max-concurrent-upstreams"] = boundedNumber(dns["max-concurrent-upstreams"], dnsUpstreamLimit)
 }
 
-func rebind(ctx context.Context, path string, options PrepareOptions) (*Bundle, error) {
+func rebind(ctx context.Context, path string, options PrepareOptions, read func(string) ([]byte, error)) (*Bundle, error) {
 	// Restore uses the overlay and patch statuses stored in the archive.
 	if _, err := parseOverlay(options.Overlay); err != nil {
 		return nil, err
@@ -350,10 +357,11 @@ func rebind(ctx context.Context, path string, options PrepareOptions) (*Bundle, 
 		return nil, err
 	}
 	if options.RefreshSources {
-		if err := bundle.refreshSources(ctx, options); err != nil {
+		if err := bundle.refreshSources(ctx, options, read); err != nil {
 			return nil, err
 		}
 	}
+	bundle.restoreOmittedResources(read)
 	bundle.Local, err = sceneSettings(options.Scenes)
 	if err != nil {
 		return nil, err
