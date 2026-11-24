@@ -163,6 +163,19 @@ func (p *FakePool) Acquire(ip netip.Addr) (string, func(), bool) {
 	var once sync.Once
 	return domain, func() { once.Do(func() { p.mu.Lock(); m.refs--; p.mu.Unlock() }) }, true
 }
+
+// Peek returns the domain mapped to ip without leasing the mapping or
+// changing its recency, so a look that does not keep the flow leaves the
+// pool as it was.
+func (p *FakePool) Peek(ip netip.Addr) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m := p.entries[ip]
+	if m == nil || p.closed {
+		return "", false
+	}
+	return m.key.domain, true
+}
 func (p *FakePool) Contains(ip netip.Addr) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

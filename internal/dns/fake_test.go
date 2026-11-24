@@ -84,6 +84,30 @@ func TestFakePoolEvictsLeastRecentlyUsedUnreferencedMapping(t *testing.T) {
 	}
 }
 
+func TestFakePoolPeekLeavesLeasesAndRecencyAlone(t *testing.T) {
+	pool := NewFakePool(2)
+	prefix := netip.MustParsePrefix("198.18.0.0/29")
+	peeked := allocateFakeIP(t, pool, 1, "peeked.test", prefix)
+	recent := allocateFakeIP(t, pool, 1, "recent.test", prefix)
+	if domain, ok := pool.Peek(peeked); !ok || domain != "peeked.test" {
+		t.Fatalf("peek %s = %q, %t", peeked, domain, ok)
+	}
+	if domain, ok := pool.Peek(peeked.Next().Next()); ok || domain != "" {
+		t.Fatalf("peek unmapped address = %q, %t", domain, ok)
+	}
+	// Peeking took no lease and kept the peeked mapping least recent, so it
+	// is the one a new allocation evicts.
+	allocateFakeIP(t, pool, 1, "new.test", prefix)
+	if _, ok := pool.Peek(peeked); ok {
+		t.Fatal("peeked mapping survived eviction")
+	}
+	checkFakeMapping(t, pool, recent, "recent.test")
+	pool.Close()
+	if _, ok := pool.Peek(recent); ok {
+		t.Fatal("peek succeeded on a closed pool")
+	}
+}
+
 func TestFakePoolAcquireUpdatesRecency(t *testing.T) {
 	pool := NewFakePool(2)
 	prefix := netip.MustParsePrefix("198.18.0.0/29")
