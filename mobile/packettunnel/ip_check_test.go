@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -108,7 +109,11 @@ func TestIPCheckPacketFlowUsesSelectedLeaf(t *testing.T) {
 		}
 		_ = request.Body.Close()
 		connects.Add(1)
-		_, _ = rw.WriteString("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		body := "ip=203.0.113.7\nloc=SG\n"
+		if r.Host == want6 {
+			body = "2001:db8::7\n"
+		}
+		_, _ = fmt.Fprintf(rw, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 		_ = rw.Flush()
 	}))
 	snapshot := prepareSnapshot(t, fmt.Sprintf(`
@@ -138,11 +143,19 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 	if node == nil || node.Member != "choice" || node.Resolved != "relay" || node.Name != "Relay" || node.Type != "http" {
 		t.Fatalf("wrong leaf metadata %+v", node)
 	}
+	if node.Host != "127.0.0.1" || node.Port != uint16(proxy.Listener.Addr().(*net.TCPAddr).Port) || node.UDP {
+		t.Fatalf("wrong server metadata %+v", node)
+	}
 	for _, check := range []generation.IPCheck{result.Local.IPv4, result.Local.IPv6, node.Server.IPv4, node.Exit.IPv4, node.Exit.IPv6} {
 		assertIPCheckOK(t, check)
 	}
 	if node.Server.IPv6.Status != "unavailable" || connects.Load() != 2 {
 		t.Fatalf("unexpected server or exit checks %+v, CONNECTs: %d", node, connects.Load())
+	}
+	if !slices.Equal(node.Server.IPv4.Addresses, []string{"127.0.0.1"}) ||
+		!slices.Equal(node.Exit.IPv4.Addresses, []string{"203.0.113.7"}) || node.Exit.IPv4.Country != "SG" ||
+		!slices.Equal(node.Exit.IPv6.Addresses, []string{"2001:db8::7"}) || node.Exit.IPv6.Country != "" {
+		t.Fatalf("wrong server or exit address metadata %+v", node)
 	}
 	if result.Recommendation == nil || result.Recommendation.IPVersion != "ipv4-prefer" || result.Recommendation.Reason != "server-ipv4-only" {
 		t.Fatalf("unexpected recommendation %+v", result.Recommendation)
@@ -255,6 +268,9 @@ func TestIPCheckDirectMemberDoesNotAffectRecommendation(t *testing.T) {
 	})
 	if result.Node == nil || result.Node.Type != "direct" || result.Node.Exit.IPv6.Status != "failed" {
 		t.Fatalf("expected a failed direct exit check, got %+v", result.Node)
+	}
+	if result.Node.Host != "" || result.Node.Port != 0 || !result.Node.UDP {
+		t.Fatalf("wrong direct outbound metadata %+v", result.Node)
 	}
 	if result.Recommendation == nil || result.Recommendation.Reason != "dual-ok" {
 		t.Fatalf("direct exit results should not drive the recommendation: %+v", result.Recommendation)

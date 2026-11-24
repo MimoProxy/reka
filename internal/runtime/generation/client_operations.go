@@ -19,6 +19,9 @@ import (
 	D "github.com/miekg/dns"
 )
 
+// A single 4 KiB page caps probe body reads and fits a typical exit trace.
+const maxProbeBodyBytes = 4096
+
 func (e *Engine) Traffic() api.Traffic {
 	upload, download := e.backend.Traffic()
 	return api.Traffic{UploadTotal: upload, DownloadTotal: download, SampledAt: time.Now().UTC()}
@@ -68,7 +71,7 @@ func (e *Engine) ProbeOutbound(ctx context.Context, request api.ProbeRequest) (a
 		if request.Unified {
 			sample, err = probeUnified(ctx, g, out, pins[out], request.URL)
 		} else {
-			sample, err = probeHTTP(ctx, g, out, pins[out], request.URL, false)
+			sample, err = probeHTTP(ctx, g, out, pins[out], request.URL)
 		}
 		if sample.StatusCode != 0 {
 			result.ResolvedOutbound, result.StatusCode, result.DelayMS = id, sample.StatusCode, sample.DelayMS
@@ -135,30 +138,16 @@ func (g *generation) probeLookupContext(ctx context.Context, out *sagernet.Outbo
 	})
 }
 
-func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string, headersOnly bool) (api.ArenaSample, error) {
+func probeHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string) (api.ArenaSample, error) {
+	return probeHTTPResponse(ctx, g, out, pin, url, drainProbeResponse)
+}
+
+func probeHTTPResponse(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, url string, checkResponse func(*http.Response) error) (api.ArenaSample, error) {
 	ctx = g.probeLookupContext(ctx, out)
 	transport := &http.Transport{DisableKeepAlives: true, DialContext: pin.Dial}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return api.ArenaSample{}, err
-	}
-	start := time.Now()
-	response, err := client.Do(req)
-	if err != nil {
-		return api.ArenaSample{}, err
-	}
-	defer response.Body.Close()
-	result := api.ArenaSample{DelayMS: max(1, time.Since(start).Milliseconds()), StatusCode: response.StatusCode}
-	if headersOnly {
-		return result, nil
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-	if response.StatusCode < 200 || response.StatusCode >= 400 {
-		return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)
-	}
-	return result, nil
+	return probeRequest(ctx, client, url, checkResponse)
 }
 
 // probeUnified sends the request twice over one kept-alive connection and
@@ -169,17 +158,17 @@ func probeUnified(ctx context.Context, g *generation, out *sagernet.Outbound, pi
 	transport := &http.Transport{DialContext: pin.Dial, MaxIdleConnsPerHost: 1}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	first, err := probeRequest(ctx, client, url)
+	first, err := probeRequest(ctx, client, url, drainProbeResponse)
 	if err != nil {
 		return first, err
 	}
-	if second, err := probeRequest(ctx, client, url); err == nil {
+	if second, err := probeRequest(ctx, client, url, drainProbeResponse); err == nil {
 		return second, nil
 	}
 	return first, nil
 }
 
-func probeRequest(ctx context.Context, client *http.Client, url string) (api.ArenaSample, error) {
+func probeRequest(ctx context.Context, client *http.Client, url string, checkResponse func(*http.Response) error) (api.ArenaSample, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return api.ArenaSample{}, err
@@ -191,11 +180,15 @@ func probeRequest(ctx context.Context, client *http.Client, url string) (api.Are
 	}
 	defer response.Body.Close()
 	result := api.ArenaSample{DelayMS: max(1, time.Since(start).Milliseconds()), StatusCode: response.StatusCode}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	return result, checkResponse(response)
+}
+
+func drainProbeResponse(response *http.Response) error {
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProbeBodyBytes))
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
-		return result, fmt.Errorf("probe HTTP status %d", response.StatusCode)
+		return fmt.Errorf("probe HTTP status %d", response.StatusCode)
 	}
-	return result, nil
+	return nil
 }
 
 func (e *Engine) QueryDNS(ctx context.Context, request api.DNSQueryRequest) (api.DNSQueryResult, error) {

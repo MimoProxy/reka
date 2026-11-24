@@ -3,11 +3,14 @@ package generation
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -102,27 +105,39 @@ func TestRecommendIPVersion(t *testing.T) {
 
 func TestIPCheckServerAddressFamily(t *testing.T) {
 	ips := []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}
+	many := []netip.Addr{{}, ips[1], netip.MustParseAddr("::ffff:192.0.2.1")}
+	var firstEight []string
+	for i := 1; i <= 9; i++ {
+		address := fmt.Sprintf("192.0.2.%d", i)
+		many = append(many, netip.MustParseAddr(address))
+		if i <= 8 {
+			firstEight = append(firstEight, address)
+		}
+	}
 	for _, tc := range []struct {
-		name     string
-		family   string
-		target   compile.Outbound
-		lookup   bool
-		answers  []netip.Addr
-		dnsErr   error
-		dialAddr string
-		dialErr  error
-		status   string
-		reason   string
+		name      string
+		family    string
+		target    compile.Outbound
+		lookup    bool
+		answers   []netip.Addr
+		dnsErr    error
+		dialAddr  string
+		dialErr   error
+		status    string
+		reason    string
+		addresses []string
 	}{
-		{name: "IPv4 literal", family: "ip4", target: compile.Outbound{Server: "192.0.2.1"}, dialAddr: "192.0.2.1:443", status: ipCheckOK},
-		{name: "IPv6 literal", family: "ip6", target: compile.Outbound{Server: "2001:db8::1"}, dialAddr: "[2001:db8::1]:443", status: ipCheckOK},
-		{name: "mapped literal", family: "ip4", target: compile.Outbound{Server: "::ffff:192.0.2.1"}, dialAddr: "192.0.2.1:443", status: ipCheckOK},
+		{name: "IPv4 literal", family: "ip4", target: compile.Outbound{Server: "192.0.2.1"}, dialAddr: "192.0.2.1:443", status: ipCheckOK, addresses: []string{"192.0.2.1"}},
+		{name: "IPv6 literal", family: "ip6", target: compile.Outbound{Server: "2001:db8::1"}, dialAddr: "[2001:db8::1]:443", status: ipCheckOK, addresses: []string{"2001:db8::1"}},
+		{name: "mapped literal", family: "ip4", target: compile.Outbound{Server: "::ffff:192.0.2.1"}, dialAddr: "192.0.2.1:443", status: ipCheckOK, addresses: []string{"192.0.2.1"}},
 		{name: "IPv4 only literal", family: "ip6", target: compile.Outbound{Server: "192.0.2.1"}, status: ipCheckUnavailable, reason: "no address"},
 		{name: "IPv6 only literal", family: "ip4", target: compile.Outbound{Server: "2001:db8::1"}, status: ipCheckUnavailable, reason: "no address"},
 		{name: "hostname IPv4", family: "ip4", target: compile.Outbound{Server: "proxy.test"}, lookup: true, answers: ips,
-			dialAddr: "192.0.2.1:443", status: ipCheckOK},
+			dialAddr: "192.0.2.1:443", status: ipCheckOK, addresses: []string{"192.0.2.1"}},
+		{name: "deduplicate and cap answers", family: "ip4", target: compile.Outbound{Server: "proxy.test"}, lookup: true, answers: many,
+			dialAddr: "192.0.2.1:443", status: ipCheckOK, addresses: firstEight},
 		{name: "hostname IPv6 refused", family: "ip6", target: compile.Outbound{Server: "proxy.test"}, lookup: true, answers: ips,
-			dialAddr: "[2001:db8::1]:443", dialErr: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, status: ipCheckFailed, reason: "refused"},
+			dialAddr: "[2001:db8::1]:443", dialErr: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, status: ipCheckFailed, reason: "refused", addresses: []string{"2001:db8::1"}},
 		{name: "hostname without AAAA", family: "ip6", target: compile.Outbound{Server: "proxy.test"}, lookup: true, answers: ips[:1],
 			status: ipCheckUnavailable, reason: "no address"},
 		{name: "hostname not found", family: "ip4", target: compile.Outbound{Server: "proxy.test"}, lookup: true, dnsErr: &net.DNSError{IsNotFound: true},
@@ -130,13 +145,13 @@ func TestIPCheckServerAddressFamily(t *testing.T) {
 		{name: "DNS failure", family: "ip4", target: compile.Outbound{Server: "proxy.test"}, lookup: true, dnsErr: errors.New("resolver failed for proxy.test"),
 			status: ipCheckFailed, reason: "dns"},
 		{name: "hysteria address only", family: "ip6", target: compile.Outbound{Type: "hysteria2", Server: "proxy.test"}, lookup: true, answers: ips[1:],
-			status: ipCheckSkipped, reason: "udp transport"},
+			status: ipCheckSkipped, reason: "udp transport", addresses: []string{"2001:db8::1"}},
 		{name: "tuic address missing", family: "ip6", target: compile.Outbound{Type: "tuic", Server: "192.0.2.1"},
 			status: ipCheckUnavailable, reason: "no address"},
 		{name: "tuic address only", family: "ip4", target: compile.Outbound{Type: "tuic", Server: "192.0.2.1"},
-			status: ipCheckSkipped, reason: "udp transport"},
+			status: ipCheckSkipped, reason: "udp transport", addresses: []string{"192.0.2.1"}},
 		{name: "kcptun address only", family: "ip4", target: compile.Outbound{Type: "shadowsocks", Server: "192.0.2.1", Plugin: &model.SSPlugin{Type: "kcptun"}},
-			status: ipCheckSkipped, reason: "udp transport"},
+			status: ipCheckSkipped, reason: "udp transport", addresses: []string{"192.0.2.1"}},
 		{name: "dialer proxy", family: "ip4", target: compile.Outbound{Server: "proxy.test", Dialer: &model.Dialer{Proxy: "parent"}},
 			status: ipCheckSkipped, reason: "dialer proxy"},
 		{name: "no server", family: "ip6", target: compile.Outbound{Type: "direct"}, status: ipCheckSkipped, reason: "no server"},
@@ -167,11 +182,94 @@ func TestIPCheckServerAddressFamily(t *testing.T) {
 			if got.Status != tc.status || got.Error != tc.reason {
 				t.Fatalf("server check = %+v, want %s %q", got, tc.status, tc.reason)
 			}
+			if !slices.Equal(got.Addresses, tc.addresses) {
+				t.Fatalf("addresses = %v, want %v", got.Addresses, tc.addresses)
+			}
 			if lookupCalls > 1 || (lookupCalls == 1) != tc.lookup || dialCalls > 1 || (dialCalls == 1) != (tc.dialAddr != "") {
 				t.Fatalf("unexpected lookup and dial counts %d, %d", lookupCalls, dialCalls)
 			}
 			if (got.DelayMS != nil) != (dialCalls == 1) || got.DelayMS != nil && *got.DelayMS < 1 {
 				t.Fatalf("unexpected delay %v after %d dials", got.DelayMS, dialCalls)
+			}
+		})
+	}
+}
+
+func TestParseIPCheckBody(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		address string
+		country string
+	}{
+		{"IPv4 trace", "fl=example\nip=192.0.2.1\nloc=SG\nhttp=http/2\n", "192.0.2.1", "SG"},
+		{"IPv6 trace", "loc=US\r\nip=2001:0db8::1\r\n", "2001:db8::1", "US"},
+		{"mapped address", "ip=::ffff:192.0.2.1\n", "192.0.2.1", ""},
+		{"unknown country", "ip=192.0.2.1\nloc=XX\n", "192.0.2.1", ""},
+		{"lowercase country", "ip=192.0.2.1\nloc=sg\n", "192.0.2.1", ""},
+		{"malformed country", "ip=192.0.2.1\nloc=S1\n", "192.0.2.1", ""},
+		{"invalid IP", "ip=300.0.2.1\nloc=GB\n", "", "GB"},
+		{"scoped address", "ip=fe80::1%eth0\n", "", ""},
+		{"plain IP", "  2001:db8::1\r\n", "2001:db8::1", ""},
+		{"invalid plain text", "192.0.2.1, 192.0.2.2", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var want netip.Addr
+			if tc.address != "" {
+				want = netip.MustParseAddr(tc.address)
+			}
+			address, country := parseIPCheckBody(tc.body)
+			if address != want || country != tc.country {
+				t.Fatalf("parsed (%v, %q), want (%v, %q)", address, country, want, tc.country)
+			}
+		})
+	}
+}
+
+func TestIPCheckNodeJSON(t *testing.T) {
+	unavailable := IPCheck{Status: ipCheckUnavailable}
+	node := IPCheckNode{
+		Host: "proxy.test", Port: 443,
+		Server: IPFamilyChecks{
+			IPv4: IPCheck{Status: ipCheckOK, Addresses: []string{"192.0.2.1"}},
+			IPv6: unavailable,
+		},
+		Exit: IPFamilyChecks{
+			IPv4: IPCheck{Status: ipCheckOK, Addresses: []string{"192.0.2.2"}, Country: "SG"},
+			IPv6: unavailable,
+		},
+	}
+	for _, tt := range []struct {
+		name    string
+		node    IPCheckNode
+		want    map[string]string
+		omitted []string
+	}{
+		{"server", node, map[string]string{
+			"host": `"proxy.test"`, "port": `443`, "udp": `false`,
+			"server": `{"ipv4":{"status":"ok","addresses":["192.0.2.1"]},"ipv6":{"status":"unavailable"}}`,
+			"exit":   `{"ipv4":{"status":"ok","addresses":["192.0.2.2"],"country":"SG"},"ipv6":{"status":"unavailable"}}`,
+		}, nil},
+		{"built-in", IPCheckNode{Type: "direct", UDP: true}, map[string]string{"udp": `true`}, []string{"host", "port"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range tt.want {
+				if got := string(wire[field]); got != want {
+					t.Errorf("%s = %s, want %s", field, got, want)
+				}
+			}
+			for _, field := range tt.omitted {
+				if _, ok := wire[field]; ok {
+					t.Errorf("unexpected field %s in %s", field, data)
+				}
 			}
 		})
 	}

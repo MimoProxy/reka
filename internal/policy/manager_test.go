@@ -65,6 +65,39 @@ func TestHealthSelectionBoundedAndManual(t *testing.T) {
 		t.Fatal("manual parent overwritten")
 	}
 }
+
+func TestURLTestPinKeepsHealthOnPinAndUnpin(t *testing.T) {
+	group := Group{ID: "auto", Type: "url-test", Members: []string{"slow", "fast"}}
+	m := New([]Group{group}, nil)
+	checked := time.Now()
+	fast := Result{Member: "fast", Alive: true, Delay: 10, Checked: checked}
+	state := m.states[group.ID]
+	state.results["fast"] = fast
+	state.selected = "fast"
+	state.last = checked
+	state.used = true
+
+	for _, tc := range []struct {
+		pin  string
+		want string
+	}{
+		{pin: "slow", want: "slow"},
+		{pin: "", want: "fast"},
+	} {
+		group.Selected = tc.pin
+		updated := New([]Group{group}, nil)
+		updated.Inherit(m)
+		status := updated.Statuses()[0]
+		if status.Results[1] != fast || updated.states[group.ID].last != checked || !updated.states[group.ID].used {
+			t.Fatalf("health state was lost with pin %q: %+v", tc.pin, status)
+		}
+		if status.Selected != tc.want || updated.Peek(group.ID, "host.test", "") != tc.want || updated.Choose(group.ID, "host.test", "") != tc.want {
+			t.Fatalf("selection with pin %q = %+v, want %q", tc.pin, status, tc.want)
+		}
+		m = updated
+	}
+}
+
 func TestLazyHealthCheckCancellation(t *testing.T) {
 	var calls atomic.Int32
 	m := New([]Group{{ID: "lazy", Type: "url-test", Lazy: true, Members: []string{"one"}}}, func(ctx context.Context, _, _ string) error { calls.Add(1); <-ctx.Done(); return ctx.Err() })

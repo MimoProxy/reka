@@ -147,6 +147,63 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [192.0.2.53]}
 	check("", 1)
 }
 
+func TestProfileStatusReportsURLTestPins(t *testing.T) {
+	snapshot := prepareSnapshot(t, `
+schema-version: 1
+outbounds: [{id: alternate, name: Backup, type: direct}]
+groups:
+  - {id: automatic, name: Automatic, type: url-test, members: [direct, alternate], selected: direct, lazy: true}
+`)
+	for _, tt := range []struct {
+		name  string
+		start func([]byte, profile.Controls) (*Session, error)
+	}{
+		{"packet flow", func(snapshot []byte, controls profile.Controls) (*Session, error) {
+			return StartProfile(snapshot, controls, false)
+		}},
+		{"offline probe", StartProbeProfile},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var controls profile.Controls
+			if err := json.Unmarshal([]byte(`{"pins":{"Automatic":"Backup"}}`), &controls); err != nil {
+				t.Fatal(err)
+			}
+			session, err := tt.start(snapshot, controls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(session.Close)
+			check := func(selected string, pinned bool) {
+				t.Helper()
+				status, err := session.ProfileStatus()
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := GroupStatus{ID: "automatic", Selected: selected, Pinned: pinned}
+				if len(status.Groups) != 1 || status.Groups[0] != want {
+					t.Fatalf("group status = %+v, want %+v", status.Groups, want)
+				}
+				data, err := json.Marshal(status)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bytes.Contains(data, []byte(`"pinned"`)) != pinned || pinned && !bytes.Contains(data, []byte(`"pinned":true`)) {
+					t.Fatalf("incorrect pin state in %s", data)
+				}
+			}
+			check("alternate", true)
+			if err := session.ApplyControls(profile.Controls{Pins: map[string]string{"automatic": "direct"}}); err != nil {
+				t.Fatal(err)
+			}
+			check("direct", true)
+			if err := session.ApplyControls(profile.Controls{}); err != nil {
+				t.Fatal(err)
+			}
+			check("direct", false)
+		})
+	}
+}
+
 func TestApplyIPVersionReplacesLargeProfile(t *testing.T) {
 	session, err := StartProfile(prepareSnapshot(t, "schema-version: 1\n"), profile.Controls{}, false)
 	if err != nil {

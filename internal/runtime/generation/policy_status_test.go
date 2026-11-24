@@ -2,11 +2,13 @@ package generation
 
 import (
 	"fmt"
-	"github.com/MimoProxy/reka/internal/config/compile"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/config/compile"
 )
 
 func TestHealthExpectedStatusChangesObservedChoiceWithoutReplacingOutbound(t *testing.T) {
@@ -47,6 +49,46 @@ func TestHealthExpectedStatusChangesObservedChoiceWithoutReplacingOutbound(t *te
 		}
 		if !checked {
 			t.Fatal("health probe did not complete")
+		}
+	}
+}
+
+func TestRuntimeURLTestPinOverridesConfiguredMember(t *testing.T) {
+	base, ds := compile.Compile([]byte(`schema-version: 1
+outbounds: [{id: local, type: direct}, {id: alternate, type: direct}]
+groups: [{id: health, type: url-test, members: [local, alternate], selected: local}]
+rules: [{id: all, match: {all: true}, outbound: health}]
+`), nil, compile.Options{})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	pinned := *base
+	pinned.AutoGroups = slices.Clone(base.AutoGroups)
+	pinned.AutoGroups[0].Selected = "alternate"
+
+	e := NewEngine(EngineOptions{HostPacketFlow: true})
+	defer e.Close()
+	for i, tc := range []struct {
+		eff  *compile.Effective
+		want string
+	}{
+		{base, "local"},
+		{&pinned, "alternate"},
+		{base, "local"},
+	} {
+		p, err := e.Prepare(tc.eff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = e.Activate(p, uint64(i+1)); err != nil {
+			t.Fatal(err)
+		}
+		decision, err := e.Explain(t.Context(), ExplainRequest{Destination: "192.0.2.1:443"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Outbound != tc.want {
+			t.Fatalf("routed through %q, want %q", decision.Outbound, tc.want)
 		}
 	}
 }
