@@ -27,6 +27,8 @@ type Operation struct {
 	Network    string               `json:"network,omitempty"`
 	Resolve    bool                 `json:"resolve,omitempty"`
 	Rule       string               `json:"rule,omitempty"`
+	ICMPNonce  string               `json:"probeNonce,omitempty"`
+	ICMPSeq    uint16               `json:"probeSequence,omitempty"`
 	TTLSeconds int                  `json:"ttl_seconds,omitempty"`
 	URL        string               `json:"url,omitempty"`
 	URL4       string               `json:"url4,omitempty"`
@@ -85,6 +87,8 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return nil, err
 	}
 	switch op.Action {
+	case "icmpProbeProvenance":
+		return s.icmpProbeProvenance(op.ICMPNonce, op.ICMPSeq)
 	case "connections":
 		return s.connections(), nil
 	case "trafficRanking":

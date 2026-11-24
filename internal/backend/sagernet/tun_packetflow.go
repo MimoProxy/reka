@@ -15,6 +15,7 @@ import (
 	"github.com/MimoProxy/reka/internal/platform"
 	D "github.com/miekg/dns"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
+	"github.com/sagernet/gvisor/pkg/tcpip/stack"
 	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
@@ -91,6 +92,16 @@ type packetFlowHandler struct {
 	mu          sync.Mutex
 	tcp, udp    packetFlowTable
 	lastWarning time.Time
+}
+
+// ObserveSyntheticICMPEchoReply forwards the stack's local-echo notification to
+// the host device when it tracks diagnostic probes.
+func (h *packetFlowHandler) ObserveSyntheticICMPEchoReply(sequence uint16, payload stack.PacketData) {
+	if observer, ok := h.dev.(interface {
+		ObserveSyntheticICMPEchoReply(uint16, stack.PacketData)
+	}); ok {
+		observer.ObserveSyntheticICMPEchoReply(sequence, payload)
+	}
 }
 
 type packetFlowKey struct {
