@@ -254,33 +254,28 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, opts exc
 			return m, nil
 		}
 	}
-	if opts.fake && s.cfg.Mode == "fake-ip" && (typ == D.TypeA || typ == D.TypeAAAA) {
-		matched := false
-		for _, p := range s.cfg.FakeFilter {
-			if s.Match(p, domain, netip.Addr{}) {
-				matched = true
-				break
-			}
+	if opts.fake && s.cfg.Mode == "fake-ip" && (typ == D.TypeA || typ == D.TypeAAAA) && s.usesFakeIP(domain) {
+		outcome.ResultSource = "fake_ip"
+		r := s.cfg.FakeRange
+		if typ == D.TypeAAAA {
+			r = s.cfg.FakeRange6
 		}
-		useFake := !matched
-		if s.cfg.FakeFilterMode == "whitelist" {
-			useFake = matched
+		prefix, _ := netip.ParsePrefix(r)
+		ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix)
+		if err != nil {
+			return nil, err
 		}
-		if useFake {
-			outcome.ResultSource = "fake_ip"
-			r := s.cfg.FakeRange
-			if typ == D.TypeAAAA {
-				r = s.cfg.FakeRange6
-			}
-			prefix, _ := netip.ParsePrefix(r)
-			ip, err := s.opts.Pool.Allocate(s.opts.Generation, domain, prefix)
-			if err != nil {
-				return nil, err
-			}
-			m := reply()
-			m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(s.cfg.FakeTTL()))}
-			return m, nil
-		}
+		m := reply()
+		m.Answer = []D.RR{addressRR(question.Name, typ, ip, uint32(s.cfg.FakeTTL()))}
+		return m, nil
+	}
+	if opts.fake && s.cfg.Mode == "fake-ip" && (typ == D.TypeHTTPS || typ == D.TypeSVCB) && s.usesFakeIP(domain) {
+		// Clients ask for service bindings next to every address lookup. A
+		// faked domain is resolved where its connection is made, so forwarding
+		// the query would only reveal the name to the configured resolvers, and
+		// its address hints would let clients bypass the fake mapping.
+		outcome.ResultSource = "fake_ip_empty"
+		return reply(), nil
 	}
 	request := q.Copy()
 	request.Id = 0
@@ -290,6 +285,21 @@ func (s *Service) exchange(ctx context.Context, q *D.Msg, scope string, opts exc
 	}
 	key := scope + "\x00" + string(wire)
 	return s.cachedExchange(ctx, q, scope, key, id, outcome)
+}
+
+// usesFakeIP reports whether fake-ip mode answers domain with a fake address.
+func (s *Service) usesFakeIP(domain string) bool {
+	matched := false
+	for _, p := range s.cfg.FakeFilter {
+		if s.Match(p, domain, netip.Addr{}) {
+			matched = true
+			break
+		}
+	}
+	if s.cfg.FakeFilterMode == "whitelist" {
+		return matched
+	}
+	return !matched
 }
 
 func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string, outcome *resolutionHistory) (*D.Msg, error) {
