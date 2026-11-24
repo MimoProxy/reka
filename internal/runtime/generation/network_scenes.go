@@ -54,10 +54,11 @@ func (e *Engine) sceneInterface() (*net.Interface, error) {
 	if !e.opts.HostPacketFlow {
 		return e.guard.SceneInterface()
 	}
-	if e.packetInterface == "" {
+	name := e.packetInterface.Load()
+	if name == nil || *name == "" {
 		return nil, errors.New("no active physical network interface")
 	}
-	return net.InterfaceByName(e.packetInterface)
+	return net.InterfaceByName(*name)
 }
 
 func (e *Engine) SetPacketFlowInterface(name string) {
@@ -66,7 +67,7 @@ func (e *Engine) SetPacketFlowInterface(name string) {
 	if e.closed || !e.opts.HostPacketFlow {
 		return
 	}
-	e.packetInterface = name
+	e.packetInterface.Store(&name)
 	_, g := e.current()
 	e.refreshSceneObservation(g)
 }

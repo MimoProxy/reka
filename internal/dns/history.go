@@ -23,6 +23,7 @@ type upstreamHistory struct {
 type resolutionHistory struct {
 	ResultSource    string           `json:"result_source,omitempty"`
 	Upstream        *upstreamHistory `json:"upstream,omitempty"`
+	SystemServers   []string         `json:"system_servers,omitempty"`
 	Fallback        bool             `json:"fallback,omitempty"`
 	Coalesced       bool             `json:"coalesced,omitempty"`
 	UpstreamQueryID uint64           `json:"upstream_query_id,omitempty"`

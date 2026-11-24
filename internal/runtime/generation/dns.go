@@ -98,7 +98,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 			return ctx, func() {}, errors.New("DNS generation retired")
 		}
 		return retained, release, err
-	}, System: func(ctx context.Context, d string) ([]netip.Addr, error) {
+	}, SystemExchange: e.systemDNSExchange(), System: func(ctx context.Context, d string) ([]netip.Addr, error) {
 		return e.opts.Resolver.LookupNetIP(ctx, "ip", d)
 	}, Route: route, Exchange: func(ctx context.Context, ep RD.Endpoint, q *D.Msg, lookup func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
 		if ep.Scheme == "dhcp" {
