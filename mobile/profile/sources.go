@@ -22,6 +22,7 @@ type pinnedResource struct {
 }
 
 type sourceResources struct {
+	ID       string                `json:"id"`
 	RuleSets []pinnedResource      `json:"rule-sets"`
 	MapLocal []pinnedResource      `json:"map-local"`
 	Module   *model.ModuleSnapshot `json:"module"`
@@ -74,10 +75,10 @@ func (b *Bundle) requiredSourceResources() map[string]bool {
 }
 
 func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error)) error {
-	return b.bindSources(ctx, profile, options, read, nil, true, true)
+	return b.bindSources(ctx, profile, options, read, nil, true, profile.Modules)
 }
 
-func (b *Bundle) bindSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error), retained []json.RawMessage, subscriptions, modules bool) error {
+func (b *Bundle) bindSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error), retained []json.RawMessage, subscriptions bool, modules []model.Module) error {
 	// dns.from selects a source's DNS whether or not the profile imports
 	// anything else from that source.
 	dnsSource := ""
@@ -158,32 +159,30 @@ func (b *Bundle) bindSources(ctx context.Context, profile *model.Profile, option
 			}
 		}
 	}
-	if modules {
-		for _, def := range profile.Modules {
-			if !def.IsEnabled() {
-				continue
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			path := options.Modules[def.ID]
-			if path == "" {
-				return moduleSnapshotError(def.ID, "module snapshot is missing; acquire the module")
-			}
-			snapshot, err := LoadModuleSnapshot(path)
-			if err != nil {
-				return moduleSnapshotError(def.ID, "module snapshot is unreadable or invalid; acquire the module again")
-			}
-			if snapshot.Source.ID != def.ID || snapshot.Source.Module.Request != def.RequestHash() {
-				return moduleSnapshotError(def.ID, "module snapshot does not match the declared ID or location; acquire the module again")
-			}
-			entry, err := json.Marshal(snapshot.Source)
-			if err != nil {
-				return err
-			}
-			if err := add(entry, snapshot.Resources); err != nil {
-				return err
-			}
+	for _, def := range modules {
+		if !def.IsEnabled() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path := options.Modules[def.ID]
+		if path == "" {
+			return moduleSnapshotError(def.ID, "module snapshot is missing; acquire the module")
+		}
+		snapshot, err := LoadModuleSnapshot(path)
+		if err != nil {
+			return moduleSnapshotError(def.ID, "module snapshot is unreadable or invalid; acquire the module again")
+		}
+		if snapshot.Source.ID != def.ID || snapshot.Source.Module.Request != def.RequestHash() {
+			return moduleSnapshotError(def.ID, "module snapshot does not match the declared ID or location; acquire the module again")
+		}
+		entry, err := json.Marshal(snapshot.Source)
+		if err != nil {
+			return err
+		}
+		if err := add(entry, snapshot.Resources); err != nil {
+			return err
 		}
 	}
 	b.Sources = nil
@@ -245,7 +244,7 @@ func loadSource(id, path string, keys []string, read func(string) ([]byte, error
 	if err != nil {
 		return nil, nil, err
 	}
-	// Import the subscription profile without applying its own overlay.
+	// Import only the selected profile sections, without its modules or overlay.
 	var profile map[string]json.RawMessage
 	if json.Unmarshal(bundle.Profile, &profile) != nil || profile == nil {
 		return nil, nil, errors.New("invalid subscription profile")
@@ -291,7 +290,7 @@ func loadSource(id, path string, keys []string, read func(string) ([]byte, error
 
 // refreshSources replaces the selected kinds of archived sources and drops
 // resources referenced only by the replaced entries.
-func (b *Bundle) refreshSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error)) error {
+func (b *Bundle) refreshSources(ctx context.Context, profile *model.Profile, previousDeviceModules []string, options PrepareOptions, read func(string) ([]byte, error)) error {
 	var own struct {
 		sourceResources
 		Geodata []pinnedResource `json:"geodata"`
@@ -306,6 +305,11 @@ func (b *Bundle) refreshSources(ctx context.Context, profile *model.Profile, opt
 	}
 	for _, set := range own.Geodata {
 		kept[set.Hash] = true
+	}
+	if b.Precompiled != nil {
+		for _, hash := range b.Precompiled.Sets {
+			kept[hash] = true
+		}
 	}
 	patches, err := parseOverlay(b.Overlay)
 	if err != nil {
@@ -329,12 +333,33 @@ func (b *Bundle) refreshSources(ctx context.Context, profile *model.Profile, opt
 	}
 	var retained []json.RawMessage
 	var replacedHashes []string
+	deviceDefinitions := make(map[string]model.Module)
+	if options.DeviceModules != nil && options.Modules == nil {
+		for _, def := range profile.Modules {
+			if slices.Contains(b.DeviceModules, def.ID) {
+				deviceDefinitions[def.ID] = def
+			}
+		}
+	}
+	retainedModules := make(map[string]bool)
 	for _, entry := range previous.Sources {
 		var refs sourceResources
 		if json.Unmarshal(entry, &refs) != nil {
 			return errors.New("invalid archived source")
 		}
-		if refs.Module != nil && options.Modules != nil || refs.Module == nil && options.RefreshSources {
+		replace := options.RefreshSources
+		if refs.Module != nil {
+			replace = options.Modules != nil
+			if !replace && options.DeviceModules != nil && slices.Contains(previousDeviceModules, refs.ID) {
+				def, found := deviceDefinitions[refs.ID]
+				// A module at the same location can use its archived lock.
+				replace = !found || !def.IsEnabled() || def.RequestHash() != refs.Module.Request
+			}
+			if !replace {
+				retainedModules[refs.ID] = true
+			}
+		}
+		if replace {
 			replacedHashes = append(replacedHashes, refs.hashes()...)
 			continue
 		}
@@ -354,5 +379,11 @@ func (b *Bundle) refreshSources(ctx context.Context, profile *model.Profile, opt
 	if b.Resources == nil {
 		b.Resources = make(map[string][]byte)
 	}
-	return b.bindSources(ctx, profile, options, read, retained, options.RefreshSources, options.Modules != nil)
+	var modules []model.Module
+	for _, def := range profile.Modules {
+		if _, device := deviceDefinitions[def.ID]; options.Modules != nil || device && !retainedModules[def.ID] {
+			modules = append(modules, def)
+		}
+	}
+	return b.bindSources(ctx, profile, options, read, retained, options.RefreshSources, modules)
 }

@@ -33,6 +33,7 @@ type Bundle struct {
 	Resources        map[string][]byte    `json:"resources,omitempty"`
 	Precompiled      *precompiledRuleSets `json:"precompiled-rule-sets,omitempty"`
 	OmittedResources []string             `json:"omitted-rule-resources,omitempty"`
+	DeviceModules    []string             `json:"deviceModules,omitempty"` // Device module IDs in Profile.
 	// OwnDNS records that the profile had its own DNS section before
 	// preparation filled in defaults. Only such DNS can be selected by
 	// another profile's dns.from.

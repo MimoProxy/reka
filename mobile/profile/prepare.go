@@ -46,6 +46,9 @@ type PrepareOptions struct {
 	// Modules maps module IDs to app-managed module snapshot files. A rebind
 	// with no map keeps the module resources already in the profile snapshot.
 	Modules map[string]string `json:"modules,omitempty"`
+	// DeviceModules applies to native and imported profiles. On rebind, nil
+	// preserves the archived list and an empty list clears it.
+	DeviceModules []model.Module `json:"deviceModules,omitempty"`
 	// RefreshSources makes a rebind read Sources again instead of keeping the
 	// archived copies, so a subscription update reaches the profiles that
 	// import it without fetching their own resources.
@@ -249,15 +252,24 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		if p.options.NodesOnly {
-			for _, field := range []string{"rules", "sub-rules", "rule-sets", "geodata", "routing", "dns"} {
-				delete(document, field)
-			}
+	} else if p.options.NodesOnly {
+		for _, field := range []string{"rules", "sub-rules", "rule-sets", "geodata", "routing", "dns"} {
+			delete(document, field)
 		}
-		if err := bundle.prepareSources(ctx, native, p.options, p.readLockedResource); err != nil {
-			return nil, err
-		}
+	}
+	profile := native
+	if profile == nil {
+		// The importer emits no module definitions or source references.
+		profile = &model.Profile{}
+	}
+	shadowed, err := bundle.mergeDeviceModules(document, profile, p.options)
+	if err != nil {
+		return nil, err
+	}
+	if err := bundle.prepareSources(ctx, profile, p.options, p.readLockedResource); err != nil {
+		return nil, err
+	}
+	if native != nil {
 		if err := p.nativeAssets(ctx, document, bundle.Resources); err != nil {
 			return nil, err
 		}
@@ -333,7 +345,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if diagnostics.HasErrors() {
 		return nil, preparationValidationError(diagnostics)
 	}
-	bundle.Summary = bundle.describePreparation(eff, native, p.options.Modules)
+	bundle.Summary = bundle.describePreparation(eff, profile, p.options, shadowed)
 	bundle.Summary.Format = format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = p.assets
@@ -382,8 +394,19 @@ func rebind(ctx context.Context, path string, options PrepareOptions, read func(
 	if diagnostics.HasErrors() {
 		return nil, &ValidationError{"Invalid profile", diagnostics}
 	}
-	if options.RefreshSources || options.Modules != nil {
-		if err := bundle.refreshSources(ctx, archived, options, read); err != nil {
+	previousDeviceModules := bundle.DeviceModules
+	shadowed, err := bundle.mergeDeviceModules(document, archived, options)
+	if err != nil {
+		return nil, err
+	}
+	if options.DeviceModules != nil && (len(previousDeviceModules) > 0 || len(bundle.DeviceModules) > 0) {
+		bundle.Profile, err = json.Marshal(document)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.RefreshSources || options.Modules != nil || options.DeviceModules != nil {
+		if err := bundle.refreshSources(ctx, archived, previousDeviceModules, options, read); err != nil {
 			return nil, err
 		}
 	}
@@ -400,7 +423,7 @@ func rebind(ctx context.Context, path string, options PrepareOptions, read func(
 		return nil, preparationValidationError(diagnostics)
 	}
 	original := bundle.Summary
-	bundle.Summary = bundle.describePreparation(eff, archived, options.Modules)
+	bundle.Summary = bundle.describePreparation(eff, archived, options, shadowed)
 	bundle.Summary.Format = original.Format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = original.Resources

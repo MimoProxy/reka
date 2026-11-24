@@ -2,6 +2,7 @@ package profile
 
 import (
 	"encoding/json"
+	"slices"
 	"strconv"
 
 	"github.com/MimoProxy/reka/internal/api"
@@ -10,11 +11,13 @@ import (
 	"github.com/MimoProxy/reka/internal/config/module"
 )
 
-// ModuleSummary describes a declared module. Report and hostnames describe the
-// converted module when enabled. Use ModuleReport for the line-by-line report.
+// ModuleSummary describes a declared module, including shadowed device entries.
+// Use ModuleReport for the line-by-line report of an effective module.
 type ModuleSummary struct {
 	ID        string                   `json:"id"`
 	Enabled   bool                     `json:"enabled"`
+	Origin    string                   `json:"origin"`
+	Shadowed  bool                     `json:"shadowed,omitempty"`
 	Name      string                   `json:"name,omitempty"`
 	Desc      string                   `json:"desc,omitempty"`
 	Arguments []module.Argument        `json:"arguments,omitempty"`
@@ -38,7 +41,7 @@ type MITMHostname struct {
 	Source   string `json:"source,omitempty"`
 }
 
-func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Profile, snapshots map[string]string) Summary {
+func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Profile, options PrepareOptions, shadowed []ModuleSummary) Summary {
 	summary := Describe(eff)
 	var hostsByModule map[string][]string
 	if hasMITMSettings(eff) {
@@ -59,11 +62,11 @@ func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Prof
 			}
 		}
 	}
-	if profile == nil {
-		return summary
-	}
 	for _, def := range profile.Modules {
-		entry := ModuleSummary{ID: def.ID, Enabled: def.IsEnabled()}
+		entry := ModuleSummary{ID: def.ID, Enabled: def.IsEnabled(), Origin: "profile"}
+		if slices.Contains(b.DeviceModules, def.ID) {
+			entry.Origin = "device"
+		}
 		if report, ok := eff.Modules[def.ID]; ok {
 			entry.Name, entry.Desc, entry.Arguments = report.Name, report.Desc, report.Arguments
 			entry.Report = &api.ModuleReportSummary{Partial: report.Partial, CanApply: report.CanApply,
@@ -73,14 +76,15 @@ func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Prof
 				// An overlay can edit or remove the module's contributed hosts.
 				entry.Hostnames = b.moduleHostnames(def)
 			}
-		} else if path := snapshots[def.ID]; path != "" {
+		} else if path := options.Modules[def.ID]; path != "" {
 			if snapshot, err := LoadModuleSnapshot(path); err == nil && snapshot.Source.ID == def.ID && snapshot.Source.Module.Request == def.RequestHash() {
 				meta, _ := module.Inspect(snapshot.Resources[snapshot.Source.Lock.Root], def.Arguments)
 				entry.Name, entry.Desc, entry.Arguments = meta.Name, meta.Desc, meta.Arguments
 			}
-		} else if snapshots == nil {
+		} else if options.Modules == nil && (entry.Origin == "profile" || options.DeviceModules == nil) {
 			for _, previous := range b.Summary.Modules {
-				if previous.ID == def.ID && !previous.Enabled {
+				if previous.ID == def.ID && !previous.Enabled && !previous.Shadowed &&
+					(previous.Origin == entry.Origin || previous.Origin == "" && entry.Origin == "profile") {
 					entry.Name, entry.Desc, entry.Arguments = previous.Name, previous.Desc, previous.Arguments
 					break
 				}
@@ -88,6 +92,7 @@ func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Prof
 		}
 		summary.Modules = append(summary.Modules, entry)
 	}
+	summary.Modules = append(summary.Modules, shadowed...)
 	return summary
 }
 
@@ -109,10 +114,7 @@ func (b *Bundle) moduleHostnames(def model.Module) []string {
 		return nil
 	}
 	for _, value := range doc.Sources {
-		var entry struct {
-			ID string `json:"id"`
-			sourceResources
-		}
+		var entry sourceResources
 		if json.Unmarshal(value, &entry) != nil || entry.ID != def.ID || entry.Module == nil || entry.Lock == nil {
 			continue
 		}
