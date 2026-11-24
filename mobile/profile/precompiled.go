@@ -51,6 +51,8 @@ func readPrecompiledRuleSet(r io.Reader) *router.PrecompiledRuleSet {
 
 func (b *Bundle) compileForPreparation(secrets secret.Store) (*compile.Effective, model.Diagnostics) {
 	opts := b.compileOptions(b.readResource, secrets, true)
+	// The app uses hostname provenance to explain the composed MITM settings.
+	opts.OmitProvenance = false
 	opts.MaxPrecompiledRuleBytes = iosRuleMemoryBudget
 	sets := make(map[string]string)
 	blobs := make(map[string][]byte)
@@ -67,6 +69,9 @@ func (b *Bundle) compileForPreparation(secrets secret.Store) (*compile.Effective
 	if diagnostics.HasErrors() || b.Precompiled == nil && len(sets) == 0 {
 		return eff, diagnostics
 	}
+	for hash := range b.requiredSourceResources() {
+		delete(coverage, hash)
+	}
 	b.Resources = b.originalResources()
 	maps.Copy(b.Resources, blobs)
 	b.precompiledCoverage = coverage
@@ -82,8 +87,11 @@ func (b *Bundle) originalResources() map[string][]byte {
 	resources := make(map[string][]byte, len(b.Resources))
 	maps.Copy(resources, b.Resources)
 	if b.Precompiled != nil {
+		required := b.requiredSourceResources()
 		for _, hash := range b.Precompiled.Sets {
-			delete(resources, hash)
+			if !required[hash] {
+				delete(resources, hash)
+			}
 		}
 	}
 	return resources

@@ -3,33 +3,22 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"os"
-	"path/filepath"
 	"reflect"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/model"
-	"github.com/MimoProxy/reka/internal/config/module"
+	"github.com/MimoProxy/reka/internal/config/moduleacquire"
 	"github.com/MimoProxy/reka/internal/config/store"
-	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/subscription"
 )
-
-const maxModuleBundleSize = 32 << 20
 
 func moduleSpecHash(def model.Module) string {
 	// Enabled affects scheduling, but cannot change the downloaded bundle.
 	def.Enabled = nil
 	data, _ := json.Marshal(def)
 	return resource.Hash(data)
-}
-
-func moduleSnapshotMatches(def model.Module, src model.Source) bool {
-	return src.Module != nil && src.Module.Format == model.ModuleFormatSurge && src.Lock != nil &&
-		src.Module.Request == def.RequestHash() && resource.ValidHash(src.Lock.Root)
 }
 
 func toModuleStatus(status SubscriptionStatus) api.ModuleStatus {
@@ -51,7 +40,7 @@ func (m *RefreshManager) moduleStatus(def model.Module, src model.Source, revisi
 	if r.SpecHash != moduleSpecHash(def) {
 		status.State, status.Stale = "pending", true
 	}
-	if moduleSnapshotMatches(def, src) {
+	if moduleacquire.Matches(def, src) {
 		aligned := src.Lock.Root == status.RootHash && len(src.Lock.Resources)+1 == len(r.Entries)
 		for _, lock := range src.Lock.Resources {
 			aligned = aligned && r.Entries[lock.ID].Hash == lock.Hash
@@ -172,13 +161,7 @@ func (m *RefreshManager) refreshModule(ctx context.Context, id string, force boo
 	return update, &subscription.Error{Code: "refresh_conflict"}
 }
 
-type moduleSnapshot struct {
-	ID     string               `json:"id"`
-	Module model.ModuleSnapshot `json:"module"`
-	Lock   model.SourceLock     `json:"lock"`
-}
-
-func moduleSourceOp(src model.Source, id string, snapshot moduleSnapshot) model.Op {
+func moduleSourceOp(src model.Source, id string, snapshot moduleacquire.Snapshot) model.Op {
 	value, _ := json.Marshal(snapshot)
 	if src.ID == "" {
 		return model.Op{Op: "insert", Path: "/sources", Value: value}
@@ -186,101 +169,11 @@ func moduleSourceOp(src model.Source, id string, snapshot moduleSnapshot) model.
 	return model.Op{Op: "set", Path: model.JoinPath("/sources", id), Value: value}
 }
 
-func (m *RefreshManager) downloadModule(ctx context.Context, def model.Module, src model.Source, previous refreshRecord, force bool) (moduleSnapshot, refreshUpdate, error) {
+func (m *RefreshManager) downloadModule(ctx context.Context, def model.Module, src model.Source, previous refreshRecord, force bool) (moduleacquire.Snapshot, refreshUpdate, error) {
 	update := refreshUpdate{specHash: moduleSpecHash(def), manualOnly: def.File != ""}
-	if model.ValidModule(&def) != nil {
-		return moduleSnapshot{}, update, &subscription.Error{Code: "module_invalid"}
-	}
-	if src.ID != "" && src.Module == nil {
-		return moduleSnapshot{}, update, &subscription.Error{Code: "module_source_conflict"}
-	}
-	validated := make(map[string]subscription.Entry)
-	if moduleSnapshotMatches(def, src) {
-		if entry := previous.Entries["root"]; entry.Hash == src.Lock.Root {
-			validated["root"] = entry
-		}
-		for _, lock := range src.Lock.Resources {
-			if entry := previous.Entries[lock.ID]; entry.Hash == lock.Hash {
-				validated[lock.ID] = entry
-			}
-		}
-	}
-	interval := def.Interval
-	if interval == 0 {
-		interval = model.DefaultResourceInterval
-	}
-	fetcher := subscription.Fetcher{Client: m.client, Blobs: m.blobs, MaxBytes: model.MaxDocumentSize, MaxBundleBytes: maxModuleBundleSize}
-	batch := fetcher.Batch(validated, force)
-	var body []byte
-	var err error
-	if def.File != "" {
-		body, err = readModuleFile(def.File)
-		if err == nil {
-			body, err = batch.Inline("root", "module", "", body)
-		}
-	} else {
-		var url string
-		url, err = m.resolve(def.URL)
-		if err == nil {
-			body, err = batch.Fetch(ctx, "root", "module", "", url, nil, interval)
-		}
-	}
-	if err != nil {
-		return moduleSnapshot{}, update, err
-	}
-	meta, urls := module.Inspect(body, def.Arguments)
-	if len(urls) > model.MaxModuleResources {
-		return moduleSnapshot{}, update, &subscription.Error{Code: "too_many_module_resources"}
-	}
-	fetcher.MaxBytes = httprewrite.MaxMapLocalSize
-	locks := make([]model.ResourceLock, 0, len(urls))
-	for _, url := range urls {
-		request := resource.Hash([]byte(url))
-		id := request[:24]
-		if _, err := batch.Fetch(ctx, id, "map-local", "", url, nil, interval); err != nil {
-			return moduleSnapshot{}, update, err
-		}
-		locks = append(locks, model.ResourceLock{ID: id, Kind: "map-local", Request: request, Hash: batch.Entries[id].Hash})
-	}
-	update.entries = batch.Entries
-	if def.URL != "" {
-		update.next = time.Now().UTC().Add(time.Duration(interval) * time.Second)
-		for _, entry := range batch.Entries {
-			if !entry.Next.IsZero() && entry.Next.Before(update.next) {
-				update.next = entry.Next
-			}
-		}
-	}
-	return moduleSnapshot{
-		ID:     def.ID,
-		Module: model.ModuleSnapshot{Format: model.ModuleFormatSurge, Request: def.RequestHash(), Name: meta.Name, Desc: meta.Desc},
-		Lock:   model.SourceLock{Root: batch.Entries["root"].Hash, Resources: locks},
-	}, update, nil
-}
-
-func readModuleFile(path string) ([]byte, error) {
-	root, err := os.OpenRoot(filepath.Dir(path))
-	if err != nil {
-		return nil, &subscription.Error{Code: "module_file_unavailable"}
-	}
-	defer root.Close()
-	name := filepath.Base(path)
-	info, err := root.Stat(name)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, &subscription.Error{Code: "module_file_unavailable"}
-	}
-	f, err := root.OpenFile(name, os.O_RDONLY|moduleFileNonblocking, 0)
-	if err != nil {
-		return nil, &subscription.Error{Code: "module_file_unavailable"}
-	}
-	defer f.Close()
-	info, err = f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > model.MaxDocumentSize {
-		return nil, &subscription.Error{Code: "module_file_invalid"}
-	}
-	data, err := io.ReadAll(io.LimitReader(f, model.MaxDocumentSize+1))
-	if err != nil || len(data) == 0 || len(data) > model.MaxDocumentSize {
-		return nil, &subscription.Error{Code: "module_file_invalid"}
-	}
-	return data, nil
+	result, err := moduleacquire.Acquire(ctx, def, moduleacquire.Options{
+		Client: m.client, Blobs: m.blobs, ResolveURL: m.resolve, Previous: src, PreviousEntries: previous.Entries, Force: force,
+	})
+	update.entries, update.next = result.Entries, result.Next
+	return result.Snapshot, update, err
 }

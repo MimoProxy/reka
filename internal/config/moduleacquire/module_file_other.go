@@ -1,5 +1,5 @@
 //go:build !unix
 
-package service
+package moduleacquire
 
 const moduleFileNonblocking = 0
