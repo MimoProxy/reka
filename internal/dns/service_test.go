@@ -2,11 +2,13 @@ package dns
 
 import (
 	"context"
-	D "github.com/miekg/dns"
 	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/history"
+	D "github.com/miekg/dns"
 )
 
 func service(t *testing.T, c Config, fn ExchangeFunc) *Service {
@@ -104,5 +106,61 @@ func TestFallbackRetainsBudgetAfterPrimaryTimeout(t *testing.T) {
 	got, err := s.Lookup(ctx, "fallback.test", "normal")
 	if err != nil || len(got) != 1 || got[0].String() != "192.0.2.2" {
 		t.Fatal("fallback budget exhausted", got, err)
+	}
+}
+
+func TestFakeIPAnswersServiceBindingsLocally(t *testing.T) {
+	for _, tc := range []struct {
+		mode           string
+		faked, forward string
+	}{{"", "faked.test", "filtered.test"}, {"whitelist", "filtered.test", "faked.test"}} {
+		t.Run("mode="+tc.mode, func(t *testing.T) {
+			var forwarded []D.Question
+			cfg := Config{Mode: "fake-ip", Nameservers: []string{"192.0.2.1"}, FakeFilter: []string{"filtered.test"}, FakeFilterMode: tc.mode}
+			s := service(t, cfg, func(_ context.Context, _ Endpoint, q *D.Msg, _ func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
+				forwarded = append(forwarded, q.Question[0])
+				m := new(D.Msg).SetReply(q)
+				if q.Question[0].Qtype == D.TypeA {
+					m.Answer = []D.RR{addressRR(q.Question[0].Name, D.TypeA, netip.MustParseAddr("192.0.2.8"), 10)}
+				}
+				return m, nil
+			})
+			t.Cleanup(s.Retire)
+			observed := make(chan history.DNSObservation, 1)
+			ctx := history.WithDNSObserver(t.Context(), func(o history.DNSObservation) { observed <- o })
+			exchange := func(name string, typ uint16, fake bool) (*D.Msg, string) {
+				t.Helper()
+				q := new(D.Msg).SetQuestion(D.Fqdn(name), typ)
+				m, err := s.Exchange(ctx, q, "normal", fake)
+				if err != nil || m.Rcode != D.RcodeSuccess {
+					t.Fatalf("%s %s: %v, %v", name, D.TypeToString[typ], m, err)
+				}
+				return m, (<-observed).Source
+			}
+
+			for _, typ := range []uint16{D.TypeHTTPS, D.TypeSVCB} {
+				if m, source := exchange(tc.faked, typ, true); len(m.Answer) != 0 || source != "fake_ip_empty" || len(forwarded) != 0 {
+					t.Fatalf("faked %s = %v from %s, forwarded %v", D.TypeToString[typ], m.Answer, source, forwarded)
+				}
+			}
+			m, source := exchange(tc.faked, D.TypeA, true)
+			if ip, _ := netip.AddrFromSlice(m.Answer[0].(*D.A).A); source != "fake_ip" || !netip.MustParsePrefix(s.cfg.FakeRange).Contains(ip) || len(forwarded) != 0 {
+				t.Fatalf("faked A = %v from %s, forwarded %v", m.Answer, source, forwarded)
+			}
+
+			// Diagnostics without fake answers and domains left out of fake-ip
+			// still reach the configured resolvers.
+			for _, tc := range []struct {
+				name string
+				typ  uint16
+				fake bool
+			}{{tc.faked, D.TypeHTTPS, false}, {tc.forward, D.TypeHTTPS, true}, {tc.forward, D.TypeSVCB, true}, {tc.forward, D.TypeA, true}} {
+				before := len(forwarded)
+				if _, source := exchange(tc.name, tc.typ, tc.fake); source != "upstream" || len(forwarded) != before+1 ||
+					forwarded[before].Name != D.Fqdn(tc.name) || forwarded[before].Qtype != tc.typ {
+					t.Fatalf("%s %s from %s, forwarded %v", tc.name, D.TypeToString[tc.typ], source, forwarded)
+				}
+			}
+		})
 	}
 }
