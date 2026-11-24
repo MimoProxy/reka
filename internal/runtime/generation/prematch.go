@@ -66,6 +66,11 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 		if ok {
 			switch out.Type() {
 			case "reject-drop":
+				// A dropped TCP flow completes its handshake and then stalls;
+				// dropping the SYN instead would change what the client sees.
+				if md.Network != "udp" {
+					return sagernet.PreMatchVerdict{}
+				}
 				action = sagernet.PreMatchDrop
 			case model.OutboundReject:
 			default:

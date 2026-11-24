@@ -154,11 +154,11 @@ func (s *udpSession) flow(dest M.Socksaddr) *udpFlow {
 		}
 		delete(s.rejected, dest)
 	}
-	md := toMetadata(s.metadata)
-	md.InboundProtocol = inboundProtocol(s.ctx, md.InboundType)
+	metadata := s.metadata
+	metadata.Destination = dest
+	md := toFlowMetadata(s.ctx, metadata)
 	md.InboundPort = s.inboundPort
 	md.Network = N.NetworkUDP
-	md.Destination = toDestination(dest)
 	ctx, cancel := context.WithCancel(s.ctx)
 	attempt := s.b.beginConnection(ctx, md)
 	ctx = withAttempt(ctx, attempt)

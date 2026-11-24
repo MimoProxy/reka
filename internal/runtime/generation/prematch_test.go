@@ -68,7 +68,8 @@ rules: [{match: {all: true}, outbound: proxy}]
 		{"default sniffing preserves a known sniffed domain", sniffedDomain, blocked, reject, "", ""},
 		{"existing sniffed domain may be replaced", "sniff: {enabled: true}\n" + sniffedDomain, blocked, cont, "", ""},
 		{"replacement sniffed domain may allow the flow", "sniff: {enabled: true}\n" + sniffedDomain, sniffed, cont, "direct", ""},
-		{"reject-drop TCP", drop, tcp, dropAction, "reject-drop", ""},
+		{"reject-drop TCP keeps its handshake", drop, tcp, cont, "reject-drop", ""},
+		{"reject-drop UDP", drop, udp, dropAction, "reject-drop", ""},
 		{"reject-drop UDP bypasses block-quic", "routing: {block-quic: all}\n" + drop, udp, dropAction, "reject-drop", ""},
 		{"named reject outbound", `outbounds: [{id: denied, type: reject}]
 rules: [{match: {all: true}, outbound: denied}]
@@ -103,7 +104,8 @@ rules: [{match: {all: true}, outbound: tcp-only}]
 		{"block-quic with already-known QUIC", "routing: {block-quic: all}\n" + direct, quic, reject, "", "block-quic"},
 		{"block-quic cannot assume other UDP is QUIC", "routing: {block-quic: all}\nsniff: {enabled: true}\n" + direct, preMatchTestMetadata("udp", 8443), cont, "direct", ""},
 		{"global mode ignores saved rules", "routing: {mode: global, global: reject}\n" + direct, tcp, reject, "", ""},
-		{"global mode selects drop", "routing: {mode: global, global: reject-drop}\n" + drop, tcp, dropAction, "reject-drop", ""},
+		{"global mode selects drop for UDP", "routing: {mode: global, global: reject-drop}\n" + drop, udp, dropAction, "reject-drop", ""},
+		{"global mode drop keeps TCP handshakes", "routing: {mode: global, global: reject-drop}\n" + drop, tcp, cont, "reject-drop", ""},
 		{"direct mode ignores saved rules", "routing: {mode: direct}\n" + ipReject, tcp, cont, "direct", ""},
 	}
 	for _, tc := range cases {
@@ -154,7 +156,7 @@ rules:
 	if _, err := e.SetNetworkScene("lab"); err != nil {
 		t.Fatal(err)
 	}
-	md := preMatchTestMetadata("tcp", 443)
+	md := preMatchTestMetadata("udp", 8443)
 	md.InboundPort = 8080
 	info := checkPreMatchAgainstRoute(t, e, observations, md, sagernet.PreMatchDrop, "reject-drop", "")
 	if info.RuleID != "deny-lab" || info.NetworkScene != "lab" || info.PolicyName != "Policy" || info.OutboundName != "Drop" {
@@ -196,7 +198,7 @@ rules:
 		return ip
 	}
 	mapped, recent := allocate("mapped.test"), allocate("recent.test")
-	md := preMatchTestMetadata("tcp", 443)
+	md := preMatchTestMetadata("udp", 8443)
 	md.Destination.Addr = mapped
 	if got := e.preMatch(md); got.Action != sagernet.PreMatchDrop || got.Info.(*FlowInfo).DestinationDomain != "mapped.test" {
 		t.Fatalf("mapped destination returned %+v", got)
@@ -217,7 +219,7 @@ rules:
 }
 
 func TestPreMatchUsesObservedPoliciesWithoutAdvancingRoundRobin(t *testing.T) {
-	e, observations := preMatchTestEngine(t, EngineOptions{})
+	e, observations := preMatchTestEngine(t, EngineOptions{HostPacketFlow: true})
 	eff, diagnostics := compile.Compile([]byte(`schema-version: 1
 groups:
   - {id: balanced, type: load-balance, strategy: round-robin, lazy: false, members: [reject, direct]}
@@ -255,7 +257,7 @@ rules:
 		}
 		time.Sleep(time.Millisecond)
 	}
-	checkPreMatchAgainstRoute(t, e, observations, preMatchTestMetadata("tcp", 8443), sagernet.PreMatchDrop, "reject-drop", "")
+	checkPreMatchAgainstRoute(t, e, observations, preMatchTestMetadata("udp", 8443), sagernet.PreMatchDrop, "reject-drop", "")
 	if next := manager.Peek("balanced", "", ""); next != "reject" {
 		t.Fatalf("unexpected first member %q", next)
 	}

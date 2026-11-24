@@ -86,6 +86,9 @@ type Backend struct {
 	router            *router
 	conns             connTable
 
+	preMatchReportOnce sync.Once
+	preMatchReports    chan preMatchReport
+
 	halfCloseTimeout time.Duration
 	udpTimeout       time.Duration
 	searcher         process.Searcher

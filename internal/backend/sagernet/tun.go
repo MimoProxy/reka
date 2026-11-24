@@ -17,6 +17,7 @@ import (
 	D "github.com/miekg/dns"
 	"github.com/sagernet/sing-box/adapter"
 	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-tun/gtcpip/header"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -140,15 +141,40 @@ func (t *TUNInbound) self(a netip.Addr) bool {
 	}
 	return false
 }
-func (t *TUNInbound) JudgeFlow(_ uint8, _ netip.AddrPort, d netip.AddrPort, _ []byte) tun.FlowVerdict {
+func (t *TUNInbound) JudgeFlow(protocol uint8, source, target netip.AddrPort, _ []byte) tun.FlowVerdict {
 	// DNS can target the gateway; DNS is consumed locally, never relayed.
-	if d.Port() == 53 && t.cfg.DNSHijack {
+	if target.Port() == 53 && t.cfg.DNSHijack {
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	if t.self(d.Addr()) {
+	if t.self(target.Addr()) {
 		return tun.FlowVerdict{Action: tun.ActionDrop}
 	}
-	return tun.FlowVerdict{Action: tun.ActionAccept}
+	var network string
+	switch protocol {
+	case uint8(header.TCPProtocolNumber):
+		network = N.NetworkTCP
+	case uint8(header.UDPProtocolNumber):
+		network = N.NetworkUDP
+	default:
+		return tun.FlowVerdict{Action: tun.ActionAccept}
+	}
+	// TUN connections have no parser-supplied protocol in their context.
+	metadata := t.metadata(M.SocksaddrFromNetIP(source), M.SocksaddrFromNetIP(target))
+	metadata.Network = network
+	md := toFlowMetadata(context.Background(), metadata)
+	// Let cached verdicts expire on idle timeout; resetting the stack on generation changes would disrupt live flows.
+	v := t.b.router.preMatch(md)
+	var action tun.FlowAction
+	switch v.Action {
+	case PreMatchReject:
+		action = tun.ActionReject
+	case PreMatchDrop:
+		action = tun.ActionDrop
+	default:
+		return tun.FlowVerdict{Action: tun.ActionAccept}
+	}
+	t.b.reportPreMatched(md, v)
+	return tun.FlowVerdict{Action: action}
 }
 func (t *TUNInbound) tryDNSSlot() bool {
 	select {

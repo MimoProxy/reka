@@ -159,6 +159,7 @@ func (h *packetFlowHandler) JudgeFlow(protocol uint8, source, target netip.AddrP
 	if h.cfg.DNSHijack && target.Port() == 53 && protocol == uint8(header.UDPProtocolNumber) {
 		return tun.FlowVerdict{Action: tun.ActionHijackDNS}
 	}
+	// Run TUN pre-matching before touching the admission tables.
 	verdict := h.TUNInbound.JudgeFlow(protocol, source, target, first)
 	if verdict.Action != tun.ActionAccept || (h.cfg.DNSHijack && target.Port() == 53) {
 		return verdict

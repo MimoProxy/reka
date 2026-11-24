@@ -44,8 +44,12 @@ func attemptFromContext(ctx context.Context) *connectionAttempt {
 }
 
 func (b *Backend) beginConnection(ctx context.Context, md Metadata) *connectionAttempt {
+	return b.beginConnectionAt(ctx, md, time.Now())
+}
+
+func (b *Backend) beginConnectionAt(ctx context.Context, md Metadata, start time.Time) *connectionAttempt {
 	c := api.Connection{
-		ID: b.conns.next.Add(1), Start: time.Now(), Inbound: md.Inbound, Network: md.Network,
+		ID: b.conns.next.Add(1), Start: start, Inbound: md.Inbound, Network: md.Network,
 		Destination: md.Destination.String(), FlowInfo: api.FlowInfo{RuleIndex: -1},
 	}
 	if md.Source.IsValid() {

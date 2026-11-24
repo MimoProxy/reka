@@ -154,10 +154,15 @@ func toDestination(d M.Socksaddr) Destination {
 	return out
 }
 
-func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	metadata.Network = N.NetworkTCP
+func toFlowMetadata(ctx context.Context, metadata adapter.InboundContext) Metadata {
 	md := toMetadata(metadata)
 	md.InboundProtocol = inboundProtocol(ctx, md.InboundType)
+	return md
+}
+
+func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	metadata.Network = N.NetworkTCP
+	md := toFlowMetadata(ctx, metadata)
 	if md.InboundType != "tun" && conn.LocalAddr() != nil {
 		if address, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
 			md.InboundPort = address.Port()
