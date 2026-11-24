@@ -122,7 +122,7 @@ func TestCompactDomainSetAgreesWithOrderedRules(t *testing.T) {
 	}
 	evaluate := func(set *RuleSet, raw string) bool {
 		md := Metadata{Domain: NormalizeDomain(raw)}
-		return set.matches(&evaluation{md: &md, lookupRule: -1})
+		return set.matches(&evaluation{md: md, lookupRule: -1})
 	}
 	for query, want := range wanted {
 		if got, old, restored := evaluate(compact, query), evaluate(ordered, query), evaluate(precompiled, query); got != want || old != want || restored != want {

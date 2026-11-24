@@ -354,8 +354,8 @@ func TestIndexMatchesLinear(t *testing.T) {
 					env.addrs[md.Domain] = []netip.Addr{netip.AddrFrom4([4]byte{10, byte(rng.IntN(5)), 2, 2})}
 				}
 			}
-			got := rs.first(&evaluation{ctx: context.Background(), md: &md, env: env})
-			want := rs.firstLinear(&evaluation{ctx: context.Background(), md: &md, env: env})
+			got := rs.first(&evaluation{ctx: context.Background(), md: md, env: env})
+			want := rs.firstLinear(&evaluation{ctx: context.Background(), md: md, env: env})
 			if got != want {
 				t.Fatalf("round %d: %+v: index %d, linear %d\nrules: %v", round, md, got, want, specs)
 			}

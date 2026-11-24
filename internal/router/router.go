@@ -30,6 +30,8 @@ type RuleSet struct {
 
 	hasProcess bool
 	hasDomain  bool
+	// firstDomain bounds the prefix that can be matched before sniffing.
+	firstDomain int
 }
 
 // CompileRules compiles specs in order.
@@ -39,6 +41,7 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 		exact:        make(map[string]int),
 		suffix:       make(map[string]int),
 		strictSuffix: make(map[string]int),
+		firstDomain:  len(specs),
 	}
 	var errs []error
 	for i, spec := range specs {
@@ -49,7 +52,10 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 		}
 		rs.rules = append(rs.rules, r)
 		rs.maxDepth = max(rs.maxDepth, ruleDepth(r))
-		rs.hasDomain = rs.hasDomain || matchesDomain(r)
+		if !rs.hasDomain && matchesDomain(r) {
+			rs.hasDomain = true
+			rs.firstDomain = i
+		}
 		switch spec.Kind {
 		case KindDomain:
 			if spec.compact != nil {
@@ -167,10 +173,12 @@ type Env interface {
 var ErrNoLookup = errors.New("router: lookup not allowed")
 
 type evaluation struct {
-	noResolve bool
-	ctx       context.Context
-	md        *Metadata
-	env       Env
+	noResolve     bool
+	packetOnly    bool
+	domainPending bool
+	ctx           context.Context
+	md            Metadata
+	env           Env
 
 	resolved        bool
 	addrs           []netip.Addr
@@ -183,7 +191,7 @@ type evaluation struct {
 	processOK       bool
 	processUID      uint32
 	processUIDKnown bool
-	stopped         bool // a lookup returned ErrNoLookup
+	stopped         bool // a lookup was disallowed
 	stoppedAt       int
 }
 
@@ -191,10 +199,15 @@ func (e *evaluation) destinationAddr(index int) (netip.Addr, bool) {
 	if e.md.Addr.IsValid() {
 		return e.md.Addr, true
 	}
-	if e.md.Domain == "" {
+	// A pending domain can make a lookup necessary even without an address.
+	if e.md.Domain == "" && !e.domainPending {
 		return netip.Addr{}, false
 	}
 	if !e.resolved {
+		if e.packetOnly {
+			e.stopped, e.stoppedAt = true, index
+			return netip.Addr{}, false
+		}
 		e.resolved = true
 		if e.env == nil {
 			e.resolveErr = errors.New("no resolver")
@@ -228,6 +241,10 @@ func pickAddr(addrs []netip.Addr) netip.Addr {
 
 func (e *evaluation) processName(index int) (string, bool) {
 	if !e.processDone {
+		if e.packetOnly {
+			e.stopped, e.stoppedAt = true, index
+			return "", false
+		}
 		e.processDone = true
 		if e.env != nil {
 			if env, ok := e.env.(ProcessInfoEnv); ok {
@@ -243,7 +260,7 @@ func (e *evaluation) processName(index int) (string, bool) {
 }
 
 func (e *evaluation) match(index int, r *rule) bool {
-	md := e.md
+	md := &e.md
 	switch r.spec.Kind {
 	case KindAnd, KindOr, KindNot:
 		for _, child := range r.children {
@@ -631,45 +648,65 @@ func (r *Router) Route(ctx context.Context, md Metadata, env Env) Decision {
 // PASS target falls through. The indexed first match remains the normal path;
 // only rules after an actual PASS need a linear continuation.
 func (r *Router) RouteWithResolver(ctx context.Context, md Metadata, env Env, resolve func(*Decision)) Decision {
-	e := &evaluation{ctx: ctx, md: &md, env: env, lookupRule: -1}
+	e := &evaluation{ctx: ctx, md: md, env: env, lookupRule: -1}
 	return r.decideWithPass(e, resolve)
 }
 func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision {
 	index := r.rules.first(e)
 	for {
-		d := r.decide(e, index)
+		d := r.decisionForRule(e, index)
+		r.resolveDecision(&d)
 		if resolve != nil {
 			resolve(&d)
 		}
-		if d.Outbound != "pass" {
+		if !d.passes(index) {
 			return d
 		}
-		if index < 0 {
-			d.Outbound = ""
-			return d
+		var ok bool
+		index, ok = r.rules.nextAfterPass(e, index, len(r.rules.rules))
+		if !ok {
+			return Decision{RuleIndex: -1, LookupRule: -1}
 		}
-		next := -1
-		for i := index + 1; i < len(r.rules.rules); i++ {
-			if e.match(i, r.rules.rules[i]) {
-				next = i
-				break
-			}
-			if e.stopped {
-				return Decision{RuleIndex: -1, LookupRule: -1}
-			}
-		}
-		index = next
 	}
-}
-func (r *Router) decide(e *evaluation, index int) Decision {
-	if index >= 0 {
-		spec := r.rules.rules[index].spec
-		return r.decideTarget(e, index, spec, spec.Target)
-	}
-	return r.decideTarget(e, -1, RuleSpec{}, r.final)
 }
 
-func (r *Router) decideTarget(e *evaluation, index int, spec RuleSpec, target string) Decision {
+// passes handles PASS for a saved rule or the final target.
+func (d *Decision) passes(index int) bool {
+	if d.Outbound != "pass" {
+		return false
+	}
+	if index < 0 {
+		d.Outbound = ""
+		return false
+	}
+	return true
+}
+
+// nextAfterPass scans in order up to limit, since a passed match can hide
+// later matches in the domain index. Reaching a partial limit is inconclusive.
+func (rs *RuleSet) nextAfterPass(e *evaluation, index, limit int) (int, bool) {
+	for i := index + 1; i < limit; i++ {
+		if e.match(i, rs.rules[i]) {
+			return i, true
+		}
+		if e.stopped {
+			return -1, false
+		}
+	}
+	return -1, limit == len(rs.rules)
+}
+
+func (r *Router) decisionForRule(e *evaluation, index int) Decision {
+	var spec RuleSpec
+	target := r.final
+	if index >= 0 {
+		spec = r.rules.rules[index].spec
+		target = spec.Target
+	}
+	return r.decisionForTarget(e, index, spec, target)
+}
+
+func (r *Router) decisionForTarget(e *evaluation, index int, spec RuleSpec, target string) Decision {
 	d := Decision{
 		RuleIndex: index, Rule: spec, Target: target, Resolved: e.addrs, ResolveError: e.resolveErr,
 		LookupRule: e.lookupRule, Process: e.process,
@@ -680,12 +717,14 @@ func (r *Router) decideTarget(e *evaluation, index int, spec RuleSpec, target st
 			d.lookupRuleSpec = &r.rules.rules[e.lookupRule].spec
 		}
 	}
-	if d.Target == "" {
-		return d
-	}
-	// New checked every target, so resolve cannot fail here.
-	d.Outbound, d.Chain, _ = r.Resolve(d.Target)
 	return d
+}
+
+func (r *Router) resolveDecision(d *Decision) {
+	if d.Target != "" {
+		// New checked every target, so resolve cannot fail here.
+		d.Outbound, d.Chain, _ = r.Resolve(d.Target)
+	}
 }
 
 // Explanation is a Decision plus why evaluation may not have finished.
@@ -720,7 +759,7 @@ func (r *Router) OverrideActive(rule TimedRule, at time.Time) bool {
 }
 
 func (r *Router) ExplainWithOverrides(ctx context.Context, md Metadata, env Env, resolve func(*Decision), overrides []TimedRule, at time.Time) Explanation {
-	e := &evaluation{ctx: ctx, md: &md, env: env, lookupRule: -1}
+	e := &evaluation{ctx: ctx, md: md, env: env, lookupRule: -1}
 	for i, override := range overrides {
 		if !r.OverrideActive(override, at) {
 			continue
@@ -738,7 +777,8 @@ func (r *Router) ExplainWithOverrides(ctx context.Context, md Metadata, env Env,
 		if index < 0 {
 			continue
 		}
-		d := r.decideTarget(e, -1, spec, spec.Target)
+		d := r.decisionForTarget(e, -1, spec, spec.Target)
+		r.resolveDecision(&d)
 		d.Temporary = true
 		if resolve != nil {
 			resolve(&d)

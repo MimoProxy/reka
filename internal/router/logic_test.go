@@ -107,8 +107,8 @@ func TestGeoIPLANAndPatternIndex(t *testing.T) {
 	}
 	for _, domain := range []string{"example.org", "exact.example.org", "x.example.org", "badexample.org", "x.wild.test", "a.b.wild.test"} {
 		md := Metadata{Domain: domain}
-		a := &evaluation{ctx: context.Background(), md: &md}
-		b := &evaluation{ctx: context.Background(), md: &md}
+		a := &evaluation{ctx: context.Background(), md: md}
+		b := &evaluation{ctx: context.Background(), md: md}
 		if set.first(a) != set.firstLinear(b) {
 			t.Fatal(domain)
 		}
