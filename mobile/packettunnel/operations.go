@@ -107,6 +107,11 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return s.historyPage(history.Logs, op)
 	case "probe":
 		return s.probe(op)
+	case "diagnosticRoute":
+		if s.profile == nil {
+			return nil, errors.New("the operation requires a profile")
+		}
+		return s.profile.engine.ResolveDiagnosticRoute(op.Member, op.URL)
 	case "ipCheck":
 		if s.profile == nil {
 			return nil, errors.New("the operation requires a profile")
