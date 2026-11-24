@@ -3,6 +3,7 @@
 package packettunnel
 
 import (
+	"github.com/MimoProxy/reka/internal/mitm/ca"
 	"github.com/sagernet/sing/common/memory"
 )
 
@@ -28,6 +29,7 @@ func (s *Session) resetForMemory(reason string) int {
 	if s.ctx.Err() != nil {
 		return 0
 	}
+	ca.PurgeAll()
 	var closed int
 	if s.profile != nil {
 		closed = s.profile.engine.CloseConnections(nil)

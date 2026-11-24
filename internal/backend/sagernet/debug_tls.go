@@ -1,20 +1,15 @@
 package sagernet
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"net/netip"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MimoProxy/reka/internal/mitm/ca"
 )
 
 type debugAuthority struct {
@@ -67,45 +62,17 @@ func newDebugCertificates(targets []string, expires time.Time) (string, map[debu
 		}
 		certificates[authority] = tls.Certificate{}
 	}
-	start := time.Now().Add(-time.Minute)
-	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return "", nil, err
-	}
-	root := &x509.Certificate{
-		Subject:   pkix.Name{CommonName: "Mimo Reka HTTPS Debug"},
-		NotBefore: start, NotAfter: expires,
-		IsCA: true, BasicConstraintsValid: true, MaxPathLenZero: true,
-		KeyUsage: x509.KeyUsageCertSign,
-	}
-	rootDER, err := x509.CreateCertificate(rand.Reader, root, root, &rootKey.PublicKey, rootKey)
+	root, err := ca.Generate(ca.GenerateOptions{CommonName: "Mimo Reka HTTPS Debug", NotAfter: expires})
 	if err != nil {
 		return "", nil, err
 	}
 	for authority := range certificates {
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		certificate, err := root.Issue(authority.host, expires)
 		if err != nil {
 			return "", nil, err
 		}
-		leaf := &x509.Certificate{
-			Subject:  pkix.Name{CommonName: authority.host},
-			DNSNames: []string{authority.host}, NotBefore: start, NotAfter: expires,
-			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			// Bound the identity with a fresh serial even for different ports of one name.
-			SerialNumber: new(big.Int).SetBytes(randomDebugBytes(16)),
-		}
-		der, err := x509.CreateCertificate(rand.Reader, leaf, root, &key.PublicKey, rootKey)
-		if err != nil {
-			return "", nil, err
-		}
-		certificates[authority] = tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+		certificates[authority] = certificate
 	}
 	// Only leaf keys survive initialization. The signing key is never stored or exported.
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})), certificates, nil
-}
-
-func randomDebugBytes(size int) []byte {
-	b := make([]byte, size)
-	_, _ = rand.Read(b)
-	return b
+	return string(root.CertificatePEM()), certificates, nil
 }

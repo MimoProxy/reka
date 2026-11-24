@@ -534,7 +534,7 @@ func (p *preparer) ruleSetAsset(ctx context.Context, definition map[string]any, 
 		asset.Automatic, _ = download["automatic"].(bool)
 		interval := intervalSeconds(download["interval"])
 		if name, ref := secret.ParseRef(address); ref {
-			if p.options.Secrets == nil || secret.ValidName(name) != nil {
+			if p.options.Secrets == nil || secret.Reserved(name) || secret.ValidName(name) != nil {
 				return assetError(asset, errors.New("resource credential unavailable"))
 			}
 			address, err = p.options.Secrets.Get(name)

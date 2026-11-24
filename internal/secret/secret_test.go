@@ -108,3 +108,16 @@ func TestRef(t *testing.T) {
 		t.Fatal(n, ok)
 	}
 }
+
+func TestReserved(t *testing.T) {
+	for _, name := range []string{"mitm/ca", "mitm/other", "mitm/nested/entry"} {
+		if !Reserved(name) {
+			t.Errorf("Reserved(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"mitm", "mitm-other/ca", "outbounds/mitm/password"} {
+		if Reserved(name) {
+			t.Errorf("Reserved(%q) = true", name)
+		}
+	}
+}

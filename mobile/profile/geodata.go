@@ -137,7 +137,7 @@ func (p *preparer) geodataSource(kind string, db model.GeoDatabase) (geodataSour
 		}
 		if name, ref := secret.ParseRef(source.address); ref {
 			source.protected = true
-			if p.options.Secrets == nil || secret.ValidName(name) != nil {
+			if p.options.Secrets == nil || secret.Reserved(name) || secret.ValidName(name) != nil {
 				return geodataSource{}, errors.New("resource credential unavailable")
 			}
 			var err error

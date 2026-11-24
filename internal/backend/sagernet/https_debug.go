@@ -3,6 +3,7 @@ package sagernet
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -76,7 +77,9 @@ func (b *Backend) startHTTPSDebug(request api.HTTPSDebugRequest, roots *x509.Cer
 		targets = append(targets, target.String())
 	}
 	sort.Strings(targets)
-	password := hex.EncodeToString(randomDebugBytes(24))
+	var passwordBytes [24]byte
+	rand.Read(passwordBytes[:])
+	password := hex.EncodeToString(passwordBytes[:])
 	ctx, cancel := context.WithDeadline(b.ctx, expires)
 	maxClients := request.MaxClients
 	if maxClients <= 0 || maxClients > 16 {

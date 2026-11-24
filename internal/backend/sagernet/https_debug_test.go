@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,40 @@ import (
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
 )
+
+func TestDebugCertificatesUseSessionExpiry(t *testing.T) {
+	expires := time.Now().UTC().Truncate(time.Second).Add(time.Minute)
+	publicCA, certificates, err := newDebugCertificates([]string{"ORIGIN.test.", "origin.test:444"}, expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, rest := pem.Decode([]byte(publicCA))
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+		t.Fatal("expected a single public CA certificate")
+	}
+	root, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Subject.CommonName != "Mimo Reka HTTPS Debug" || !root.NotAfter.Equal(expires) {
+		t.Fatal("unexpected debug CA subject or expiry")
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	first := certificates[debugAuthority{host: "origin.test", port: "443"}].Leaf
+	second := certificates[debugAuthority{host: "origin.test", port: "444"}].Leaf
+	if first == nil || second == nil || first.SerialNumber.Cmp(second.SerialNumber) == 0 {
+		t.Fatal("expected a distinct leaf per target")
+	}
+	for _, leaf := range []*x509.Certificate{first, second} {
+		if !leaf.NotAfter.Equal(expires) {
+			t.Fatal("debug leaf does not expire with the session")
+		}
+		if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "origin.test", Roots: pool}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestHTTPSDebugAuthorizedCaptureAndNativeRoute(t *testing.T) {
 	const responseText = "HTTPS fixture response"

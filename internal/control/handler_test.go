@@ -16,6 +16,12 @@ import (
 
 func testSession(t *testing.T, secrets secret.Store) func(*testing.T, Request) Message {
 	t.Helper()
+	_, call := testSessionWithObserver(t, secrets, nil)
+	return call
+}
+
+func testSessionWithObserver(t *testing.T, secrets secret.Store, observe func([]byte)) (*service.Service, func(*testing.T, Request) Message) {
+	t.Helper()
 	engine := rt.NewEngine(rt.EngineOptions{Backend: sagernet.Options{Logger: quiet()}})
 	svc, err := service.Open(service.Options{StateRoot: t.TempDir(), Secrets: secrets, Engine: engine, Logger: quiet(), InitialProfile: []byte(testProfile)})
 	if err != nil {
@@ -33,7 +39,7 @@ func testSession(t *testing.T, secrets secret.Store) func(*testing.T, Request) M
 		t.Helper()
 		defer func() {
 			if p := recover(); p != nil {
-				t.Fatalf("%s panicked: %v", req.Method, p)
+				t.Fatalf("%s panicked", req.Method)
 			}
 		}()
 		frame, err := json.Marshal(req)
@@ -44,14 +50,17 @@ func testSession(t *testing.T, secrets secret.Store) func(*testing.T, Request) M
 		session.Handle(frame)
 		var msg Message
 		if err := json.Unmarshal(response, &msg); err != nil || msg.ID != req.ID {
-			t.Fatalf("invalid response to %s: %s (%v)", req.Method, response, err)
+			t.Fatalf("invalid response to %s", req.Method)
+		}
+		if observe != nil {
+			observe(response)
 		}
 		return msg
 	}
 	if hello := call(t, Request{ID: 1, Method: "Hello", Params: json.RawMessage(`{"versions":[1]}`)}); hello.Error != nil {
 		t.Fatal(hello.Error)
 	}
-	return call
+	return svc, call
 }
 
 func TestPagedRequestsAcceptNegativeBounds(t *testing.T) {

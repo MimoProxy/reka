@@ -417,7 +417,7 @@ func (m *RefreshManager) work(id string, force bool, job *refreshJob) {
 }
 func (m *RefreshManager) resolve(value string) (string, error) {
 	if name, ok := secret.ParseRef(value); ok {
-		if m.svc.Secrets() == nil {
+		if secret.Reserved(name) || m.svc.Secrets() == nil {
 			return "", &subscription.Error{Code: "credentials_unavailable"}
 		}
 		v, err := m.svc.Secrets().Get(name)

@@ -28,7 +28,8 @@ var Version = "dev"
 
 // Handler serves control API sessions for one ConfigService.
 type Handler struct {
-	svc *service.Service
+	svc      *service.Service
+	mitmCAMu sync.Mutex
 }
 
 // NewHandler binds a handler to svc.
@@ -122,6 +123,7 @@ var Methods = []string{
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
+	"GenerateMITMCA", "ImportMITMCA", "GetMITMCA", "ExportMITMCA", "DeleteMITMCA",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
 	"RunNodeArena", "GetNetworkScene", "SetNetworkScene", "GetTrafficBudgets",
@@ -130,7 +132,12 @@ var Methods = []string{
 func (s *Session) dispatch(req Request) (result any, err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			slog.Error("control request panicked", "method", req.Method, "request_id", req.ID, "panic", p, "stack", string(debug.Stack()))
+			if isMITMCAMethod(req.Method) {
+				// A panic from a secret store callback may include key material.
+				slog.Error("control request panicked", "method", req.Method, "request_id", req.ID)
+			} else {
+				slog.Error("control request panicked", "method", req.Method, "request_id", req.ID, "panic", p, "stack", string(debug.Stack()))
+			}
 			result = nil
 			err = &service.Error{Code: CodeInternal, Message: "request handler panicked"}
 		}
@@ -188,6 +195,9 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 			return nil, err
 		}
 		s.profileID, s.profileEpoch = state.ProfileID, state.Epoch
+	}
+	if isMITMCAMethod(req.Method) {
+		return s.h.handleMITMCA(req)
 	}
 	switch req.Method {
 	case "ExportProfileArchive":
@@ -590,6 +600,9 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 		if err != nil {
 			return nil, err
 		}
+		if secret.Reserved(p.Name) {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "reserved secret; use GenerateMITMCA or ImportMITMCA"}
+		}
 		if err := secret.ValidName(p.Name); err != nil {
 			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
 		}
@@ -614,6 +627,9 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 		}](req.Params)
 		if err != nil {
 			return nil, err
+		}
+		if secret.Reserved(p.Name) {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "reserved secret; use DeleteMITMCA"}
 		}
 		if svc.Secrets() == nil {
 			return nil, &service.Error{Code: CodeInternal, Message: "no secret store"}

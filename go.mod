@@ -30,6 +30,7 @@ require (
 	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.11
 	lukechampine.com/blake3 v1.3.0
+	software.sslmate.com/src/go-pkcs12 v0.4.0
 )
 
 require (

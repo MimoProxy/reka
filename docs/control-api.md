@@ -124,6 +124,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `SetSecret` | `name`、`value`，可选 `apply: true` | `name`、`ref`，可选 `apply` 提交结果 |
 | `DeleteSecret` | `name` | `deleted` 名称 |
 | `ListSecrets` | 无 | `names` 数组，不含值 |
+| `GenerateMITMCA` / `ImportMITMCA` / `GetMITMCA` / `ExportMITMCA` / `DeleteMITMCA` | 见 [MITM CA](#mitm-ca) | CA 状态、公开证书或删除结果 |
 | `Subscribe` | 可选 `types`、`epoch`、`after` | `subscribed: true`、`epoch`，持续推送事件 |
 | `Unsubscribe` | 无 | `subscribed: false` |
 
@@ -358,6 +359,22 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 配置里使用 `password: secret://outbounds/hk/password`。SetSecret 默认 apply 为 true，保存后重新应用当前配置，返回 name/ref/apply（提交结果）。apply:false 只保存，不立即更新已有实例。apply 失败时 secret 可能已保存，应检查结果后修正配置。
 
 名称最长 256 字符，使用字母、数字、`.`、`_`、`-` 和分段 `/`，不允许空段、`.` 或 `..` 段。ListSecrets 只返回名称；没有读取原值的 API。DeleteSecret 不会重新应用配置，不要直接删除仍被配置引用的值。
+
+### MITM CA
+
+| 方法 | params | result |
+| --- | --- | --- |
+| `GenerateMITMCA` | 可选 `replace`，默认 `false` | 新建根证书，返回 CA 状态 |
+| `ImportMITMCA` | `pkcs12`、`password`，可选 `replace`，默认 `false` | 导入根证书，返回 CA 状态 |
+| `GetMITMCA` | 无 | 当前 CA 状态 |
+| `ExportMITMCA` | 可选 `format`，默认 `pem`，也可传 `der` | `format`、`data`、`fingerprint_sha256` |
+| `DeleteMITMCA` | 无 | `{"deleted":true}` |
+
+未安装时，CA 状态只有 `{"installed":false}`。已安装时返回 `installed`、`ref`、`subject`（证书通用名称）、`fingerprint_sha256`、`serial_number`、`key_type`、`not_before`、`not_after` 和 `expired`。
+
+`pkcs12` 使用标准 base64 编码，允许首尾空白和换行。已有 CA 时，生成或导入需显式传 `replace:true`，否则返回 `conflict`。未安装时，导出和删除返回 `not_found`。导出的 `data` 在 `pem` 格式下是证书文本，在 `der` 格式下是 DER 证书的 base64。所有回复都不包含 CA 私钥。
+
+`secret://mitm/ca` 是保留引用。`SetSecret` 和 `DeleteSecret` 拒绝 `mitm/` 下的名称，配置、订阅和模块也不能引用这些 secret。`ListSecrets` 仍可列出名称。
 
 ## 8. 事件订阅与恢复
 

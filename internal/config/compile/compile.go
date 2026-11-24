@@ -440,6 +440,10 @@ func (c *compiler) resolveSecret(path, v string) string {
 	if !ok {
 		return v
 	}
+	if secret.Reserved(name) {
+		c.errorf(model.DocProfile, path, "secret.reserved", "secret %q is reserved", name)
+		return ""
+	}
 	if err := secret.ValidName(name); err != nil {
 		c.errorf(model.DocProfile, path, "secret.name", "%v", err)
 		return ""

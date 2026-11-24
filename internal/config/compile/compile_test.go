@@ -116,6 +116,34 @@ func TestFingerprintFollowsSecret(t *testing.T) {
 	}
 }
 
+type recordingSecretStore struct {
+	secret.Store
+	reads []string
+}
+
+func (s *recordingSecretStore) Get(name string) (string, error) {
+	s.reads = append(s.reads, name)
+	return "", secret.ErrNotFound
+}
+
+func TestReservedSecretReference(t *testing.T) {
+	s := &recordingSecretStore{}
+	doc := strings.Replace(profile, "secret://outbounds/vps/uuid", "secret://mitm/ca", 1)
+	eff, diags := Compile([]byte(doc), nil, Options{Secrets: s})
+	if len(s.reads) != 0 {
+		t.Errorf("secret reads = %v, want none", s.reads)
+	}
+	if eff != nil {
+		t.Error("compiled with a reserved secret reference")
+	}
+	for _, d := range diags {
+		if d.Code == "secret.reserved" && d.Path == "/outbounds/vps/uuid" {
+			return
+		}
+	}
+	t.Fatalf("missing secret.reserved diagnostic: %v", diags)
+}
+
 func TestDiagnostics(t *testing.T) {
 	cases := []struct {
 		name, edit, with, code, path string

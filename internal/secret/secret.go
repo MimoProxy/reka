@@ -44,6 +44,11 @@ func ValidName(name string) error {
 	return nil
 }
 
+// Reserved reports whether only a dedicated API may manage the name.
+// Reject references in configurations, subscriptions, and modules so they
+// cannot send a CA private key to a remote server as a credential.
+func Reserved(name string) bool { return strings.HasPrefix(name, "mitm/") }
+
 // Ref returns the configuration reference for name.
 func Ref(name string) string { return "secret://" + name }
 
