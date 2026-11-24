@@ -499,7 +499,7 @@ traffic-budgets:
 
 在 profile 的 `modules` 列表中可声明 [Surge 模块](modules.md)，将锁定快照中的规则、重写和 MITM 主机名合成到有效配置。参数和启停随 profile 保存，下载由模块刷新完成。
 
-当前内核支持这些字段的合成、校验和独立的 HTTP 重写引擎，尚未接入解密转发。配置 `enabled: true` 不会启用实际流量解密。
+MITM 对选中的入站 HTTPS 连接终结 TLS，再通过选定的出站建立新的 TLS 连接并转发 HTTP 请求。客户端需将 MITM CA 安装到自己的信任库。客户端 TLS 最低为 1.2，客户端和上游均使用 HTTP/1.1。
 
 ### 11.1 MITM 设置
 
@@ -508,18 +508,21 @@ traffic-budgets:
 | `mitm` 字段 | 类型 / 默认值 | 含义及限制 |
 | --- | --- | --- |
 | `enabled` | 布尔，默认 `false` | 本机 MITM 开关。关闭时仍合成并校验其他 MITM 设置及重写规则 |
-| `ca` | 字符串，默认无 | `enabled: true` 时必填，必须是 `secret://` 引用，通常写 `secret://mitm/ca`（由 [CA 控制接口](control-api.md#mitm-ca)生成或导入）。编译只校验引用语法，不读取内容 |
+| `ca` | 字符串，默认无 | `enabled: true` 时必填，唯一允许的值为 `secret://mitm/ca`。使用 CA 控制接口生成或导入证书后，重新激活配置以加载 CA。加载失败时，该代配置下的连接按原路由转发。 [CA 控制接口](control-api.md#mitm-ca) |
 
 profile 和 source 的 `mitm` 支持以下字段。
 
 | `mitm` 字段 | 类型 / 默认值 | 含义及限制 |
 | --- | --- | --- |
 | `hostnames` | 字符串列表，默认空 | 按顺序匹配，第一条命中决定是否解密。`-` 前缀排除，未命中时不解密 |
-| `h2` | 布尔，默认 `false` | 允许 HTTP/2 |
+| `client-source-address` | 字符串列表，默认空 | 按入站实际客户端的 IPv4、IPv6 地址或 CIDR 选择流量。以 `-` 开头的条目优先排除。有任何允许项时，客户端必须命中其中一项。省略、空列表或仅有排除项时，其他客户端均允许 |
+| `h2` | 布尔，默认 `false` | 保留的 HTTP/2 开关。HTTP/2 尚未实现，设为 `true` 时仍只协商 HTTP/1.1 |
 | `skip-server-cert-verify` | 布尔，默认 `false` | 跳过上游服务器证书校验 |
-| `quic-block` | 布尔，默认 `true` | 对选中的目标阻止 QUIC，以便客户端回退到 TCP |
+| `quic-block` | 布尔，默认 `true` | 启用 MITM 且成功加载 CA 时，对命中主机名和客户端地址条件的 QUIC 流按 `mitm-quic` 原因拒绝，以便客户端回退到 TCP。临时绕过的主机名跳过该项阻断，常规路由中的 `block-quic` 仍生效 |
 
 主机名可使用 ASCII 字母、数字、`.`、`-`、`_` 和通配符。匹配忽略大小写，`*` 匹配零个或多个字符，可跨越 `.`，`?` 匹配一个字符。允许使用 IP 字面量，IPv6 写作 `[::1]` 或 `[::1]:443`。省略端口只匹配 443，`api.example.com:8443` 只匹配 8443，`api.example.com:0` 匹配所有端口。空条目、单独的 `-`、非法字符和超出 0–65535 的端口会报错，完全相同的重复条目会给出警告。排除项应放在会覆盖它的通配项前，例如 `['-pinned.example.com', '*.example.com']`。
+
+内核使用入站目标、流量嗅探或 fake-IP 反查得到的主机名作匹配。客户端若在 TLS 握手中拒绝证书，该主机名接下来 10 分钟内跳过 MITM，期间 TCP 继续经常规路由转发。绕过按主机名生效，适用于该主机名的各个端口，配置热更新后仍有效。控制接口显示当前绕过项、原因和到期时间。 [MITM 诊断](control-api.md#mitm-status)
 
 ### 11.2 重写资源与合成
 
@@ -527,7 +530,7 @@ profile 和 source 的 `mitm` 支持以下字段。
 
 替换模板中的 `$0` 表示整个匹配，`$1` 至 `$99` 引用捕获组，`$$` 表示字面 `$`。`$1x` 会在第一组后追加 `x`。引用不存在的捕获组会给出警告。
 
-`imports[].rewrites: true` 从对应 source 导入 `mitm` 和四类重写资源。重写资源按 `imports` 的顺序排列在 profile 自有资源之前，ID 变成 `source/id`。profile 中使用相同 ID 可在原位置替换整条导入资源。`mitm.hostnames` 则把 profile 列表放在前面，随后按 `imports` 顺序追加来自各 source 的列表。三个 MITM 布尔字段依次由默认值、按导入顺序出现的 source、profile、overlay 覆盖。overlay 最后编辑合成后的重写和主机名列表。参见 [Sources 与 overlays](source-overlays.md#http-rewrites-and-mitm-hostnames)。
+`imports[].rewrites: true` 从对应 source 导入 `mitm` 和四类重写资源。重写资源按 `imports` 的顺序排列在 profile 自有资源之前，ID 变成 `source/id`。profile 中使用相同 ID 可在原位置替换整条导入资源。`mitm.hostnames` 则把 profile 列表放在前面，随后按 `imports` 顺序追加来自各 source 的列表。`client-source-address` 整个列表和三个 MITM 布尔字段依次由默认值、按导入顺序出现的 source、profile、overlay 覆盖。overlay 最后编辑合成后的重写和主机名列表。 [Sources 与 overlays](source-overlays.md#http-rewrites-and-mitm-hostnames)
 
 ### 11.3 URL 重写 `http-rewrites`
 
@@ -535,7 +538,7 @@ profile 和 source 的 `mitm` 支持以下字段。
 | --- | --- | --- |
 | `action` | 必填，`header`、`302`、`307`、`reject` | `header` 原地改写 URL，后续请求操作都用新 URL 匹配。`302` 和 `307` 返回对应状态码、`Location` 和空响应体。`reject` 按 `response` 处理。`302` 和 `307` 可写成 YAML 整数或字符串 |
 | `target` | 字符串 | `header`、`302`、`307` 必填，`reject` 禁用。用替换模板替换 URL 中第一处匹配，保留其余部分 |
-| `response` | 默认 `error`，仅供 `reject` 使用 | `error` 返回 404 和空响应体，`200` 返回 200 和空响应体，`gif` 返回 200 和透明 GIF，`dict` 返回 200 和 JSON `{}`，`array` 返回 200 和 JSON `[]`。`close` 关闭连接，`drop` 丢弃请求并等待客户端放弃，这两种不生成 HTTP 响应 |
+| `response` | 默认 `error`，仅供 `reject` 使用 | `error` 返回 404 和空响应体，`200` 返回 200 和空响应体，`gif` 返回 200 和透明 GIF，`dict` 返回 200 和 JSON `{}`，`array` 返回 200 和 JSON `[]`。`close` 关闭连接，`drop` 等待客户端断开或空闲超时，这两种不生成 HTTP 响应 |
 
 如果重定向产生非法的 `Location` 字段值，请求继续执行后续请求头、本地响应和请求体规则。
 
@@ -559,7 +562,7 @@ profile 和 source 的 `mitm` 支持以下字段。
 | `replace` | 非空的 `{pattern, value}` 列表 | `pattern` 为 RE2 正则，`value` 为替换模板，按列表顺序逐对替换所有匹配。消息体不是合法 UTF-8 时跳过整条规则 |
 | `jq` | 字符串 | 在 JSON 消息体上运行 jq，保留大整数精度，输出首个结果。JSON 解析失败、运行出错、无结果或超时会跳过该规则。每条 jq 的执行时限为 1 秒，无环境数据或额外输入可用 |
 
-`replace` 和 `jq` 必须二选一。默认可改写上限为 1 MiB，引擎调用方可配置上限，并可采用 10 MiB 的桌面常量。超出上限的原始消息体直接放行。支持无 `Content-Encoding`、`identity`、`gzip` 和 `deflate`，解压后同样检查大小。解压失败、使用多重编码或使用 `br`、`zstd` 等其他编码时，消息体原样放行。某条规则的结果超过上限时，保留该条规则执行前的消息体。消息体改动后以未压缩形式返回，移除 `Content-Encoding` 和 `Transfer-Encoding`，按新长度设置 `Content-Length`。
+`replace` 和 `jq` 必须二选一。仅在匹配消息体规则时缓冲消息体。iOS 的缓冲和改写上限为 512 KiB，以控制 Packet Tunnel 扩展的内存占用。其他平台上限为 10 MiB，与 Surge 桌面端一致。原始消息体超过上限时以流式方式原样转发，并统计超限透传次数。支持无 `Content-Encoding`、`identity`、`gzip` 和 `deflate`，解压后同样检查大小。需要响应体重写时，上游请求中的 `Accept-Encoding` 只声明客户端接受的 `gzip`、`deflate` 或未压缩传输。解压失败、使用多重编码或使用 `br`、`zstd` 等其他编码时，消息体原样放行。某条规则的结果超过上限时，保留该条规则执行前的消息体。消息体改动后以未压缩形式返回，移除 `Content-Encoding` 和 `Transfer-Encoding`，按新长度设置 `Content-Length`。
 
 ### 11.6 本地响应 `map-local`
 
@@ -567,9 +570,9 @@ profile 和 source 的 `mitm` 支持以下字段。
 | --- | --- | --- |
 | `data-type` | `file`（默认）、`text`、`json`、`tiny-gif`、`base64` | 分别使用已锁定的资源、文本、JSON、内置 1×1 透明 GIF 或 Base64 解码后的字节 |
 | `data` | 字符串 | `text`、`json`、`base64` 必填。`json` 要求合法 JSON，`base64` 使用标准 Base64。`file` 和 `tiny-gif` 不接受此字段 |
-| `hash` | SHA-256 字符串 | `file` 必填。和外部规则集使用同一资源存储，校验时文件必须存在且不超过 15 MiB。命中时按哈希读取，失败返回 404 和空响应体 |
+| `hash` | SHA-256 字符串 | `file` 必填。和外部规则集使用同一资源存储，校验时文件必须存在且不超过 15 MiB。命中时按哈希读取，运行时读取失败返回 502 |
 | `download` | 可选对象，仅用于 `file` | `url` 为不含内联凭据或片段的 HTTP(S) URL 或 secret 引用，`interval` 为 300–604800 秒，`automatic` 为布尔值，默认 `false`。重写引擎按 `hash` 使用已经入库的内容 |
-| `status-code` | 整数，100–999，默认 200 | 本地响应的状态码 |
+| `status-code` | 整数，100–999，默认 200 | 本地响应的状态码。MITM 转发中的本地响应必须是最终响应，配置 100–199 时返回 502 |
 | `headers` | `{name, value}` 列表，默认空 | 自定义响应头，按头字段重写的名称和值限制校验，`Content-Length` 由引擎计算 |
 
 如果 `headers` 未指定 `Content-Type`，`text` 使用 `text/plain`，`json` 使用 `application/json`，`tiny-gif` 使用 `image/gif`，`base64` 使用 `application/octet-stream`。`file` 从 `download.url` 的路径扩展名按内置表推断类型。内置表支持 `.json`、`.js`、`.mjs`、`.html`、`.htm`、`.css`、`.txt`、`.xml`、`.plist`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.ico`、`.mp4`、`.m3u8`、`.wasm`。无法推断时使用 `application/octet-stream`。
@@ -577,6 +580,8 @@ profile 和 source 的 `mitm` 支持以下字段。
 ### 11.7 执行顺序
 
 请求依次执行 URL 重写、请求头重写、本地响应匹配、请求体重写。URL 重写和本地响应各只采用第一条命中的规则。URL 重写产生重定向或拒绝时立即结束；本地响应命中后不再处理请求体。上游响应先重写响应头，再重写响应体。命中的头字段和消息体规则分别按其列表顺序执行，后续规则使用前一条的结果。本地生成的响应不经过响应重写。
+
+URL 重写改变目标主机时，内核用该连接所属配置的路由为请求重新选路，并按新主机名建立和验证上游 TLS 连接。热更新后的新连接使用新规则，已建立的客户端连接继续使用建立时的规则。HTTP 协议升级由普通 TLS 透传连接承载。
 
 ## 12. 源码核对入口
 

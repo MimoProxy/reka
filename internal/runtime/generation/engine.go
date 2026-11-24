@@ -69,6 +69,7 @@ type EngineOptions struct {
 	// ObserveRoute runs synchronously, including for pre-match rejections.
 	ObserveRoute  func(RouteObservation)
 	PacketHistory *history.Store
+	mitmNow       func() time.Time
 }
 
 type RouteObservation struct {
@@ -95,6 +96,8 @@ type generation struct {
 	// when the saved rules or the final target can route to one.
 	dropOutbounds map[string]bool
 	rulesMayDrop  bool
+	mitm          *mitmGeneration
+	mitmCAError   string
 }
 
 // Engine turns effective configurations into running generations: it
@@ -123,6 +126,9 @@ type Engine struct {
 	packetFlowRealDNS atomic.Bool
 	backend           *sagernet.Backend
 	rt                *runtime.Runtime[*sagernet.Outbound]
+	mitmBypasses      mitmBypassTable
+	mitmConnections   atomic.Uint64
+	mitmRequests      atomic.Uint64
 
 	mu        sync.Mutex
 	listeners map[string]*listener
@@ -144,7 +150,10 @@ func NewEngine(opts EngineOptions) *Engine {
 		opts.MaxRetiring = DefaultMaxRetiring
 	}
 
-	e := &Engine{opts: opts, listeners: map[string]*listener{}}
+	if opts.mitmNow == nil {
+		opts.mitmNow = time.Now
+	}
+	e := &Engine{opts: opts, listeners: map[string]*listener{}, mitmBypasses: mitmBypassTable{now: opts.mitmNow}}
 	if opts.HostPacketFlow {
 		// Keep the pool within the iOS Packet Tunnel memory budget.
 		e.fake = RD.NewFakePool(2048)
@@ -651,8 +660,10 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	for _, l := range eff.Listeners {
 		g.inUDP[l.ID] = l.UDP
 	}
+	g.loadMITM(previousGeneration, p.outbounds)
 	genNo, err := e.rt.CommitValue(p.outbounds, g)
 	if err != nil {
+		g.mitm.release()
 		for _, o := range p.created {
 			o.Close()
 		}
@@ -664,6 +675,7 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 		}
 		return 0, &ActivateError{Err: err}
 	}
+	previousGeneration.mitm.release()
 	if profileID != previousGeneration.historyScope.ProfileID {
 		e.backend.StopHTTPSDebug()
 	}
@@ -978,7 +990,7 @@ func (e *Engine) History() (*history.Store, history.Scope) {
 }
 
 func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route {
-	return e.routeWithAcquire(ctx, md, e.rt.Acquire, nil, routingState{})
+	return e.routeWithAcquire(ctx, md, e.rt.Acquire, nil, routingState{}, true)
 }
 
 type snapshotAcquirer func(func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error)
@@ -1037,7 +1049,7 @@ func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sag
 	return o, ok, ""
 }
 
-func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState) sagernet.Route {
+func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState, allowMITM bool) sagernet.Route {
 	inputAddress := md.Destination.Addr
 	var fakeRelease func()
 	if md.Destination.Addr.IsValid() {
@@ -1064,14 +1076,25 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		g            *generation
 		rejectReason string
 		ruleLookup   *api.RuleLookupInfo
+		mitm         *sagernet.MITMRoute
+		snapshot     *runtime.Snapshot[*sagernet.Outbound]
 	)
 	genNo, out, release, ok, err := acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
+		if mitm != nil {
+			g.mitm.release()
+			mitm = nil
+		}
+		snapshot = s
 		g = s.Value.(*generation)
 		if g.router == nil {
 			return nil, false
 		}
 		if fixed == nil {
 			state = e.routingState(g)
+		}
+		routeCtx := ctx
+		if !allowMITM {
+			routeCtx = sniffSnapshotContext(routeCtx, s)
 		}
 		if md.Network == "udp" && !e.inboundAllowsUDP(g, md) {
 			dec = router.Decision{RuleIndex: -1, LookupRule: -1, Outbound: model.OutboundReject}
@@ -1080,14 +1103,14 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		env.dns = g.dns
 		env.processOff = g.eff.Process.Mode == "off"
 		if g.eff.Process.Mode == "always" {
-			env.ProcessInfo(ctx)
+			env.ProcessInfo(routeCtx)
 		}
 		routeMD := g.flowRouterMetadata(md, state.scene)
 		resolve := func(dec *router.Decision) { g.resolveObserved(dec, routeMD, true) }
 		if len(state.temporary) == 0 {
-			dec = g.router.RouteWithResolver(ctx, routeMD, env, resolve)
+			dec = g.router.RouteWithResolver(routeCtx, routeMD, env, resolve)
 		} else {
-			dec = g.router.ExplainWithOverrides(ctx, routeMD, env, resolve, state.temporary, state.at).Decision
+			dec = g.router.ExplainWithOverrides(routeCtx, routeMD, env, resolve, state.temporary, state.at).Decision
 		}
 		if ruleLookup == nil && env.ruleLookup != nil && dec.LookupRule >= 0 {
 			// If acquisition retries, the cached lookup keeps its original trigger.
@@ -1097,7 +1120,14 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
 		}
+		if e.mitmBlocksQUIC(g, md) {
+			rejectReason = mitmQUIC
+			return nil, false
+		}
 		o, ok, reason := flowOutbound(g, s.Resources, md, dec)
+		if ok && allowMITM && o.Type() != "reject-drop" {
+			mitm = e.newMITMRoute(s, state, md)
+		}
 		rejectReason = reason
 		return o, ok
 	})
@@ -1122,6 +1152,9 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		scope = g.historyScope
 	}
 	if !ok {
+		if mitm != nil {
+			g.mitm.release()
+		}
 		if fakeRelease != nil {
 			fakeRelease()
 		}
@@ -1134,7 +1167,16 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			fakeRelease()
 		}
 	}
-	result := sagernet.Route{Outbound: out, Release: release, Info: info, Scope: scope}
+	result := sagernet.Route{Outbound: out, Release: release, Info: info, Scope: scope, MITM: mitm}
+	if mitm != nil {
+		var once sync.Once
+		result.Release = func() {
+			once.Do(func() {
+				release()
+				g.mitm.release()
+			})
+		}
+	}
 	if !env.processOff && env.procDone && env.procOK {
 		result.Owner = sagernet.ProcessInfo{PID: env.owner.PID, Path: env.owner.Path, UID: env.owner.UID, UIDKnown: env.owner.UIDKnown}
 	}
@@ -1169,6 +1211,14 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			}
 			return g.dns.Lookup(ctx, d, scope)
 		}
+	}
+	if mitm != nil && fixed == nil {
+		if g.mitm.pins != nil {
+			result.Context = func(ctx context.Context) context.Context {
+				return sagernet.WithPinnedOutbounds(ctx, g.mitm.pins)
+			}
+		}
+		result = retainSniffSnapshot(result, snapshot)
 	}
 	return result
 }
@@ -1314,6 +1364,7 @@ func (e *Engine) Connections() []Connection {
 			Source: c.Metadata.Source.String(), Destination: c.Metadata.Destination.String(),
 			Outbound: c.Outbound, Start: c.Start, Upload: c.Upload, Download: c.Download,
 			OriginalDestination: c.OriginalDestination, State: c.State,
+			MITMConnectionInfo: c.MITMConnectionInfo,
 		}
 		if fi, ok := c.Info.(*FlowInfo); ok {
 			conn.FlowInfo = *fi
@@ -1384,6 +1435,7 @@ func (e *Engine) Close() {
 	e.listeners = nil
 	e.mu.Unlock()
 	e.backend.CloseConnections(nil)
+	g.mitm.release()
 	e.rt.Close()
 	e.backend.Close()
 	e.fake.Close()

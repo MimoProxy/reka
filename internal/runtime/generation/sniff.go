@@ -27,6 +27,12 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 		if !e.flowMaySniff(g, md, state, options) {
 			return sagernet.PreparedFlow{Route: e.route}
 		}
+		var mitm *mitmGeneration
+		if g.mitm.retain() {
+			mitm = g.mitm
+		} else if e.rt.Current() != snap {
+			continue
+		}
 		pins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
 		dnsPins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
 		valid := true
@@ -54,6 +60,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 		if !valid {
 			closeSniffPins(pins)
 			closeSniffPins(dnsPins)
+			mitm.release()
 			// Retirement without a newer snapshot is shutdown (or an invalid
 			// resource), not a publication race. Do not spin waiting for one.
 			if e.rt.Current() == snap {
@@ -80,6 +87,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			}
 			closeSniffPins(dnsPins)
 			dnsPins = nil
+			mitm.release()
 		}
 		acquire := func(pick func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error) {
 			outbound, ok := pick(snap)
@@ -99,7 +107,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			Sniff: options,
 			Route: func(ctx context.Context, md sagernet.Metadata) sagernet.Route {
 				ctx = sniffSnapshotContext(ctx, snap)
-				result := e.routeWithAcquire(sagernet.WithPinnedOutbounds(ctx, borrowPins), md, acquire, snap, state)
+				result := e.routeWithAcquire(sagernet.WithPinnedOutbounds(ctx, borrowPins), md, acquire, snap, state, true)
 				if result.Outbound == nil {
 					return result
 				}
@@ -120,7 +128,25 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 }
 
 func (e *Engine) flowMaySniff(g *generation, md sagernet.Metadata, state routingState, options sagernet.SniffOptions) bool {
-	return options.Enabled && (!g.eff.SniffForRouting || e.routingNeedsDomain(g, md, state))
+	return options.Enabled && (!g.eff.SniffForRouting || e.routingNeedsDomain(g, md, state) || e.mitmNeedsDomain(g, md, options))
+}
+
+func (e *Engine) mitmNeedsDomain(g *generation, md sagernet.Metadata, options sagernet.SniffOptions) bool {
+	if md.SkipMITM || !g.mitmAvailable() || mitmHostname(md) != "" || !md.Destination.Addr.IsValid() || e.isFakeIP(g, md.Destination.Addr) {
+		return false
+	}
+	cfg := g.eff.MITM
+	if !cfg.ClientSourceMatcher.Match(mitmClientAddress(md)) || !cfg.Matcher.MayMatchPort(md.Destination.Port) {
+		return false
+	}
+	switch md.Network {
+	case "tcp":
+		return slices.Contains(options.Protocols, "tls")
+	case "udp":
+		return cfg.QUICBlock && slices.Contains(options.Protocols, "quic")
+	default:
+		return false
+	}
 }
 
 func (e *Engine) routingNeedsDomain(g *generation, md sagernet.Metadata, state routingState) bool {

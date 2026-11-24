@@ -7,21 +7,24 @@ import (
 
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/httprewrite"
+	"github.com/MimoProxy/reka/internal/mitm/ca"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
 var rewriteKinds = []string{"http-rewrites", "header-rewrites", "body-rewrites", "map-local"}
 
-// MITM contains the machine's HTTPS decryption settings and hostname selector.
+// MITM contains the machine's HTTPS decryption settings and flow selectors.
 type MITM struct {
 	Enabled              bool                   `json:"enabled"`
 	CA                   string                 `json:"ca,omitempty"`
 	Hostnames            []string               `json:"hostnames"`
+	ClientSourceAddress  []string               `json:"client-source-address,omitempty"`
 	H2                   bool                   `json:"h2"`
 	SkipServerCertVerify bool                   `json:"skip-server-cert-verify"`
 	QUICBlock            bool                   `json:"quic-block"`
 	Matcher              *httprewrite.Hostnames `json:"-"`
+	ClientSourceMatcher  *ClientSourceMatcher   `json:"-"`
 }
 
 func (c *compiler) mitm(eff *Effective) {
@@ -33,6 +36,10 @@ func (c *compiler) mitm(eff *Effective) {
 	eff.MITM.Hostnames = settings.Hostnames
 	if len(settings.Hostnames) != 0 {
 		eff.MITM.Matcher = c.compileMITMHostnames(settings.Hostnames)
+	}
+	eff.MITM.ClientSourceAddress = settings.ClientSourceAddress
+	if len(settings.ClientSourceAddress) != 0 {
+		eff.MITM.ClientSourceMatcher = c.compileMITMClientSources(settings.ClientSourceAddress)
 	}
 	for _, option := range []struct {
 		name  string
@@ -58,9 +65,8 @@ func (c *compiler) mitm(eff *Effective) {
 			}
 		}
 		if local.Enabled || hasKey(c.lpos, "/mitm/ca") {
-			name, ok := secret.ParseRef(local.CA)
-			if !ok || secret.ValidName(name) != nil {
-				c.errorf(model.DocLocal, "/mitm/ca", "mitm.ca", "MITM CA requires a valid secret:// reference")
+			if ref := secret.Ref(ca.SecretName); local.CA != ref {
+				c.errorf(model.DocLocal, "/mitm/ca", "mitm.ca", "MITM CA requires %s", ref)
 			}
 		}
 	}
@@ -153,7 +159,7 @@ func (c *compiler) httpRewrites(eff *Effective) {
 		}
 		spec.MapLocal[i] = entry
 	}
-	set, err := httprewrite.New(spec, httprewrite.Options{ReadResource: c.opts.ReadResource})
+	set, err := httprewrite.New(spec, httprewrite.Options{MaxBodySize: MITMMaxBodySize, ReadResource: c.opts.ReadResource})
 	var invalid httprewrite.ValidationErrors
 	if errors.As(err, &invalid) {
 		for _, issue := range invalid {

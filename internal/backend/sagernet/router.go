@@ -46,6 +46,11 @@ type Metadata struct {
 	// Local is the listener address the client connected to, used to find
 	// the owning process. It may be invalid.
 	Local netip.AddrPort
+	// ClientSource is the socket peer for MITM admission on TCP listeners.
+	// Source can instead contain a proxy-supplied address.
+	ClientSource netip.Addr
+	// SkipMITM marks streams already handled by an HTTP proxy.
+	SkipMITM bool
 }
 
 // Route is the routing decision for one connection.
@@ -63,6 +68,7 @@ type Route struct {
 	// Release gives the lease back; the relay calls it once when the
 	// connection ends.
 	Release func()
+	MITM    *MITMRoute
 	// Info is opaque to the backend and shown in connection listings.
 	Info any
 }
@@ -163,6 +169,15 @@ func toFlowMetadata(ctx context.Context, metadata adapter.InboundContext) Metada
 func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Network = N.NetworkTCP
 	md := toFlowMetadata(ctx, metadata)
+	_, debugBridge := conn.(*debugBridge)
+	md.SkipMITM = debugBridge
+	if peer, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		md.ClientSource = peer.AddrPort().Addr()
+	} else if md.InboundType == "http" || md.InboundType == "mixed" {
+		// The HTTP inbound uses a pipe for parsed forward requests and
+		// upgrades. A CONNECT tunnel keeps the original client socket.
+		md.SkipMITM = true
+	}
 	if md.InboundType != "tun" && conn.LocalAddr() != nil {
 		if address, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
 			md.InboundPort = address.Port()
@@ -172,7 +187,7 @@ func (r *router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	ctx = withAttempt(ctx, attempt)
 	prepared := r.prepareFlow(ctx, md)
 	defer prepared.Release()
-	if _, debugBridge := conn.(*debugBridge); !debugBridge && prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
+	if !debugBridge && prepared.Sniff.streamEligible(md) && r.takeSniffSlot() {
 		start := time.Now()
 		var observed sniffObservation
 		conn, md, observed = sniffStream(ctx, conn, md, prepared.Sniff)

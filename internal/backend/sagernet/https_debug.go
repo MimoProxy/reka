@@ -47,7 +47,7 @@ type httpsDebug struct {
 	slots         chan struct{}
 
 	mu      sync.Mutex
-	tunnels map[*debugTunnel]struct{}
+	tunnels map[*singleConnListener]struct{}
 }
 
 func (b *Backend) StartHTTPSDebug(request api.HTTPSDebugRequest) (api.HTTPSDebugStatus, error) {
@@ -88,7 +88,7 @@ func (b *Backend) startHTTPSDebug(request api.HTTPSDebugRequest, roots *x509.Cer
 	debug := &httpsDebug{
 		backend: b, certificates: certificates, ctx: ctx, cancel: cancel, upstreamRoots: roots, listener: listener,
 		auth: base64.StdEncoding.EncodeToString([]byte(debugUsername + ":" + password)), allowHTTP: request.AllowHTTP,
-		tunnels: make(map[*debugTunnel]struct{}), previewSlots: make(chan struct{}, 16),
+		tunnels: make(map[*singleConnListener]struct{}), previewSlots: make(chan struct{}, 16),
 		slots: make(chan struct{}, maxClients),
 		status: api.HTTPSDebugStatus{
 			Running: true, Address: listener.Addr().String(), Targets: targets,
@@ -201,7 +201,7 @@ func (s *httpsDebug) connect(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		return
 	}
-	tunnel := &debugTunnel{Conn: conn, reader: buffered.Reader, done: make(chan struct{})}
+	tunnel := newSingleConnListener(&bufferedHTTPConn{Conn: conn, reader: buffered.Reader})
 	s.tunnels[tunnel] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
@@ -233,7 +233,7 @@ func (s *httpsDebug) connect(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-	_ = server.ServeTLS(&tunnelListener{tunnel: tunnel}, "", "")
+	_ = server.ServeTLS(tunnel, "", "")
 	_ = server.Close()
 }
 
@@ -278,7 +278,7 @@ func (s *httpsDebug) forward(w http.ResponseWriter, r *http.Request, target debu
 	transport := &http.Transport{
 		TLSClientConfig:   &tls.Config{RootCAs: s.upstreamRoots, MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2: true, DisableKeepAlives: true, DisableCompression: true, TLSHandshakeTimeout: 10 * time.Second,
-		MaxResponseHeaderBytes: 64 << 10,
+		MaxResponseHeaderBytes: relayHTTPMaxHeaderBytes,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			if network != "tcp" || address != target.String() || s.ctx.Err() != nil {
 				return nil, errors.New("invalid HTTPS debug upstream")
@@ -387,44 +387,9 @@ func (c *debugClientConn) Close() error {
 	return err
 }
 
-type debugTunnel struct {
+type bufferedHTTPConn struct {
 	net.Conn
 	reader *bufio.Reader
-	done   chan struct{}
-	once   sync.Once
 }
 
-func (t *debugTunnel) Read(p []byte) (int, error) { return t.reader.Read(p) }
-func (t *debugTunnel) Close() error {
-	t.once.Do(func() { close(t.done) })
-	return t.Conn.Close()
-}
-
-type tunnelListener struct {
-	tunnel  *debugTunnel
-	started bool
-}
-
-func (l *tunnelListener) Accept() (net.Conn, error) {
-	if !l.started {
-		l.started = true
-		return l.tunnel, nil
-	}
-	<-l.tunnel.done
-	return nil, net.ErrClosed
-}
-
-func (l *tunnelListener) Close() error   { return l.tunnel.Close() }
-func (l *tunnelListener) Addr() net.Addr { return l.tunnel.LocalAddr() }
-
-func stripHTTPHopHeaders(header http.Header) {
-	for _, value := range header.Values("Connection") {
-		for _, token := range strings.Split(value, ",") {
-			header.Del(strings.TrimSpace(token))
-		}
-	}
-	for _, name := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authorization",
-		"Proxy-Authenticate", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
-		header.Del(name)
-	}
-}
+func (t *bufferedHTTPConn) Read(p []byte) (int, error) { return t.reader.Read(p) }

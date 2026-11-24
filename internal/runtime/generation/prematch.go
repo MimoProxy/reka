@@ -57,7 +57,12 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 			opts.Peek = g.peekPreMatchTarget
 		}
 		result := g.router.PreMatch(ctx, routeMD, opts)
-		if !result.Decided {
+		if e.mitmBlocksQUIC(g, md) {
+			rejectReason = mitmQUIC
+			if result.Decided {
+				dec = result.Decision
+			}
+		} else if !result.Decided {
 			// The rule is unknown, but the outcome may still be certain.
 			if !quicAlwaysRejected(g, md, state) {
 				return sagernet.PreMatchVerdict{}

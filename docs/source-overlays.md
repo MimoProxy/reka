@@ -102,7 +102,7 @@ Removing a node disables it. Its group references and selections must also be re
 
 ## HTTP rewrites and MITM hostnames
 
-Set `rewrites: true` to import a source's `mitm`, `http-rewrites`, `header-rewrites`, `body-rewrites`, and `map-local`. The imported rewrites run before the profile's rules in each list, in `imports` order. A profile rewrite with the same `source/id` replaces the imported rule in place. The profile's MITM hostnames come first, followed by imported hostnames in `imports` order. Defaults, imported sources, the profile, and the overlay set the MITM booleans `h2`, `skip-server-cert-verify`, and `quic-block` in that order, with the last explicit value winning.
+Set `rewrites: true` to import a source's `mitm`, `http-rewrites`, `header-rewrites`, `body-rewrites`, and `map-local`. The imported rewrites run before the profile's rules in each list, in `imports` order. A profile rewrite with the same `source/id` replaces the imported rule in place. The profile's MITM hostnames come first, followed by imported hostnames in `imports` order. Defaults, imported sources, the profile, and the overlay set `client-source-address` and the MITM booleans `h2`, `skip-server-cert-verify`, and `quic-block` in that order. The last explicit value wins, and each `client-source-address` value replaces the whole list.
 
 In `sources.yaml`, define the rewrite and hostname list.
 

@@ -133,6 +133,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `DeleteSecret` | `name` | `deleted` 名称 |
 | `ListSecrets` | 无 | `names` 数组，不含值 |
 | `GenerateMITMCA` / `ImportMITMCA` / `GetMITMCA` / `ExportMITMCA` / `DeleteMITMCA` | 见 [MITM CA](#mitm-ca) | CA 状态、公开证书或删除结果 |
+| `GetMITMStatus` | 无 | 当前转发配置、CA 加载结果、临时绕过和累计计数，见 [MITM 状态](#mitm-status) |
 | `Subscribe` | 可选 `types`、`epoch`、`after` | `subscribed: true`、`epoch`，持续推送事件 |
 | `Unsubscribe` | 无 | `subscribed: false` |
 
@@ -194,6 +195,10 @@ GetGroupStatus 返回自动组数组，每项含 `id`、`type`、`selected`、`r
 ListConnections 的 offset 应为非负数；limit 为 1–1000，省略、≤0 或 >1000 时用 100。连接含 `id`、`inbound`、`network`、`source`、`destination`、`outbound`、`start`、`upload`、`download`，以及 `generation`、`revision`、`rule_index`、可选 `rule_id`、`rule`、`chain`、`fingerprint`。流量单位为字节。可选的新字段有 `sniffed_domain`、`protocol`、`process_path`、`process_uid`；进程信息按需查询，缺省不代表 UID 为 0。
 
 `destination_domain` 记录入站提供的域名或 Fake IP 映射中的域名。活动连接的 `destination` 发生改写时，`original_destination` 保留入站收到的地址和端口。
+
+`ListConnections`、`ListConnectionHistory` 和 `GetConnectionTimeline` 的连接条目可包含 `mitm`、`mitm_requests`、`mitm_matched_ids` 和 `mitm_body_passthroughs`。每条连接和请求最多保留 24 个去重后的重写 ID。正文超限按请求、响应两个方向分别计数。MITM 连接的 `upload` 和 `download` 与总量、按进程统计采用相同口径，均为客户端侧的 TLS 密文字节，包括握手。MITM 的 QUIC 拒绝在连接记录中使用 `reject_reason: mitm-quic`。
+
+`ListRequestHistory` 中的 MITM 请求带 `mitm: true` 和父连接的 `connection_id`，适用时还带 `matched_ids`、`body_passthroughs` 和 `resource_error`。同一 TLS 连接内的多个请求共享连接 ID。请求记录沿用现有的 URL 和头字段脱敏。
 
 ```json
 {"id":10,"method":"ListConnections","params":{"offset":0,"limit":100}}
@@ -388,7 +393,17 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 `pkcs12` 使用标准 base64 编码，允许首尾空白和换行。已有 CA 时，生成或导入需显式传 `replace:true`，否则返回 `conflict`。未安装时，导出和删除返回 `not_found`。导出的 `data` 在 `pem` 格式下是证书文本，在 `der` 格式下是 DER 证书的 base64。所有回复都不包含 CA 私钥。
 
-`secret://mitm/ca` 是保留引用。`SetSecret` 和 `DeleteSecret` 拒绝 `mitm/` 下的名称，配置、订阅和模块也不能引用这些 secret。`ListSecrets` 仍可列出名称。
+`secret://mitm/ca` 是 `local.yaml` 的 `mitm.ca` 专用引用。`SetSecret` 和 `DeleteSecret` 拒绝 `mitm/` 下的名称。`ListSecrets` 仍可列出名称。生成、导入或删除后，重新应用配置以使 TCP 转发载入最新的 CA 状态。
+
+<a id="mitm-status"></a>
+
+### MITM 状态
+
+`GetMITMStatus` 返回 `enabled`、`ca_loaded`、可选 `ca_error`、`h2`、`hostname_count`、`pinning_bypasses`、`connections_total` 和 `requests_total`。`enabled` 表示本机配置中的开关，`ca_loaded` 表示活动配置拥有可用的 CA。CA 状态随配置激活更新。
+
+`h2` 在配置启用 HTTP/2 时为 `"not supported yet"`，省略该开关或设为 `false` 时为 `"disabled"`。MITM 只协商 HTTP/1.1。
+
+`pinning_bypasses` 的每项包含 `hostname`、`reason`、`expires_at`。列表跨配置代际生效，按主机名记录，保留至多 256 项。`connections_total` 从进入 MITM 转发时开始计数，包含后续握手失败的连接。`requests_total` 统计已解析的请求，包含本地响应。两个计数均从本次内核运行开始累计。
 
 ## 8. 事件订阅与恢复
 

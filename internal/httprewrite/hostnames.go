@@ -54,6 +54,7 @@ type Hostnames struct {
 	exact    map[hostnameKey]hostnameMatch
 	suffix   map[hostnameKey]hostnameMatch
 	wildcard []hostnamePattern
+	ports    map[uint16]bool
 }
 
 // NewHostnames validates the entries and builds an ordered matcher.
@@ -68,6 +69,12 @@ func NewHostnames(entries []string) (*Hostnames, error) {
 			continue
 		}
 		match := hostnameMatch{position: i + 1, exclude: exclude}
+		if !exclude {
+			if h.ports == nil {
+				h.ports = make(map[uint16]bool)
+			}
+			h.ports[key.port] = true
+		}
 		switch {
 		case !strings.ContainsAny(key.host, "*?"):
 			addHostname(&h.exact, key, match)
@@ -82,6 +89,12 @@ func NewHostnames(entries []string) (*Hostnames, error) {
 		return nil, invalid
 	}
 	return h, nil
+}
+
+// MayMatchPort reports whether an inclusion could match the port if a hostname
+// becomes available. Match still determines the outcome of ordered rules.
+func (h *Hostnames) MayMatchPort(port uint16) bool {
+	return h != nil && (h.ports[port] || h.ports[0])
 }
 
 func addHostname(entries *map[hostnameKey]hostnameMatch, key hostnameKey, match hostnameMatch) {

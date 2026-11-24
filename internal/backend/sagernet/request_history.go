@@ -24,29 +24,33 @@ type requestHistoryKey struct{}
 
 type requestRecord struct {
 	history.Scope
-	ID            uint64    `json:"id"`
-	ConnectionID  uint64    `json:"connection_id,omitempty"`
-	Start         time.Time `json:"start"`
-	DurationMS    int64     `json:"duration_ms"`
-	TTFBMS        *int64    `json:"ttfb_ms,omitempty"`
-	DialMS        *int64    `json:"dial_ms,omitempty"`
-	DNSMS         *int64    `json:"dns_ms,omitempty"`
-	TLSMS         *int64    `json:"tls_ms,omitempty"`
-	Reused        *bool     `json:"reused,omitempty"`
-	UpstreamHTTP  string    `json:"upstream_http_version,omitempty"`
-	Detail        bool      `json:"detail,omitempty"`
-	Inbound       string    `json:"inbound"`
-	Client        string    `json:"client,omitempty"`
-	Method        string    `json:"method"`
-	Scheme        string    `json:"scheme"`
-	Host          string    `json:"host"`
-	Path          string    `json:"path"`
-	HTTPVersion   string    `json:"http_version"`
-	StatusCode    int       `json:"status_code,omitempty"`
-	StatusSource  string    `json:"status_source,omitempty"`
-	RequestBytes  int64     `json:"request_bytes"`
-	ResponseBytes int64     `json:"response_bytes"`
-	Error         string    `json:"error,omitempty"`
+	ID               uint64    `json:"id"`
+	ConnectionID     uint64    `json:"connection_id,omitempty"`
+	Start            time.Time `json:"start"`
+	DurationMS       int64     `json:"duration_ms"`
+	TTFBMS           *int64    `json:"ttfb_ms,omitempty"`
+	DialMS           *int64    `json:"dial_ms,omitempty"`
+	DNSMS            *int64    `json:"dns_ms,omitempty"`
+	TLSMS            *int64    `json:"tls_ms,omitempty"`
+	Reused           *bool     `json:"reused,omitempty"`
+	UpstreamHTTP     string    `json:"upstream_http_version,omitempty"`
+	Detail           bool      `json:"detail,omitempty"`
+	Inbound          string    `json:"inbound"`
+	Client           string    `json:"client,omitempty"`
+	Method           string    `json:"method"`
+	Scheme           string    `json:"scheme"`
+	Host             string    `json:"host"`
+	Path             string    `json:"path"`
+	HTTPVersion      string    `json:"http_version"`
+	StatusCode       int       `json:"status_code,omitempty"`
+	StatusSource     string    `json:"status_source,omitempty"`
+	RequestBytes     int64     `json:"request_bytes"`
+	ResponseBytes    int64     `json:"response_bytes"`
+	Error            string    `json:"error,omitempty"`
+	MITM             bool      `json:"mitm,omitempty"`
+	MatchedIDs       []string  `json:"matched_ids,omitempty"`
+	BodyPassthroughs uint64    `json:"body_passthroughs,omitempty"`
+	ResourceError    bool      `json:"resource_error,omitempty"`
 }
 
 type requestObservation struct {
@@ -192,6 +196,22 @@ func (obs *requestObservation) response(res *http.Response) {
 	if obs.detail != nil {
 		obs.detail.Response.Headers = debugHeaders(res.Header)
 	}
+}
+
+func (obs *requestObservation) clearOriginStatus() {
+	obs.mu.Lock()
+	obs.summary.StatusCode = 0
+	obs.summary.StatusSource = ""
+	obs.mu.Unlock()
+}
+
+func (obs *requestObservation) setMITM(stats mitmRequestStats) {
+	obs.mu.Lock()
+	obs.summary.MITM = true
+	obs.summary.MatchedIDs = stats.matches
+	obs.summary.BodyPassthroughs = stats.passthroughs
+	obs.summary.ResourceError = stats.resourceError
+	obs.mu.Unlock()
 }
 
 func (obs *requestObservation) finish(proxyStatus int, err error) {

@@ -288,11 +288,19 @@ type Connection struct {
 	Upload      int64     `json:"upload"`
 	Download    int64     `json:"download"`
 	FlowInfo
+	MITMConnectionInfo
 
 	// OriginalDestination is set when the active destination was rewritten.
 	OriginalDestination string `json:"original_destination,omitempty"`
 	// State is used by the Packet Tunnel connection list.
 	State string `json:"-"`
+}
+
+type MITMConnectionInfo struct {
+	MITM                 bool     `json:"mitm,omitempty"`
+	MITMRequests         uint64   `json:"mitm_requests,omitempty"`
+	MITMMatchedIDs       []string `json:"mitm_matched_ids,omitempty"`
+	MITMBodyPassthroughs uint64   `json:"mitm_body_passthroughs,omitempty"`
 }
 
 // RuntimeStatus is a summary of the running state.

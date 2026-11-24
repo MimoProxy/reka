@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -219,7 +220,9 @@ func (a *connectionAttempt) dialed(start, finished time.Time, err error, observe
 		event.kind, event.code = eventDialFail, connectionReason(err, "error")
 	} else {
 		now := a.DialFinishedAt
-		a.ReadyAt = &now
+		if !a.MITM || a.ReadyAt == nil {
+			a.ReadyAt = &now
+		}
 		a.socketEventsLocked(observed, direct)
 		event.addr = a.ServerAddr
 	}
@@ -255,16 +258,18 @@ func (a *connectionAttempt) socketEventsLocked(observed socketDialResult, direct
 	}
 }
 
-func (a *connectionAttempt) activeState() string {
+func (a *connectionAttempt) activeInfo() (string, api.MITMConnectionInfo) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !a.EndedAt.IsZero() {
-		return ""
+	info := a.MITMConnectionInfo
+	info.MITMMatchedIDs = slices.Clone(info.MITMMatchedIDs)
+	if a.EndedAt.IsZero() {
+		if a.ReadyAt == nil {
+			return "connecting", info
+		}
+		return "active", info
 	}
-	if a.ReadyAt == nil {
-		return "connecting"
-	}
-	return "active"
+	return "", info
 }
 
 func (a *connectionAttempt) complete(reason, stage string) {

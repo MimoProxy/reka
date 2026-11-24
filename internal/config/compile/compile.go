@@ -186,6 +186,7 @@ type Effective struct {
 	HTTPRewrite *httprewrite.Set `json:"-"`
 	// HTTPRewriteFingerprint identifies the ordered rewrite definitions and their resource hashes.
 	HTTPRewriteFingerprint string `json:"http-rewrite-fingerprint,omitempty"`
+	mitmCAStore            secret.Store
 
 	// IPVersionOverride is empty when the profile's IP settings are in use.
 	IPVersionOverride string `json:"-"`
@@ -196,6 +197,10 @@ type Effective struct {
 	// and group error; the runtime reuses it.
 	Router *router.Router `json:"-"`
 }
+
+// MITMCAStore returns the profile's local store for runtime CA loading.
+// The compiler does not resolve the reserved CA reference.
+func (e *Effective) MITMCAStore() secret.Store { return e.mitmCAStore }
 
 // OriginOf returns where path came from, falling back to the closest
 // recorded parent.
@@ -361,6 +366,9 @@ func (c *compiler) compose() *Effective {
 	c.dns(eff)
 	c.listenersAndLocal(eff)
 	c.mitm(eff)
+	if eff.MITM.Enabled {
+		eff.mitmCAStore = c.opts.Secrets
+	}
 	c.httpRewrites(eff)
 	c.process(eff)
 	c.sniff(eff)

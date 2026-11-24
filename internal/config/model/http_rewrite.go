@@ -9,6 +9,7 @@ type LocalMITM struct {
 // MITM contains the traffic selection settings shared by profiles and sources.
 type MITM struct {
 	Hostnames            []string `yaml:"hostnames"`
+	ClientSourceAddress  []string `yaml:"client-source-address"`
 	H2                   *bool    `yaml:"h2"`
 	SkipServerCertVerify *bool    `yaml:"skip-server-cert-verify"`
 	QUICBlock            *bool    `yaml:"quic-block"`

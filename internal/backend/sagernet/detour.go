@@ -90,6 +90,16 @@ func (p *PinnedOutbound) release() {
 	}
 }
 
+// Borrow retains this dependency lease for one operation, even after the
+// outbound has retired. A successful borrow must be released by its caller.
+func (p *PinnedOutbound) Borrow() (func(), bool) {
+	if p == nil || !p.retain() {
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(p.release) }, true
+}
+
 // TransferToFlow transfers this pin's owner reference to one routed flow. It
 // then counts as an active connection instead of a hidden dependency pin.
 // The returned release function must be called when that flow finishes.

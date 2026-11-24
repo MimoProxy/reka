@@ -124,7 +124,7 @@ var Methods = []string{
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"AddModule", "RemoveModule", "SetModuleEnabled", "SetModuleArguments", "RefreshModule", "ListModules", "GetModuleReport", "PreviewModule",
-	"GenerateMITMCA", "ImportMITMCA", "GetMITMCA", "ExportMITMCA", "DeleteMITMCA",
+	"GenerateMITMCA", "ImportMITMCA", "GetMITMCA", "ExportMITMCA", "DeleteMITMCA", "GetMITMStatus",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
 	"RunNodeArena", "GetNetworkScene", "SetNetworkScene", "GetTrafficBudgets",
@@ -545,6 +545,8 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 		return status, nil
 	case "GetHTTPSDebug":
 		return svc.Engine().HTTPSDebugStatus(), nil
+	case "GetMITMStatus":
+		return svc.Engine().MITMStatus(), nil
 	case "StopHTTPSDebug":
 		svc.Engine().StopHTTPSDebug()
 		return api.HTTPSDebugStatus{}, nil

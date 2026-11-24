@@ -113,6 +113,12 @@ type mapRule struct {
 	header     http.Header
 }
 
+// MayChangeRequestURL reports whether the set has a transparent URL rewrite.
+// Such rewrites can choose an upstream authority at request time.
+func (s *Set) MayChangeRequestURL() bool {
+	return s != nil && slices.ContainsFunc(s.http, func(rule urlRule) bool { return rule.action == "header" })
+}
+
 // A transparent one-pixel GIF89a image.
 const tinyGIF = "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
 

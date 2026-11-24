@@ -24,9 +24,6 @@ import (
 // sniffing has already finished before the route was selected.
 func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {
 	out, release := rt.Outbound, rt.Release
-	if rt.Context != nil {
-		ctx = rt.Context(ctx)
-	}
 	var originalDestination string
 	if rt.Destination != nil {
 		destination := rt.Destination.String()
@@ -35,15 +32,12 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		}
 		metadata.Destination = M.ParseSocksaddr(destination)
 	}
-	ctx = WithLookup(ctx, observeRequestLookup(ctx, rt.Lookup))
-	ctx = adapter.WithContext(ctx, &metadata)
-	dialStart := time.Now()
-	attempt.dialing(dialStart, out)
-	dialCtx, socketDial := withSocketDial(ctx)
-	remote, err := out.out.DialContext(dialCtx, N.NetworkTCP, metadata.Destination)
-	dialFinished := time.Now()
-	observed := socketDial.finish(remote, err)
-	observeRequestDial(ctx, attempt.dialed(dialStart, dialFinished, err, observed, out.Type() == "direct" && out.dependencyCloser == nil))
+	if _, debug := conn.(*debugBridge); !debug && rt.MITM != nil {
+		go b.relayMITM(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
+		return
+	}
+	ctx = tcpRouteContext(ctx, rt, metadata)
+	remote, err := dialTCP(ctx, out, metadata.Destination, attempt)
 	if err != nil {
 		attempt.complete(connectionReason(err, "error"), "dial")
 		release()
@@ -132,6 +126,25 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 	closeIdle := func() { drained.Store(true); closeBoth() }
 	go copyHalf(conn, remote, up, finish, func() { watchIdle(down, grace, finished, closeIdle) }, &b.trafficUpload, &processTraffic.upload)
 	go copyHalf(remote, conn, down, finish, func() { watchIdle(up, grace, finished, closeIdle) }, &b.trafficDownload, &processTraffic.download)
+}
+
+func tcpRouteContext(ctx context.Context, rt Route, metadata adapter.InboundContext) context.Context {
+	if rt.Context != nil {
+		ctx = rt.Context(ctx)
+	}
+	ctx = WithLookup(ctx, observeRequestLookup(ctx, rt.Lookup))
+	return adapter.WithContext(ctx, &metadata)
+}
+
+func dialTCP(ctx context.Context, out *Outbound, destination M.Socksaddr, attempt *connectionAttempt) (net.Conn, error) {
+	start := time.Now()
+	attempt.dialing(start, out)
+	ctx, socketDial := withSocketDial(ctx)
+	remote, err := out.out.DialContext(ctx, N.NetworkTCP, destination)
+	finished := time.Now()
+	observed := socketDial.finish(remote, err)
+	observeRequestDial(ctx, attempt.dialed(start, finished, err, observed, out.Type() == "direct" && out.dependencyCloser == nil))
+	return remote, err
 }
 
 // copyHalf copies source to destination, counting bytes into moved. At EOF

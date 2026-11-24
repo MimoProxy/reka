@@ -24,6 +24,7 @@ type ConnInfo struct {
 	State    string
 
 	OriginalDestination string
+	api.MITMConnectionInfo
 }
 
 type tracked struct {
@@ -39,11 +40,13 @@ type tracked struct {
 }
 
 func (c *tracked) snapshot() ConnInfo {
+	state, mitm := c.attempt.activeInfo()
 	return ConnInfo{
 		ID: c.id, Metadata: c.md, Outbound: c.out.Tag(), OutboundType: c.out.Type(), Info: c.info,
 		Start: c.start, Upload: c.attempt.up.Load(), Download: c.attempt.down.Load(),
-		State:               c.attempt.activeState(),
+		State:               state,
 		OriginalDestination: c.originalDestination,
+		MITMConnectionInfo:  mitm,
 	}
 }
 
