@@ -6,7 +6,7 @@ The source layer accepts **normalized native snapshots**. [Local Clash/share-lin
 
 Each immutable revision contains `profile.yaml`, `local.yaml`, `sources.yaml` and `overlay.yaml`. The last two are empty when upgrading a state root created before sources and overlays existed; old revisions remain readable without rewriting them. Restore restores all four documents as a new revision.
 
-Sources hold imported content. The profile decides what to use and where to place rules. The overlay holds persistent user edits. Local settings own machine-specific listeners and logging. Composition is defaults → sources → profile → overlay → local settings.
+Sources hold imported content. The profile decides what to use and where to place rules. The overlay holds persistent user edits. Local settings own machine-specific listeners, logging, and `mitm.enabled` and `mitm.ca`. Composition is defaults → sources → profile → overlay → local settings.
 
 Local source and import operations remain network-free. The importer and the refresh worker submit a replacement `sources` document through the same `PlanConfiguration`/`CommitConfiguration` transaction. Replacing sources alone preserves the other documents byte for byte. Concurrent changes use the existing base-revision conflict checks.
 
@@ -41,7 +41,7 @@ rules:
   - {id: final, match: {all: true}, outbound: airport/proxy}
 ```
 
-`imports` selects nodes and/or groups; at least one must be true. Import each source once. Rules are included separately: `{source: airport}` expands the source's ordered rules exactly at that location. A marker cannot also contain `match` or `outbound`. It may have an ID to address the marker in the original profile. Expanding the same rules twice produces duplicate IDs and is refused.
+`imports` selects `outbounds`, `groups`, `rule-sets`, `sub-rules`, and `rewrites`. At least one selection must be true. Import each source once. Rules are included separately. A `{source: airport}` marker expands the source's ordered rules exactly at that location. A marker cannot also contain `match` or `outbound`. It may have an ID to address the marker in the original profile. Expanding the same rules twice produces duplicate IDs and is refused.
 
 `overlay.yaml`:
 
@@ -92,11 +92,44 @@ Composed IDs are `source/id`. Source group members, selected members and rule ta
 
 API paths use JSON Pointer escaping, so the ID `airport/proxy` is one segment, `airport~1proxy`. Profile group members and rule targets use the unescaped ID. Different sources can use the same local IDs.
 
-A profile outbound or group with the exact imported ID replaces that whole object; it is not a field-wise merge. Use the overlay for partial edits. Patches execute in order and can only edit outbounds, groups and rules. `set` and `remove` target existing resources by stable ID; `set` may add optional fields. Resource identity cannot be changed. `insert` targets a resource list and adds a resource with a new native stable ID; `before`/`after` are literal IDs, not escaped paths.
+A profile outbound or group with the exact imported ID replaces that whole object. Use the overlay for partial edits. Patches execute in order. For resource lists, `set` and `remove` target existing resources by stable ID. `set` may add optional fields, and resource identity stays fixed. `insert` targets a resource list and adds a resource with a new native stable ID. Use literal IDs for `before` and `after`.
 
 Removing a node disables it. Its group references and selections must also be repaired explicitly. Missing sources, deleted or renamed targets, stale overlay paths, invalid selections and cycles refuse the transaction; the previous revision keeps running. There is no automatic fallback to DIRECT or guessed rename association.
 
 `effective.provenance` records the layer, document, original path, line and column; imported fields also name their source. Overlay edits record the origin they replaced. Semantic errors point to the source/overlay document rather than generated YAML. `effective.source_hashes` records SHA-256 of each normalized snapshot's canonical YAML mapping (including its ID and comments); revision metadata separately hashes the complete four document files.
+
+## HTTP rewrites and MITM hostnames
+
+Set `rewrites: true` to import a source's `mitm`, `http-rewrites`, `header-rewrites`, `body-rewrites`, and `map-local`. The imported rewrites run before the profile's rules in each list, in `imports` order. A profile rewrite with the same `source/id` replaces the imported rule in place. The profile's MITM hostnames come first, followed by imported hostnames in `imports` order. Defaults, imported sources, the profile, and the overlay set the MITM booleans `h2`, `skip-server-cert-verify`, and `quic-block` in that order, with the last explicit value winning.
+
+In `sources.yaml`, define the rewrite and hostname list.
+
+```yaml
+sources:
+  - id: filters
+    mitm: {hostnames: ['*.example.com', 'obsolete.example.net']}
+    http-rewrites:
+      - {id: ads, match: '^https://ads\.example\.com/', action: reject}
+```
+
+In `profile.yaml`, import the rewrite resources.
+
+```yaml
+schema-version: 1
+imports:
+  - {source: filters, rewrites: true}
+```
+
+In `overlay.yaml`, remove the imported rewrite, remove the second hostname, and place an exclusion before the wildcard.
+
+```yaml
+patches:
+  - {op: remove, path: /http-rewrites/filters~1ads}
+  - {op: remove, path: '/mitm/hostnames/#1'}
+  - {op: insert, path: /mitm/hostnames, before: '#0', value: '-pinned.example.com'}
+```
+
+For the hostname list, `#N` is a zero-based position in the list as it exists at that edit. Omitting `before` and `after` appends the hostname. The first hostname match wins, so placing the exclusion ahead of `*.example.com` excludes `pinned.example.com`. For the full field reference, see [MITM and HTTP rewriting](configuration-reference.md#11-mitm-与-http-重写).
 
 ## Transactions and editing
 

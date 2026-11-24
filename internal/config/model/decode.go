@@ -361,7 +361,11 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 			seen[k.Value] = true
 			idx, ok := fields[k.Value]
 			if !ok {
-				d.errorf(k, kp, "schema.unknown-field", "unknown field %q", k.Value)
+				if v.Type() == reflect.TypeFor[MITM]() && (k.Value == "enabled" || k.Value == "ca") {
+					d.errorf(k, kp, "mitm.local-only", "mitm.%s is a machine-local setting and can only be set in local.yaml", k.Value)
+				} else {
+					d.errorf(k, kp, "schema.unknown-field", "unknown field %q", k.Value)
+				}
 				continue
 			}
 			if k.Value == "id" && val.Kind != yaml.ScalarNode && v.Type() == reflect.TypeFor[Source]() {

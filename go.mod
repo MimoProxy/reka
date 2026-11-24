@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/golang/snappy v1.0.0
+	github.com/itchyny/gojq v0.12.20
 	github.com/klauspost/compress v1.19.1
 	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604
@@ -55,6 +56,7 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
+	github.com/itchyny/timefmt-go v0.1.9 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/reedsolomon v1.12.3 // indirect

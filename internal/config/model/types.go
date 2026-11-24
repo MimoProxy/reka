@@ -9,18 +9,23 @@ const SchemaVersion = 1
 
 // Profile is the user's main configuration document.
 type Profile struct {
-	Geodata       []GeoDatabase `yaml:"geodata"`
-	Process       *Process      `yaml:"process"`
-	Routing       *Routing      `yaml:"routing"`
-	Sniff         *Sniff        `yaml:"sniff"`
-	DNS           *RD.Config    `yaml:"dns"`
-	SchemaVersion int           `yaml:"schema-version"`
-	Imports       []Import      `yaml:"imports"`
-	Outbounds     []Outbound    `yaml:"outbounds"`
-	Groups        []Group       `yaml:"groups"`
-	Rules         []Rule        `yaml:"rules"`
-	RuleSets      []RuleSet     `yaml:"rule-sets"`
-	SubRules      []SubRules    `yaml:"sub-rules"`
+	MITM           *MITM           `yaml:"mitm"`
+	HTTPRewrites   []HTTPRewrite   `yaml:"http-rewrites"`
+	HeaderRewrites []HeaderRewrite `yaml:"header-rewrites"`
+	BodyRewrites   []BodyRewrite   `yaml:"body-rewrites"`
+	MapLocal       []MapLocal      `yaml:"map-local"`
+	Geodata        []GeoDatabase   `yaml:"geodata"`
+	Process        *Process        `yaml:"process"`
+	Routing        *Routing        `yaml:"routing"`
+	Sniff          *Sniff          `yaml:"sniff"`
+	DNS            *RD.Config      `yaml:"dns"`
+	SchemaVersion  int             `yaml:"schema-version"`
+	Imports        []Import        `yaml:"imports"`
+	Outbounds      []Outbound      `yaml:"outbounds"`
+	Groups         []Group         `yaml:"groups"`
+	Rules          []Rule          `yaml:"rules"`
+	RuleSets       []RuleSet       `yaml:"rule-sets"`
+	SubRules       []SubRules      `yaml:"sub-rules"`
 	// Listeners and Log may also be set in the profile; local settings
 	// override them on each machine.
 	Listeners []Listener `yaml:"listeners"`
@@ -30,6 +35,7 @@ type Profile struct {
 // LocalSettings are per-machine settings kept apart from the profile, so
 // switching profiles never changes ports or the control endpoint.
 type LocalSettings struct {
+	MITM           *LocalMITM        `yaml:"mitm"`
 	NetworkScenes  []NetworkScene    `yaml:"network-scenes"`
 	TrafficBudgets []TrafficBudget   `yaml:"traffic-budgets"`
 	Process        *Process          `yaml:"process"`
@@ -168,6 +174,7 @@ type Rule struct {
 
 // Import selects which resources from a source are visible to the profile.
 type Import struct {
+	Rewrites  bool   `yaml:"rewrites"`
 	RuleSets  bool   `yaml:"rule-sets"`
 	SubRules  bool   `yaml:"sub-rules"`
 	Source    string `yaml:"source"`
@@ -219,15 +226,20 @@ type ResourceLock struct {
 	Request  string `yaml:"request" json:"request"`
 }
 type Source struct {
-	DNS          *RD.Config    `yaml:"dns"`
-	Subscription *Subscription `yaml:"subscription"`
-	Lock         *SourceLock   `yaml:"lock"`
-	ID           string        `yaml:"id"`
-	Outbounds    []Outbound    `yaml:"outbounds"`
-	Groups       []Group       `yaml:"groups"`
-	Rules        []Rule        `yaml:"rules"`
-	RuleSets     []RuleSet     `yaml:"rule-sets"`
-	SubRules     []SubRules    `yaml:"sub-rules"`
+	MITM           *MITM           `yaml:"mitm"`
+	HTTPRewrites   []HTTPRewrite   `yaml:"http-rewrites"`
+	HeaderRewrites []HeaderRewrite `yaml:"header-rewrites"`
+	BodyRewrites   []BodyRewrite   `yaml:"body-rewrites"`
+	MapLocal       []MapLocal      `yaml:"map-local"`
+	DNS            *RD.Config      `yaml:"dns"`
+	Subscription   *Subscription   `yaml:"subscription"`
+	Lock           *SourceLock     `yaml:"lock"`
+	ID             string          `yaml:"id"`
+	Outbounds      []Outbound      `yaml:"outbounds"`
+	Groups         []Group         `yaml:"groups"`
+	Rules          []Rule          `yaml:"rules"`
+	RuleSets       []RuleSet       `yaml:"rule-sets"`
+	SubRules       []SubRules      `yaml:"sub-rules"`
 }
 
 // Overlay contains explicit edits against the composed source/profile view.

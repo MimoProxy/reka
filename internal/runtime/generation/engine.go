@@ -27,6 +27,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
@@ -227,6 +228,16 @@ func (e *Engine) Effective() (*compile.Effective, uint64) {
 	return g.eff, g.revision
 }
 
+// MITM returns the active settings and rewrite set from the same generation.
+// Callers must treat the returned settings as immutable.
+func (e *Engine) MITM() (compile.MITM, *httprewrite.Set) {
+	_, g := e.current()
+	if g.eff == nil {
+		return compile.MITM{}, nil
+	}
+	return g.eff.MITM, g.eff.HTTPRewrite
+}
+
 // Plan computes the impact of activating eff.
 func (e *Engine) Plan(eff *compile.Effective) Plan {
 	e.mu.Lock()
@@ -419,13 +430,21 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 		e.mu.Unlock()
 		return nil, errors.New("engine closed")
 	}
-	p := &Prepared{eff: eff, outbounds: map[string]*sagernet.Outbound{}, bound: map[string]*sagernet.Inbound{}}
-	p.plan = e.plan(eff)
-	if p.plan.Blocked != "" {
+	plan := e.plan(eff)
+	if plan.Blocked != "" {
 		e.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrBlocked, p.plan.Blocked)
+		return nil, fmt.Errorf("%w: %s", ErrBlocked, plan.Blocked)
 	}
 	snap, gen := e.current()
+	if old := gen.eff; old != nil && eff.HTTPRewrite != old.HTTPRewrite &&
+		eff.HTTPRewriteFingerprint == old.HTTPRewriteFingerprint {
+		// Keep lazily compiled expressions without modifying the candidate.
+		// The candidate's options, such as its resource reader, still apply.
+		reused := *eff
+		reused.HTTPRewrite = eff.HTTPRewrite.ReuseCompiled(old.HTTPRewrite)
+		eff = &reused
+	}
+	p := &Prepared{eff: eff, plan: plan, outbounds: map[string]*sagernet.Outbound{}, bound: map[string]*sagernet.Inbound{}}
 	fail := func(err error) (*Prepared, error) {
 		e.release(p)
 		e.mu.Unlock()

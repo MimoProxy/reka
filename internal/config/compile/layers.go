@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -144,7 +145,7 @@ func (c *compiler) layers(doc *model.Doc) {
 		}
 		// Require stable IDs before namespacing. Anonymous source rules would
 		// otherwise change identity whenever the subscription reorders them.
-		for _, kind := range []string{"outbounds", "groups", "rules", "rule-sets", "sub-rules"} {
+		for _, kind := range append([]string{"outbounds", "groups", "rules", "rule-sets", "sub-rules"}, rewriteKinds...) {
 			items := field(n, kind)
 			if items == nil {
 				continue
@@ -386,6 +387,7 @@ func (c *compiler) layers(doc *model.Doc) {
 	}
 	merged := map[string]*yaml.Node{"outbounds": sequence(), "groups": sequence()}
 	seenImports := map[string]bool{}
+	var rewriteImports []string
 	for i, imp := range c.profile.Imports {
 		path := model.JoinPath("/imports", "#"+strconv.Itoa(i))
 		src := byID[imp.Source]
@@ -399,8 +401,11 @@ func (c *compiler) layers(doc *model.Doc) {
 		}
 		seenImports[imp.Source] = true
 		includeResources(imp.Source, imp.RuleSets, imp.SubRules)
-		if !imp.Outbounds && !imp.Groups && !imp.RuleSets && !imp.SubRules {
-			addDiag(model.DocProfile, path, "source.empty-import", "select outbounds, groups, rule-sets or sub-rules to import", c.ppos)
+		if imp.Rewrites {
+			rewriteImports = append(rewriteImports, imp.Source)
+		}
+		if !imp.Outbounds && !imp.Groups && !imp.RuleSets && !imp.SubRules && !imp.Rewrites {
+			addDiag(model.DocProfile, path, "source.empty-import", "select outbounds, groups, rule-sets, sub-rules or rewrites to import", c.ppos)
 		}
 		for _, kind := range []string{"outbounds", "groups"} {
 			if (kind == "outbounds" && !imp.Outbounds) || (kind == "groups" && !imp.Groups) {
@@ -519,6 +524,9 @@ func (c *compiler) layers(doc *model.Doc) {
 	if c.diags.HasErrors() {
 		return
 	}
+	if len(rewriteImports) != 0 {
+		c.mergeRewrites(doc.Mapping(), byID, rewriteImports, spos, importItem)
+	}
 	for i, op := range overlay.Patches {
 		path := model.JoinPath("/patches", "#"+strconv.Itoa(i))
 		fail := func(err error) { addDiag(model.DocOverlay, path, "overlay.path", err.Error(), opos) }
@@ -528,8 +536,8 @@ func (c *compiler) layers(doc *model.Doc) {
 			continue
 		}
 		kind := segs[0]
-		if kind != "outbounds" && kind != "groups" && kind != "rules" && kind != "rule-sets" && kind != "sub-rules" && kind != "dns" {
-			fail(fmt.Errorf("overlay may only edit outbounds, groups, rules, rule-sets, sub-rules and dns"))
+		if kind != "outbounds" && kind != "groups" && kind != "rules" && kind != "rule-sets" && kind != "sub-rules" && kind != "dns" && kind != "mitm" && !slices.Contains(rewriteKinds, kind) {
+			fail(fmt.Errorf("overlay may only edit outbounds, groups, rules, rule-sets, sub-rules, dns, mitm and rewrite resources"))
 			continue
 		}
 		if op.Before != "" && op.After != "" {
@@ -537,6 +545,7 @@ func (c *compiler) layers(doc *model.Doc) {
 			continue
 		}
 		dest := op.Path
+		var oldHostnames map[*yaml.Node]Origin
 		if kind == "dns" {
 			if op.Op != "set" && op.Op != "remove" {
 				fail(fmt.Errorf("DNS overlays support set/remove"))
@@ -545,6 +554,18 @@ func (c *compiler) layers(doc *model.Doc) {
 			if len(segs) < 2 || doc.Get("/dns") == nil {
 				fail(fmt.Errorf("DNS target does not exist"))
 				continue
+			}
+		} else if kind == "mitm" {
+			if len(segs) > 1 && (segs[1] == "enabled" || segs[1] == "ca") {
+				addDiag(model.DocOverlay, path+"/path", "mitm.local-only", "mitm."+segs[1]+" is a machine-local setting and can only be set in local.yaml", opos)
+				continue
+			}
+			if err := validateMITMOverlay(op, segs); err != nil {
+				fail(err)
+				continue
+			}
+			if op.Op == "insert" || (op.Op == "remove" && len(segs) == 3) {
+				oldHostnames = c.hostnameOrigins(doc.Get(mitmHostnamePath))
 			}
 		} else if op.Op == "insert" {
 			if len(segs) != 1 {
@@ -592,7 +613,17 @@ func (c *compiler) layers(doc *model.Doc) {
 			fail(err)
 			continue
 		}
+		if oldHostnames != nil {
+			inserted := c.reindexHostnameOrigins(doc.Get(mitmHostnamePath), oldHostnames)
+			if op.Op == "remove" {
+				continue
+			}
+			dest = inserted
+		}
 		old, hadOld := originAt(c.origins, dest)
+		if oldHostnames != nil {
+			hadOld = false // An inserted hostname has no previous value.
+		}
 		for p := range c.origins {
 			if p == dest || strings.HasPrefix(p, dest+"/") {
 				delete(c.origins, p)

@@ -8,8 +8,8 @@
 
 | 文件 | 顶层字段 | 用途 |
 | --- | --- | --- |
-| `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process` | 节点、分组、路由和 DNS；必须有 `schema-version: 1` |
-| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes`、`traffic-budgets` | 本机端口、日志、控制通道、系统接管、场景和预算；可为空 |
+| `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local` | 节点、分组、路由、DNS 和 HTTP 重写；必须有 `schema-version: 1` |
+| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes`、`traffic-budgets`、`mitm` | 本机端口、日志、控制通道、系统接管、场景、预算和 MITM 开关；可为空 |
 | `sources.yaml` | `schema-version`、`sources` | 导入和订阅的原生快照 |
 | `overlay.yaml` | `schema-version`、`patches` | 对已合成资源的持久覆盖 |
 
@@ -408,9 +408,9 @@ Fake IP 映射写入 `<state-root>/cache/fake-ip.json`，重启恢复未过期�
 
 ## 8. Sources、订阅和 overlay
 
-profile 的 `imports[]` 包含 `source`，以及 `outbounds`、`groups`、`rule-sets`、`sub-rules` 的布尔开关。规则通过 `rules: [{source: airport}]` 在指定位置展开；DNS 通过 `dns.from` 选用，互不自动启用。
+profile 的 `imports[]` 包含 `source`，以及 `outbounds`、`groups`、`rule-sets`、`sub-rules`、`rewrites` 的布尔开关，至少开启一种。规则通过 `rules: [{source: airport}]` 在指定位置展开；DNS 通过 `dns.from` 选用，互不自动启用。
 
-`sources.sources[]` 包含 `id`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`dns`，以及可选 `subscription` 和 `lock`。订阅 URL 不应直接写进 profile 的 outbounds。
+`sources.sources[]` 包含 `id`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`dns`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local`，以及可选 `subscription` 和 `lock`。订阅 URL 不应直接写进 profile 的 outbounds。
 
 | `subscription` YAML 字段 | 含义 |
 | --- | --- |
@@ -495,6 +495,87 @@ traffic-budgets:
 
 每日预算等于可用余量除以剩余的 24 小时段数，天数向上取整。截止时间取 `reset-at` 与服务商报告的到期时间中较早的一项。缺少可信总量或截止时间时，相应的估算字段为空。`rekactl budget` 显示预算和数据是否过期。
 
-## 11. 源码核对入口
+## 11. MITM 与 HTTP 重写
+
+当前内核支持这些字段的合成、校验和独立的 HTTP 重写引擎，尚未接入解密转发。配置 `enabled: true` 不会启用实际流量解密。
+
+### 11.1 MITM 设置
+
+`local.yaml` 的 `mitm` 只允许以下两个本机字段。profile、source 和 overlay 中设置这两个字段会报错。
+
+| `mitm` 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `enabled` | 布尔，默认 `false` | 本机 MITM 开关。关闭时仍合成并校验其他 MITM 设置及重写规则 |
+| `ca` | 字符串，默认无 | `enabled: true` 时必填，必须是 `secret://` 引用，通常写 `secret://mitm/ca`（由 [CA 控制接口](control-api.md#mitm-ca)生成或导入）。编译只校验引用语法，不读取内容 |
+
+profile 和 source 的 `mitm` 支持以下字段。
+
+| `mitm` 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `hostnames` | 字符串列表，默认空 | 按顺序匹配，第一条命中决定是否解密。`-` 前缀排除，未命中时不解密 |
+| `h2` | 布尔，默认 `false` | 允许 HTTP/2 |
+| `skip-server-cert-verify` | 布尔，默认 `false` | 跳过上游服务器证书校验 |
+| `quic-block` | 布尔，默认 `true` | 对选中的目标阻止 QUIC，以便客户端回退到 TCP |
+
+主机名可使用 ASCII 字母、数字、`.`、`-`、`_` 和通配符。匹配忽略大小写，`*` 匹配零个或多个字符，可跨越 `.`，`?` 匹配一个字符。允许使用 IP 字面量，IPv6 写作 `[::1]` 或 `[::1]:443`。省略端口只匹配 443，`api.example.com:8443` 只匹配 8443，`api.example.com:0` 匹配所有端口。空条目、单独的 `-`、非法字符和超出 0–65535 的端口会报错，完全相同的重复条目会给出警告。排除项应放在会覆盖它的通配项前，例如 `['-pinned.example.com', '*.example.com']`。
+
+### 11.2 重写资源与合成
+
+`http-rewrites`、`header-rewrites`、`body-rewrites` 和 `map-local` 都是 profile 或 source 中的列表，每条必填稳定 `id` 和 `match`。`match` 使用 RE2 匹配完整 URL，例如 `https://api.example.com/path?q=1`。正则不支持前瞻等 RE2 未实现的语法。编译时校验正则语法，实际匹配所需的正则在首次使用时编译。
+
+替换模板中的 `$0` 表示整个匹配，`$1` 至 `$99` 引用捕获组，`$$` 表示字面 `$`。`$1x` 会在第一组后追加 `x`。引用不存在的捕获组会给出警告。
+
+`imports[].rewrites: true` 从对应 source 导入 `mitm` 和四类重写资源。重写资源按 `imports` 的顺序排列在 profile 自有资源之前，ID 变成 `source/id`。profile 中使用相同 ID 可在原位置替换整条导入资源。`mitm.hostnames` 则把 profile 列表放在前面，随后按 `imports` 顺序追加来自各 source 的列表。三个 MITM 布尔字段依次由默认值、按导入顺序出现的 source、profile、overlay 覆盖。overlay 最后编辑合成后的重写和主机名列表。参见 [Sources 与 overlays](source-overlays.md#http-rewrites-and-mitm-hostnames)。
+
+### 11.3 URL 重写 `http-rewrites`
+
+| 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `action` | 必填，`header`、`302`、`307`、`reject` | `header` 原地改写 URL，后续请求操作都用新 URL 匹配。`302` 和 `307` 返回对应状态码、`Location` 和空响应体。`reject` 按 `response` 处理。`302` 和 `307` 可写成 YAML 整数或字符串 |
+| `target` | 字符串 | `header`、`302`、`307` 必填，`reject` 禁用。用替换模板替换 URL 中第一处匹配，保留其余部分 |
+| `response` | 默认 `error`，仅供 `reject` 使用 | `error` 返回 404 和空响应体，`200` 返回 200 和空响应体，`gif` 返回 200 和透明 GIF，`dict` 返回 200 和 JSON `{}`，`array` 返回 200 和 JSON `[]`。`close` 关闭连接，`drop` 丢弃请求并等待客户端放弃，这两种不生成 HTTP 响应 |
+
+如果重定向产生非法的 `Location` 字段值，请求继续执行后续请求头、本地响应和请求体规则。
+
+### 11.4 头字段重写 `header-rewrites`
+
+| 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `phase` | `request` 或 `response`，默认 `request` | 修改请求头或响应头 |
+| `op` | 必填，`add`、`del`、`replace`、`replace-regex` | `add` 追加一行，`del` 删除所有同名值，`replace` 将现有同名值替换为一行，`replace-regex` 对每个现有值替换所有匹配。后两项在字段不存在时跳过 |
+| `name` | 必填字符串 | 合法的 HTTP 字段名，匹配时忽略大小写 |
+| `pattern` | RE2 正则 | `replace-regex` 必填，其他操作不使用 |
+| `value` | 字符串 | `add`、`replace`、`replace-regex` 必填，`del` 禁用。`replace-regex` 使用 `pattern` 的捕获组，`add` 和 `replace` 使用 URL `match` 的捕获组。必须是合法的 HTTP 字段值，运行中产生非法值时跳过该操作 |
+
+头字段重写和 `map-local.headers` 均禁止设置 `Content-Length`、`Transfer-Encoding` 等分帧字段，`Connection`、`Keep-Alive`、`Proxy-Connection`、`TE`、`Trailer`、`Upgrade` 等逐跳字段，以及以 `:` 开头的伪头。运行时也跳过 `Connection` 中列出的字段。
+
+### 11.5 消息体重写 `body-rewrites`
+
+| 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `phase` | 必填，`request` 或 `response` | 修改请求体或响应体 |
+| `replace` | 非空的 `{pattern, value}` 列表 | `pattern` 为 RE2 正则，`value` 为替换模板，按列表顺序逐对替换所有匹配。消息体不是合法 UTF-8 时跳过整条规则 |
+| `jq` | 字符串 | 在 JSON 消息体上运行 jq，保留大整数精度，输出首个结果。JSON 解析失败、运行出错、无结果或超时会跳过该规则。每条 jq 的执行时限为 1 秒，无环境数据或额外输入可用 |
+
+`replace` 和 `jq` 必须二选一。默认可改写上限为 1 MiB，引擎调用方可配置上限，并可采用 10 MiB 的桌面常量。超出上限的原始消息体直接放行。支持无 `Content-Encoding`、`identity`、`gzip` 和 `deflate`，解压后同样检查大小。解压失败、使用多重编码或使用 `br`、`zstd` 等其他编码时，消息体原样放行。某条规则的结果超过上限时，保留该条规则执行前的消息体。消息体改动后以未压缩形式返回，移除 `Content-Encoding` 和 `Transfer-Encoding`，按新长度设置 `Content-Length`。
+
+### 11.6 本地响应 `map-local`
+
+| 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `data-type` | `file`（默认）、`text`、`json`、`tiny-gif`、`base64` | 分别使用已锁定的资源、文本、JSON、内置 1×1 透明 GIF 或 Base64 解码后的字节 |
+| `data` | 字符串 | `text`、`json`、`base64` 必填。`json` 要求合法 JSON，`base64` 使用标准 Base64。`file` 和 `tiny-gif` 不接受此字段 |
+| `hash` | SHA-256 字符串 | `file` 必填。和外部规则集使用同一资源存储，校验时文件必须存在且不超过 15 MiB。命中时按哈希读取，失败返回 404 和空响应体 |
+| `download` | 可选对象，仅用于 `file` | `url` 为不含内联凭据或片段的 HTTP(S) URL 或 secret 引用，`interval` 为 300–604800 秒，`automatic` 为布尔值，默认 `false`。重写引擎按 `hash` 使用已经入库的内容 |
+| `status-code` | 整数，100–999，默认 200 | 本地响应的状态码 |
+| `headers` | `{name, value}` 列表，默认空 | 自定义响应头，按头字段重写的名称和值限制校验，`Content-Length` 由引擎计算 |
+
+如果 `headers` 未指定 `Content-Type`，`text` 使用 `text/plain`，`json` 使用 `application/json`，`tiny-gif` 使用 `image/gif`，`base64` 使用 `application/octet-stream`。`file` 从 `download.url` 的路径扩展名按内置表推断类型。内置表支持 `.json`、`.js`、`.mjs`、`.html`、`.htm`、`.css`、`.txt`、`.xml`、`.plist`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.ico`、`.mp4`、`.m3u8`、`.wasm`。无法推断时使用 `application/octet-stream`。
+
+### 11.7 执行顺序
+
+请求依次执行 URL 重写、请求头重写、本地响应匹配、请求体重写。URL 重写和本地响应各只采用第一条命中的规则。URL 重写产生重定向或拒绝时立即结束；本地响应命中后不再处理请求体。上游响应先重写响应头，再重写响应体。命中的头字段和消息体规则分别按其列表顺序执行，后续规则使用前一条的结果。本地生成的响应不经过响应重写。
+
+## 12. 源码核对入口
 
 字段声明：[`model/types.go`](../internal/config/model/types.go)、[`model/dialer.go`](../internal/config/model/dialer.go)、[`dns/config.go`](../internal/dns/config.go)、[`platform/config.go`](../internal/platform/config.go)。协议约束：[`compile.go`](../internal/config/compile/compile.go)、[`protocol.go`](../internal/config/compile/protocol.go)、[`ss_plugin.go`](../internal/config/compile/ss_plugin.go)、[`tls_carrier.go`](../internal/config/compile/tls_carrier.go)、[`realm.go`](../internal/config/compile/realm.go)。运行时默认值也可能由固定依赖填充；接入方应查询当前内核 `GetCapabilities` 并在提交前验证配置。

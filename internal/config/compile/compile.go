@@ -25,6 +25,7 @@ import (
 	VE "github.com/MimoProxy/reka/internal/compat/vlessenc"
 	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
+	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/platform"
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
@@ -147,6 +148,7 @@ type GroupMetadata struct {
 
 // Effective is the immutable configuration used by the runtime.
 type Effective struct {
+	MITM             MITM                      `json:"mitm"`
 	NetworkScenes    []NetworkScene            `json:"network-scenes,omitempty"`
 	TrafficBudgets   map[string]TrafficBudget  `json:"traffic-budgets,omitempty"`
 	Process          model.Process             `json:"process"`
@@ -178,6 +180,10 @@ type Effective struct {
 	// RulesFingerprint changes whenever the rule list changes.
 	RulesFingerprint string             `json:"rules-fingerprint"`
 	RuleMemory       RuleMemoryEstimate `json:"-"`
+	// HTTPRewrite is nil when there are no rewrite rules.
+	HTTPRewrite *httprewrite.Set `json:"-"`
+	// HTTPRewriteFingerprint identifies the ordered rewrite definitions and their resource hashes.
+	HTTPRewriteFingerprint string `json:"http-rewrite-fingerprint,omitempty"`
 
 	// IPVersionOverride is empty when the profile's IP settings are in use.
 	IPVersionOverride string `json:"-"`
@@ -281,7 +287,7 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	}
 	for i, d := range c.diags {
 		if d.Document == model.DocProfile {
-			if o, ok := originAt(c.origins, d.Path); ok {
+			if o, ok := diagnosticOrigin(c.origins, d.Path); ok {
 				c.diags[i].Document, c.diags[i].Path, c.diags[i].Line, c.diags[i].Column = o.Document, o.Path, o.Line, o.Column
 			}
 		}
@@ -342,6 +348,8 @@ func (c *compiler) compose() *Effective {
 	c.rules(eff)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
+	c.mitm(eff)
+	c.httpRewrites(eff)
 	c.process(eff)
 	c.sniff(eff)
 	c.network(eff)
