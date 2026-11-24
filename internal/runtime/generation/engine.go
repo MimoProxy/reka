@@ -902,6 +902,20 @@ func routerMetadata(md sagernet.Metadata) router.Metadata {
 	}
 }
 
+func (g *generation) flowRouterMetadata(md sagernet.Metadata, scene string) router.Metadata {
+	routeMD := routerMetadata(md)
+	routeMD.NetworkScene = scene
+	if routeMD.InboundPort == 0 && md.InboundType != "tun" {
+		for _, listener := range g.eff.Listeners {
+			if listener.ID == md.Inbound {
+				routeMD.InboundPort = listener.Listen.Port()
+				break
+			}
+		}
+	}
+	return routeMD
+}
+
 func (e *Engine) StartHTTPSDebug(request api.HTTPSDebugRequest) (api.HTTPSDebugStatus, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -925,6 +939,8 @@ func (e *Engine) route(ctx context.Context, md sagernet.Metadata) sagernet.Route
 
 type snapshotAcquirer func(func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error)
 
+const fakeIPUnavailable = "fake-ip-unavailable"
+
 func (e *Engine) isFakeIP(g *generation, addr netip.Addr) bool {
 	if e.fake.Contains(addr) {
 		return true
@@ -942,6 +958,35 @@ func (e *Engine) isFakeIP(g *generation, addr netip.Addr) bool {
 	return false
 }
 
+func (e *Engine) inboundAllowsUDP(g *generation, md sagernet.Metadata) bool {
+	if md.InboundType == "tun" {
+		return e.opts.HostPacketFlow || g.eff.Network.Mode == "tun"
+	}
+	return g.inUDP[md.Inbound]
+}
+
+func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sagernet.Metadata, dec router.Decision) (*sagernet.Outbound, bool, string) {
+	if md.Network == "udp" {
+		for _, id := range dec.Chain {
+			if g.eff.GroupUDPDisabled[id] {
+				return nil, false, ""
+			}
+		}
+		if !g.outUDP[dec.Outbound] {
+			return nil, false, ""
+		}
+	}
+	o, ok := resources[dec.Outbound]
+	isQUIC := md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
+	if ok && isQUIC {
+		mode, typ := g.eff.Routing.BlockQUIC, o.Type()
+		if typ != "reject-drop" && (mode == "all" || mode == "proxy" && typ != model.OutboundDirect) {
+			return nil, false, "block-quic"
+		}
+	}
+	return o, ok, ""
+}
+
 func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState) sagernet.Route {
 	inputAddress := md.Destination.Addr
 	var fakeRelease func()
@@ -957,14 +1002,13 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			}
 			if e.isFakeIP(active, md.Destination.Addr) {
 				if observe := e.opts.ObserveRoute; observe != nil {
-					observe(RouteObservation{Address: inputAddress, Failure: "fake-ip-unavailable"})
+					observe(RouteObservation{Address: inputAddress, Failure: fakeIPUnavailable})
 				}
 				return sagernet.Route{Scope: active.historyScope}
 			}
 		}
 	}
 	env := &lookupEnv{e: e, md: md, observeLookup: true}
-	isQUIC := md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
 	var (
 		dec          = router.Decision{LookupRule: -1}
 		g            *generation
@@ -979,11 +1023,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		if fixed == nil {
 			state = e.routingState(g)
 		}
-		udpAllowed := g.inUDP[md.Inbound]
-		if md.InboundType == "tun" {
-			udpAllowed = e.opts.HostPacketFlow || g.eff.Network.Mode == "tun"
-		}
-		if md.Network == "udp" && !udpAllowed {
+		if md.Network == "udp" && !e.inboundAllowsUDP(g, md) {
 			dec = router.Decision{RuleIndex: -1, LookupRule: -1, Outbound: model.OutboundReject}
 			return nil, false
 		}
@@ -992,16 +1032,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		if g.eff.Process.Mode == "always" {
 			env.ProcessInfo(ctx)
 		}
-		routeMD := routerMetadata(md)
-		routeMD.NetworkScene = state.scene
-		if routeMD.InboundPort == 0 && md.InboundType != "tun" {
-			for _, listener := range g.eff.Listeners {
-				if listener.ID == md.Inbound {
-					routeMD.InboundPort = listener.Listen.Port()
-					break
-				}
-			}
-		}
+		routeMD := g.flowRouterMetadata(md, state.scene)
 		resolve := func(dec *router.Decision) { g.resolveObserved(dec, routeMD, true) }
 		if len(state.temporary) == 0 {
 			dec = g.router.RouteWithResolver(ctx, routeMD, env, resolve)
@@ -1016,24 +1047,8 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		if g.policies != nil {
 			g.policies.MarkUsed(dec.Outbound)
 		}
-		if md.Network == "udp" {
-			for _, id := range dec.Chain {
-				if g.eff.GroupUDPDisabled[id] {
-					return nil, false
-				}
-			}
-			if !g.outUDP[dec.Outbound] {
-				return nil, false
-			}
-		}
-		o, ok := s.Resources[dec.Outbound]
-		if ok && isQUIC {
-			mode, typ := g.eff.Routing.BlockQUIC, o.Type()
-			if typ != "reject-drop" && (mode == "all" || mode == "proxy" && typ != model.OutboundDirect) {
-				rejectReason = "block-quic"
-				return nil, false
-			}
-		}
+		o, ok, reason := flowOutbound(g, s.Resources, md, dec)
+		rejectReason = reason
 		return o, ok
 	})
 	if err != nil {
@@ -1042,36 +1057,14 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	if observe := e.opts.ObserveRoute; observe != nil {
 		observe(RouteObservation{Domain: routerMetadata(md).Domain, Address: inputAddress, Decision: dec})
 	}
-	info := &FlowInfo{
-		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
-		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
-		NetworkScene: state.scene, RejectReason: rejectReason, RuleLookup: ruleLookup,
-	}
-	if dec.Temporary {
-		info.RuleSource = "temporary"
-	}
+	info := g.flowInfo(genNo, md, dec, state.scene, rejectReason)
+	info.RuleLookup = ruleLookup
 	if !env.processOff && env.procDone && env.procOK {
 		info.ProcessPID = env.owner.PID
 		info.ProcessPath = env.owner.Path
 		if env.owner.UIDKnown {
 			uid := env.owner.UID
 			info.ProcessUID = &uid
-		}
-	}
-	if g != nil {
-		info.Revision = g.revision
-		info.Fingerprint = fingerprintOf(g, dec.Outbound)
-		if g.packetFlowNames != nil {
-			target := dec.Outbound
-			if len(dec.Chain) > 0 {
-				target = dec.Chain[0]
-			}
-			info.PolicyName = g.packetFlowNames[target]
-			info.OutboundName = g.packetFlowNames[dec.Outbound]
-		}
-		if dec.RuleIndex >= 0 || dec.Temporary {
-			info.RuleID = dec.Rule.ID
-			info.Rule = dec.Rule.String()
 		}
 	}
 	scope := history.Scope{}
@@ -1128,6 +1121,35 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		}
 	}
 	return result
+}
+
+func (g *generation) flowInfo(genNo uint64, md sagernet.Metadata, dec router.Decision, scene, rejectReason string) *FlowInfo {
+	info := &FlowInfo{
+		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
+		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
+		NetworkScene: scene, RejectReason: rejectReason,
+	}
+	if dec.Temporary {
+		info.RuleSource = "temporary"
+	}
+	if g == nil {
+		return info
+	}
+	info.Revision = g.revision
+	info.Fingerprint = fingerprintOf(g, dec.Outbound)
+	if g.packetFlowNames != nil {
+		target := dec.Outbound
+		if len(dec.Chain) > 0 {
+			target = dec.Chain[0]
+		}
+		info.PolicyName = g.packetFlowNames[target]
+		info.OutboundName = g.packetFlowNames[dec.Outbound]
+	}
+	if dec.RuleIndex >= 0 || dec.Temporary {
+		info.RuleID = dec.Rule.ID
+		info.Rule = dec.Rule.String()
+	}
+	return info
 }
 
 type explainEnv struct {

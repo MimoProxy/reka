@@ -24,7 +24,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 		snap, g := e.current()
 		state := e.routingState(g)
 		options := flowSniffOptions(ctx, g.eff, md, state.scene)
-		if !options.Enabled || (g.eff.SniffForRouting && !e.routingNeedsDomain(g, md, state)) {
+		if !e.flowMaySniff(g, md, state, options) {
 			return sagernet.PreparedFlow{Route: e.route}
 		}
 		pins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
@@ -117,6 +117,10 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			Release: release,
 		}
 	}
+}
+
+func (e *Engine) flowMaySniff(g *generation, md sagernet.Metadata, state routingState, options sagernet.SniffOptions) bool {
+	return options.Enabled && (!g.eff.SniffForRouting || e.routingNeedsDomain(g, md, state))
 }
 
 func (e *Engine) routingNeedsDomain(g *generation, md sagernet.Metadata, state routingState) bool {
