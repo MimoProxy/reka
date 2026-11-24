@@ -107,6 +107,15 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return s.historyPage(history.Logs, op)
 	case "probe":
 		return s.probe(op)
+	case "speedStart":
+		return s.startCloudflareSpeed(op.ID, op.Member)
+	case "speedRead":
+		return s.readCloudflareSpeed(op.ID)
+	case "speedCancel":
+		if op.ID == 0 {
+			return nil, errors.New("speed test probe ID required")
+		}
+		return s.cancelCloudflareSpeed(op.ID), nil
 	case "diagnosticRoute":
 		if s.profile == nil {
 			return nil, errors.New("the operation requires a profile")
@@ -236,6 +245,9 @@ func (s *Session) probe(op Operation) (Latency, error) {
 func (s *Session) NetworkChanged(available, changed bool) {
 	if s.ctx.Err() != nil {
 		return
+	}
+	if !available || changed {
+		s.cancelCloudflareSpeed(0)
 	}
 	if s.profile != nil {
 		p := s.profile

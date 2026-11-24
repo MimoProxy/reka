@@ -80,6 +80,7 @@ type Session struct {
 	logs      tunnelLogHandler
 	started   time.Time
 	ranking   trafficRanking
+	speed     cloudflareSpeedState
 	guard     *memoryGuard
 	guardOnce sync.Once
 }
