@@ -77,6 +77,8 @@ type Session struct {
 	profile   *profileSession
 	events    *history.Store
 	logger    *slog.Logger
+	logs      tunnelLogHandler
+	started   time.Time
 	ranking   trafficRanking
 	guard     *memoryGuard
 	guardOnce sync.Once
@@ -89,10 +91,11 @@ func newSession() *Session {
 		history.DNS: eventBytes, history.Logs: eventBytes,
 		history.Connections: connectionEventBytes, history.Requests: eventBytes,
 	})
-	logger := slog.New(tunnelLogHandler{events: events})
+	logs := newTunnelLogHandler(events)
+	now := time.Now()
 	return &Session{
 		ctx: ctx, cancel: cancel, mtu: mtu, device: &packetDevice{endpoint: channel.New(queueSize, uint32(mtu), "")},
-		events: events, logger: logger, ranking: trafficRanking{sinceMS: time.Now().UnixMilli()},
+		events: events, logger: slog.New(logs), logs: logs, started: now, ranking: trafficRanking{sinceMS: now.UnixMilli()},
 	}
 }
 
@@ -126,7 +129,8 @@ func Start(node Node) (*Session, error) {
 		return nil, err
 	}
 	s.backend, s.outbound, s.tunnel = backend, outbound, tunnel
-	s.logger.Info("Packet tunnel started")
+	s.captureDefaultLogger()
+	s.logger.Info("Packet tunnel started", "mode", "node", "mtu", s.mtu, "method", node.Method)
 	return s, nil
 }
 
@@ -192,6 +196,14 @@ func (s *Session) Traffic() (upload, download uint64) {
 
 func (s *Session) Close() {
 	s.close.Do(func() {
+		if s.tunnel != nil {
+			upload, download := s.Traffic()
+			connections, _ := s.Counts()
+			s.logger.Info("Packet tunnel stopping", "uptime", time.Since(s.started).Round(time.Second),
+				"uploaded", upload, "downloaded", download, "connections", connections)
+		}
+		s.releaseDefaultLogger()
+		defer s.logs.sink.close()
 		s.guardOnce.Do(func() {})
 		if s.guard != nil {
 			s.guard.stop()

@@ -4,9 +4,7 @@ package packettunnel
 
 import (
 	"cmp"
-	"context"
 	"errors"
-	"log/slog"
 	"slices"
 	"strings"
 
@@ -64,42 +62,6 @@ type Latency struct {
 	DelayMS  *int64 `json:"delayMs,omitempty"`
 	Status   int    `json:"status,omitempty"`
 }
-
-type tunnelLogHandler struct {
-	events    *history.Store
-	component string
-}
-
-func (h tunnelLogHandler) Enabled(_ context.Context, level slog.Level) bool {
-	// Library components log each dial at Info. Keep those messages out of the
-	// extension's small ring, leaving room for lifecycle events and errors.
-	if h.component != "" {
-		return level >= slog.LevelWarn
-	}
-	return level >= slog.LevelInfo
-}
-
-func (h tunnelLogHandler) Handle(_ context.Context, record slog.Record) error {
-	entry := struct {
-		TimeMS    int64  `json:"timeMs"`
-		Level     string `json:"level"`
-		Message   string `json:"message"`
-		Component string `json:"component,omitempty"`
-	}{record.Time.UnixMilli(), strings.ToLower(record.Level.String()), history.Text(record.Message, 320), h.component}
-	h.events.Record(history.Logs, history.Scope{}, record.Time, entry, nil)
-	return nil
-}
-
-func (h tunnelLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	for _, attr := range attrs {
-		if attr.Key == "component" && attr.Value.Kind() == slog.KindString {
-			h.component = history.Text(attr.Value.String(), 64)
-		}
-	}
-	return h
-}
-
-func (h tunnelLogHandler) WithGroup(string) slog.Handler { return h }
 
 func (s *Session) Counts() (connections, dns int) {
 	if s.profile != nil {

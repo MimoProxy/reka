@@ -4,6 +4,7 @@ package packettunnel
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -113,7 +114,12 @@ func StartProfile(snapshot []byte, controls profile.Controls, trace bool) (*Sess
 		return nil, errors.New("could not attach profile packet flow")
 	}
 	s.tunnel = tunnel
-	s.logger.Info("Packet tunnel started")
+	s.captureDefaultLogger()
+	s.profile.mu.Lock()
+	summary := s.profile.summary
+	s.profile.mu.Unlock()
+	s.logger.Info("Packet tunnel started", "mode", controls.Mode, "profile", controls.ProfileID, "mtu", s.mtu,
+		"outbounds", len(summary.Names), "ruleSets", len(s.profile.sets), "trace", trace)
 	return s, nil
 }
 
@@ -138,6 +144,11 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 		}
 	}
 	s := newSession()
+	if controls.LogFile != "" && !probeOnly {
+		if err := s.logs.sink.open(controls.LogFile); err != nil {
+			s.logger.Warn("Could not open the tunnel log file", "err", err)
+		}
+	}
 	opts := generation.EngineOptions{
 		HostPacketFlow: true, PacketHistory: s.events,
 		Backend: s.backendOptions(),
@@ -157,6 +168,8 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 		}
 	}
 	if err := p.publish(p.base, p.summary, controls); err != nil {
+		s.logger.Error("Profile could not be started", "err", err)
+		s.logs.sink.close()
 		s.cancel()
 		p.engine.Close()
 		return nil, err
@@ -181,11 +194,11 @@ func (p *profileSession) publish(base *compile.Effective, summary profile.Summar
 func (p *profileSession) activate(base *compile.Effective, summary profile.Summary, controls profile.Controls) (uint64, bool, error) {
 	eff, err := profile.ApplyControls(base, summary, controls)
 	if err != nil {
-		return 0, false, errors.New("invalid policy or routing mode")
+		return 0, false, fmt.Errorf("invalid policy or routing mode: %w", err)
 	}
 	prepared, err := p.engine.Prepare(eff)
 	if err != nil {
-		return 0, false, errors.New("could not prepare profile outbounds or DNS")
+		return 0, false, fmt.Errorf("could not prepare profile outbounds or DNS: %w", err)
 	}
 	_, scope := p.engine.History()
 	profileID := controls.ProfileID
@@ -194,7 +207,7 @@ func (p *profileSession) activate(base *compile.Effective, summary profile.Summa
 	}
 	gen, err := p.engine.ActivatePacketFlowProfile(prepared, p.rev+1, profileID, summary.Names)
 	if err != nil {
-		return 0, false, errors.New("could not activate profile")
+		return 0, false, fmt.Errorf("could not activate profile: %w", err)
 	}
 	var pinned map[string]bool
 	if len(controls.Pins) != 0 {
@@ -222,7 +235,10 @@ func (s *Session) ApplyControls(controls profile.Controls) error {
 	}
 	err := p.publish(p.base, p.summary, controls)
 	if err == nil {
-		s.logger.Info("Routing updated")
+		s.logger.Info("Routing updated", "mode", controls.Mode, "global", controls.Global,
+			"blockQuic", controls.BlockQUIC, "ipVersion", controls.IPVersion, "selections", len(controls.Selections))
+	} else {
+		s.logger.Warn("Routing could not be updated", "mode", controls.Mode, "err", err)
 	}
 	return err
 }
@@ -245,6 +261,7 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	defer debug.FreeOSMemory()
 	base, err := profile.CompileSnapshot(snapshot, controls.Secrets)
 	if err != nil {
+		s.logger.Warn("Profile refresh could not be compiled", "profile", controls.ProfileID, "err", err)
 		return err
 	}
 	if err := s.ctx.Err(); err != nil {
@@ -252,7 +269,7 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	}
 	gen, switched, err := p.activate(base, profile.Describe(base), controls)
 	if err != nil {
-		s.logger.Warn("Profile refresh could not be applied")
+		s.logger.Warn("Profile refresh could not be applied", "profile", controls.ProfileID, "err", err)
 		return err
 	}
 	if switched {
@@ -267,7 +284,8 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 		}
 	}
 	p.sets = collectRuleSets(base.Router.Rules())
-	s.logger.Info("Profile refreshed")
+	s.logger.Info("Profile refreshed", "profile", controls.ProfileID, "switched", switched,
+		"outbounds", len(p.summary.Names), "ruleSets", len(p.sets))
 	return nil
 }
 

@@ -88,8 +88,11 @@ type Controls struct {
 	// unless it names one in the profile.
 	Global string `json:"global,omitempty"`
 	// FakeIPState is the App Group path opened once per session.
-	FakeIPState string       `json:"fakeIPState,omitempty"`
-	Secrets     secret.Store `json:"-"`
+	FakeIPState string `json:"fakeIPState,omitempty"`
+	// LogFile is where an extension session appends its log as JSON lines,
+	// so the log outlives the extension process.
+	LogFile string       `json:"logFile,omitempty"`
+	Secrets secret.Store `json:"-"`
 }
 
 func readBundleFile(path string) ([]byte, error) {
