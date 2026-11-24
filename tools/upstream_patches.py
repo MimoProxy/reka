@@ -799,8 +799,23 @@ def forwarder_receive_window(source):
 \t}
 \tforwarder.forwarder = tcp.NewForwarder(stack, rcvWnd, 1024, forwarder.Forward)''')
 
+def synthetic_icmp_echo_observer(source):
+    for version in (4, 6):
+        write = f'\t\toutgoingEP.(ipv{version}.ExportedEndpoint).WritePacketDirect(route, pkt)'
+        source = replace(source, write, '\t\tf.observeSyntheticEcho(icmpHdr.Sequence(), pkt.Data())\n' + write)
+    return replace(source, 'func (f *ICMPForwarder) forwardCached(', '''// Notify a host packet-flow observer before publishing a synthetic echo reply.
+func (f *ICMPForwarder) observeSyntheticEcho(sequence uint16, payload stack.PacketData) {
+	if observer, ok := f.handler.(interface{ ObserveSyntheticICMPEchoReply(uint16, stack.PacketData) }); ok {
+		observer.ObserveSyntheticICMPEchoReply(sequence, payload)
+	}
+}
+
+func (f *ICMPForwarder) forwardCached(''')
+
+
 MODULES['github.com/sagernet/sing-tun'] = ('v0.9.7-0.20261023115432-040db71fcd33', {
 'stack_gvisor_tcp.go': ('418df41fb175d37e7dc8eccea85b5e75052dee29c39c527f6be58a837982e955', forwarder_receive_window),
+'stack_gvisor_icmp.go': ('8aef45cc66a5b773063f27a49afe2ac650d4505adc185c681e53174b9d1ce47c', synthetic_icmp_echo_observer),
 })
 
 # Inspect only the requested rows of compiled geodata without unpacking the

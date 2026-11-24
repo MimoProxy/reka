@@ -267,6 +267,7 @@ func copyPacket(output []byte, packet *stack.PacketBuffer) int {
 
 type packetDevice struct {
 	endpoint *channel.Endpoint
+	probes   syntheticEchoReplies
 	// Packets the stack handed to the host queue, and those dropped because
 	// the queue was full.
 	written, dropped atomic.Uint64
