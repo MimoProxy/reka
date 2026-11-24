@@ -92,6 +92,7 @@ type router struct {
 	backend    *Backend
 	route      atomic.Pointer[RouteFunc]
 	prepare    atomic.Pointer[PrepareFlowFunc]
+	preMatchFn atomic.Pointer[PreMatchFunc]
 	sniffOnce  sync.Once
 	sniffSlots chan struct{}
 }

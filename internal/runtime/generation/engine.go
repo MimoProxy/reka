@@ -65,8 +65,9 @@ type EngineOptions struct {
 	// HostPacketFlow uses host-owned networking and a smaller fake IP pool.
 	// Traffic is not recorded in desktop history.
 	HostPacketFlow bool
-	ObserveRoute   func(RouteObservation)
-	PacketHistory  *history.Store
+	// ObserveRoute runs synchronously, including for pre-match rejections.
+	ObserveRoute  func(RouteObservation)
+	PacketHistory *history.Store
 }
 
 type RouteObservation struct {
@@ -78,16 +79,17 @@ type RouteObservation struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
-	historyScope    history.Scope
-	policies        *policy.Manager
-	dns             *RD.Service
-	revision        uint64
-	eff             *compile.Effective
-	router          *router.Router
-	outUDP          map[string]bool
-	packetAddr      map[string]bool
-	inUDP           map[string]bool
-	packetFlowNames map[string]string
+	historyScope       history.Scope
+	policies           *policy.Manager
+	dns                *RD.Service
+	revision           uint64
+	eff                *compile.Effective
+	router             *router.Router
+	outUDP             map[string]bool
+	packetAddr         map[string]bool
+	inUDP              map[string]bool
+	packetFlowNames    map[string]string
+	unfixedLoadBalance map[string]bool
 }
 
 // Engine turns effective configurations into running generations: it
@@ -198,6 +200,7 @@ func NewEngine(opts EngineOptions) *Engine {
 	})
 	e.backend.SetRoute(e.route)
 	e.backend.SetPrepareFlow(e.prepareFlow)
+	e.backend.SetPreMatch(e.preMatch)
 	return e
 }
 
@@ -600,6 +603,15 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	}
 	g := &generation{historyScope: scope, policies: p.policies, dns: p.dns, revision: revision, eff: p.eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	g.packetFlowNames = packetFlowNames
+	for _, group := range eff.AutoGroups {
+		// Router.New fills in empty selections, so use the configured value.
+		if group.Type == "load-balance" && group.Selected == "" {
+			if g.unfixedLoadBalance == nil {
+				g.unfixedLoadBalance = make(map[string]bool)
+			}
+			g.unfixedLoadBalance[group.ID] = true
+		}
+	}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
