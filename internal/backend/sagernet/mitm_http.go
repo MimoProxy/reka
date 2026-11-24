@@ -18,6 +18,7 @@ import (
 	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	"golang.org/x/net/http/httpguts"
 )
@@ -227,7 +228,10 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			writer = mitmStreamWriter{ResponseWriter: w, flusher: flusher}
 		}
-		_, err = io.Copy(writer, responseBody)
+		// Reuse relay-sized pooled buffers; io.Copy allocates 32 KiB per response.
+		buffer := buf.Get(buf.BufferSize)
+		_, err = io.CopyBuffer(writer, responseBody, buffer)
+		_ = buf.Put(buffer)
 	}
 	if err != nil {
 		panic(http.ErrAbortHandler)

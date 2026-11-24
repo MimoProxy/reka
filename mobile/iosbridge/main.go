@@ -250,10 +250,17 @@ func start(open func() (*packettunnel.Session, error), extension bool, failure *
 		// heap. It must sit above what the tunnel needs, or the collector
 		// runs continuously, and low enough that idle pages are returned to
 		// stay well below the extension's memory limit. sing-box's libbox
-		// uses 4/5 of 50 MB with GOGC 50; under load tests that changed
-		// nothing measurable, since tunnel memory is live data rather than
-		// collector slack, so the lower limit stays.
+		// uses 4/5 of 50 MB; the lower limit stays because tunnel memory is
+		// mostly live data rather than collector slack.
 		debug.SetMemoryLimit(28 << 20)
+		// GOGC 50 matches sing-box libbox's
+		// oomkiller.DefaultAppleNetworkExtensionGCPercent. Without HTTPS
+		// interception it made no measurable difference, because tunnel
+		// memory is live data. Interception allocates per request: on an
+		// iPhone, 8 parallel intercepted requests for 30 s peaked at 25.8 MiB
+		// with the default and 23.0 MiB with GOGC 50, against a 25 MiB steady
+		// budget.
+		debug.SetGCPercent(50)
 	}
 	session, err := open()
 	if err != nil {
