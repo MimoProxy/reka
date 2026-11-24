@@ -58,12 +58,15 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 		}
 		result := g.router.PreMatch(ctx, routeMD, opts)
 		if !result.Decided {
-			return sagernet.PreMatchVerdict{}
-		}
-		dec = result.Decision
-		out, ok, reason := flowOutbound(g, s.Resources, md, dec)
-		rejectReason = reason
-		if ok {
+			// The rule is unknown, but the outcome may still be certain.
+			if !quicAlwaysRejected(g, md, state) {
+				return sagernet.PreMatchVerdict{}
+			}
+			rejectReason = blockQUIC
+		} else if out, ok, reason := flowOutbound(g, s.Resources, md, result.Decision); !ok {
+			dec, rejectReason = result.Decision, reason
+		} else {
+			dec, rejectReason = result.Decision, reason
 			switch out.Type() {
 			case "reject-drop":
 				// A dropped TCP flow completes its handshake and then stalls;
@@ -86,6 +89,23 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 		Info:   g.flowInfo(s.Generation, md, dec, state.scene, rejectReason),
 		Scope:  g.historyScope,
 	}
+}
+
+// quicAlwaysRejected reports whether block-quic rejects md whatever rule it
+// matches. With block-quic set to all, a QUIC flow is rejected unless its
+// route ends at a drop outbound, which is exempt and drops the flow instead.
+// Proxy mode exempts direct routes, so it needs the matched rule.
+func quicAlwaysRejected(g *generation, md sagernet.Metadata, state routingState) bool {
+	if !isQUICFlow(md) || g.eff.Routing.BlockQUIC != "all" || g.rulesMayDrop {
+		return false
+	}
+	isDrop := func(id string) bool { return g.dropOutbounds[id] }
+	for _, rule := range state.temporary {
+		if g.router.OverrideActive(rule, state.at) && g.router.Reaches(rule.Match.Rule(0).Target, isDrop) {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *generation) peekPreMatchTarget(target string) (string, []string, bool) {

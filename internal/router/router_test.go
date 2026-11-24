@@ -427,3 +427,33 @@ func BenchmarkRoute10k(b *testing.B) {
 		r.Route(ctx, queries[i%len(queries)], nil)
 	}
 }
+
+func TestReachesFollowsEveryGroupMember(t *testing.T) {
+	rules, err := CompileRules([]RuleSpec{
+		{Kind: KindDomain, Values: []string{"a.test"}, Target: "outer"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(rules, Options{
+		Outbounds: []string{"direct", "drop", "proxy"},
+		Groups: []Group{
+			{ID: "outer", Members: []string{"proxy", "inner"}, Selected: "proxy"},
+			{ID: "inner", Members: []string{"direct", "drop"}, Selected: "direct"},
+		},
+		Final: "direct",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	isDrop := func(id string) bool { return id == "drop" }
+	if !r.Reaches("outer", isDrop) || r.Reaches("proxy", isDrop) || r.Reaches("direct", isDrop) {
+		t.Fatal("reachability did not follow unselected group members")
+	}
+	if !r.TargetsReach(isDrop) {
+		t.Fatal("a rule target reaching the drop outbound was missed")
+	}
+	if r.TargetsReach(func(id string) bool { return id == "missing" }) {
+		t.Fatal("reported an outbound no target can reach")
+	}
+}

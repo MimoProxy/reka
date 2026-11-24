@@ -564,6 +564,38 @@ func (r *Router) exists(id string) bool {
 
 func (r *Router) HasTarget(id string) bool { return r.exists(id) }
 
+// Reaches reports whether target can end at an outbound for which match is
+// true, through any member of the groups it passes.
+func (r *Router) Reaches(target string, match func(string) bool) bool {
+	seen := map[string]bool{}
+	var walk func(string) bool
+	walk = func(t string) bool {
+		if seen[t] {
+			return false
+		}
+		seen[t] = true
+		if g, ok := r.groups[t]; ok {
+			return slices.ContainsFunc(g.Members, walk)
+		}
+		return match(t)
+	}
+	return walk(target)
+}
+
+// TargetsReach reports whether the final target or any rule's target can
+// end at an outbound for which match is true.
+func (r *Router) TargetsReach(match func(string) bool) bool {
+	if r.Reaches(r.final, match) {
+		return true
+	}
+	for _, rule := range r.rules.rules {
+		if r.Reaches(rule.spec.Target, match) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolve follows group selections from target to an outbound. It returns
 // the chain of groups passed through.
 func (r *Router) resolve(target string) ([]string, error) {

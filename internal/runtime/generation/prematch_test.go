@@ -3,6 +3,7 @@ package generation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"reflect"
@@ -420,4 +421,59 @@ func checkPreMatchAgainstRoute(t *testing.T, e *Engine, observations *[]RouteObs
 		t.Fatalf("unexpected route info %v, pre-match flow info %+v", route.Info, info)
 	}
 	return info
+}
+
+func TestPreMatchBlockQUICRejectsBeforeAnUndecidedRule(t *testing.T) {
+	// The first rule would need a DNS lookup for the mapped domain, so the
+	// rule cannot be decided from the first packet.
+	const rules = `outbounds: [{id: proxy, type: socks, server: 192.0.2.45, port: 1080}]
+rules:
+  - {match: {ip-cidr: 203.0.113.0/24}, outbound: direct}
+  - {match: {domain-suffix: video.test}, outbound: proxy}
+  - {match: {all: true}, outbound: %s}
+`
+	prefix := netip.MustParsePrefix("198.18.0.0/29")
+	for _, tc := range []struct {
+		name, profile string
+		network       string
+		port          uint16
+		want          sagernet.PreMatchAction
+	}{
+		{"block-quic all rejects QUIC", "routing: {block-quic: all}\n" + fmt.Sprintf(rules, "direct"), "udp", 443, sagernet.PreMatchReject},
+		{"a reachable drop outbound keeps it undecided", "routing: {block-quic: all}\n" + fmt.Sprintf(rules, "reject-drop"), "udp", 443, sagernet.PreMatchContinue},
+		{"proxy mode needs the matched rule", "routing: {block-quic: proxy}\n" + fmt.Sprintf(rules, "direct"), "udp", 443, sagernet.PreMatchContinue},
+		{"other UDP is not QUIC", "routing: {block-quic: all}\n" + fmt.Sprintf(rules, "direct"), "udp", 8443, sagernet.PreMatchContinue},
+		{"TCP is not QUIC", "routing: {block-quic: all}\n" + fmt.Sprintf(rules, "direct"), "tcp", 443, sagernet.PreMatchContinue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := preMatchTestEngine(t, EngineOptions{HostPacketFlow: true})
+			e.fake.Close()
+			e.fake = dns.NewFakePool(4)
+			pinFlowApply(t, e, "schema-version: 1\n"+tc.profile, "", 42)
+			mapped, err := e.fake.Allocate(1, "rr1.video.test", prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			md := preMatchTestMetadata(tc.network, tc.port)
+			md.Destination.Addr = mapped
+			got := e.preMatch(md)
+			if got.Action != tc.want {
+				t.Fatalf("pre-match action = %v, want %v", got.Action, tc.want)
+			}
+			if got.Action != sagernet.PreMatchReject {
+				return
+			}
+			if info := got.Info.(*FlowInfo); info.RejectReason != "block-quic" || info.DestinationDomain != "rr1.video.test" {
+				t.Fatalf("pre-match flow info = %+v", info)
+			}
+			route := e.route(t.Context(), md)
+			if route.Outbound != nil {
+				route.Release()
+				t.Fatalf("normal route accepted the flow through %q", route.Outbound.Tag())
+			}
+			if info, _ := route.Info.(*FlowInfo); info == nil || info.RejectReason != "block-quic" {
+				t.Fatalf("normal route rejected the flow for another reason: %+v", route.Info)
+			}
+		})
+	}
 }

@@ -90,6 +90,10 @@ type generation struct {
 	inUDP              map[string]bool
 	packetFlowNames    map[string]string
 	unfixedLoadBalance map[string]bool
+	// dropOutbounds are the outbounds that drop flows; rulesMayDrop is set
+	// when the saved rules or the final target can route to one.
+	dropOutbounds map[string]bool
+	rulesMayDrop  bool
 }
 
 // Engine turns effective configurations into running generations: it
@@ -615,6 +619,15 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
 		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
+		if o.Type == "reject-drop" {
+			if g.dropOutbounds == nil {
+				g.dropOutbounds = make(map[string]bool)
+			}
+			g.dropOutbounds[o.ID] = true
+		}
+	}
+	if g.router != nil {
+		g.rulesMayDrop = g.router.TargetsReach(func(id string) bool { return g.dropOutbounds[id] })
 	}
 	for _, l := range eff.Listeners {
 		g.inUDP[l.ID] = l.UDP
@@ -977,6 +990,13 @@ func (e *Engine) inboundAllowsUDP(g *generation, md sagernet.Metadata) bool {
 	return g.inUDP[md.Inbound]
 }
 
+const blockQUIC = "block-quic"
+
+// isQUICFlow reports whether block-quic treats md as QUIC.
+func isQUICFlow(md sagernet.Metadata) bool {
+	return md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
+}
+
 func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sagernet.Metadata, dec router.Decision) (*sagernet.Outbound, bool, string) {
 	if md.Network == "udp" {
 		for _, id := range dec.Chain {
@@ -989,11 +1009,10 @@ func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sag
 		}
 	}
 	o, ok := resources[dec.Outbound]
-	isQUIC := md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
-	if ok && isQUIC {
+	if ok && isQUICFlow(md) {
 		mode, typ := g.eff.Routing.BlockQUIC, o.Type()
 		if typ != "reject-drop" && (mode == "all" || mode == "proxy" && typ != model.OutboundDirect) {
-			return nil, false, "block-quic"
+			return nil, false, blockQUIC
 		}
 	}
 	return o, ok, ""
