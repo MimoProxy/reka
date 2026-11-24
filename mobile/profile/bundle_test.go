@@ -55,6 +55,64 @@ rules:
 	}
 }
 
+func TestControlsPinURLTestMembers(t *testing.T) {
+	base, diagnostics := compile.Compile([]byte(`
+schema-version: 1
+outbounds:
+  - {id: primary, name: Primary Node, type: direct}
+  - {id: alternate, name: Alternate Node, type: direct}
+groups:
+  - {id: automatic, name: Automatic Group, type: url-test, members: [primary, alternate]}
+  - {id: configured, type: url-test, members: [primary, alternate], selected: primary}
+  - {id: fallback, type: fallback, members: [primary, alternate]}
+  - {id: balanced, type: load-balance, members: [primary, alternate]}
+  - {id: manual, type: select, members: [primary, alternate], selected: primary}
+`), nil, compile.Options{})
+	if diagnostics.HasErrors() {
+		t.Fatal(diagnostics)
+	}
+	summary := Describe(base)
+	for _, tc := range []struct {
+		name       string
+		pins       map[string]string
+		automatic  string
+		configured string
+	}{
+		{"IDs", map[string]string{"automatic": "alternate", "configured": "alternate"}, "alternate", "alternate"},
+		{"display names", map[string]string{"Automatic Group": "Alternate Node"}, "alternate", "primary"},
+		{"group ID takes precedence", map[string]string{"automatic": "primary", "Automatic Group": "Alternate Node"}, "primary", "primary"},
+		{"unknown member", map[string]string{"automatic": "missing"}, "", "primary"},
+		{"member outside group", map[string]string{"configured": "direct"}, "", "primary"},
+		{"other group types", map[string]string{"fallback": "alternate", "balanced": "alternate", "manual": "alternate"}, "", "primary"},
+		{"cleared", nil, "", "primary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eff, err := ApplyControls(base, summary, Controls{Pins: tc.pins})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"automatic": tc.automatic, "configured": tc.configured, "fallback": "", "balanced": "",
+			}
+			selected := make(map[string]string, len(eff.AutoGroups))
+			for _, group := range eff.AutoGroups {
+				selected[group.ID] = group.Selected
+			}
+			if !reflect.DeepEqual(selected, want) {
+				t.Errorf("automatic selections = %v, want %v", selected, want)
+			}
+			for _, group := range eff.Groups {
+				if group.ID == "manual" && group.Selected != "primary" {
+					t.Errorf("manual selection changed to %q", group.Selected)
+				}
+			}
+			if base.AutoGroups[0].Selected != "" || base.AutoGroups[1].Selected != "primary" {
+				t.Fatal("controls modified the base automatic groups")
+			}
+		})
+	}
+}
+
 func TestControlsBlockQUIC(t *testing.T) {
 	raw := []byte(`
 proxies:

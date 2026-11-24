@@ -14,6 +14,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/secret"
 )
@@ -77,6 +78,7 @@ type Group struct {
 type Controls struct {
 	Mode       string            `json:"mode"`
 	Selections map[string]string `json:"selections"`
+	Pins       map[string]string `json:"pins,omitempty"`
 	ProfileID  string            `json:"profileID,omitempty"`
 	// BlockQUIC overrides the profile's routing.block-quic when set.
 	BlockQUIC string `json:"blockQuic,omitempty"`
@@ -278,6 +280,30 @@ func Describe(eff *compile.Effective) Summary {
 	return summary
 }
 
+// PinnedMember returns the resolved member of a pinned url-test group, if any.
+func (c Controls) PinnedMember(group policy.Group, names map[string]string) string {
+	if group.Type != "url-test" {
+		return ""
+	}
+	return controlledMember(c.Pins, names, group.ID, group.Members)
+}
+
+func controlledMember(values, names map[string]string, groupID string, members []string) string {
+	member := values[groupID]
+	if member == "" && names[groupID] != "" {
+		member = values[names[groupID]]
+	}
+	if member == "" || slices.Contains(members, member) {
+		return member
+	}
+	for _, id := range members {
+		if names[id] == member {
+			return id
+		}
+	}
+	return ""
+}
+
 // ApplyControls shares the compiled rule index across updates. Stable IDs are
 // preferred, with display names supported for older iOS saves.
 func ApplyControls(base *compile.Effective, summary Summary, controls Controls) (*compile.Effective, error) {
@@ -296,22 +322,19 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	}
 	for i := range eff.Groups {
 		group := &eff.Groups[i]
-		entry := summary.Groups[i]
-		if entry.Type != "select" {
+		if summary.Groups[i].Type != "select" {
 			continue
 		}
-		member := controls.Selections[group.ID]
-		if member == "" && summary.Names[group.ID] != "" {
-			member = controls.Selections[summary.Names[group.ID]]
-		}
-		if slices.Contains(group.Members, member) {
+		if member := controlledMember(controls.Selections, summary.Names, group.ID, group.Members); member != "" {
 			group.Selected = member
-		} else if member != "" {
-			for _, id := range group.Members {
-				if summary.Names[id] == member {
-					group.Selected = id
-					break
-				}
+		}
+	}
+	if len(controls.Pins) > 0 {
+		eff.AutoGroups = slices.Clone(eff.AutoGroups)
+		for i := range eff.AutoGroups {
+			group := &eff.AutoGroups[i]
+			if member := controls.PinnedMember(*group, summary.Names); member != "" {
+				group.Selected = member
 			}
 		}
 	}

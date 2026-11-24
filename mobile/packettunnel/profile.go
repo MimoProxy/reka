@@ -27,6 +27,7 @@ type profileSession struct {
 	engine  *generation.Engine
 	base    *compile.Effective
 	summary profile.Summary
+	pinned  map[string]bool
 	rev     uint64
 	trace   *routeTrace
 	sets    map[string]*router.RuleSet
@@ -43,6 +44,7 @@ type ProfileStatus struct {
 type GroupStatus struct {
 	ID        string `json:"id"`
 	Selected  string `json:"selected"`
+	Pinned    bool   `json:"pinned,omitempty"`
 	Checked   int    `json:"checked"`
 	Available int    `json:"available"`
 }
@@ -194,8 +196,17 @@ func (p *profileSession) activate(base *compile.Effective, summary profile.Summa
 	if err != nil {
 		return 0, false, errors.New("could not activate profile")
 	}
+	var pinned map[string]bool
+	if len(controls.Pins) != 0 {
+		pinned = make(map[string]bool, len(controls.Pins))
+		for _, group := range eff.AutoGroups {
+			if controls.PinnedMember(group, summary.Names) != "" {
+				pinned[group.ID] = true
+			}
+		}
+	}
 	p.rev++
-	p.base, p.summary = base, summary
+	p.base, p.summary, p.pinned = base, summary, pinned
 	return gen, profileID != scope.ProfileID, nil
 }
 
@@ -279,7 +290,7 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 	}
 	observed := p.engine.GroupStatus()
 	for _, group := range eff.Groups {
-		row := GroupStatus{ID: group.ID, Selected: group.Selected}
+		row := GroupStatus{ID: group.ID, Selected: group.Selected, Pinned: p.pinned[group.ID]}
 		if row.Selected == "" && len(group.Members) > 0 {
 			row.Selected = group.Members[0]
 		}

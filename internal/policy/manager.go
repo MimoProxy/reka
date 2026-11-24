@@ -289,7 +289,7 @@ func (m *Manager) MarkUsed(member string) {
 	}
 }
 
-// Inherit keeps observations across rule-only revisions without persisting them.
+// Inherit keeps observations across revisions with unchanged health settings.
 func (m *Manager) Inherit(old *Manager) {
 	if old == nil {
 		return
@@ -300,7 +300,15 @@ func (m *Manager) Inherit(old *Manager) {
 	defer m.mu.Unlock()
 	for id, s := range m.states {
 		previous := old.states[id]
-		if previous == nil || !reflect.DeepEqual(previous.group, s.group) {
+		if previous == nil {
+			continue
+		}
+		previousGroup := previous.group
+		if s.group.Type == "url-test" {
+			// A selection override leaves the probes and their schedule valid.
+			previousGroup.Selected = s.group.Selected
+		}
+		if !reflect.DeepEqual(previousGroup, s.group) {
 			continue
 		}
 		for key, result := range previous.results {

@@ -5,9 +5,13 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,9 +31,11 @@ const (
 )
 
 type IPCheck struct {
-	Status  string `json:"status"`
-	DelayMS *int64 `json:"delayMs,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Status    string   `json:"status"`
+	DelayMS   *int64   `json:"delayMs,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	Addresses []string `json:"addresses,omitempty"`
+	Country   string   `json:"country,omitempty"`
 }
 
 type IPFamilyChecks struct {
@@ -42,6 +48,9 @@ type IPCheckNode struct {
 	Resolved string         `json:"resolved"`
 	Name     string         `json:"name"`
 	Type     string         `json:"type"`
+	Host     string         `json:"host,omitempty"`
+	Port     uint16         `json:"port,omitempty"`
+	UDP      bool           `json:"udp"`
 	Server   IPFamilyChecks `json:"server"`
 	Exit     IPFamilyChecks `json:"exit"`
 }
@@ -99,6 +108,9 @@ var (
 )
 
 const maxIPCheckTargets = 8
+
+// Cap the diagnostic payload even when DNS returns a large answer set.
+const maxIPCheckAddresses = 8
 
 // RunIPCheck compares local connectivity and a single resolved leaf. The
 // batch shares one probe slot, one deadline and one set of transport pins.
@@ -192,7 +204,10 @@ func (e *Engine) RunIPCheck(parent context.Context, opts IPCheckOptions) (IPChec
 		wg.Go(func() { result.QUIC.Local = ipCheckQUIC(ctx, pins[direct].ListenPacket, localQUIC) })
 		if member != "" {
 			target, _ := g.eff.Outbound(resolved)
-			node := &IPCheckNode{Member: member, Resolved: resolved, Name: cmp.Or(target.Name, resolved), Type: target.Type}
+			node := &IPCheckNode{
+				Member: member, Resolved: resolved, Name: cmp.Or(target.Name, resolved), Type: target.Type,
+				Host: target.Server, Port: target.Port, UDP: target.UDP,
+			}
 			result.Node = node
 			if out == nil {
 				unavailable := IPCheck{Status: ipCheckUnavailable, Error: "outbound unavailable"}
@@ -396,11 +411,60 @@ func (c quicProbePacketConn) SetReadDeadline(deadline time.Time) error {
 }
 
 func ipCheckHTTP(ctx context.Context, g *generation, out *sagernet.Outbound, pin *sagernet.PinnedOutbound, endpoint string) IPCheck {
-	sample, err := probeHTTP(ctx, g, out, pin, endpoint, true)
+	check := IPCheck{Status: ipCheckOK}
+	sample, err := probeHTTPResponse(ctx, g, out, pin, endpoint, func(response *http.Response) error {
+		// Error responses still establish reachability and have no exit metadata.
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return nil
+		}
+		data, err := io.ReadAll(io.LimitReader(response.Body, maxProbeBodyBytes))
+		if err != nil {
+			return err
+		}
+		body := string(data)
+		if len(body) == maxProbeBodyBytes && response.ContentLength != maxProbeBodyBytes {
+			// A limit may cut a line in the middle of an IP or country code.
+			body = body[:strings.LastIndexByte(body, '\n')+1]
+		}
+		addr, country := parseIPCheckBody(body)
+		if addr.IsValid() {
+			check.Addresses = []string{addr.String()}
+		}
+		check.Country = country
+		return nil
+	})
 	if sample.StatusCode != 0 {
-		return IPCheck{Status: ipCheckOK, DelayMS: &sample.DelayMS}
+		check.DelayMS = &sample.DelayMS
+		return check
 	}
 	return IPCheck{Status: ipCheckFailed, Error: ipCheckError(err, "connection failed")}
+}
+
+func parseIPCheckBody(body string) (netip.Addr, string) {
+	if addr, err := netip.ParseAddr(strings.TrimSpace(body)); err == nil && addr.Zone() == "" {
+		return addr.Unmap(), ""
+	}
+	var addr netip.Addr
+	var country string
+	for line := range strings.SplitSeq(body, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "ip":
+			addr, _ = netip.ParseAddr(value)
+		case "loc":
+			country = value
+		}
+	}
+	if addr.Zone() != "" {
+		addr = netip.Addr{}
+	}
+	if len(country) != 2 || country == "XX" || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		country = ""
+	}
+	return addr.Unmap(), country
 }
 
 func ipCheckServer(ctx context.Context, target compile.Outbound, network string, lookup func(context.Context, string, string) ([]netip.Addr, error), dial func(context.Context, string, string) (net.Conn, error)) IPCheck {
@@ -423,24 +487,39 @@ func ipCheckServer(ctx context.Context, target compile.Outbound, network string,
 			return IPCheck{Status: ipCheckFailed, Error: ipCheckError(err, "dns")}
 		}
 	}
+	var check IPCheck
 	for _, ip := range addresses {
 		ip = ip.Unmap()
 		if !ip.IsValid() || ip.Is4() != (network == "ip4") {
 			continue
 		}
-		if target.Type == "hysteria2" || target.Type == "tuic" || target.Plugin != nil && target.Plugin.Type == "kcptun" {
-			return IPCheck{Status: ipCheckSkipped, Error: "udp transport"}
+		address := ip.String()
+		if slices.Contains(check.Addresses, address) {
+			continue
 		}
-		start := time.Now()
-		conn, err := dial(ctx, "tcp", netip.AddrPortFrom(ip, target.Port).String())
-		delayMS := max(1, time.Since(start).Milliseconds())
-		if err != nil {
-			return IPCheck{Status: ipCheckFailed, DelayMS: &delayMS, Error: ipCheckError(err, "connection failed")}
+		check.Addresses = append(check.Addresses, address)
+		if len(check.Addresses) == maxIPCheckAddresses {
+			break
 		}
-		_ = conn.Close()
-		return IPCheck{Status: ipCheckOK, DelayMS: &delayMS}
 	}
-	return IPCheck{Status: ipCheckUnavailable, Error: "no address"}
+	if len(check.Addresses) == 0 {
+		return IPCheck{Status: ipCheckUnavailable, Error: "no address"}
+	}
+	if target.Type == "hysteria2" || target.Type == "tuic" || target.Plugin != nil && target.Plugin.Type == "kcptun" {
+		check.Status, check.Error = ipCheckSkipped, "udp transport"
+		return check
+	}
+	start := time.Now()
+	conn, err := dial(ctx, "tcp", net.JoinHostPort(check.Addresses[0], strconv.Itoa(int(target.Port))))
+	delayMS := max(1, time.Since(start).Milliseconds())
+	check.DelayMS = &delayMS
+	if err != nil {
+		check.Status, check.Error = ipCheckFailed, ipCheckError(err, "connection failed")
+		return check
+	}
+	_ = conn.Close()
+	check.Status = ipCheckOK
+	return check
 }
 
 func ipCheckError(err error, fallback string) string {
