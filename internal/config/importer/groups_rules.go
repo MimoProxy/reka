@@ -338,6 +338,9 @@ func (c *converter) convertRuleList(input []*yaml.Node, path string) []object {
 			id += fmt.Sprintf("-%d", duplicates[id])
 		}
 		rule["id"] = id
+		if call == "" {
+			rule["syntax"] = strings.TrimSpace(n.Value)
+		}
 		rules = append(rules, rule)
 	}
 	return rules

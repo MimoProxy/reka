@@ -45,6 +45,19 @@ func roundTripConditionSet(t *testing.T, set *RuleSet) *RuleSet {
 	return restored
 }
 
+func TestPrecompiledDiagnosticEntryCount(t *testing.T) {
+	set := buildTestConditionSet(t, []RuleSpec{
+		{Kind: KindDomain, Values: []string{"one.test", "two.test"}},
+		{Kind: KindIPCIDR, Values: []string{"192.0.2.0/24"}},
+		{Kind: KindDomainSuffix, Values: []string{".test"}},
+	})
+	set = roundTripConditionSet(t, set).WithEntryDiagnostics()
+	count, expanded := set.DiagnosticSize()
+	if !expanded || count != 4 {
+		t.Fatalf("precompiled size = %d, expanded = %t", count, expanded)
+	}
+}
+
 func TestCompactDomainSetAgreesWithOrderedRules(t *testing.T) {
 	specs := []RuleSpec{
 		{Kind: KindDomain, Values: []string{".EXACT.test.", "bücher.test", "escaped%0a.test", "raw\xff.test"}},

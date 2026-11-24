@@ -198,16 +198,34 @@ func trimTimelineEvents(timeline *api.ConnectionTimeline) {
 }
 
 type rulePage struct {
-	Revision uint64         `json:"revision"`
-	Mode     string         `json:"mode"`
-	Total    int            `json:"total"`
-	Next     *int           `json:"next,omitempty"`
-	Rules    []api.RuleView `json:"rules"`
+	Revision uint64              `json:"revision"`
+	Mode     string              `json:"mode"`
+	Total    int                 `json:"total"`
+	Next     *int                `json:"next,omitempty"`
+	Rules    []diagnosticRuleRow `json:"rules"`
 }
 
 type ruleSetRow struct {
-	ID    string `json:"id"`
-	Count int    `json:"count"`
+	ID       string `json:"id"`
+	Selector string `json:"selector,omitempty"`
+	Count    int    `json:"count"`
+}
+
+type diagnosticRuleRow struct {
+	api.RuleView
+	References []ruleSetRow `json:"references,omitempty"`
+	BuiltinLAN bool         `json:"builtinLAN,omitempty"`
+}
+
+type ruleDiagnostics struct {
+	names     map[string]string
+	selectors map[string]string
+	search    string
+}
+
+func (d ruleDiagnostics) ruleSet(id string, set *router.RuleSet) ruleSetRow {
+	count, _ := set.DiagnosticSize()
+	return ruleSetRow{ID: id, Selector: d.selectors[id], Count: count}
 }
 
 func collectRuleSets(root *router.RuleSet) map[string]*router.RuleSet {
@@ -230,12 +248,17 @@ func collectRuleSets(root *router.RuleSet) map[string]*router.RuleSet {
 
 func (p *profileSession) ruleSets() []ruleSetRow {
 	p.mu.Lock()
-	sets := p.sets
+	base := p.base
 	p.mu.Unlock()
-	rows := make([]ruleSetRow, 0, len(sets))
-	for id, set := range sets {
-		rows = append(rows, ruleSetRow{ID: id, Count: set.Len()})
-	}
+	diagnostics := ruleDiagnostics{selectors: base.RuleSetSelectors}
+	seen := make(map[string]bool)
+	rows := make([]ruleSetRow, 0)
+	base.Router.Rules().VisitReferences(func(id string, set *router.RuleSet) {
+		if !seen[id] {
+			seen[id] = true
+			rows = append(rows, diagnostics.ruleSet(id, set))
+		}
+	})
 	slices.SortFunc(rows, func(a, b ruleSetRow) int { return strings.Compare(a.ID, b.ID) })
 	return rows
 }
@@ -248,12 +271,19 @@ func (p *profileSession) rules(op Operation) (rulePage, error) {
 		return rulePage{}, errors.New("the profile is unavailable")
 	}
 	var set *router.RuleSet
+	var descriptions []string
 	if op.Target == "" {
 		set = effective.RoutingRouter().Rules()
+		if set == effective.Router.Rules() {
+			descriptions = effective.RuleDescriptions
+		}
 	} else {
 		set = p.sets[op.Target]
 	}
-	names := p.summary.Names
+	diagnostics := ruleDiagnostics{
+		names: p.summary.Names, selectors: effective.RuleSetSelectors,
+		search: strings.ToLower(strings.TrimSpace(history.Text(op.Search, 256))),
+	}
 	p.mu.Unlock()
 	if set == nil {
 		return rulePage{}, errors.New("rule set is unavailable")
@@ -262,20 +292,21 @@ func (p *profileSession) rules(op Operation) (rulePage, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 40
 	}
-	result := rulePage{Revision: revision, Mode: effective.Routing.Mode, Total: set.Len(), Rules: make([]api.RuleView, 0, limit)}
-	search := strings.ToLower(strings.TrimSpace(history.Text(op.Search, 256)))
+	total, expanded := set.DiagnosticSize()
+	result := rulePage{Revision: revision, Mode: effective.Routing.Mode, Total: total, Rules: make([]diagnosticRuleRow, 0, limit)}
+	if expanded {
+		result.readEntries(set, diagnostics, max(0, op.Offset), limit)
+		return result, nil
+	}
 	index := min(max(0, op.Offset), set.Len())
-	end := min(set.Len(), index+2000)
+	end := min(set.Len(), index+rulePageScanLimit)
 	for index < end && len(result.Rules) < limit {
-		rule := set.Rule(index)
-		kind := strings.ToUpper(rule.Kind.String())
-		target := names[rule.Target]
-		if target == "" {
-			target = rule.Target
+		var description string
+		if index < len(descriptions) {
+			description = descriptions[index]
 		}
-		description := history.Text(rule.String(), 1536)
-		if search == "" || strings.Contains(strings.ToLower(description), search) || strings.Contains(strings.ToLower(target), search) {
-			result.Rules = append(result.Rules, api.RuleView{Index: index, ID: rule.ID, Type: kind, Outbound: target, Description: description})
+		if row, matches := diagnostics.row(set.Rule(index), index, "", description); matches {
+			result.Rules = append(result.Rules, row)
 		}
 		index++
 	}
@@ -283,6 +314,68 @@ func (p *profileSession) rules(op Operation) (rulePage, error) {
 		result.Next = &index
 	}
 	return result, nil
+}
+
+const rulePageScanLimit = 2000
+
+func (page *rulePage) readEntries(set *router.RuleSet, diagnostics ruleDiagnostics, offset, limit int) {
+	index := 0
+	set.WalkDiagnosticEntries(func(spec router.RuleSpec, context string) bool {
+		if index < offset {
+			index++
+			return true
+		}
+		if len(page.Rules) == limit || index-offset == rulePageScanLimit {
+			page.Next = &index
+			return false
+		}
+		if row, matches := diagnostics.row(spec, index, context, ""); matches {
+			page.Rules = append(page.Rules, row)
+		}
+		index++
+		return true
+	})
+}
+
+func (d ruleDiagnostics) row(rule router.RuleSpec, index int, context, description string) (diagnosticRuleRow, bool) {
+	target := d.names[rule.Target]
+	if target == "" {
+		target = rule.Target
+	}
+	if description == "" {
+		description = rule.String()
+	}
+	description = history.Text(description, 1536)
+	if d.search != "" && !strings.Contains(strings.ToLower(description), d.search) &&
+		!strings.Contains(strings.ToLower(target), d.search) && !strings.Contains(strings.ToLower(rule.String()), d.search) {
+		return diagnosticRuleRow{}, false
+	}
+	row := diagnosticRuleRow{RuleView: api.RuleView{
+		Index: index, ID: rule.ID, Type: strings.ToUpper(rule.Kind.String()),
+		Outbound: target, Description: description, Context: context,
+	}}
+	var seen map[string]bool
+	var visit func(router.RuleSpec)
+	visit = func(condition router.RuleSpec) {
+		if condition.Kind == router.KindGeoIP {
+			row.BuiltinLAN = true
+		}
+		if condition.Set != nil && len(condition.Values) > 0 {
+			id := condition.Values[0]
+			if !seen[id] {
+				if seen == nil {
+					seen = make(map[string]bool)
+				}
+				seen[id] = true
+				row.References = append(row.References, d.ruleSet(id, condition.Set))
+			}
+		}
+		for _, child := range condition.Children {
+			visit(child)
+		}
+	}
+	visit(rule)
+	return row, true
 }
 
 // FlowLimits reports connection limit decisions and the host packet queue.

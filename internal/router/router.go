@@ -13,9 +13,10 @@ import (
 
 // RuleSet is an immutable ordered rule list or a referenced condition set.
 type RuleSet struct {
-	maxDepth int
-	rules    []*rule
-	members  *conditionSet
+	maxDepth             int
+	rules                []*rule
+	members              *conditionSet
+	diagnosticEntryCount func() int
 	// exact and suffix map a normalized domain to the first rule position
 	// that lists it. Only the first matters: a later rule with the same
 	// key can never win.

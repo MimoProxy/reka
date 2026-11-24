@@ -3,14 +3,20 @@
 package packettunnel
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
+	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/platform"
+	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
+	"github.com/MimoProxy/reka/mobile/profile"
 )
 
 func TestPacketTunnelHistoryLimits(t *testing.T) {
@@ -121,5 +127,116 @@ func TestPacketTunnelTimelineLimitsLinkedRows(t *testing.T) {
 				t.Fatalf("retained HTTP = %v, DNS = %v, want HTTP = %v, DNS = %v", gotHTTP, gotDNS, wantHTTP, tt.wantDNS)
 			}
 		})
+	}
+}
+
+func TestExpandedRulePageContinuationAndSearch(t *testing.T) {
+	var builder router.ConditionSetBuilder
+	for i := range rulePageScanLimit + 3 {
+		if err := builder.AddDomain(router.KindDomain, fmt.Sprintf("entry-%04d.test", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first rulePage
+	first.readEntries(set, ruleDiagnostics{}, 0, 2)
+	if len(first.Rules) != 2 || first.Next == nil || *first.Next != 2 ||
+		first.Rules[0].Description != "DOMAIN,entry-0000.test," {
+		t.Fatalf("first page: %+v", first)
+	}
+	var second rulePage
+	second.readEntries(set, ruleDiagnostics{}, *first.Next, 2)
+	if len(second.Rules) != 2 || second.Rules[0].Index != 2 || second.Rules[0].Description != "DOMAIN,entry-0002.test," {
+		t.Fatalf("second page: %+v", second)
+	}
+	var search rulePage
+	search.readEntries(set, ruleDiagnostics{search: "entry-2002.test"}, 0, 2)
+	if len(search.Rules) != 0 || search.Next == nil || *search.Next != rulePageScanLimit {
+		t.Fatalf("first search page: %+v", search)
+	}
+	var last rulePage
+	last.readEntries(set, ruleDiagnostics{search: "entry-2002.test"}, *search.Next, 2)
+	if len(last.Rules) != 1 || last.Rules[0].Description != "DOMAIN,entry-2002.test," || last.Next != nil {
+		t.Fatalf("last search page: %+v", last)
+	}
+}
+
+func TestRuleDiagnosticsListsDirectReferencesAndOpensNestedASN(t *testing.T) {
+	const asn = "asn:399358"
+	var builder router.ConditionSetBuilder
+	if err := builder.Add(router.RuleSpec{Kind: router.KindIPCIDR, Values: []string{"192.0.2.0/24", "2001:db8::/32"}}); err != nil {
+		t.Fatal(err)
+	}
+	child, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child = child.WithEntryDiagnostics()
+	nested := router.RuleSpec{Kind: router.KindRuleSet, Values: []string{asn}, Set: child}
+	if err := builder.Add(nested); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, direct := range []bool{false, true} {
+		specs := []router.RuleSpec{
+			{Kind: router.KindGeoIP, Values: []string{"LAN"}, NoResolve: true, Target: "direct"},
+			{Kind: router.KindRuleSet, Values: []string{"anthropic"}, Set: parent, Target: "direct"},
+		}
+		if direct {
+			nested.Target = "direct"
+			specs = append(specs, nested)
+		}
+		rules, err := router.CompileRules(specs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := router.New(rules, router.Options{Outbounds: []string{"direct"}, Final: "direct"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := &compile.Effective{
+			Router: r, Final: "direct", Routing: model.Routing{Mode: "rule"},
+			Network:          platform.Network{Mode: "off"},
+			Outbounds:        []compile.Outbound{{ID: "direct", Type: "direct", Builtin: true, UDP: true}},
+			RuleSetSelectors: map[string]string{asn: asn},
+		}
+		engine := generation.NewEngine(generation.EngineOptions{HostPacketFlow: true})
+		t.Cleanup(engine.Close)
+		p := &profileSession{base: base, sets: collectRuleSets(rules), engine: engine}
+		if err := p.publish(base, profile.Describe(base), profile.Controls{Mode: "rule"}); err != nil {
+			t.Fatal(err)
+		}
+		index := p.ruleSets()
+		want := []ruleSetRow{{ID: "anthropic", Count: 1}}
+		if direct {
+			want = append(want, ruleSetRow{ID: asn, Selector: asn, Count: 2})
+		}
+		if !slices.Equal(index, want) {
+			t.Fatalf("direct=%v index=%+v want %+v", direct, index, want)
+		}
+		root, err := p.rules(Operation{})
+		if err != nil || len(root.Rules) != len(specs) || !root.Rules[0].BuiltinLAN || len(root.Rules[0].References) != 0 ||
+			!slices.Equal(root.Rules[1].References, want[:1]) {
+			t.Fatalf("root=%+v err=%v", root, err)
+		}
+		nestedPage, err := p.rules(Operation{Target: "anthropic"})
+		if err != nil || nestedPage.Total != 1 || len(nestedPage.Rules) != 1 ||
+			!slices.Equal(nestedPage.Rules[0].References, []ruleSetRow{{ID: asn, Selector: asn, Count: 2}}) {
+			t.Fatalf("parent=%+v err=%v", nestedPage, err)
+		}
+		first, err := p.rules(Operation{Target: asn, Limit: 1})
+		if err != nil || len(first.Rules) != 1 || first.Rules[0].Description != "IP-CIDR,192.0.2.0/24," || first.Next == nil || first.Total != 2 {
+			t.Fatalf("first ASN page=%+v err=%v", first, err)
+		}
+		second, err := p.rules(Operation{Target: asn, Offset: *first.Next, Limit: 1})
+		if err != nil || len(second.Rules) != 1 || second.Rules[0].Description != "IP-CIDR,2001:db8::/32," || second.Next != nil || second.Total != 2 {
+			t.Fatalf("second ASN page=%+v err=%v", second, err)
+		}
 	}
 }

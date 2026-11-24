@@ -192,6 +192,9 @@ func (r *ruleCompiler) resource(id string, depth int) (compiledResource, error) 
 		return resolved, err
 	}
 	remember := func(set *router.RuleSet, cacheKey string, data []byte) compiledResource {
+		if def.Format == "srs" || geodataSelector(def) != "" {
+			set = set.WithEntryDiagnostics()
+		}
 		v := compiledResource{set, hex.EncodeToString(digest.Sum(nil))}
 		r.done[id] = v
 		if record := r.c.opts.RecordPrecompiledRuleSet; record != nil && len(data) > 0 {

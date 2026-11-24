@@ -802,3 +802,62 @@ def forwarder_receive_window(source):
 MODULES['github.com/sagernet/sing-tun'] = ('v0.9.7-0.20261023115432-040db71fcd33', {
 'stack_gvisor_tcp.go': ('418df41fb175d37e7dc8eccea85b5e75052dee29c39c527f6be58a837982e955', forwarder_receive_window),
 })
+
+# Inspect only the requested rows of compiled geodata without unpacking the
+# whole trie or cloning the set of IP ranges inside the packet tunnel.
+def walk_domain_matcher(source):
+    source = source.replace('"slices"', '"math/bits"\n\t"slices"', 1)
+    return source + r'''
+func (m *Matcher) DomainCount() int {
+    count := 0
+    for _, word := range m.set.leaves {
+        count += bits.OnesCount64(word)
+    }
+    // WalkDomains starts with the root's children.
+    return count - int(getBit(m.set.leaves, 0))
+}
+
+func (m *Matcher) WalkDomains(yield func(suffix bool, value string) bool) {
+    type frame struct { node, bit int }
+    stack := []frame{{0, 0}}
+    var path []byte
+    for len(stack) > 0 {
+        top := &stack[len(stack)-1]
+        if getBit(m.set.labelBitmap, top.bit) != 0 {
+            stack = stack[:len(stack)-1]
+            if len(stack) > 0 {
+                path = path[:len(path)-1]
+                stack[len(stack)-1].bit++
+            }
+            continue
+        }
+        path = append(path, m.set.labels[top.bit-top.node])
+        node := countZeros(m.set.labelBitmap, m.set.ranks, top.bit+1)
+        bit := selectIthOne(m.set.labelBitmap, m.set.ranks, m.set.selects, node-1) + 1
+        if getBit(m.set.leaves, node) != 0 {
+            key := reverseDomain(string(path))
+            suffix := key[0] == prefixLabel || key[0] == rootLabel
+            if suffix { key = key[1:] }
+            if !yield(suffix, key) { return }
+        }
+        stack = append(stack, frame{node, bit})
+    }
+}
+'''
+
+
+def walk_ip_ranges(source):
+    return source + '''
+func (s *IPSet) WalkRanges(yield func(IPRange) bool) {
+    for _, r := range s.rr {
+        if !yield(r) { return }
+    }
+}
+'''
+
+
+MODULES['github.com/sagernet/sing'][1]['common/domain/matcher.go'] = (
+    'd24dcc3133d34355c59a324421b9f450f86b158fa45a0d7edc395ac7cb791fd6', walk_domain_matcher)
+MODULES['go4.org/netipx'] = ('v0.0.0-20231129151722-fdeea329fbba', {
+    'ipset.go': ('01d0a58880b95e75f0b8e90e076eb9b56697bf9c9d075c030d422f2aafacd659', walk_ip_ranges),
+})

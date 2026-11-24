@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -290,4 +291,76 @@ func TestSRSLoadingAllocatesLessThanText(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSRSGeodataListing(t *testing.T) {
+	t.Run("GeoSite preserves exact and suffix forms", func(t *testing.T) {
+		data := srsData(t, C.RuleSetVersionCurrent, srsDefault(option.DefaultHeadlessRule{
+			Domain:       []string{"exact.test", "café.test"},
+			DomainSuffix: []string{"suffix.test", ".strict.test"},
+		}))
+		set := loadRuleSet(t, "geosite", "srs", data)
+		var got []string
+		set.WalkDiagnosticEntries(func(spec router.RuleSpec, context string) bool {
+			if context != "" {
+				t.Fatalf("unexpected compound context %q", context)
+			}
+			got = append(got, spec.String())
+			return true
+		})
+		if count, expanded := set.WithEntryDiagnostics().DiagnosticSize(); !expanded || count != len(got) {
+			t.Errorf("reported %d entries, expanded %t, listed %d", count, expanded, len(got))
+		}
+		slices.Sort(got)
+		want := []string{
+			"DOMAIN,café.test,", "DOMAIN,exact.test,",
+			"DOMAIN-SUFFIX,.strict.test,", "DOMAIN-SUFFIX,suffix.test,",
+		}
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Fatalf("listed %v, want %v", got, want)
+		}
+	})
+
+	t.Run("GeoIP lists IPv4 and IPv6 prefixes", func(t *testing.T) {
+		data := srsData(t, C.RuleSetVersionCurrent, srsDefault(option.DefaultHeadlessRule{
+			IPCIDR: []string{"192.0.2.0/25", "192.0.2.128/25", "2001:db8::/32"},
+		}))
+		set := loadRuleSet(t, "geoip", "srs", data)
+		var got []string
+		set.WalkDiagnosticEntries(func(spec router.RuleSpec, _ string) bool {
+			got = append(got, spec.String())
+			return true
+		})
+		if count, expanded := set.WithEntryDiagnostics().DiagnosticSize(); !expanded || count != len(got) {
+			t.Errorf("reported %d entries, expanded %t, listed %d", count, expanded, len(got))
+		}
+		slices.Sort(got)
+		want := []string{"IP-CIDR,192.0.2.0/24,", "IP-CIDR,2001:db8::/32,"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("listed %v, want %v", got, want)
+		}
+	})
+
+	t.Run("logical operands retain their context", func(t *testing.T) {
+		data := srsData(t, C.RuleSetVersionCurrent, srsLogic(C.LogicalTypeAnd, false,
+			srsDefault(option.DefaultHeadlessRule{Domain: []string{"example.test"}}),
+			srsLogic(C.LogicalTypeOr, true, srsDefault(option.DefaultHeadlessRule{
+				DomainSuffix: []string{"excluded.test"},
+			})),
+		))
+		set := loadRuleSet(t, "geosite", "srs", data)
+		var got []string
+		set.WalkDiagnosticEntries(func(spec router.RuleSpec, context string) bool {
+			got = append(got, context+" "+spec.String())
+			return true
+		})
+		if count, expanded := set.WithEntryDiagnostics().DiagnosticSize(); !expanded || count != len(got) {
+			t.Errorf("reported %d entries, expanded %t, listed %d", count, expanded, len(got))
+		}
+		if len(got) != 2 || !strings.Contains(got[0], "AND[1] DOMAIN,example.test,") ||
+			!strings.Contains(got[1], "AND[2] NOT[1]") || !strings.HasSuffix(got[1], " DOMAIN-SUFFIX,excluded.test,") {
+			t.Fatalf("unexpected compound listing: %v", got)
+		}
+	})
 }

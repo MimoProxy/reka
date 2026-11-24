@@ -157,6 +157,8 @@ type Group struct {
 // or a group.
 type Rule struct {
 	ID string `yaml:"id"`
+	// Syntax is the original rule line retained by the importer for diagnostics.
+	Syntax string `yaml:"syntax"`
 	// Source expands that source's rules here instead of matching a flow.
 	Source   string `yaml:"source"`
 	Match    Match  `yaml:"match"`

@@ -46,6 +46,7 @@ type RuleView struct {
 	Payload     string `json:"payload"`
 	Outbound    string `json:"outbound"`
 	Description string `json:"description"`
+	Context     string `json:"context,omitempty"`
 }
 
 type RulesPage struct {

@@ -168,6 +168,8 @@ type Effective struct {
 	Groups           []router.Group            `json:"groups"`
 	Rules            []router.RuleSpec         `json:"-"`
 	RuleIDs          []string                  `json:"-"`
+	RuleDescriptions []string                  `json:"-"`
+	RuleSetSelectors map[string]string         `json:"-"`
 	Listeners        []Listener                `json:"listeners"`
 	LogLevel         string                    `json:"log-level"`
 	Control          string                    `json:"control,omitempty"`
@@ -1007,9 +1009,11 @@ func (c *compiler) rules(eff *Effective) {
 		}
 		eff.Rules = append(eff.Rules, spec)
 		eff.RuleIDs = append(eff.RuleIDs, r.ID)
+		eff.RuleDescriptions = append(eff.RuleDescriptions, rc.ruleDescription(r, spec))
 		b, _ := json.Marshal(spec)
 		h.Write(b)
 	}
+	eff.RuleSetSelectors = rc.ruleSetSelectors()
 	if catchAll < 0 && len(c.profile.Rules) > 0 && !c.diags.HasErrors() {
 		c.warnf(doc, "/rules", "rule.no-final", "no match-all rule; connections no rule matches go direct")
 	}

@@ -137,10 +137,12 @@ func TestPrepareClashUsesSRSProviderAndGeodata(t *testing.T) {
 	server, _ := newGeodataFixture(t)
 	server.bodies[fixtureSRSPath+"geosite/google@cn.srs"] = srsFixture(t, option.DefaultHeadlessRule{DomainSuffix: []string{"google.test"}})
 	server.bodies[fixtureSRSPath+"geoip/cn.srs"] = srsFixture(t, option.DefaultHeadlessRule{IPCIDR: []string{"192.0.2.0/24"}})
-	server.bodies["/provider.srs"] = srsFixture(t, option.DefaultHeadlessRule{Domain: []string{"provider.test"}, Network: []string{"udp"}})
+	server.bodies["/provider.srs"] = srsFixture(t, option.DefaultHeadlessRule{
+		Domain: []string{"provider.test"}, DomainSuffix: []string{".other.test"}, Network: []string{"udp"},
+	})
 	raw := fmt.Sprintf(`rule-providers:
   example: {type: http, url: %s/provider.srs, format: srs, behavior: classical}
-rules: ['GEOSITE,google@CN,REJECT', 'GEOIP,CN,REJECT,no-resolve', 'RULE-SET,example,REJECT']
+rules: ['GEOSITE, google@CN, REJECT', 'GEOIP,CN,REJECT,no-resolve', 'RULE-SET,example,REJECT', 'RULE-SET,geosite:google@cn,REJECT']
 `, geodataFixtureHost)
 	bundle := mustPrepareGeodata(t, raw, t.TempDir(), PrepareOptions{}, server)
 	p, _, ds := model.ParseProfile(bundle.Profile)
@@ -157,6 +159,54 @@ rules: ['GEOSITE,google@CN,REJECT', 'GEOIP,CN,REJECT,no-resolve', 'RULE-SET,exam
 	eff, err := bundle.Compile()
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantDescriptions := []string{
+		"GEOSITE, google@CN, REJECT", "GEOIP,CN,REJECT,no-resolve", "RULE-SET,example,REJECT", "RULE-SET,geosite:google@cn,REJECT",
+	}
+	if !slices.Equal(eff.RuleDescriptions, wantDescriptions) {
+		t.Errorf("diagnostic syntax: got %q, want %q", eff.RuleDescriptions, wantDescriptions)
+	}
+	want := make(map[string]int)
+	var providerID string
+	for _, def := range p.RuleSets {
+		want[def.ID] = 1
+		if def.Name == "example" {
+			providerID = def.ID
+			want[def.ID] = 3
+		}
+	}
+	if providerID == "" {
+		t.Fatal("missing imported provider name")
+	}
+	seen := make(map[string]bool)
+	eff.Router.Rules().VisitReferences(func(id string, set *router.RuleSet) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		count, expanded := set.DiagnosticSize()
+		if expected, ok := want[id]; !ok || !expanded || count != expected {
+			t.Errorf("%s: size %d, expanded %t, want %d", id, count, expanded, expected)
+		}
+		delete(want, id)
+		if id != providerID {
+			return
+		}
+		var rows []string
+		set.WalkDiagnosticEntries(func(spec router.RuleSpec, context string) bool {
+			rows = append(rows, spec.String())
+			if !strings.Contains(context, "AND[") {
+				t.Errorf("missing AND context for %s: %q", spec, context)
+			}
+			return true
+		})
+		slices.Sort(rows)
+		if expected := []string{"DOMAIN,provider.test,", "DOMAIN-SUFFIX,.other.test,", "NETWORK,udp,"}; !slices.Equal(rows, expected) {
+			t.Errorf("provider: listed %v, want %v", rows, expected)
+		}
+	})
+	if len(want) != 0 {
+		t.Errorf("missing referenced sets: %v", want)
 	}
 	for net, want := range map[string]string{"tcp": "direct", "udp": "reject"} {
 		if got := eff.Router.Route(t.Context(), router.Metadata{Domain: "provider.test", Network: net}, nil).Outbound; got != want {
