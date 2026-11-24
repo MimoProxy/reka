@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"sync"
+
+	"github.com/MimoProxy/reka/internal/config/module"
 )
 
 // Client is a control API client. Calls may be made concurrently; events
@@ -119,6 +121,54 @@ func (c *Client) Call(method string, params, out any) error {
 		return json.Unmarshal(m.Result, out)
 	}
 	return nil
+}
+
+func (c *Client) AddModule(req AddModuleRequest) (Result, error) {
+	var result Result
+	err := c.Call("AddModule", req, &result)
+	return result, err
+}
+
+func (c *Client) RemoveModule(req RemoveModuleRequest) (Result, error) {
+	var result Result
+	err := c.Call("RemoveModule", req, &result)
+	return result, err
+}
+
+func (c *Client) SetModuleEnabled(req SetModuleEnabledRequest) (Result, error) {
+	var result Result
+	err := c.Call("SetModuleEnabled", req, &result)
+	return result, err
+}
+
+func (c *Client) SetModuleArguments(req SetModuleArgumentsRequest) (Result, error) {
+	var result Result
+	err := c.Call("SetModuleArguments", req, &result)
+	return result, err
+}
+
+func (c *Client) RefreshModule(req RefreshModuleRequest) (ModuleStatus, error) {
+	var status ModuleStatus
+	err := c.Call("RefreshModule", req, &status)
+	return status, err
+}
+
+func (c *Client) ListModules() ([]ModuleInfo, error) {
+	var modules []ModuleInfo
+	err := c.Call("ListModules", nil, &modules)
+	return modules, err
+}
+
+func (c *Client) GetModuleReport(req GetModuleReportRequest) (module.Report, error) {
+	var report module.Report
+	err := c.Call("GetModuleReport", req, &report)
+	return report, err
+}
+
+func (c *Client) PreviewModule(req PreviewModuleRequest) (module.Report, error) {
+	var report module.Report
+	err := c.Call("PreviewModule", req, &report)
+	return report, err
 }
 
 // Close closes the connection.

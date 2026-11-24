@@ -34,6 +34,21 @@ type refreshRecord struct {
 	Failures int                           `json:"failures"`
 	Entries  map[string]subscription.Entry `json:"entries"`
 }
+type refreshKey struct {
+	id     string
+	module bool
+}
+
+type refreshUpdate struct {
+	next       time.Time
+	entries    map[string]subscription.Entry
+	specHash   string
+	revision   uint64
+	manualOnly bool
+}
+
+type refreshWork func(context.Context, refreshRecord) (refreshUpdate, error)
+
 type refreshJob struct {
 	done   chan struct{}
 	result SubscriptionStatus
@@ -47,8 +62,8 @@ type RefreshManager struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	mu               sync.Mutex
-	jobs             map[string]*refreshJob
-	records          map[string]refreshRecord
+	jobs             map[refreshKey]*refreshJob
+	records          map[refreshKey]refreshRecord
 	managed          managedRefresh
 	slots            chan struct{}
 	started, closing bool
@@ -113,7 +128,7 @@ func (s *Service) manager(opts RefreshOptions) (*RefreshManager, error) {
 		return nil, err
 	}
 	dir := filepath.Join(s.store.Root(), "subscriptions")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "modules"), 0700); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -125,8 +140,8 @@ func (s *Service) manager(opts RefreshOptions) (*RefreshManager, error) {
 		dir:     dir,
 		ctx:     ctx,
 		cancel:  cancel,
-		jobs:    map[string]*refreshJob{},
-		records: map[string]refreshRecord{},
+		jobs:    map[refreshKey]*refreshJob{},
+		records: map[refreshKey]refreshRecord{},
 		slots:   make(chan struct{}, opts.Concurrency),
 		managed: newManagedRefresh(),
 	}
@@ -175,7 +190,8 @@ func (m *RefreshManager) loop() {
 	}
 }
 func (m *RefreshManager) runDue() {
-	_, _, _, sources, _ := m.svc.LayerDocuments()
+	_, profile, _, sources, _ := m.svc.LayerDocuments()
+	m.runModulesDue(profile)
 	config, _, ds := model.ParseSources(sources)
 	if ds.HasErrors() {
 		return
@@ -185,7 +201,7 @@ func (m *RefreshManager) runDue() {
 			continue
 		}
 		m.mu.Lock()
-		r := m.record(src.ID)
+		r := m.record(refreshKey{id: src.ID})
 		due := r.SpecHash != specHash(src.Subscription) || !time.Now().Before(r.Status.NextAttempt)
 		m.mu.Unlock()
 		if due {
@@ -197,12 +213,19 @@ func specHash(spec *model.Subscription) string {
 	b, _ := json.Marshal(spec)
 	return resource.Hash(b)
 }
-func (m *RefreshManager) record(id string) refreshRecord {
-	if r, ok := m.records[id]; ok {
+func (m *RefreshManager) recordPath(key refreshKey) string {
+	if key.module {
+		return filepath.Join(m.dir, "modules", key.id+".json")
+	}
+	return filepath.Join(m.dir, key.id+".json")
+}
+
+func (m *RefreshManager) record(key refreshKey) refreshRecord {
+	if r, ok := m.records[key]; ok {
 		return r
 	}
-	r := refreshRecord{Status: SubscriptionStatus{SourceID: id, State: "pending"}, Entries: map[string]subscription.Entry{}}
-	path := filepath.Join(m.dir, id+".json")
+	r := refreshRecord{Status: SubscriptionStatus{SourceID: key.id, State: "pending"}, Entries: map[string]subscription.Entry{}}
+	path := m.recordPath(key)
 	if info, err := os.Stat(path); err == nil && info.Size() < 2<<20 {
 		if data, e := os.ReadFile(path); e == nil {
 			_ = json.Unmarshal(data, &r)
@@ -211,15 +234,15 @@ func (m *RefreshManager) record(id string) refreshRecord {
 	if r.Entries == nil {
 		r.Entries = map[string]subscription.Entry{}
 	}
-	m.records[id] = r
+	m.records[key] = r
 	return r
 }
-func (m *RefreshManager) save(id string, r refreshRecord) error {
+func (m *RefreshManager) save(key refreshKey, r refreshRecord) error {
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	return secret.WriteFileAtomic(filepath.Join(m.dir, id+".json"), data, 0600)
+	return secret.WriteFileAtomic(m.recordPath(key), data, 0600)
 }
 func sourceFrom(data []byte, id string) (*model.Source, *model.Doc, error) {
 	config, _, ds := model.ParseSources(data)
@@ -252,7 +275,7 @@ func (s *Service) ListSubscriptions() ([]SubscriptionStatus, error) {
 		if src.Subscription == nil {
 			continue
 		}
-		r := m.record(src.ID)
+		r := m.record(refreshKey{id: src.ID})
 		status := r.Status
 		status.SourceID = src.ID
 		if r.SpecHash != specHash(src.Subscription) {
@@ -273,7 +296,7 @@ func (s *Service) ListSubscriptions() ([]SubscriptionStatus, error) {
 		if src.Subscription.Paused {
 			status.State = "paused"
 		}
-		if m.jobs[src.ID] != nil {
+		if m.jobs[refreshKey{id: src.ID}] != nil {
 			status.State = "refreshing"
 		}
 		statuses = append(statuses, status)
@@ -306,10 +329,24 @@ func (m *RefreshManager) trigger(ctx context.Context, id string, force, try bool
 	if src.Subscription == nil {
 		return nil, errf(CodeNotFound, "source has no subscription")
 	}
-	m.mu.Lock()
-	if j := m.jobs[id]; j != nil {
-		m.mu.Unlock()
+	return m.queue(ctx, refreshKey{id: id}, try, true, func(ctx context.Context, previous refreshRecord) (refreshUpdate, error) {
+		return m.refreshSource(ctx, id, force, previous)
+	})
+}
+
+// queue shares the scheduler's worker limit and coalesces ordinary refreshes.
+// Definition-changing transactions take the same slot but cannot join a refresh.
+func (m *RefreshManager) queue(ctx context.Context, key refreshKey, try, join bool, refresh refreshWork) (*refreshJob, error) {
+	existing := func(j *refreshJob) (*refreshJob, error) {
+		if !join {
+			return nil, errf(CodeBlocked, "a refresh for this definition is in progress")
+		}
 		return j, nil
+	}
+	m.mu.Lock()
+	if j := m.jobs[key]; j != nil {
+		m.mu.Unlock()
+		return existing(j)
 	}
 	m.mu.Unlock()
 	if try {
@@ -333,50 +370,50 @@ func (m *RefreshManager) trigger(ctx context.Context, id string, force, try bool
 		<-m.slots
 		return nil, errf(CodeBlocked, "kernel is stopping")
 	}
-	if j := m.jobs[id]; j != nil {
+	if j := m.jobs[key]; j != nil {
 		<-m.slots
-		return j, nil
+		return existing(j)
 	}
 	job := &refreshJob{done: make(chan struct{})}
-	m.jobs[id] = job
+	m.jobs[key] = job
 	m.wg.Add(1)
-	go m.work(id, force, job)
+	go m.work(key, job, refresh)
 	return job, nil
 }
-func (m *RefreshManager) work(id string, force bool, job *refreshJob) {
+func (m *RefreshManager) work(key refreshKey, job *refreshJob, refresh refreshWork) {
 	defer m.wg.Done()
 	defer func() { <-m.slots }()
 	m.mu.Lock()
-	previous := m.record(id)
+	previous := m.record(key)
 	m.mu.Unlock()
 	status := previous.Status
-	status.SourceID = id
+	status.SourceID = key.id
 	status.LastAttempt = time.Now().UTC()
 	status.State = "refreshing"
 	ctx, cancel := context.WithTimeout(m.ctx, m.options.JobTimeout)
 	defer cancel()
-	next, entries, hash, revision, err := m.refreshSource(ctx, id, force, previous)
+	update, err := refresh(ctx, previous)
 	record := previous
 	record.Status = status
 	if err == nil {
-		record.SpecHash = hash
-		record.Entries = entries
+		record.SpecHash = update.specHash
+		record.Entries = update.entries
 		record.Failures = 0
 		record.Status.State = "current"
 		record.Status.Stale = false
 		record.Status.ErrorCode = ""
-		record.Status.Revision = revision
-		record.Status.RootHash = entries["root"].Hash
-		record.Status.Usage = entries["root"].Usage
+		record.Status.Revision = update.revision
+		record.Status.RootHash = update.entries["root"].Hash
+		record.Status.Usage = update.entries["root"].Usage
 		record.Status.FallbackResources = nil
-		for id, entry := range entries {
+		for id, entry := range update.entries {
 			if entry.Fallback {
 				record.Status.FallbackResources = append(record.Status.FallbackResources, id)
 			}
 		}
 		sort.Strings(record.Status.FallbackResources)
 		record.Status.LastSuccess = time.Now().UTC()
-		record.Status.NextAttempt = next
+		record.Status.NextAttempt = update.next
 	} else {
 		record.Failures++
 		record.Status.Stale = true
@@ -392,27 +429,34 @@ func (m *RefreshManager) work(id string, force bool, job *refreshJob) {
 		if delay > 30*time.Minute {
 			delay = 30 * time.Minute
 		}
-		record.Status.NextAttempt = time.Now().UTC().Add(delay)
+		record.Status.NextAttempt = time.Time{}
+		if !update.manualOnly {
+			record.Status.NextAttempt = time.Now().UTC().Add(delay)
+		}
 		// A failed new specification must back off too, rather than retrying
 		// every scheduler tick. Do not alter the old good body/validators.
-		if hash != "" {
-			record.SpecHash = hash
+		if update.specHash != "" {
+			record.SpecHash = update.specHash
 		}
 	}
 	m.mu.Lock()
-	m.records[id] = record
-	if err := m.save(id, record); err != nil {
+	m.records[key] = record
+	if err := m.save(key, record); err != nil {
 		record.Status.ErrorCode = "state_store_failed"
-		m.records[id] = record
+		m.records[key] = record
 	}
 	job.result = record.Status
-	delete(m.jobs, id)
+	delete(m.jobs, key)
 	close(job.done)
 	m.mu.Unlock()
+	if key.module {
+		m.svc.Events().Publish("module.updated", toModuleStatus(record.Status))
+		return
+	}
 	m.svc.Events().Publish("subscription.updated", record.Status)
 	if record.Status.Usage != nil {
 		eff, _ := m.svc.engine.Effective()
-		m.svc.Events().Publish("traffic_budget.updated", trafficBudget(record.Status, budgetFor(eff, id), time.Now().UTC()))
+		m.svc.Events().Publish("traffic_budget.updated", trafficBudget(record.Status, budgetFor(eff, key.id), time.Now().UTC()))
 	}
 }
 func (m *RefreshManager) resolve(value string) (string, error) {
@@ -428,19 +472,19 @@ func (m *RefreshManager) resolve(value string) (string, error) {
 	}
 	return value, nil
 }
-func (m *RefreshManager) refreshSource(ctx context.Context, id string, force bool, previous refreshRecord) (time.Time, map[string]subscription.Entry, string, uint64, error) {
+func (m *RefreshManager) refreshSource(ctx context.Context, id string, force bool, previous refreshRecord) (refreshUpdate, error) {
 	_, _, _, sourceData, _ := m.svc.LayerDocuments()
 	src, doc, err := sourceFrom(sourceData, id)
 	if err != nil {
-		return time.Time{}, nil, "", 0, err
+		return refreshUpdate{}, err
 	}
 	if src.Subscription == nil {
-		return time.Time{}, nil, "", 0, &subscription.Error{Code: "subscription_removed"}
+		return refreshUpdate{}, &subscription.Error{Code: "subscription_removed"}
 	}
 	spec := src.Subscription
 	fingerprint := specHash(spec)
-	fail := func(code string) (time.Time, map[string]subscription.Entry, string, uint64, error) {
-		return time.Time{}, nil, fingerprint, 0, &subscription.Error{Code: code}
+	fail := func(code string) (refreshUpdate, error) {
+		return refreshUpdate{specHash: fingerprint}, &subscription.Error{Code: code}
 	}
 	original := resource.Hash(model.Format(doc.Get(model.JoinPath("/sources", id))))
 	if err := model.ValidSubscription(spec); err != nil {
@@ -619,7 +663,7 @@ func (m *RefreshManager) refreshSource(ctx context.Context, id string, force boo
 			next = entry.Next
 		}
 	}
-	return next, batch.Entries, fingerprint, committed.Revision, nil
+	return refreshUpdate{next: next, entries: batch.Entries, specHash: fingerprint, revision: committed.Revision}, nil
 }
 
 // ConfigureSubscription versions the definition without fetching or discarding

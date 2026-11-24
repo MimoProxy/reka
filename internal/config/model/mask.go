@@ -23,7 +23,8 @@ var sensitiveFields = map[string]bool{"password": true, "uuid": true, "username"
 // IsSensitive reports whether path names a credential field.
 func IsSensitive(path string) bool {
 	segs, err := SplitPath(path)
-	return err == nil && len(segs) == 3 && segs[0] == "outbounds" && sensitiveFields[segs[2]]
+	return err == nil && len(segs) == 3 &&
+		(segs[0] == "outbounds" && sensitiveFields[segs[2]] || segs[0] == "modules" && segs[2] == "url")
 }
 
 func unalias(n *yaml.Node) *yaml.Node {
@@ -176,6 +177,16 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	}
 	obs, _ := child(root, "outbounds", false, 0)
 	list(obs, "/outbounds")
+	if modules, err := child(root, "modules", false, 0); err == nil && unalias(modules).Kind == yaml.SequenceNode {
+		for i, item := range unalias(modules).Content {
+			if u, err := child(item, "url", false, 0); err == nil {
+				u = unalias(u)
+				if u.Kind == yaml.ScalarNode && !strings.HasPrefix(u.Value, SecretPrefix) {
+					fn(JoinPath("/modules", ElementSegment(item, i), "url"), u)
+				}
+			}
+		}
+	}
 	if sources, err := child(root, "sources", false, 0); err == nil && unalias(sources).Kind == yaml.SequenceNode {
 		sources = unalias(sources)
 		for i, src := range sources.Content {

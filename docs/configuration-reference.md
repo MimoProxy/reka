@@ -497,6 +497,8 @@ traffic-budgets:
 
 ## 11. MITM 与 HTTP 重写
 
+在 profile 的 `modules` 列表中可声明 [Surge 模块](modules.md)，将锁定快照中的规则、重写和 MITM 主机名合成到有效配置。参数和启停随 profile 保存，下载由模块刷新完成。
+
 当前内核支持这些字段的合成、校验和独立的 HTTP 重写引擎，尚未接入解密转发。配置 `enabled: true` 不会启用实际流量解密。
 
 ### 11.1 MITM 设置

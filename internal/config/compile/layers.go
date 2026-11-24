@@ -16,6 +16,7 @@ import (
 
 const (
 	LayerSource  = "source"
+	LayerModule  = "module"
 	LayerOverlay = "overlay"
 )
 
@@ -88,6 +89,20 @@ func (c *compiler) layers(doc *model.Doc) {
 	// doc is the profile's own parse, which c.profile no longer references.
 	*doc.Mapping() = *nodeCopy(doc.Mapping())
 	byID := map[string]*yaml.Node{}
+	moduleSources := map[string]model.Source{}
+	moduleDefs := make(map[string]model.Module, len(c.profile.Modules))
+	c.modulePaths = make(map[string]string, len(c.profile.Modules))
+	for i, def := range c.profile.Modules {
+		path := model.JoinPath("/modules", seg(def.ID, i))
+		if err := model.ValidModule(&def); err != nil {
+			addDiag(model.DocProfile, path, "module.definition", err.Error(), c.ppos)
+		}
+		if _, ok := moduleDefs[def.ID]; ok {
+			addDiag(model.DocProfile, path+"/id", "module.duplicate", "duplicate module id", c.ppos)
+		}
+		moduleDefs[def.ID] = def
+		c.modulePaths[def.ID] = path
+	}
 	if !c.opts.OmitProvenance {
 		c.sourceHashes = map[string]string{}
 	}
@@ -114,6 +129,18 @@ func (c *compiler) layers(doc *model.Doc) {
 			addDiag(model.DocSources, path+"/id", "source.duplicate", "duplicate source id", spos)
 			continue
 		}
+		n := nodeCopy(sourceDoc.Get(model.JoinPath("/sources", seg("", i))))
+		byID[src.ID] = n
+		if src.Module != nil {
+			moduleSources[src.ID] = src
+			if err := validateModuleSnapshot(src, n); err != nil {
+				addDiag(model.DocSources, path+"/module", "module.snapshot", err.Error(), spos)
+			}
+			continue
+		}
+		if _, ok := moduleDefs[src.ID]; ok {
+			addDiag(model.DocProfile, c.modulePaths[src.ID]+"/id", "module.source-conflict", "module id is already used by a non-module source", c.ppos)
+		}
 		if err := model.ValidSubscription(src.Subscription); err != nil {
 			addDiag(model.DocSources, path+"/subscription", "source.subscription", err.Error(), spos)
 		}
@@ -136,8 +163,6 @@ func (c *compiler) layers(doc *model.Doc) {
 				addDiag(model.DocSources, path+"/lock", "source.lock", "root resource is not locked", spos)
 			}
 		}
-		n := nodeCopy(sourceDoc.Get(model.JoinPath("/sources", seg("", i))))
-		byID[src.ID] = n
 		localTargets[src.ID] = map[string]bool{}
 		if c.sourceHashes != nil {
 			sum := sha256.Sum256(model.Format(n))
@@ -168,8 +193,16 @@ func (c *compiler) layers(doc *model.Doc) {
 				if field(item, "source") != nil {
 					addDiag(model.DocSources, p+"/source", "source.nested", "a normalized source cannot import another source", spos)
 				}
+				if field(item, "module") != nil {
+					addDiag(model.DocSources, p+"/module", "module.marker", "module markers belong in the profile", spos)
+				}
 			}
 		}
+	}
+	isModule := func(id string) bool {
+		_, declared := moduleDefs[id]
+		_, snapshot := moduleSources[id]
+		return declared || snapshot
 	}
 	if c.diags.HasErrors() {
 		return
@@ -314,7 +347,9 @@ func (c *compiler) layers(doc *model.Doc) {
 		if from := field(cfg, "from"); from != nil {
 			src := byID[from.Value]
 			sourceDNS := field(src, "dns")
-			if sourceDNS == nil {
+			if isModule(from.Value) {
+				addDiag(model.DocProfile, "/dns/from", "module.source", "use modules to include module sources", c.ppos)
+			} else if sourceDNS == nil {
 				addDiag(model.DocProfile, "/dns/from", "dns.source", "source has no DNS snapshot", c.ppos)
 			} else {
 				mergedDNS := nodeCopy(sourceDNS)
@@ -390,6 +425,10 @@ func (c *compiler) layers(doc *model.Doc) {
 	var rewriteImports []string
 	for i, imp := range c.profile.Imports {
 		path := model.JoinPath("/imports", "#"+strconv.Itoa(i))
+		if isModule(imp.Source) {
+			addDiag(model.DocProfile, path+"/source", "module.source", "use modules to include module sources", c.ppos)
+			continue
+		}
 		src := byID[imp.Source]
 		if src == nil {
 			addDiag(model.DocProfile, path+"/source", "source.missing", "unknown source "+imp.Source, c.ppos)
@@ -465,6 +504,9 @@ func (c *compiler) layers(doc *model.Doc) {
 		}
 		put(doc.Mapping(), kind, merged[kind])
 	}
+	if c.diags.HasErrors() {
+		return
+	}
 	rules := sequence()
 	rulePaths := map[string][]string{}
 	for p := range c.origins {
@@ -475,21 +517,50 @@ func (c *compiler) layers(doc *model.Doc) {
 			delete(c.origins, p)
 		}
 	}
+	modules := c.convertModules(moduleSources, merged)
 	originalRules := field(doc.Mapping(), "rules")
+	marked := map[string]bool{}
+	markers := map[string]bool{}
+	if originalRules != nil {
+		for _, rule := range originalRules.Content {
+			if marker := field(rule, "module"); marker != nil {
+				marked[marker.Value] = true
+			}
+		}
+	}
+	for _, def := range c.profile.Modules {
+		if !marked[def.ID] {
+			rules.Content = append(rules.Content, modules[def.ID].rules...)
+		}
+	}
 	if originalRules != nil {
 		seenRules := map[string]bool{}
 		for i, r := range c.profile.Rules {
 			path := model.JoinPath("/rules", seg(r.ID, i))
+			item := originalRules.Content[i]
+			moduleMarker := field(item, "module") != nil
 			if r.ID != "" {
 				if seenRules[r.ID] {
 					addDiag(model.DocProfile, path+"/id", "schema.duplicate-id", "duplicate profile rule or source marker ID", c.ppos)
 				}
 				seenRules[r.ID] = true
-				if r.Source != "" && !idRE.MatchString(r.ID) {
-					addDiag(model.DocProfile, path+"/id", "schema.id", "source marker ID must be a native stable ID", c.ppos)
+				if (r.Source != "" || moduleMarker) && !idRE.MatchString(r.ID) {
+					addDiag(model.DocProfile, path+"/id", "schema.id", "rule marker ID must be a native stable ID", c.ppos)
 				}
 			}
-			item := originalRules.Content[i]
+			if moduleMarker {
+				if field(item, "source") != nil || field(item, "match") != nil || field(item, "outbound") != nil || field(item, "call") != nil {
+					addDiag(model.DocProfile, path, "module.marker", "a module rule marker cannot also expand a source, match or route", c.ppos)
+				} else if _, ok := moduleDefs[r.Module]; !ok {
+					addDiag(model.DocProfile, path+"/module", "module.missing", "unknown module "+r.Module, c.ppos)
+				} else if markers[r.Module] {
+					addDiag(model.DocProfile, path+"/module", "module.duplicate-marker", "module rules may only be expanded once", c.ppos)
+				} else {
+					markers[r.Module] = true
+					rules.Content = append(rules.Content, modules[r.Module].rules...)
+				}
+				continue
+			}
 			if r.Source == "" {
 				old := model.JoinPath("/rules", seg(r.ID, i))
 				dest := model.JoinPath("/rules", seg(r.ID, len(rules.Content)))
@@ -502,6 +573,10 @@ func (c *compiler) layers(doc *model.Doc) {
 			}
 			if field(item, "match") != nil || field(item, "outbound") != nil {
 				addDiag(model.DocProfile, path, "source.rule", "a source rule marker cannot also match or route", c.ppos)
+				continue
+			}
+			if isModule(r.Source) {
+				addDiag(model.DocProfile, path+"/source", "module.source", "declare the source in modules and use a module marker to expand its rules", c.ppos)
 				continue
 			}
 			src := byID[r.Source]
@@ -524,8 +599,8 @@ func (c *compiler) layers(doc *model.Doc) {
 	if c.diags.HasErrors() {
 		return
 	}
-	if len(rewriteImports) != 0 {
-		c.mergeRewrites(doc.Mapping(), byID, rewriteImports, spos, importItem)
+	if len(rewriteImports) != 0 || len(modules) != 0 {
+		c.mergeRewrites(doc.Mapping(), byID, rewriteImports, spos, modules, importItem)
 	}
 	for i, op := range overlay.Patches {
 		path := model.JoinPath("/patches", "#"+strconv.Itoa(i))
@@ -674,8 +749,12 @@ func (c *compiler) layers(doc *model.Doc) {
 	// packet tunnel pays on every profile switch.
 	c.profile, c.ppos, diags = model.DecodeProfileNode(doc.Mapping())
 	for i, r := range c.profile.Rules {
+		path := model.JoinPath("/rules", seg(r.ID, i))
 		if r.Source != "" {
-			c.errorf(model.DocProfile, model.JoinPath("/rules", seg(r.ID, i), "source"), "source.rule", "overlay cannot introduce source markers")
+			c.errorf(model.DocProfile, path+"/source", "source.rule", "overlay cannot introduce source markers")
+		}
+		if hasKey(c.ppos, path+"/module") {
+			c.errorf(model.DocProfile, path+"/module", "module.marker", "overlay cannot introduce module markers")
 		}
 	}
 	// Parser positions from generated YAML are not user locations.

@@ -337,6 +337,38 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 			d.decode(item, JoinPath(path, ElementSegment(item, i)), s.Index(i), depth+1)
 		}
 		v.Set(s)
+	case reflect.Map:
+		if isNull {
+			return
+		}
+		if n.Kind != yaml.MappingNode {
+			d.errorf(n, path, "yaml.type", "expected a mapping, got %s", kindName(n))
+			return
+		}
+		m := make(map[string]string, len(n.Content)/2)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, value := n.Content[i], n.Content[i+1]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				d.errorf(key, path, "yaml.key", "keys must be strings")
+				continue
+			}
+			kp := JoinPath(path, key.Value)
+			if _, ok := m[key.Value]; ok {
+				d.errorf(key, kp, "yaml.duplicate", "duplicate key %q", key.Value)
+				continue
+			}
+			value, ok := d.visit(value, kp, depth+1)
+			if !ok {
+				return
+			}
+			m[key.Value] = ""
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+				d.errorf(value, kp, "yaml.type", "expected a string, got %s", kindName(value))
+				continue
+			}
+			m[key.Value] = value.Value
+		}
+		v.Set(reflect.ValueOf(m))
 	case reflect.Struct:
 		if isNull {
 			return
@@ -368,9 +400,15 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 				}
 				continue
 			}
-			if k.Value == "id" && val.Kind != yaml.ScalarNode && v.Type() == reflect.TypeFor[Source]() {
-				d.errorf(val, kp, "source.id", "source id must be a literal scalar")
-				continue
+			if k.Value == "id" && val.Kind != yaml.ScalarNode {
+				switch v.Type() {
+				case reflect.TypeFor[Source]():
+					d.errorf(val, kp, "source.id", "source id must be a literal scalar")
+					continue
+				case reflect.TypeFor[Module]():
+					d.errorf(val, kp, "module.id", "module id must be a literal scalar")
+					continue
+				}
 			}
 			d.decode(val, kp, v.Field(idx), depth+1)
 		}
@@ -456,7 +494,7 @@ func mappingID(n *yaml.Node) string {
 func structFields(t reflect.Type) map[string]int {
 	m := make(map[string]int, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
-		tag := t.Field(i).Tag.Get("yaml")
+		tag, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
 		if tag == "" || tag == "-" {
 			continue
 		}

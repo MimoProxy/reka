@@ -21,6 +21,7 @@ type Profile struct {
 	DNS            *RD.Config      `yaml:"dns"`
 	SchemaVersion  int             `yaml:"schema-version"`
 	Imports        []Import        `yaml:"imports"`
+	Modules        []Module        `yaml:"modules"`
 	Outbounds      []Outbound      `yaml:"outbounds"`
 	Groups         []Group         `yaml:"groups"`
 	Rules          []Rule          `yaml:"rules"`
@@ -167,6 +168,7 @@ type Rule struct {
 	Syntax string `yaml:"syntax"`
 	// Source expands that source's rules here instead of matching a flow.
 	Source   string `yaml:"source"`
+	Module   string `yaml:"module"`
 	Match    Match  `yaml:"match"`
 	Outbound string `yaml:"outbound"`
 	Call     string `yaml:"call"`
@@ -233,6 +235,7 @@ type Source struct {
 	MapLocal       []MapLocal      `yaml:"map-local"`
 	DNS            *RD.Config      `yaml:"dns"`
 	Subscription   *Subscription   `yaml:"subscription"`
+	Module         *ModuleSnapshot `yaml:"module"`
 	Lock           *SourceLock     `yaml:"lock"`
 	ID             string          `yaml:"id"`
 	Outbounds      []Outbound      `yaml:"outbounds"`

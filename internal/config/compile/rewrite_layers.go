@@ -13,10 +13,16 @@ const mitmHostnamePath = "/mitm/hostnames"
 
 var mitmSwitches = []string{"h2", "skip-server-cert-verify", "quic-block"}
 
-func (c *compiler) mergeRewrites(root *yaml.Node, sources map[string]*yaml.Node, imports []string, positions model.Positions, importItem func(string, string, *yaml.Node) *yaml.Node) {
+func (c *compiler) mergeRewrites(root *yaml.Node, sources map[string]*yaml.Node, imports []string, positions model.Positions, modules map[string]moduleLayer, importItem func(string, string, *yaml.Node) *yaml.Node) {
 	for _, kind := range rewriteKinds {
 		merged := sequence()
 		index := map[string]int{}
+		for _, def := range c.profile.Modules {
+			for _, item := range modules[def.ID].rewrites[kind] {
+				index[field(item, "id").Value] = len(merged.Content)
+				merged.Content = append(merged.Content, item)
+			}
+		}
 		for _, src := range imports {
 			if list := field(sources[src], kind); list != nil {
 				for _, item := range list.Content {
@@ -46,7 +52,7 @@ func (c *compiler) mergeRewrites(root *yaml.Node, sources map[string]*yaml.Node,
 		}
 		put(root, kind, merged)
 	}
-	c.mergeMITM(root, sources, imports, positions)
+	c.mergeMITM(root, sources, imports, positions, modules)
 }
 
 func (c *compiler) overrideRewriteOrigins(path string, imported, local *yaml.Node) {
@@ -81,12 +87,43 @@ func walkNodePaths(node *yaml.Node, path string, visit func(string)) {
 	}
 }
 
-func (c *compiler) mergeMITM(root *yaml.Node, sources map[string]*yaml.Node, imports []string, positions model.Positions) {
+func (c *compiler) mergeMITM(root *yaml.Node, sources map[string]*yaml.Node, imports []string, positions model.Positions, modules map[string]moduleLayer) {
 	local := field(root, "mitm")
 	merged := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	hosts := sequence()
-	if list := field(local, "hostnames"); list != nil {
-		hosts.Content = append(hosts.Content, list.Content...)
+	profileHosts := field(local, "hostnames")
+	profileHostOrigins := c.hostnameOrigins(profileHosts)
+	for i := range len(profileHostOrigins) {
+		delete(c.origins, model.JoinPath(mitmHostnamePath, "#"+strconv.Itoa(i)))
+	}
+	appendHost := func(entry *yaml.Node, origin Origin) {
+		if _, ok := c.origins[mitmHostnamePath]; !ok {
+			c.origins[mitmHostnamePath] = origin
+		}
+		dest := model.JoinPath(mitmHostnamePath, "#"+strconv.Itoa(len(hosts.Content)))
+		c.origins[dest] = origin
+		hosts.Content = append(hosts.Content, entry)
+	}
+	for _, def := range c.profile.Modules {
+		if m := modules[def.ID].result; m != nil {
+			for _, host := range m.InsertHostnames {
+				appendHost(scalar(host.Value), moduleOrigin(def.ID, host.Line))
+			}
+		}
+	}
+	if profileHosts != nil {
+		for _, entry := range profileHosts.Content {
+			appendHost(entry, profileHostOrigins[entry])
+		}
+	}
+	setSwitch := func(name string, value *yaml.Node, origin Origin) {
+		path := model.JoinPath("/mitm", name)
+		if field(merged, name) != nil {
+			previous := c.origins[path]
+			origin.Overrides = &previous
+		}
+		c.origins[path] = origin
+		put(merged, name, value)
 	}
 	sourceOrigin := func(id, path string) Origin {
 		p := model.JoinPath("/sources", id) + path
@@ -107,9 +144,7 @@ func (c *compiler) mergeMITM(root *yaml.Node, sources map[string]*yaml.Node, imp
 			}
 			for i, entry := range list.Content {
 				path := model.JoinPath(mitmHostnamePath, "#"+strconv.Itoa(i))
-				dest := model.JoinPath(mitmHostnamePath, "#"+strconv.Itoa(len(hosts.Content)))
-				c.origins[dest] = sourceOrigin(id, path)
-				hosts.Content = append(hosts.Content, entry)
+				appendHost(entry, sourceOrigin(id, path))
 			}
 		}
 		for _, name := range mitmSwitches {
@@ -118,29 +153,51 @@ func (c *compiler) mergeMITM(root *yaml.Node, sources map[string]*yaml.Node, imp
 				continue
 			}
 			path := model.JoinPath("/mitm", name)
-			previous, hadPrevious := c.origins[path]
-			o := sourceOrigin(id, path)
-			if hadPrevious && previous.Layer == LayerSource {
-				o.Overrides = &previous
+			setSwitch(name, value, sourceOrigin(id, path))
+		}
+	}
+	for _, def := range c.profile.Modules {
+		m := modules[def.ID].result
+		if m == nil {
+			continue
+		}
+		for _, host := range m.AppendHostnames {
+			appendHost(scalar(host.Value), moduleOrigin(def.ID, host.Line))
+		}
+		for _, opt := range []struct {
+			name  string
+			value *bool
+		}{{"h2", m.MITM.H2}, {"skip-server-cert-verify", m.MITM.SkipServerCertVerify}} {
+			if opt.value != nil {
+				origin := moduleOrigin(def.ID, m.MITMLines[opt.name])
+				value := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(*opt.value)}
+				setSwitch(opt.name, value, origin)
 			}
-			c.origins[path] = o
-			put(merged, name, value)
 		}
 	}
 	for _, name := range mitmSwitches {
 		if value := field(local, name); value != nil && value.Tag != "!!null" {
-			put(merged, name, value)
 			path := model.JoinPath("/mitm", name)
-			if previous := c.origins[path]; previous.Layer == LayerSource {
-				pos := c.ppos[path]
-				c.origins[path] = Origin{Layer: LayerProfile, Document: model.DocProfile, Path: path, Line: pos.Line, Column: pos.Column, Overrides: &previous}
-			}
+			pos := c.ppos[path]
+			setSwitch(name, value, Origin{Layer: LayerProfile, Document: model.DocProfile, Path: path, Line: pos.Line, Column: pos.Column})
 		}
 	}
 	if _, ok := c.origins[mitmHostnamePath]; ok {
 		put(merged, "hostnames", hosts)
 	}
 	if len(merged.Content) != 0 {
+		if _, ok := c.origins["/mitm"]; !ok {
+			if o, ok := c.origins[mitmHostnamePath]; ok {
+				c.origins["/mitm"] = o
+			} else {
+				for _, name := range mitmSwitches {
+					if o, ok := c.origins[model.JoinPath("/mitm", name)]; ok {
+						c.origins["/mitm"] = o
+						break
+					}
+				}
+			}
+		}
 		put(root, "mitm", merged)
 	}
 }

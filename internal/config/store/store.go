@@ -360,8 +360,17 @@ func (s *Store) ValidateResources(data []byte) error {
 	blobs := resource.At(s.root)
 	for _, source := range sources.Sources {
 		if source.Lock != nil {
+			if source.Module != nil {
+				body, err := blobs.Read(source.Lock.Root)
+				if err != nil || len(body) > model.MaxDocumentSize {
+					return fmt.Errorf("store: locked module text is unavailable")
+				}
+			}
 			for _, lock := range source.Lock.Resources {
 				if _, err := blobs.Read(lock.Hash); err != nil {
+					if source.Module != nil {
+						return fmt.Errorf("store: locked module resource is unavailable")
+					}
 					return fmt.Errorf("store: locked subscription resource is unavailable")
 				}
 			}

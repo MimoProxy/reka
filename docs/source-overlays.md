@@ -1,6 +1,6 @@
 # Sources and overlays
 
-The source layer accepts **normalized native snapshots**. [Local Clash/share-link conversion](clash-import.md) runs before this layer; [background downloads, provider resources and stale-cache reporting](subscriptions.md) feed it too.
+The source layer accepts **normalized native snapshots**. [Local Clash/share-link conversion](clash-import.md) runs before this layer; [background downloads, provider resources and stale-cache reporting](subscriptions.md) feed it too. [Surge modules](modules.md) keep their original text in a locked source snapshot and convert it during composition.
 
 ## Documents and ownership
 
@@ -40,6 +40,8 @@ rules:
   - {source: airport}
   - {id: final, match: {all: true}, outbound: airport/proxy}
 ```
+
+Use `modules` and `{module: ID}` for locked module snapshots. They have their own [composition order](modules.md#composition).
 
 `imports` selects `outbounds`, `groups`, `rule-sets`, `sub-rules`, and `rewrites`. At least one selection must be true. Import each source once. Rules are included separately. A `{source: airport}` marker expands the source's ordered rules exactly at that location. A marker cannot also contain `match` or `outbound`. It may have an ID to address the marker in the original profile. Expanding the same rules twice produces duplicate IDs and is refused.
 
@@ -96,7 +98,7 @@ A profile outbound or group with the exact imported ID replaces that whole objec
 
 Removing a node disables it. Its group references and selections must also be repaired explicitly. Missing sources, deleted or renamed targets, stale overlay paths, invalid selections and cycles refuse the transaction; the previous revision keeps running. There is no automatic fallback to DIRECT or guessed rename association.
 
-`effective.provenance` records the layer, document, original path, line and column; imported fields also name their source. Overlay edits record the origin they replaced. Semantic errors point to the source/overlay document rather than generated YAML. `effective.source_hashes` records SHA-256 of each normalized snapshot's canonical YAML mapping (including its ID and comments); revision metadata separately hashes the complete four document files.
+`effective.provenance` records the layer, document, original path, line and column; imported fields also name their source. Overlay edits record the origin they replaced. Semantic errors point to the source/overlay document rather than generated YAML. `effective.source_hashes` records SHA-256 of each normalized snapshot's canonical YAML mapping (including its ID and comments); revision metadata separately hashes the complete four document files. Enabled modules contribute hashes of their snapshot identities, locks, and profile argument overrides.
 
 ## HTTP rewrites and MITM hostnames
 
@@ -135,7 +137,7 @@ For the hostname list, `#N` is a zero-based position in the list as it exists at
 
 The API accepts whole `sources`/`overlay` strings and `sources_patch`/`overlay_patch` structural edits alongside the existing profile/local fields. They participate in validation, planning, operation identity, conflict reporting and crash recovery. Submit one request for related changes that must be atomic. No HTTP requests or subscriptions are refreshed during validation or planning.
 
-`rekactl get`, `validate`, `plan`, `commit`, `set` and `remove` support the new documents (`-sources`/`-overlay` for edit commands). `GetCapabilities` advertises the five composition layers and `source_formats: ["native", "clash", "links"]`.
+`rekactl get`, `validate`, `plan`, `commit`, `set` and `remove` support the new documents (`-sources`/`-overlay` for edit commands). `GetCapabilities` advertises `source_formats: ["native", "clash", "links", "surge-module"]`.
 
 The candidate directory exports all four YAML files. Each saved file is committed individually, so use the API for changes that require several documents together. Invalid candidates stay on disk with `.errors` and do not change the active revision.
 

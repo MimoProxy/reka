@@ -89,6 +89,9 @@ func (c *compiler) compileMITMHostnames(entries []string) *httprewrite.Hostnames
 func (c *compiler) httpRewrites(eff *Effective) {
 	p := c.profile
 	if len(p.HTTPRewrites)+len(p.HeaderRewrites)+len(p.BodyRewrites)+len(p.MapLocal) == 0 {
+		if len(c.moduleDigests) != 0 {
+			eff.HTTPRewriteFingerprint = fingerprint(c.moduleDigests)
+		}
 		return
 	}
 	paths := make(map[string][]string, len(rewriteKinds))
@@ -175,7 +178,7 @@ func (c *compiler) httpRewrites(eff *Effective) {
 		Header []model.HeaderRewrite
 		Body   []model.BodyRewrite
 		Local  []model.MapLocal
-	}{p.HTTPRewrites, p.HeaderRewrites, p.BodyRewrites, p.MapLocal})
+	}{p.HTTPRewrites, p.HeaderRewrites, p.BodyRewrites, p.MapLocal}, c.moduleDigests...)
 }
 
 func (c *compiler) validateMapLocalFile(path string, rule model.MapLocal) {

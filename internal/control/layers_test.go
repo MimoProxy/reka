@@ -1,6 +1,7 @@
 package control
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ func TestLayerAPIContract(t *testing.T) {
 	}
 	defer c.Close()
 	var caps Capabilities
-	if err = c.Call("GetCapabilities", nil, &caps); err != nil || len(caps.ConfigurationLayers) != 5 || len(caps.SourceFormats) != 3 || caps.SourceFormats[0] != "native" {
+	if err = c.Call("GetCapabilities", nil, &caps); err != nil || len(caps.ConfigurationLayers) != 5 || !slices.Equal(caps.SourceFormats, []string{"native", "clash", "links", "surge-module"}) {
 		t.Fatalf("capabilities: %+v %v", caps, err)
 	}
 	profile := "schema-version: 1\nimports: [{source: sub, outbounds: true, groups: true}]\nrules: [{match: {all: true}, outbound: sub/proxy}]\n"

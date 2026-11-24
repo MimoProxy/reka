@@ -113,11 +113,12 @@ type Entry struct {
 	Next     time.Time              `json:"next"`
 }
 type Fetcher struct {
-	Client       *http.Client
-	Blobs        *resource.Store
-	Now          func() time.Time
-	ValidateBody func([]byte) error
-	MaxBytes     int
+	Client         *http.Client
+	Blobs          *resource.Store
+	Now            func() time.Time
+	ValidateBody   func([]byte) error
+	MaxBytes       int
+	MaxBundleBytes int
 }
 type Batch struct {
 	f        *Fetcher
@@ -151,6 +152,11 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 	if b.f.MaxBytes > 0 {
 		limit = min(limit, b.f.MaxBytes)
 	}
+	sizeCode := "body_too_large"
+	if b.f.MaxBundleBytes > 0 && b.f.MaxBundleBytes-b.Bytes < limit {
+		limit = b.f.MaxBundleBytes - b.Bytes
+		sizeCode = "bundle_too_large"
+	}
 	now := time.Now().UTC()
 	if b.f.Now != nil {
 		now = b.f.Now()
@@ -160,6 +166,9 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 	var cached []byte
 	if old.Request == request && old.Hash != "" {
 		cached, _ = b.f.Blobs.Read(old.Hash)
+		if len(cached) > limit {
+			cached = nil
+		}
 	}
 	entry := old
 	var data []byte
@@ -203,14 +212,14 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			data = cached
 		case http.StatusOK:
 			if response.ContentLength > int64(limit) {
-				return nil, failure("body_too_large")
+				return nil, failure(sizeCode)
 			}
 			data, err = io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 			if err != nil {
 				return nil, failure("body_read_failed")
 			}
 			if len(data) > limit {
-				return nil, failure("body_too_large")
+				return nil, failure(sizeCode)
 			}
 			if len(data) == 0 {
 				return nil, failure("empty_body")
@@ -242,8 +251,12 @@ func (b *Batch) Inline(id, kind, name string, data []byte) ([]byte, error) {
 	return b.record(id, kind, name, data, Entry{Request: resource.Hash(data)})
 }
 func (b *Batch) record(id, kind, name string, data []byte, entry Entry) ([]byte, error) {
+	limit := b.f.MaxBundleBytes
+	if limit <= 0 {
+		limit = 384 << 20
+	}
 	b.Bytes += len(data)
-	if b.Bytes > 384<<20 {
+	if b.Bytes > limit {
 		return nil, failure("bundle_too_large")
 	}
 	hash, err := b.f.Blobs.Put(data)

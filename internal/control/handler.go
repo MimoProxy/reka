@@ -123,6 +123,7 @@ var Methods = []string{
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
+	"AddModule", "RemoveModule", "SetModuleEnabled", "SetModuleArguments", "RefreshModule", "ListModules", "GetModuleReport", "PreviewModule",
 	"GenerateMITMCA", "ImportMITMCA", "GetMITMCA", "ExportMITMCA", "DeleteMITMCA",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
@@ -405,6 +406,50 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 			return svc.RefreshSubscription(s.ctx, p.SourceID)
 		}
 		return svc.QueueSubscription(s.ctx, p.SourceID)
+	case "AddModule":
+		p, err := decode[api.AddModuleRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.AddModule(s.ctx, p)
+	case "RemoveModule":
+		p, err := decode[api.RemoveModuleRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.RemoveModule(s.ctx, p)
+	case "SetModuleEnabled":
+		p, err := decode[api.SetModuleEnabledRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.SetModuleEnabled(s.ctx, p)
+	case "SetModuleArguments":
+		p, err := decode[api.SetModuleArgumentsRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.SetModuleArguments(s.ctx, p)
+	case "RefreshModule":
+		p, err := decode[api.RefreshModuleRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.RefreshModule(s.ctx, p.ModuleID, p.Wait)
+	case "ListModules":
+		return svc.ListModules()
+	case "GetModuleReport":
+		p, err := decode[api.GetModuleReportRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.GetModuleReport(p.ModuleID)
+	case "PreviewModule":
+		p, err := decode[api.PreviewModuleRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.PreviewModule(p)
 	case "GetStatus":
 		return status(svc), nil
 	case "GetConfiguration":
@@ -722,7 +767,7 @@ func capabilities(svc *service.Service) Capabilities {
 	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"}, ProcessModes: []string{"off", "rule", "always"},
 		DHCPDNS: platform.DHCPDNSSupported(), ConditionalSniff: true,
 		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
-		SourceFormats:       []string{"native", "clash", "links"},
+		SourceFormats:       []string{"native", "clash", "links", "surge-module"},
 		ImportSupport:       importer.SupportMatrix(),
 		APIVersion:          APIVersion,
 		SchemaVersion:       model.SchemaVersion,

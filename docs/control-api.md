@@ -121,6 +121,14 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `ConfigureSubscription` | `source_id`、`base_revision`、`subscription` | 提交结果 |
 | `ListSubscriptions` | 无 | 订阅安全状态数组 |
 | `RefreshSubscription` | `source_id`，可选 `wait: false` | 刷新状态 |
+| `AddModule` | `module`、`base_revision`，可选 `position` | 提交结果 |
+| `RemoveModule` | `module_id`、`base_revision` | 提交结果 |
+| `SetModuleEnabled` | `module_id`、`enabled`、`base_revision` | 提交结果 |
+| `SetModuleArguments` | `module_id`、`arguments`、`base_revision` | 提交结果 |
+| `RefreshModule` | `module_id`，可选 `wait: false` | 模块刷新状态 |
+| `ListModules` | 无 | 模块、参数声明、刷新状态和报告摘要，不含 URL 或路径 |
+| `GetModuleReport` | `module_id` | 完整模块转换报告 |
+| `PreviewModule` | `data`，可选 `arguments` | 转换报告 |
 | `SetSecret` | `name`、`value`，可选 `apply: true` | `name`、`ref`，可选 `apply` 提交结果 |
 | `DeleteSecret` | `name` | `deleted` 名称 |
 | `ListSecrets` | 无 | `names` 数组，不含值 |
@@ -348,6 +356,12 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 状态含 source_id、state（如 pending/paused/refreshing/current/stale/failed）、stale，以及可选 last_attempt、last_success、next_attempt、error_code、revision、root_hash、fallback_resources，不包含 URL/header 凭据。失败保留之前有效快照。资源限额、下载路由和文件 provider 用法见[订阅文档](subscriptions.md)。
 
+### Surge 模块
+
+`GetCapabilities.source_formats` 包含 `surge-module` 时，可用 `AddModule` 安装 Surge 模块。请求中的 `module` 接受 `id`、`url` 或绝对 `file`、可选的 `enabled`、`interval` 和 `arguments`。`position` 是从零开始的列表索引，省略时追加。安装成功时同一事务保存模块定义和锁定快照。所有模块修改方法都要检查提交结果的 `state`。
+
+`SetModuleArguments` 替换完整的参数覆盖映射。传入空对象可恢复模块默认值。`PreviewModule.data` 接收原始模块文本，使用当前策略表，且不下载资源或写配置。远程 Map Local 内容在预览中会提示缺少锁定资源。`GetModuleReport` 返回当前生效模块的逐行转换结果。`RefreshModule` 的 `wait` 和状态字段沿用订阅刷新结构，以 `module_id` 标识模块。配置和命令示例见 [Surge 模块](modules.md)。
+
 ## 7. Secret 管理
 
 ```json
@@ -392,6 +406,7 @@ types 省略/空数组接收全部事件；同连接再次 Subscribe 替换上�
 | `runtime.generation` | 运行时切换 |
 | `candidate.invalid` | 手工编辑候选失败 |
 | `subscription.updated` | 订阅观察状态更新 |
+| `module.updated` | 模块刷新状态更新 |
 | `traffic_budget.updated` | 订阅用量观测更新后的预算 |
 | `log` | 实际启用的日志记录，data 含 level、message、time |
 

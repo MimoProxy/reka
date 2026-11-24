@@ -27,6 +27,9 @@ const usage = `usage: rekactl [-c address | -state-root dir] [-json] command [ar
 configuration
   get [profile|local|sources|overlay|effective] [-reveal]   print the active configuration
   subscription list|set ID URL|refresh ID|pause ID|resume ID|remove ID
+  module add ID URL | add ID -file PATH       download and install a Surge module
+  module remove|enable|disable|refresh|report ID
+  module set-arguments ID [-argument NAME=VALUE]... | list | preview FILE
   resource list|add KIND ID URL [options]|refresh KIND ID
   import -source ID [-format auto|clash|links] [-nodes-only] [-allow-partial] [-apply] FILE
   origin PATH                               where an effective field comes from
@@ -142,6 +145,8 @@ func run(args []string) error {
 		return cmdGet(rest)
 	case "subscription":
 		return cmdSubscription(rest)
+	case "module":
+		return cmdModule(rest)
 	case "resource":
 		return cmdResource(rest)
 	case "import":

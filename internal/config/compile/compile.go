@@ -24,6 +24,7 @@ import (
 
 	VE "github.com/MimoProxy/reka/internal/compat/vlessenc"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/module"
 	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/platform"
@@ -166,6 +167,7 @@ type Effective struct {
 	DNSMatches       map[string]*router.Router `json:"-"`
 	GroupMetadata    map[string]GroupMetadata  `json:"group_metadata,omitempty"`
 	SourceHashes     map[string]string         `json:"source_hashes,omitempty"`
+	Modules          map[string]module.Report  `json:"modules,omitempty"`
 	Outbounds        []Outbound                `json:"outbounds"`
 	Groups           []router.Group            `json:"groups"`
 	Rules            []router.RuleSpec         `json:"-"`
@@ -231,6 +233,9 @@ type compiler struct {
 	origins       map[string]Origin
 	scopedIDs     map[string]bool
 	sourceHashes  map[string]string
+	moduleReports map[string]module.Report
+	moduleDigests []string
+	modulePaths   map[string]string
 	opts          Options
 	diags         model.Diagnostics
 	ppos          model.Positions
@@ -271,9 +276,9 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	if c.diags.HasErrors() {
 		return nil, c.diags
 	}
-	needsLayers := len(opts.Sources) > 0 || len(opts.Overlay) > 0 || len(c.profile.Imports) > 0
-	for _, rule := range c.profile.Rules {
-		needsLayers = needsLayers || rule.Source != ""
+	needsLayers := len(opts.Sources) > 0 || len(opts.Overlay) > 0 || len(c.profile.Imports) > 0 || len(c.profile.Modules) > 0
+	for i, rule := range c.profile.Rules {
+		needsLayers = needsLayers || rule.Source != "" || hasKey(c.ppos, model.JoinPath("/rules", seg(rule.ID, i), "module"))
 	}
 	if needsLayers {
 		c.layers(doc)
@@ -288,6 +293,13 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	for i, d := range c.diags {
 		if d.Document == model.DocProfile {
 			if o, ok := diagnosticOrigin(c.origins, d.Path); ok {
+				if o.Layer == LayerModule {
+					path := c.modulePaths[o.Source]
+					c.diags[i].Path = path
+					c.diags[i].Line, c.diags[i].Column = c.ppos[path].Line, c.ppos[path].Column
+					c.diags[i].Message = fmt.Sprintf("module line %d: %s", o.Line, d.Message)
+					continue
+				}
 				c.diags[i].Document, c.diags[i].Path, c.diags[i].Line, c.diags[i].Column = o.Document, o.Path, o.Line, o.Column
 			}
 		}
@@ -330,7 +342,7 @@ func (c *compiler) checkID(doc, path, id string) bool {
 }
 
 func (c *compiler) compose() *Effective {
-	eff := &Effective{Final: model.OutboundDirect, SourceHashes: c.sourceHashes}
+	eff := &Effective{Final: model.OutboundDirect, SourceHashes: c.sourceHashes, Modules: c.moduleReports}
 	if !c.opts.OmitProvenance {
 		if c.origins != nil {
 			eff.Provenance = maps.Clone(c.origins)
