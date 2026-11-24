@@ -14,11 +14,15 @@ import (
 )
 
 func systemDNSServers(config *dnsinfo.Configuration, index int, excluded []netip.Prefix) []netip.AddrPort {
-	if config == nil {
+	if config == nil || index == 0 {
 		return nil
 	}
-	for _, resolver := range []dnsinfo.Resolver{config.Select(index), config.Select(0)} {
-		if resolver.InterfaceIndex != 0 && resolver.InterfaceIndex != index {
+	// Use only the physical interface's scoped resolvers. While the tunnel is
+	// up, the unscoped default resolver is the tunnel's own DNS server, which
+	// need not lie inside the tunnel's address prefixes. dnsinfo's Select falls
+	// back to that resolver, so it is not used here.
+	for _, resolver := range config.ScopedResolvers {
+		if resolver.InterfaceIndex != index || resolver.Domain != "" {
 			continue
 		}
 		var servers []netip.AddrPort

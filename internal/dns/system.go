@@ -13,6 +13,9 @@ import (
 var ErrSystemDNSUnavailable = errors.New("system DNS packet exchange unavailable")
 
 func (s *Service) querySystem(ctx context.Context, q *D.Msg, outcome *resolutionHistory) (*D.Msg, error) {
+	question := q.Question[0]
+	address := question.Qtype == D.TypeA || question.Qtype == D.TypeAAAA
+	exchangeErr := ErrSystemDNSUnavailable
 	if s.opts.SystemExchange != nil {
 		m, server, err := s.opts.SystemExchange(ctx, q)
 		if err == nil && m != nil {
@@ -22,18 +25,17 @@ func (s *Service) querySystem(ctx context.Context, q *D.Msg, outcome *resolution
 			return m, nil
 		}
 		if err == nil {
-			return nil, errors.New("empty system DNS response")
+			err = errors.New("empty system DNS response")
 		}
-		if !errors.Is(err, ErrSystemDNSUnavailable) {
-			return nil, err
-		}
+		exchangeErr = err
 	}
-	if s.opts.System == nil {
-		return nil, ErrSystemDNSUnavailable
+	// The native lookup answers only address questions. It also covers a
+	// failed packet exchange, for example while the network is changing.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	question := q.Question[0]
-	if question.Qtype != D.TypeA && question.Qtype != D.TypeAAAA {
-		return nil, ErrSystemDNSUnavailable
+	if s.opts.System == nil || !address {
+		return nil, exchangeErr
 	}
 	addresses, err := s.opts.System(ctx, strings.TrimSuffix(question.Name, "."))
 	if err != nil {

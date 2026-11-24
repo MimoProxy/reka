@@ -39,6 +39,30 @@ func TestSystemDNSServersUsePhysicalScope(t *testing.T) {
 	}
 }
 
+func TestSystemDNSServersIgnoreTheDefaultResolver(t *testing.T) {
+	// The tunnel's DNS server can sit outside the tunnel's address prefixes,
+	// so an interface without its own resolver must not inherit it.
+	vpn := netip.MustParseAddrPort("198.18.0.2:53")
+	wifi := netip.MustParseAddrPort("192.0.2.53:53")
+	corporate := netip.MustParseAddrPort("203.0.113.53:53")
+	config := &dnsinfo.Configuration{
+		Resolvers: []dnsinfo.Resolver{{Servers: []netip.AddrPort{vpn}}},
+		ScopedResolvers: []dnsinfo.Resolver{
+			{InterfaceIndex: 4, Domain: "corp.test", Servers: []netip.AddrPort{corporate}},
+			{InterfaceIndex: 4, Servers: []netip.AddrPort{wifi}},
+		},
+	}
+	excluded := []netip.Prefix{netip.MustParsePrefix("172.27.255.0/30")}
+	if got := systemDNSServers(config, 4, excluded); !slices.Equal(got, []netip.AddrPort{wifi}) {
+		t.Fatalf("Wi-Fi servers: %v", got)
+	}
+	for _, index := range []int{0, 5} {
+		if got := systemDNSServers(config, index, excluded); len(got) != 0 {
+			t.Fatalf("interface %d used the VPN resolver: %v", index, got)
+		}
+	}
+}
+
 func TestSystemDNSQueriesRetainWireAnswers(t *testing.T) {
 	listener, packet := testnet.ListenTCPUDP(t)
 	alias := dnsRecordForTest(t, "entry.test. 90 IN CNAME middle.test.")
