@@ -25,15 +25,19 @@ const MaxBundleBytes = 4 << 20
 var errBundleTooLarge = errors.New("prepared rules and resources exceed the 4 MiB extension configuration budget")
 
 type Bundle struct {
-	Version             int                  `json:"version"`
-	Profile             json.RawMessage      `json:"profile"`
-	Local               json.RawMessage      `json:"local,omitempty"`
-	Sources             json.RawMessage      `json:"sources,omitempty"`
-	Overlay             json.RawMessage      `json:"overlay,omitempty"` // Only patches validated during preparation.
-	Resources           map[string][]byte    `json:"resources,omitempty"`
-	Precompiled         *precompiledRuleSets `json:"precompiled-rule-sets,omitempty"`
-	OmittedResources    []string             `json:"omitted-rule-resources,omitempty"`
-	Summary             Summary              `json:"summary"`
+	Version          int                  `json:"version"`
+	Profile          json.RawMessage      `json:"profile"`
+	Local            json.RawMessage      `json:"local,omitempty"`
+	Sources          json.RawMessage      `json:"sources,omitempty"`
+	Overlay          json.RawMessage      `json:"overlay,omitempty"` // Only patches validated during preparation.
+	Resources        map[string][]byte    `json:"resources,omitempty"`
+	Precompiled      *precompiledRuleSets `json:"precompiled-rule-sets,omitempty"`
+	OmittedResources []string             `json:"omitted-rule-resources,omitempty"`
+	// OwnDNS records that the profile had its own DNS section before
+	// preparation filled in defaults. Only such DNS can be selected by
+	// another profile's dns.from.
+	OwnDNS              bool    `json:"own-dns,omitempty"`
+	Summary             Summary `json:"summary"`
 	precompiledCoverage map[string][]string
 }
 

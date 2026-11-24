@@ -348,3 +348,56 @@ rules: [{match: {all: true}, outbound: s-test/` + importer.StableID("g", "Choice
 		t.Fatal("a rebind without refresh changed the archived sources")
 	}
 }
+
+func TestPrepareSelectsSourceDNS(t *testing.T) {
+	choice := "s-test/" + importer.StableID("g", "Choice")
+	for _, tc := range []struct {
+		name, server, imports, want string
+	}{
+		// dns.from alone packs the source even though nothing else is imported.
+		{"dns only", "https://dns.example.test/dns-query", "", "https://dns.example.test/dns-query"},
+		// A server that dials through the source's group needs that group imported.
+		{"with imports", "https://dns.example.test/dns-query#Choice", "imports: [{source: s-test, outbounds: true, groups: true}]\n",
+			"https://dns.example.test/dns-query#" + choice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, sourcePath := prepareSourceFixture(t, clashSourceFixture+fmt.Sprintf(`
+dns:
+  enable: true
+  enhanced-mode: redir-host
+  ipv6: true
+  nameserver: [%q, "198.51.100.53"]
+`, tc.server), PrepareOptions{})
+			options := PrepareOptions{Sources: map[string]string{"s-test": sourcePath}}
+			bundle, _ := prepareSourceFixture(t, "schema-version: 1\n"+tc.imports+"dns: {from: s-test, ipv6: false}\n", options)
+			sources, _, diagnostics := model.ParseSources(bundle.Sources)
+			if diagnostics.HasErrors() || len(sources.Sources) != 1 || sources.Sources[0].DNS == nil {
+				t.Fatalf("source DNS was not packed: %s (%v)", bundle.Sources, diagnostics)
+			}
+			eff, err := bundle.Compile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if eff.DNS == nil || !slices.Equal(eff.DNS.Nameservers, []string{tc.want, "198.51.100.53"}) || eff.DNS.Mode != "redir-host" {
+				t.Fatalf("compiled DNS does not come from the source: %+v", eff.DNS)
+			}
+			if eff.DNS.IPv6 {
+				t.Fatalf("profile DNS fields must override the source: %+v", eff.DNS)
+			}
+		})
+	}
+}
+
+func TestPrepareRejectsSourceWithoutDNS(t *testing.T) {
+	// Preparation fills in default DNS for the source; that is not the
+	// source's own DNS and must not satisfy dns.from.
+	_, sourcePath := prepareSourceFixture(t, clashSourceFixture, PrepareOptions{})
+	options := PrepareOptions{Sources: map[string]string{"s-test": sourcePath}}
+	_, err := prepare(t.Context(), []byte("schema-version: 1\ndns: {from: s-test}\n"), &preparer{options: options})
+	var validation *ValidationError
+	if !errors.As(err, &validation) || !slices.ContainsFunc(validation.Diagnostics, func(d model.Diagnostic) bool {
+		return d.Path == "/dns/from" && d.Message == "source has no DNS snapshot"
+	}) {
+		t.Fatalf("expected a missing DNS snapshot diagnostic, got %v", err)
+	}
+}

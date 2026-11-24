@@ -12,7 +12,13 @@ import (
 )
 
 func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error)) error {
-	if len(profile.Imports) == 0 || len(options.Sources) == 0 {
+	// dns.from selects a source's DNS whether or not the profile imports
+	// anything else from that source.
+	dnsSource := ""
+	if !options.NodesOnly && profile.DNS != nil {
+		dnsSource = profile.DNS.From
+	}
+	if len(options.Sources) == 0 || len(profile.Imports) == 0 && dnsSource == "" {
 		return nil
 	}
 	// A rule marker also imports the rule sets of an already loaded source.
@@ -30,17 +36,20 @@ func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, opt
 	}{SchemaVersion: model.SchemaVersion}
 	seen := make(map[string]bool)
 	size, resourceBytes := 0, 0
-	for _, imp := range profile.Imports {
-		path, ok := options.Sources[imp.Source]
-		if !ok || seen[imp.Source] {
-			continue // The compiler reports missing and duplicate imports.
+	add := func(id string, keys []string) error {
+		path, ok := options.Sources[id]
+		if !ok || seen[id] {
+			return nil // The compiler reports missing and duplicate sources.
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, resources, err := loadSource(imp.Source, path, importedKeys(imp, ruleSources[imp.Source]), read)
+		if id == dnsSource {
+			keys = append(keys, dnsKeys...)
+		}
+		entry, resources, err := loadSource(id, path, keys, read)
 		if err != nil {
-			return fmt.Errorf("cannot read source %s: %w", imp.Source, err)
+			return fmt.Errorf("cannot read source %s: %w", id, err)
 		}
 		size += len(entry)
 		for hash, data := range resources {
@@ -56,7 +65,18 @@ func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, opt
 			return errors.New("imported rule resources exceed 32 MiB")
 		}
 		document.Sources = append(document.Sources, entry)
-		seen[imp.Source] = true
+		seen[id] = true
+		return nil
+	}
+	for _, imp := range profile.Imports {
+		if err := add(imp.Source, importedKeys(imp, ruleSources[imp.Source])); err != nil {
+			return err
+		}
+	}
+	if dnsSource != "" {
+		if err := add(dnsSource, nil); err != nil {
+			return err
+		}
 	}
 	if len(document.Sources) == 0 {
 		return nil
@@ -65,6 +85,11 @@ func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, opt
 	b.Sources, err = json.Marshal(document)
 	return err
 }
+
+// dnsKeys are a source's DNS section and the rule sets its policies may
+// match, including pinned geodata slices. Servers that dial through the
+// source's nodes or groups need the profile to import them, as on desktop.
+var dnsKeys = []string{"dns", "rule-sets"}
 
 // importedKeys lists the parts of a source the profile uses. The rest stays
 // out of the bundle: the extension would otherwise parse and validate a
@@ -109,6 +134,9 @@ func loadSource(id, path string, keys []string, read func(string) ([]byte, error
 	encodedID, _ := json.Marshal(id)
 	entry := map[string]json.RawMessage{"id": encodedID}
 	for _, key := range keys {
+		if key == "dns" && !bundle.OwnDNS {
+			continue // Preparation added default DNS; the source has none.
+		}
 		if value, ok := profile[key]; ok {
 			entry[key] = value
 		}

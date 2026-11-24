@@ -280,6 +280,9 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		}
 		pinGeodata(document, geodata)
 	}
+	if dns, ok := document["dns"].(map[string]any); ok && dns["from"] == nil {
+		bundle.OwnDNS = true
+	}
 	normalize(document)
 	data, err := json.Marshal(document)
 	if err != nil {
