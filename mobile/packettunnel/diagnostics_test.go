@@ -3,6 +3,7 @@
 package packettunnel
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -127,6 +128,97 @@ func TestPacketTunnelTimelineLimitsLinkedRows(t *testing.T) {
 				t.Fatalf("retained HTTP = %v, DNS = %v, want HTTP = %v, DNS = %v", gotHTTP, gotDNS, wantHTTP, tt.wantDNS)
 			}
 		})
+	}
+}
+
+func TestPacketTunnelHistoryPreservesMITMFields(t *testing.T) {
+	records := history.NewBounded(eventRows, eventBytes)
+	engine := generation.NewEngine(generation.EngineOptions{HostPacketFlow: true, PacketHistory: records})
+	t.Cleanup(engine.Close)
+	session := &Session{ctx: t.Context(), events: records, profile: &profileSession{engine: engine}}
+	const id = 42
+	start := time.Now().UTC().Add(-time.Second)
+	trace := api.ConnectionTrace{
+		Connection: api.Connection{
+			ID: id, Start: start,
+			MITMConnectionInfo: api.MITMConnectionInfo{
+				MITM: true, MITMRequests: 2, MITMMatchedIDs: []string{"rewrite"}, MITMBodyPassthroughs: 1,
+			},
+		},
+		EndedAt: start.Add(time.Second),
+	}
+	records.RecordFlow(history.Connections, trace.Scope, start, id, trace, nil)
+	requestFields := map[string]string{
+		"mitm": "true", "connection_id": "42", "matched_ids": `["rewrite"]`, "body_passthroughs": "1", "resource_error": "true",
+	}
+	for i, path := range []string{"/small", "/" + strings.Repeat("a", 800)} {
+		at := start.Add(time.Duration(i+1) * time.Millisecond)
+		row := map[string]any{"start": at, "path": path}
+		for key, value := range requestFields {
+			row[key] = json.RawMessage(value)
+		}
+		records.RecordFlow(history.Requests, trace.Scope, at, id, row, nil)
+	}
+	run := func(op Operation) any {
+		t.Helper()
+		value, err := session.RunOperation(op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	assertFields := func(raw []byte, want map[string]string) map[string]json.RawMessage {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		for field, expected := range want {
+			if string(fields[field]) != expected {
+				t.Errorf("%s = %s, want %s", field, fields[field], expected)
+			}
+		}
+		return fields
+	}
+	connections := run(Operation{Action: "connectionHistory"}).(history.Page)
+	if len(connections.Rows) != 1 {
+		t.Fatalf("connection history has %d rows, want 1", len(connections.Rows))
+	}
+	connectionFields := map[string]string{
+		"mitm": "true", "mitm_requests": "2", "mitm_matched_ids": `["rewrite"]`, "mitm_body_passthroughs": "1",
+	}
+	assertFields(connections.Rows[0].Data, connectionFields)
+	requests := run(Operation{Action: "requestHistory"}).(history.Page)
+	if len(requests.Rows) != 2 {
+		t.Fatalf("request history has %d rows, want 2", len(requests.Rows))
+	}
+	for _, row := range requests.Rows {
+		if assertFields(row.Data, requestFields)["path"] == nil {
+			t.Error("request history lost the request path")
+		}
+	}
+	timeline, err := json.Marshal(run(Operation{Action: "timeline", ID: id}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		Connection json.RawMessage     `json:"connection"`
+		Events     []api.TimelineEvent `json:"events"`
+	}
+	if err := json.Unmarshal(timeline, &data); err != nil {
+		t.Fatal(err)
+	}
+	assertFields(data.Connection, connectionFields)
+	var httpRows int
+	for _, event := range data.Events {
+		if event.Stage != "http" {
+			continue
+		}
+		httpRows++
+		assertFields(event.Data, requestFields)
+	}
+	if httpRows != 2 {
+		t.Fatalf("timeline has %d HTTP rows, want 2", httpRows)
 	}
 }
 

@@ -3,10 +3,16 @@
 package main
 
 /*
+#include <stddef.h>
 #include <stdint.h>
 typedef int32_t (*RekaSecretReader)(const void *, size_t, void *, size_t);
+typedef int32_t (*RekaSecretWriter)(const void *, size_t, const void *, size_t);
+typedef const void *RekaAppOperationInput;
 static inline int32_t readSecret(RekaSecretReader reader, const void *name, size_t length, void *output, size_t capacity) {
 	return reader(name, length, output, capacity);
+}
+static inline int32_t writeSecret(RekaSecretWriter writer, const void *name, size_t length, const void *value, size_t valueLength) {
+	return writer(name, length, value, valueLength);
 }
 */
 import "C"
@@ -15,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
@@ -25,7 +32,7 @@ import (
 	"unsafe"
 
 	"github.com/MimoProxy/reka/internal/history"
-	"github.com/MimoProxy/reka/internal/secret"
+	"github.com/MimoProxy/reka/mobile/appbridge"
 	"github.com/MimoProxy/reka/mobile/packettunnel"
 	"github.com/MimoProxy/reka/mobile/profile"
 )
@@ -40,6 +47,9 @@ var (
 	active    atomic.Pointer[runningTunnel]
 	lastID    uint64
 	reader    atomic.Pointer[C.RekaSecretReader]
+	writer    atomic.Pointer[C.RekaSecretWriter]
+	keychain  = appbridge.KeychainStore{Read: readKeychain, Write: writeKeychain}
+	appOps    = appbridge.New(keychain)
 )
 
 //export RekaGoSetSecretReader
@@ -47,29 +57,61 @@ func RekaGoSetSecretReader(callback C.RekaSecretReader) {
 	reader.Store(&callback)
 }
 
-type keychainReader struct{}
-
-func (keychainReader) Get(name string) (string, error) {
-	callback := reader.Load()
-	if callback == nil || *callback == nil || len(name) == 0 {
-		return "", errors.New("iOS Keychain unavailable")
-	}
-	output := make([]byte, 16<<10)
-	defer clear(output)
-	size := int(C.readSecret(*callback, unsafe.Pointer(unsafe.StringData(name)), C.size_t(len(name)),
-		unsafe.Pointer(&output[0]), C.size_t(len(output))))
-	if size == 0 {
-		return "", secret.ErrNotFound
-	}
-	if size < 0 || size > len(output) {
-		return "", errors.New("iOS Keychain read failed")
-	}
-	return string(output[:size]), nil
+// RekaGoSetSecretWriter registers the synchronous Keychain callback.
+//
+//	typedef int32_t (*RekaSecretWriter)(const void *name, size_t nameLength,
+//	    const void *value, size_t valueLength);
+//	void RekaGoSetSecretWriter(RekaSecretWriter writer);
+//
+// The callback returns 1 for success and 0 for failure. NULL with length zero
+// deletes an item and an already missing item counts as success. The callback
+// may run on a Go worker thread; its pointers are valid only during the call.
+//
+//export RekaGoSetSecretWriter
+func RekaGoSetSecretWriter(callback C.RekaSecretWriter) {
+	writer.Store(&callback)
 }
 
-func (keychainReader) Set(string, string) error { return errors.ErrUnsupported }
-func (keychainReader) Delete(string) error      { return errors.ErrUnsupported }
-func (keychainReader) List() ([]string, error)  { return nil, errors.ErrUnsupported }
+func readKeychain(name string, output []byte) int {
+	callback := reader.Load()
+	if callback == nil || *callback == nil {
+		return -1
+	}
+	return int(C.readSecret(*callback, unsafe.Pointer(unsafe.StringData(name)), C.size_t(len(name)),
+		unsafe.Pointer(unsafe.SliceData(output)), C.size_t(len(output))))
+}
+
+func writeKeychain(name string, value []byte) bool {
+	callback := writer.Load()
+	if callback == nil || *callback == nil {
+		return false
+	}
+	return C.writeSecret(*callback, unsafe.Pointer(unsafe.StringData(name)), C.size_t(len(name)),
+		unsafe.Pointer(unsafe.SliceData(value)), C.size_t(len(value))) == 1
+}
+
+// RekaGoAppOperation runs a main-app JSON operation.
+//
+//	int32_t RekaGoAppOperation(const void *input, size_t length, void *output, size_t capacity);
+//
+// The return is the JSON byte count without a NUL terminator, or the negative
+// required capacity. NULL output with zero capacity requests a size. Retry
+// immediately with the original bytes to reuse the result, including for a
+// mutating operation. Serialize the operation and its retries in the caller.
+// A NULL output with positive capacity is invalid and returns zero.
+//
+//export RekaGoAppOperation
+func RekaGoAppOperation(input C.RekaAppOperationInput, length C.size_t, output unsafe.Pointer, capacity C.size_t) C.int32_t {
+	if output == nil && capacity != 0 {
+		return 0
+	}
+	var request []byte
+	if input != nil && length <= appbridge.MaxInputBytes {
+		request = unsafe.Slice((*byte)(unsafe.Pointer(input)), int(length))
+	}
+	reply := unsafe.Slice((*byte)(output), int(min(capacity, math.MaxInt32)))
+	return C.int32_t(appOps.WriteResponse(request, reply))
+}
 
 //export RekaGoSetNetworkInterface
 func RekaGoSetNetworkInterface(id C.uint64_t, name *C.char) {
@@ -105,7 +147,7 @@ func RekaGoPrepareProfile(input, output, cache *C.char, failure *C.char, capacit
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
-	if err := profile.PrepareFileWithOptions(ctx, C.GoString(input), C.GoString(output), C.GoString(cache), profile.PrepareOptions{Secrets: keychainReader{}}); err != nil {
+	if err := profile.PrepareFileWithOptions(ctx, C.GoString(input), C.GoString(output), C.GoString(cache), profile.PrepareOptions{Secrets: keychain}); err != nil {
 		writeError(failure, capacity, err.Error())
 		return 0
 	}
@@ -138,7 +180,7 @@ func RekaGoPrepareProfileEx(input, output, cache, optionsPath *C.char, failure *
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	options.Secrets = keychainReader{}
+	options.Secrets = keychain
 	options.ProxyControls.Secrets = options.Secrets
 
 	var seed *packettunnel.Session
@@ -325,7 +367,7 @@ func RekaGoPolicyStatus(id C.uint64_t, out unsafe.Pointer, capacity C.size_t) C.
 }
 
 func decodeControls(data unsafe.Pointer, length C.size_t) (profile.Controls, bool) {
-	controls := profile.Controls{Secrets: keychainReader{}}
+	controls := profile.Controls{Secrets: keychain}
 	if data == nil || length == 0 || length > 64<<10 {
 		return controls, false
 	}

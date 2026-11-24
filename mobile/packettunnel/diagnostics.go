@@ -77,6 +77,8 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 	}
 	engine := s.profile.engine
 	switch op.Action {
+	case "mitmStatus":
+		return engine.MITMStatus(), nil
 	case "timeline":
 		timeline, ok := engine.ConnectionTimeline(op.ID)
 		if !ok {
@@ -91,10 +93,15 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 				continue
 			}
 			var label struct {
-				Name   string `json:"name,omitempty"`
-				Host   string `json:"host,omitempty"`
-				Type   string `json:"type,omitempty"`
-				Status int    `json:"status_code,omitempty"`
+				Name             string          `json:"name,omitempty"`
+				Host             string          `json:"host,omitempty"`
+				Type             string          `json:"type,omitempty"`
+				Status           int             `json:"status_code,omitempty"`
+				MITM             json.RawMessage `json:"mitm,omitempty"`
+				ConnectionID     json.RawMessage `json:"connection_id,omitempty"`
+				MatchedIDs       json.RawMessage `json:"matched_ids,omitempty"`
+				BodyPassthroughs json.RawMessage `json:"body_passthroughs,omitempty"`
+				ResourceError    json.RawMessage `json:"resource_error,omitempty"`
 			}
 			if json.Unmarshal(event.Data, &label) == nil {
 				event.Data, _ = json.Marshal(label)

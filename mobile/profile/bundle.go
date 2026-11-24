@@ -51,6 +51,8 @@ type Summary struct {
 	Format      string            `json:"format,omitempty"`
 	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
 	Patches     []PatchStatus     `json:"patches,omitempty"`
+	Modules     []ModuleSummary   `json:"modules,omitempty"`
+	MITM        *MITMSummary      `json:"mitm,omitempty"`
 	// Global is the outbound or group global mode uses unless the controls
 	// choose another.
 	Global string `json:"global,omitempty"`

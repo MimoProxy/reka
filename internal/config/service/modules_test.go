@@ -16,6 +16,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/moduleacquire"
 	"github.com/MimoProxy/reka/internal/resource"
 )
 
@@ -276,7 +277,7 @@ func TestModuleFileBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{dir, large, filepath.Join(dir, "missing.sgmodule")} {
-		if _, err := readModuleFile(path); err == nil {
+		if _, err := moduleacquire.ReadFile(path, model.MaxDocumentSize); err == nil {
 			t.Fatal("invalid module file was accepted")
 		}
 	}

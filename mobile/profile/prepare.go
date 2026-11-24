@@ -15,6 +15,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/mitm/ca"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/secret"
 	"github.com/MimoProxy/reka/internal/subscription"
@@ -33,6 +34,7 @@ type PrepareOptions struct {
 	RefreshAsset      string                             `json:"refreshAsset"`
 	ForceProviders    bool                               `json:"forceProviders"`
 	Scenes            []SceneDefinition                  `json:"scenes"`
+	MITM              *LocalMITM                         `json:"mitm,omitempty"`
 	RebindSnapshot    string                             `json:"rebindSnapshot"`
 	GeodataSources    map[string]string                  `json:"geodataSources,omitempty"`
 	Overlay           json.RawMessage                    `json:"overlay,omitempty"` // Overlay document for a new preparation.
@@ -41,6 +43,9 @@ type PrepareOptions struct {
 	// Sources maps source IDs to prepared bundles of subscriptions. Only the
 	// sources a native profile imports are read.
 	Sources map[string]string `json:"sources,omitempty"`
+	// Modules maps module IDs to app-managed module snapshot files. A rebind
+	// with no map keeps the module resources already in the profile snapshot.
+	Modules map[string]string `json:"modules,omitempty"`
 	// RefreshSources makes a rebind read Sources again instead of keeping the
 	// archived copies, so a subscription update reaches the profiles that
 	// import it without fetching their own resources.
@@ -53,17 +58,31 @@ type SceneDefinition struct {
 	IPCIDR    []string `json:"ip-cidr,omitempty"`
 }
 
-func sceneSettings(scenes []SceneDefinition) (json.RawMessage, error) {
+// LocalMITM controls the profile's use of the device's shared CA.
+type LocalMITM struct {
+	Enabled bool `json:"enabled"`
+}
+
+func localSettings(scenes []SceneDefinition, mitm *LocalMITM) (json.RawMessage, error) {
 	if len(scenes) > 32 {
 		return nil, errors.New("at most 32 network scenes are supported")
 	}
-	if len(scenes) == 0 {
+	if len(scenes) == 0 && mitm == nil {
 		return nil, nil
 	}
-	return json.Marshal(struct {
+	type mitmSettings struct {
+		Enabled bool   `json:"enabled"`
+		CA      string `json:"ca"`
+	}
+	document := struct {
 		Version int               `json:"schema-version"`
-		Scenes  []SceneDefinition `json:"network-scenes"`
-	}{1, scenes})
+		Scenes  []SceneDefinition `json:"network-scenes,omitempty"`
+		MITM    *mitmSettings     `json:"mitm,omitempty"`
+	}{Version: model.SchemaVersion, Scenes: scenes}
+	if mitm != nil {
+		document.MITM = &mitmSettings{Enabled: mitm.Enabled, CA: secret.Ref(ca.SecretName)}
+	}
+	return json.Marshal(document)
 }
 
 type Asset struct {
@@ -289,7 +308,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		return nil, errors.New("could not encode profile")
 	}
 	bundle.Profile = data
-	bundle.Local, err = sceneSettings(p.options.Scenes)
+	bundle.Local, err = localSettings(p.options.Scenes, p.options.MITM)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +333,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 	if diagnostics.HasErrors() {
 		return nil, preparationValidationError(diagnostics)
 	}
-	bundle.Summary = Describe(eff)
+	bundle.Summary = bundle.describePreparation(eff, native, p.options.Modules)
 	bundle.Summary.Format = format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = p.assets
@@ -359,13 +378,17 @@ func rebind(ctx context.Context, path string, options PrepareOptions, read func(
 	if err != nil {
 		return nil, err
 	}
-	if options.RefreshSources {
-		if err := bundle.refreshSources(ctx, options, read); err != nil {
+	archived, _, diagnostics := model.ParseProfile(bundle.Profile)
+	if diagnostics.HasErrors() {
+		return nil, &ValidationError{"Invalid profile", diagnostics}
+	}
+	if options.RefreshSources || options.Modules != nil {
+		if err := bundle.refreshSources(ctx, archived, options, read); err != nil {
 			return nil, err
 		}
 	}
 	bundle.restoreOmittedResources(read)
-	bundle.Local, err = sceneSettings(options.Scenes)
+	bundle.Local, err = localSettings(options.Scenes, options.MITM)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +400,7 @@ func rebind(ctx context.Context, path string, options PrepareOptions, read func(
 		return nil, preparationValidationError(diagnostics)
 	}
 	original := bundle.Summary
-	bundle.Summary = Describe(eff)
+	bundle.Summary = bundle.describePreparation(eff, archived, options.Modules)
 	bundle.Summary.Format = original.Format
 	bundle.Summary.Diagnostics = diagnostics
 	bundle.Summary.Resources = original.Resources

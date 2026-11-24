@@ -9,6 +9,7 @@ import (
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/config/module"
+	"github.com/MimoProxy/reka/internal/config/moduleacquire"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/subscription"
@@ -109,7 +110,7 @@ func (s *Service) SetModuleEnabled(ctx context.Context, req api.SetModuleEnabled
 	value, _ := json.Marshal(*req.Enabled)
 	op := model.Op{Op: "set", Path: model.JoinPath("/modules", def.ID, "enabled"), Value: value}
 	src := sources[def.ID]
-	if def.IsEnabled() && !moduleSnapshotMatches(*def, src) {
+	if def.IsEnabled() && !moduleacquire.Matches(*def, src) {
 		return s.commitDownloadedModule(ctx, *def, src, req.BaseRevision, op)
 	}
 	return s.Commit(ctx, CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: req.BaseRevision, Patch: []model.Op{op}},
@@ -132,7 +133,7 @@ func (s *Service) SetModuleArguments(ctx context.Context, req api.SetModuleArgum
 	op := model.Op{Op: "set", Path: model.JoinPath("/modules", req.ModuleID, "arguments"), Value: value}
 	def.Arguments = req.Arguments
 	// New arguments can name Map Local files that are not locked yet.
-	if src := sources[def.ID]; def.IsEnabled() && (!moduleSnapshotMatches(*def, src) || !s.moduleResourcesLocked(*def, src)) {
+	if src := sources[def.ID]; def.IsEnabled() && (!moduleacquire.Matches(*def, src) || !s.moduleResourcesLocked(*def, src)) {
 		return s.commitDownloadedModule(ctx, *def, src, req.BaseRevision, op)
 	}
 	return s.Commit(ctx, CommitRequest{ChangeRequest: ChangeRequest{BaseRevision: req.BaseRevision, Patch: []model.Op{op}},
@@ -207,7 +208,7 @@ func (s *Service) ListModules() ([]api.ModuleInfo, error) {
 		if def.File != "" {
 			info.SourceType = "file"
 		}
-		if moduleSnapshotMatches(def, src) {
+		if moduleacquire.Matches(def, src) {
 			info.Name, info.Desc = src.Module.Name, src.Module.Desc
 		}
 		if eff != nil {
@@ -219,7 +220,7 @@ func (s *Service) ListModules() ([]api.ModuleInfo, error) {
 		}
 		// Disabled modules have no effective report, but their locked text can
 		// still provide argument declarations for editing.
-		if info.Report == nil && moduleSnapshotMatches(def, src) {
+		if info.Report == nil && moduleacquire.Matches(def, src) {
 			if body, err := m.blobs.Read(src.Lock.Root); err == nil {
 				meta, _ := module.Inspect(body, def.Arguments)
 				info.Arguments = meta.Arguments
@@ -248,7 +249,7 @@ func (s *Service) GetModuleReport(id string) (module.Report, error) {
 		return module.Report{}, errf(CodeNotFound, "module not found")
 	}
 	src := byID[id]
-	if !moduleSnapshotMatches(*def, src) {
+	if !moduleacquire.Matches(*def, src) {
 		if m, err := s.manager(RefreshOptions{}); err == nil {
 			status := m.moduleStatus(*def, src, revision)
 			if status.ErrorCode != "" && (status.State == "failed" || status.State == "stale") {

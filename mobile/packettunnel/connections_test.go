@@ -113,7 +113,10 @@ func TestConnectionRowsSortByStartThenID(t *testing.T) {
 }
 
 func TestConnectionRowJSON(t *testing.T) {
-	rows := []ConnectionRow{{State: "connecting"}, {State: "active", Protocol: "quic"}}
+	rows := []ConnectionRow{
+		{State: "connecting"},
+		{State: "active", Protocol: "quic", MITM: true, MITMRequests: 2, MITMMatchedIDs: []string{"rewrite"}, MITMBodyPassthroughs: 1},
+	}
 	data, err := json.Marshal(rows)
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +128,13 @@ func TestConnectionRowJSON(t *testing.T) {
 	if string(fields[0]["state"]) != `"connecting"` || fields[0]["protocol"] != nil ||
 		string(fields[1]["state"]) != `"active"` || string(fields[1]["protocol"]) != `"quic"` {
 		t.Fatalf("unexpected connection row fields: %s", data)
+	}
+	for field, want := range map[string]string{
+		"mitm": "true", "mitmRequests": "2", "mitmMatchedIds": `["rewrite"]`, "mitmBodyPassthroughs": "1",
+	} {
+		if fields[0][field] != nil || string(fields[1][field]) != want {
+			t.Errorf("unexpected %s in connection rows: %s", field, data)
+		}
 	}
 }
 

@@ -1,6 +1,6 @@
 //go:build unix
 
-package service
+package moduleacquire
 
 import "syscall"
 
