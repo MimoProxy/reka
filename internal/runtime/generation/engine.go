@@ -98,7 +98,8 @@ type Engine struct {
 	temporary         atomic.Pointer[temporaryRules]
 	temporarySequence uint64
 	sceneObservation  atomic.Pointer[sceneObservation]
-	packetInterface   string
+	packetInterface   atomic.Pointer[string]
+	packetNetworks    atomic.Pointer[[2]netip.Prefix]
 	sceneManual       atomic.Pointer[manualScene]
 	arenaRunning      atomic.Bool
 	history           *history.Store

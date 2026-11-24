@@ -19,17 +19,20 @@ import (
 
 type ExchangeFunc func(context.Context, Endpoint, *D.Msg, func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error)
 type MatchFunc func(pattern, domain string, addr netip.Addr) bool
+type SystemExchangeFunc func(context.Context, *D.Msg) (*D.Msg, netip.Addr, error)
+
 type Options struct {
-	History    *history.Store
-	Exchange   ExchangeFunc
-	System     func(context.Context, string) ([]netip.Addr, error)
-	Match      MatchFunc
-	Pool       *FakePool
-	Generation uint64
-	Route      func(context.Context, Endpoint) string
-	Background func(context.Context) (context.Context, func(), error)
-	Retire     func()
-	ResetIdle  func()
+	History        *history.Store
+	Exchange       ExchangeFunc
+	System         func(context.Context, string) ([]netip.Addr, error)
+	SystemExchange SystemExchangeFunc
+	Match          MatchFunc
+	Pool           *FakePool
+	Generation     uint64
+	Route          func(context.Context, Endpoint) string
+	Background     func(context.Context) (context.Context, func(), error)
+	Retire         func()
+	ResetIdle      func()
 }
 type cached struct {
 	msg       *D.Msg
@@ -399,34 +402,19 @@ func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scop
 		ep.Scope = scope
 		ep.PreferH3 = s.cfg.PreferH3 && ep.Scheme == "https"
 		if ep.Disabled(q.Question[0].Qtype) {
-			outcome.ResultSource = "filtered"
+			outcome.ResultSource, outcome.Upstream, outcome.SystemServers = "filtered", nil, nil
 			m := new(D.Msg)
 			m.SetReply(q)
 			return m, nil
 		}
 		if ep.Scheme == "system" {
-			outcome.ResultSource = "system"
-			if s.opts.System == nil {
-				last = errors.New("system resolver unavailable")
-				continue
+			outcome.ResultSource, outcome.Upstream, outcome.SystemServers = "system", nil, nil
+			m, err := s.querySystem(ctx, q, outcome)
+			if err == nil {
+				return m, nil
 			}
-			if q.Question[0].Qtype != D.TypeA && q.Question[0].Qtype != D.TypeAAAA {
-				last = errors.New("system resolver supports address lookups only")
-				continue
-			}
-			a, err := s.opts.System(ctx, strings.TrimSuffix(q.Question[0].Name, "."))
-			if err != nil {
-				last = err
-				continue
-			}
-			m := new(D.Msg)
-			m.SetReply(q)
-			for _, ip := range a {
-				if rr := addressRR(q.Question[0].Name, q.Question[0].Qtype, ip, 30); rr != nil {
-					m.Answer = append(m.Answer, rr)
-				}
-			}
-			return m, nil
+			last = err
+			continue
 		}
 		if ep.Scheme != "dhcp" && ep.Via == "" && scope == "normal" && s.cfg.RespectRules && s.opts.Route != nil {
 			ep.Via = s.opts.Route(ctx, ep)
@@ -439,7 +427,7 @@ func (s *Service) queryOne(ctx context.Context, servers []string, q *D.Msg, scop
 			return nil, errors.New("DNS exchange unavailable")
 		}
 		attempt, upstream := attemptContext(ctx, ep)
-		outcome.ResultSource, outcome.Upstream = "upstream", upstream
+		outcome.ResultSource, outcome.Upstream, outcome.SystemServers = "upstream", upstream, nil
 		m, err := s.opts.Exchange(attempt, ep, ep.Request(q), func(ctx context.Context, d string) ([]netip.Addr, error) {
 			if scope == "bootstrap" {
 				return nil, errors.New("DNS bootstrap cycle")

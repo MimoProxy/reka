@@ -18,6 +18,7 @@ func (e *Engine) ActivatePacketFlowProfile(p *Prepared, revision uint64, profile
 // AttachPacketFlow gives an already activated engine the host's packet link.
 // The host owns settings and closes the link before retiring the engine.
 func (e *Engine) AttachPacketFlow(device tun.GVisorTun, mtu int, v4, v6 netip.Prefix, tcpLimit, udpLimit int) (*sagernet.PacketFlow, error) {
+	e.packetNetworks.Store(&[2]netip.Prefix{v4.Masked(), v6.Masked()})
 	return e.backend.AttachPacketFlow(device, mtu, v4, v6, tcpLimit, udpLimit, e.ExchangeDNS)
 }
 
