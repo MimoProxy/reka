@@ -2,6 +2,7 @@ package generation
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +20,16 @@ import (
 const (
 	cloudflareLatencyURL = "https://speed.cloudflare.com/__down?bytes=0"
 	cloudflareDownURL    = "https://speed.cloudflare.com/__down?bytes=25000000"
-	speedDownloadSize    = 25_000_000
-	speedConnectLimit    = 5 * time.Second
-	speedTransferLimit   = 10 * time.Second
-	speedMinimumSample   = time.Millisecond
+	cloudflareUpURL      = "https://speed.cloudflare.com/__up"
+	speedConnectLimit    = 5 * time.Second // Bound proxy handshakes, TLS, and latency samples.
+)
+
+// SpeedSource identifies the service used for latency and throughput tests.
+type SpeedSource string
+
+const (
+	SpeedSourceCloudflare SpeedSource = "cloudflare"
+	SpeedSourceOokla      SpeedSource = "ookla"
 )
 
 type CloudflareSpeedPoint struct {
@@ -33,6 +40,8 @@ type CloudflareSpeedPoint struct {
 type CloudflareSpeedReading struct {
 	Phase        string                 `json:"phase"`
 	Resolved     string                 `json:"resolved,omitempty"`
+	Source       string                 `json:"source,omitempty"`
+	Server       string                 `json:"server,omitempty"`
 	LatencyMS    *float64               `json:"latencyMs,omitempty"`
 	JitterMS     *float64               `json:"jitterMs,omitempty"`
 	DownloadMbps *float64               `json:"downloadMbps,omitempty"`
@@ -41,9 +50,25 @@ type CloudflareSpeedReading struct {
 	Uploads      []CloudflareSpeedPoint `json:"uploads,omitempty"`
 }
 
-// RunCloudflareSpeed pins one resolved leaf, together with its DNS and dialer
-// dependencies, for the complete benchmark. Policy selection itself is untouched.
+// RunCloudflareSpeed runs a Cloudflare speed test on the requested outbound.
 func (e *Engine) RunCloudflareSpeed(ctx context.Context, member string, update func(CloudflareSpeedReading)) error {
+	return e.RunSpeedTest(ctx, member, SpeedSourceCloudflare, update)
+}
+
+// RunSpeedTest pins one resolved leaf and its DNS and dialer dependencies for
+// the complete benchmark, including server discovery. The default is Cloudflare.
+func (e *Engine) RunSpeedTest(ctx context.Context, member string, source SpeedSource, update func(CloudflareSpeedReading)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source, err := normalizeSpeedSource(source)
+	if err != nil {
+		return err
+	}
+	probeURL := cloudflareLatencyURL
+	if source == SpeedSourceOokla {
+		probeURL = ooklaServerListURL
+	}
 	release, err := e.takeProbeSlot(ctx)
 	if err != nil {
 		return err
@@ -54,7 +79,7 @@ func (e *Engine) RunCloudflareSpeed(ctx context.Context, member string, update f
 		if g.eff == nil || g.router == nil {
 			return errors.New("speed test requires an active configuration")
 		}
-		resolved, err := g.resolveProbe(member, cloudflareLatencyURL)
+		resolved, err := g.resolveProbe(member, probeURL)
 		out := snapshot.Resources[resolved]
 		if member == model.OutboundDirect {
 			// A profile's direct outbound can have its own detour. The direct
@@ -78,40 +103,107 @@ func (e *Engine) RunCloudflareSpeed(ctx context.Context, member string, update f
 		}
 		defer closeSniffPins(pins)
 		selected := sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, pins), snapshot)
-		return MeasureCloudflareSpeed(g.probeLookupContext(selected, out), resolved, pins[out].Dial, update)
+		return MeasureSpeed(g.probeLookupContext(selected, out), resolved, pins[out].Dial, source, update)
 	}
 	return ctx.Err()
 }
 
+// MeasureCloudflareSpeed runs a Cloudflare speed test through dial.
 func MeasureCloudflareSpeed(
 	ctx context.Context,
 	resolved string,
 	dial func(context.Context, string, string) (net.Conn, error),
 	update func(CloudflareSpeedReading),
 ) error {
+	return MeasureSpeed(ctx, resolved, dial, SpeedSourceCloudflare, update)
+}
+
+// MeasureSpeed uses dial for all requests. An empty source selects Cloudflare.
+// Readings are delivered serially on the caller's goroutine.
+func MeasureSpeed(
+	ctx context.Context,
+	resolved string,
+	dial func(context.Context, string, string) (net.Conn, error),
+	source SpeedSource,
+	update func(CloudflareSpeedReading),
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	client := newSpeedClient(ctx, dial)
+	defer client.CloseIdleConnections()
+	return measureSpeed(ctx, client, resolved, source, ooklaServerListURL, defaultSpeedTransferSettings(), update)
+}
+
+type speedDialContextKey struct{}
+
+func newSpeedRequest(ctx context.Context, method, rawURL string, body io.Reader) (*http.Request, error) {
+	return http.NewRequestWithContext(context.WithValue(ctx, speedDialContextKey{}, ctx), method, rawURL, body)
+}
+
+func newSpeedClient(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	transport := &http.Transport{
 		DialContext: func(dialContext context.Context, network, address string) (net.Conn, error) {
 			// net/http allows a dial to outlive its initiating request. Bind
-			// proxy handshakes to the benchmark's cancellation and deadline.
-			dialContext, cancel := context.WithTimeout(dialContext, speedConnectLimit)
+			// proxy handshakes to the request's cancellation and deadline.
+			requestContext, ok := dialContext.Value(speedDialContextKey{}).(context.Context)
+			if !ok {
+				requestContext = ctx
+			}
+			if err := requestContext.Err(); err != nil {
+				return nil, err
+			}
+			deadline := time.Now().Add(speedConnectLimit)
+			if requestDeadline, ok := requestContext.Deadline(); ok && requestDeadline.Before(deadline) {
+				deadline = requestDeadline
+			}
+			dialContext, cancel := context.WithDeadline(dialContext, deadline)
 			defer cancel()
-			stop := context.AfterFunc(ctx, cancel)
+			stop := context.AfterFunc(requestContext, cancel)
 			defer stop()
 			return dial(dialContext, network, address)
 		},
-		ForceAttemptHTTP2: true, DisableCompression: true, TLSHandshakeTimeout: speedConnectLimit,
-		MaxIdleConnsPerHost: 1, MaxResponseHeaderBytes: 32 << 10,
+		// A concurrent HTTP/1.1 request occupies its own TCP connection.
+		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{},
+		DisableCompression: true, TLSHandshakeTimeout: speedConnectLimit,
+		MaxIdleConnsPerHost: speedStreams, MaxResponseHeaderBytes: 32 << 10,
 	}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{
+	return &http.Client{
 		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return measureCloudflareSpeed(ctx, client, resolved, update)
 }
 
-func measureCloudflareSpeed(ctx context.Context, client *http.Client, resolved string, update func(CloudflareSpeedReading)) error {
-	report := CloudflareSpeedReading{Phase: "latency", Resolved: resolved}
+func normalizeSpeedSource(source SpeedSource) (SpeedSource, error) {
+	switch source {
+	case "", SpeedSourceCloudflare:
+		return SpeedSourceCloudflare, nil
+	case SpeedSourceOokla:
+		return source, nil
+	default:
+		return "", fmt.Errorf("unknown speed source %q", source)
+	}
+}
+
+type speedEndpoints struct {
+	latency          string
+	download, upload func() string
+	server           string
+}
+
+func measureSpeed(ctx context.Context, client *http.Client, resolved string, source SpeedSource, ooklaListURL string, settings speedTransferSettings, update func(CloudflareSpeedReading)) (err error) {
+	defer func() {
+		if failure := ctx.Err(); failure != nil {
+			err = failure
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source, err = normalizeSpeedSource(source)
+	if err != nil {
+		return err
+	}
+	report := CloudflareSpeedReading{Phase: "latency", Resolved: resolved, Source: string(source)}
 	emit := func() {
 		snapshot := report
 		snapshot.Downloads = slices.Clone(report.Downloads)
@@ -119,9 +211,22 @@ func measureCloudflareSpeed(ctx context.Context, client *http.Client, resolved s
 		update(snapshot)
 	}
 	emit()
+	endpoints := speedEndpoints{
+		latency:  cloudflareLatencyURL,
+		download: func() string { return cloudflareDownURL },
+		upload:   func() string { return cloudflareUpURL },
+	}
+	if source == SpeedSourceOokla {
+		endpoints, err = resolveOoklaEndpoints(ctx, client, ooklaListURL)
+		if err != nil {
+			return err
+		}
+		report.Server = endpoints.server
+		emit()
+	}
 	latencies := make([]float64, 0, 5)
 	for sample := 0; sample < 6; sample++ {
-		value, err := cloudflareLatency(ctx, client)
+		value, err := measureSpeedLatency(ctx, client, endpoints.latency, source)
 		if err != nil {
 			return err
 		}
@@ -139,7 +244,7 @@ func measureCloudflareSpeed(ctx context.Context, client *http.Client, resolved s
 	report.Phase = "download"
 	report.Downloads = append(report.Downloads, CloudflareSpeedPoint{})
 	emit()
-	down, err := cloudflareDownload(ctx, client, func(point CloudflareSpeedPoint) {
+	down, err := runSpeedTransfer(ctx, client, source, http.MethodGet, endpoints.download, settings, func(point CloudflareSpeedPoint) {
 		report.Downloads = append(report.Downloads, point)
 		emit()
 	})
@@ -150,7 +255,7 @@ func measureCloudflareSpeed(ctx context.Context, client *http.Client, resolved s
 	report.Phase = "upload"
 	report.Uploads = append(report.Uploads, CloudflareSpeedPoint{})
 	emit()
-	up, err := cloudflareUpload(ctx, client, func(point CloudflareSpeedPoint) {
+	up, err := runSpeedTransfer(ctx, client, source, http.MethodPost, endpoints.upload, settings, func(point CloudflareSpeedPoint) {
 		report.Uploads = append(report.Uploads, point)
 		emit()
 	})
@@ -162,7 +267,7 @@ func measureCloudflareSpeed(ctx context.Context, client *http.Client, resolved s
 	return nil
 }
 
-func cloudflareLatency(ctx context.Context, client *http.Client) (float64, error) {
+func measureSpeedLatency(ctx context.Context, client *http.Client, rawURL string, source SpeedSource) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, speedConnectLimit)
 	defer cancel()
 	// The write callback may run on the transport's goroutine.
@@ -175,7 +280,7 @@ func cloudflareLatency(ctx context.Context, client *http.Client) (float64, error
 			}
 		}
 	}})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cloudflareLatencyURL, nil)
+	req, err := newSpeedRequest(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -186,12 +291,11 @@ func cloudflareLatency(ctx context.Context, client *http.Client) (float64, error
 		return 0, err
 	}
 	defer response.Body.Close()
-	if err := speedHTTPStatus(response.StatusCode); err != nil {
+	if err := speedHTTPError(source, response.StatusCode); err != nil {
 		return 0, err
 	}
-	read, err := io.Copy(io.Discard, io.LimitReader(response.Body, 1))
-	if err != nil || read != 0 {
-		return 0, errors.New("unexpected Cloudflare latency response")
+	if err := drainSpeedResponse(response.Body); err != nil {
+		return 0, err
 	}
 	select {
 	case now = <-written:
@@ -200,91 +304,17 @@ func cloudflareLatency(ctx context.Context, client *http.Client) (float64, error
 	return max(0, received.Sub(now).Seconds()*1000), nil
 }
 
-func cloudflareDownload(ctx context.Context, client *http.Client, publish func(CloudflareSpeedPoint)) (float64, error) {
-	phaseCtx, cancel := context.WithTimeout(ctx, speedTransferLimit)
-	defer cancel()
-	meter := &speedMeter{start: time.Now(), publish: publish}
-	req, err := http.NewRequestWithContext(phaseCtx, http.MethodGet, cloudflareDownURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Accept-Encoding", "identity")
-	response, err := client.Do(req)
-	if err != nil {
-		return meter.result(ctx, phaseCtx, speedDownloadSize, err)
-	}
-	defer response.Body.Close()
-	if err := speedHTTPStatus(response.StatusCode); err != nil {
-		return 0, err
-	}
-	reader := &speedReader{Reader: io.LimitReader(response.Body, speedDownloadSize), meter: meter}
-	_, err = io.Copy(io.Discard, reader)
-	return meter.result(ctx, phaseCtx, speedDownloadSize, err)
+func drainSpeedResponse(body io.Reader) error {
+	_, err := io.Copy(io.Discard, io.LimitReader(body, maxProbeBodyBytes))
+	return err
 }
 
-func speedHTTPStatus(code int) error {
+func speedHTTPError(source SpeedSource, code int) error {
 	if code < 200 || code >= 300 {
+		if source == SpeedSourceOokla {
+			return fmt.Errorf("Ookla returned HTTP %d", code)
+		}
 		return fmt.Errorf("Cloudflare returned HTTP %d", code)
 	}
 	return nil
-}
-
-type speedReader struct {
-	io.Reader
-	meter *speedMeter
-}
-
-func (r *speedReader) Read(p []byte) (int, error) {
-	n, err := r.Reader.Read(p)
-	if n > 0 {
-		r.meter.record(int64(n))
-	}
-	return n, err
-}
-
-type speedMeter struct {
-	start    time.Time
-	publish  func(CloudflareSpeedPoint)
-	total    int64
-	previous int64
-	elapsed  float64
-	reported float64
-}
-
-func (m *speedMeter) record(n int64) {
-	m.total += n
-	m.elapsed = min(speedTransferLimit.Seconds(), time.Since(m.start).Seconds())
-	if m.elapsed-m.reported >= 0.25 {
-		m.report(m.elapsed)
-	}
-}
-
-func (m *speedMeter) report(end float64) {
-	if seconds := end - m.reported; seconds > 0 && m.total > m.previous {
-		m.publish(CloudflareSpeedPoint{Seconds: end, Mbps: speedMbps(m.total-m.previous, seconds)})
-		m.previous, m.reported = m.total, end
-	}
-}
-
-func (m *speedMeter) result(ctx, phaseCtx context.Context, expected int64, err error) (float64, error) {
-	if failure := ctx.Err(); failure != nil {
-		return 0, failure
-	}
-	elapsed := m.elapsed
-	if err != nil && phaseCtx.Err() == context.DeadlineExceeded && m.total > 0 && m.total < expected {
-		elapsed = speedTransferLimit.Seconds()
-	} else if err != nil {
-		return 0, err
-	} else if m.total != expected {
-		return 0, io.ErrUnexpectedEOF
-	}
-	// Fast transfers may finish within a single clock tick. Use the same
-	// minimum duration for the final chart point and the aggregate rate.
-	elapsed = max(speedMinimumSample.Seconds(), elapsed)
-	m.report(elapsed)
-	return speedMbps(m.total, elapsed), nil
-}
-
-func speedMbps(bytes int64, seconds float64) float64 {
-	return float64(bytes) * 8 / 1_000_000 / seconds
 }

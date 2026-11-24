@@ -14,24 +14,26 @@ import (
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 )
 
-type cloudflareSpeedState struct {
+type speedTestState struct {
 	mu  sync.Mutex
-	job *cloudflareSpeedJob
+	job *speedTestJob
 }
 
-type cloudflareSpeedJob struct {
+type speedTestJob struct {
 	id     uint64
 	cancel context.CancelFunc
-	reply  cloudflareSpeedReply
+	reply  speedTestReply
 }
 
-type cloudflareSpeedReply struct {
+type speedTestReply struct {
 	generation.CloudflareSpeedReading
 	Complete bool   `json:"complete"`
 	Error    string `json:"error,omitempty"`
+	// ErrorCode lets the app show its own text for failures it recognizes.
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
-func (s *Session) startCloudflareSpeed(id uint64, member string) (bool, error) {
+func (s *Session) startSpeedTest(id uint64, member string, source generation.SpeedSource) (bool, error) {
 	if id == 0 || member == "" || len(member) > 128 {
 		return false, errors.New("speed test requires a probe ID and outbound")
 	}
@@ -47,13 +49,18 @@ func (s *Session) startCloudflareSpeed(id uint64, member string) (bool, error) {
 		}
 		return false, errors.New("a speed test is already running")
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
-	job := &cloudflareSpeedJob{id: id, cancel: cancel}
+	if source == "" {
+		source = generation.SpeedSourceCloudflare
+	}
+	// Leave time for server discovery and latency sampling around the two 10-second transfers.
+	ctx, cancel := context.WithTimeout(s.ctx, 75*time.Second)
+	job := &speedTestJob{id: id, cancel: cancel}
 	job.reply.Phase = "latency"
+	job.reply.Source = string(source)
 	state.job = job
 	go func() {
 		defer cancel()
-		err := s.measureCloudflareSpeed(ctx, member, func(reading generation.CloudflareSpeedReading) {
+		err := s.measureSpeed(ctx, member, source, func(reading generation.CloudflareSpeedReading) {
 			state.mu.Lock()
 			job.reply.CloudflareSpeedReading = reading
 			state.mu.Unlock()
@@ -62,15 +69,18 @@ func (s *Session) startCloudflareSpeed(id uint64, member string) (bool, error) {
 		defer state.mu.Unlock()
 		if err != nil {
 			job.reply.Error = history.Text(err.Error(), 384)
+			if errors.Is(err, generation.ErrOoklaUnreachable) {
+				job.reply.ErrorCode = "ooklaUnreachable"
+			}
 		}
 		job.reply.Complete = true
 	}()
 	return true, nil
 }
 
-func (s *Session) measureCloudflareSpeed(ctx context.Context, member string, update func(generation.CloudflareSpeedReading)) error {
+func (s *Session) measureSpeed(ctx context.Context, member string, source generation.SpeedSource, update func(generation.CloudflareSpeedReading)) error {
 	if s.profile != nil {
-		return s.profile.engine.RunCloudflareSpeed(ctx, member, update)
+		return s.profile.engine.RunSpeedTest(ctx, member, source, update)
 	}
 	direct, err := s.backend.NewOutbound(model.OutboundDirect, sagernet.DirectSpec{})
 	if err != nil {
@@ -82,20 +92,20 @@ func (s *Session) measureCloudflareSpeed(ctx context.Context, member string, upd
 		return err
 	}
 	defer pin.Close()
-	return generation.MeasureCloudflareSpeed(ctx, model.OutboundDirect, pin.Dial, update)
+	return generation.MeasureSpeed(ctx, model.OutboundDirect, pin.Dial, source, update)
 }
 
-func (s *Session) readCloudflareSpeed(id uint64) (cloudflareSpeedReply, error) {
+func (s *Session) readSpeedTest(id uint64) (speedTestReply, error) {
 	state := &s.speed
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.job == nil || state.job.id != id {
-		return cloudflareSpeedReply{}, errors.New("speed test unavailable")
+		return speedTestReply{}, errors.New("speed test unavailable")
 	}
 	return state.job.reply, nil
 }
 
-func (s *Session) cancelCloudflareSpeed(id uint64) bool {
+func (s *Session) cancelSpeedTest(id uint64) bool {
 	state := &s.speed
 	state.mu.Lock()
 	defer state.mu.Unlock()

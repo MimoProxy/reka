@@ -17,6 +17,7 @@ type Operation struct {
 	Action     string               `json:"action"`
 	ID         uint64               `json:"id,omitempty"`
 	Member     string               `json:"member,omitempty"`
+	Source     string               `json:"source,omitempty"`
 	IDs        []uint64             `json:"ids,omitempty"`
 	Category   string               `json:"category,omitempty"`
 	Cursor     string               `json:"cursor,omitempty"`
@@ -108,14 +109,14 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 	case "probe":
 		return s.probe(op)
 	case "speedStart":
-		return s.startCloudflareSpeed(op.ID, op.Member)
+		return s.startSpeedTest(op.ID, op.Member, generation.SpeedSource(op.Source))
 	case "speedRead":
-		return s.readCloudflareSpeed(op.ID)
+		return s.readSpeedTest(op.ID)
 	case "speedCancel":
 		if op.ID == 0 {
 			return nil, errors.New("speed test probe ID required")
 		}
-		return s.cancelCloudflareSpeed(op.ID), nil
+		return s.cancelSpeedTest(op.ID), nil
 	case "diagnosticRoute":
 		if s.profile == nil {
 			return nil, errors.New("the operation requires a profile")
@@ -247,7 +248,7 @@ func (s *Session) NetworkChanged(available, changed bool) {
 		return
 	}
 	if !available || changed {
-		s.cancelCloudflareSpeed(0)
+		s.cancelSpeedTest(0)
 	}
 	if s.profile != nil {
 		p := s.profile
