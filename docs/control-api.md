@@ -199,7 +199,7 @@ ListConnections 的 offset 应为非负数；limit 为 1–1000，省略、≤0 
 
 `destination_domain` 记录入站提供的域名或 Fake IP 映射中的域名。活动连接的 `destination` 发生改写时，`original_destination` 保留入站收到的地址和端口。
 
-`ListConnections`、`ListConnectionHistory` 和 `GetConnectionTimeline` 的连接条目可包含 `mitm`、`mitm_requests`、`mitm_matched_ids`、`mitm_body_passthroughs` 和 `mitm_scripts`。`mitm_client_protocol` 记录客户端侧 TLS 协商的协议，没有 ALPN 结果时省略。`mitm_upstream_protocols` 记录实际使用的上游协议，按首次使用顺序排列并去重。协议值为 `h2` 或 `http/1.1`。
+`ListConnections`、`ListConnectionHistory` 和 `GetConnectionTimeline` 的连接条目可包含 `mitm`、`mitm_requests`、`mitm_matched_ids`、`mitm_body_passthroughs` 和 `mitm_scripts`。`mitm_client_protocol` 记录客户端侧 TLS 协商的协议，没有 ALPN 结果时省略。`mitm_upstream_protocols` 记录实际使用的上游协议，按首次使用顺序排列并去重。协议值为 `h2` 或 `http/1.1`。匹配 MITM 但未解密的连接带 `mitm_skipped`：`h2-disabled` 表示 MITM HTTP/2 关闭而客户端只提供 `h2`。
 
 每条连接和请求最多保留 24 个去重后的重写 ID。`mitm_scripts` 按脚本 ID 去重，最多保留 24 项。每项含 `id`、命中次数 `count` 和最近一次命中的结果 `last_result`。正文超过大小上限或缓冲预算时，按请求、响应两个方向分别计入透传次数。MITM 连接的 `upload` 和 `download` 与总量、按进程统计采用相同口径，均为客户端侧的 TLS 密文字节，包括握手。MITM 的 QUIC 拒绝在连接记录中使用 `reject_reason: mitm-quic`。
 

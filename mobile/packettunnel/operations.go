@@ -66,6 +66,7 @@ type ConnectionRow struct {
 	MITMScripts           []api.MITMScriptStats `json:"mitmScripts,omitempty"`
 	MITMClientProtocol    string                `json:"mitmClientProtocol,omitempty"`
 	MITMUpstreamProtocols []string              `json:"mitmUpstreamProtocols,omitempty"`
+	MITMSkipped           string                `json:"mitmSkipped,omitempty"`
 }
 
 type Latency struct {
@@ -171,6 +172,7 @@ func (s *Session) connections() []ConnectionRow {
 				MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
 				MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
 				MITMClientProtocol: conn.MITMClientProtocol, MITMUpstreamProtocols: conn.MITMUpstreamProtocols,
+				MITMSkipped: conn.MITMSkipped,
 			})
 		}
 		sortConnectionRows(rows)
@@ -221,6 +223,7 @@ func (s *Session) connections() []ConnectionRow {
 			MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
 			MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
 			MITMClientProtocol: conn.MITMClientProtocol, MITMUpstreamProtocols: conn.MITMUpstreamProtocols,
+			MITMSkipped: conn.MITMSkipped,
 		})
 	}
 	sortConnectionRows(rows)

@@ -45,6 +45,9 @@ func mitmProtocols(info api.MITMConnectionInfo) string {
 	if len(info.MITMUpstreamProtocols) != 0 {
 		protocols = append(protocols, "upstream="+strings.Join(info.MITMUpstreamProtocols, ","))
 	}
+	if info.MITMSkipped != "" {
+		protocols = append(protocols, "mitm-skipped="+info.MITMSkipped)
+	}
 	return strings.Join(protocols, " ")
 }
 

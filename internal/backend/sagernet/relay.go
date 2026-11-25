@@ -34,7 +34,26 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		metadata.Destination = M.ParseSocksaddr(destination)
 	}
 	if _, debug := conn.(*debugBridge); !debug && rt.MITM != nil {
-		go b.relayMITM(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
+		if rt.MITM.H2 {
+			go b.relayMITM(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
+			return
+		}
+		go func() {
+			conn, requiresH2 := peekMITMClientHello(conn)
+			if !requiresH2 {
+				b.relayMITM(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
+				return
+			}
+			// An HTTP/1.1-only MITM handshake would fail for this client, and
+			// the app would retry or fall back slowly. Relaying it undecrypted
+			// keeps the app working; only this connection's rewrites and
+			// scripts are lost.
+			attempt.mu.Lock()
+			attempt.MITMSkipped = mitmSkipH2Disabled
+			attempt.mu.Unlock()
+			rt.MITM = nil
+			b.relayTCP(ctx, rt, conn, metadata, onClose, attempt)
+		}()
 		return
 	}
 	ctx = tcpRouteContext(ctx, rt, metadata)

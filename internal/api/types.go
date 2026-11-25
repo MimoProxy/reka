@@ -304,6 +304,10 @@ type MITMConnectionInfo struct {
 	MITMScripts           []MITMScriptStats `json:"mitm_scripts,omitempty"`
 	MITMClientProtocol    string            `json:"mitm_client_protocol,omitempty"`
 	MITMUpstreamProtocols []string          `json:"mitm_upstream_protocols,omitempty"`
+	// MITMSkipped is set when a connection matched MITM but was relayed
+	// without decryption. "h2-disabled" means the client only offered HTTP/2
+	// while MITM HTTP/2 is off.
+	MITMSkipped string `json:"mitm_skipped,omitempty"`
 }
 
 // RuntimeStatus is a summary of the running state.
