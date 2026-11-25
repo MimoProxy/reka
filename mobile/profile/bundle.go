@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
@@ -96,6 +97,8 @@ type Controls struct {
 	Global string `json:"global,omitempty"`
 	// FakeIPState is the App Group path opened once per session.
 	FakeIPState string `json:"fakeIPState,omitempty"`
+	// ScriptState is the App Group directory used by the script store.
+	ScriptState string `json:"scriptState,omitempty"`
 	// LogFile is where an extension session appends its log as JSON lines,
 	// so the log outlives the extension process.
 	LogFile string       `json:"logFile,omitempty"`
@@ -135,18 +138,20 @@ func (b *Bundle) CompileWithSecrets(secrets secret.Store) (*compile.Effective, e
 }
 
 func (b *Bundle) compileEffective(opts compile.Options) (*compile.Effective, error) {
-	var needsPreparation bool
+	var needsPreparation atomic.Bool
 	if len(b.OmittedResources) > 0 {
 		read := opts.ReadResource
 		opts.ReadResource = func(hash string) ([]byte, error) {
 			data, err := read(hash)
-			needsPreparation = needsPreparation || errors.Is(err, errSnapshotNeedsPreparation)
+			if errors.Is(err, errSnapshotNeedsPreparation) {
+				needsPreparation.Store(true)
+			}
 			return data, err
 		}
 	}
 	eff, diagnostics := b.compile(opts)
 	if diagnostics.HasErrors() {
-		if needsPreparation {
+		if needsPreparation.Load() {
 			return nil, errSnapshotNeedsPreparation
 		}
 		return nil, diagnosticError("invalid profile", diagnostics)
@@ -165,7 +170,11 @@ func (b *Bundle) readResource(hash string) ([]byte, error) {
 }
 
 func (b *Bundle) missingResource(hash string) error {
-	if slices.Contains(b.OmittedResources, hash) {
+	return missingSnapshotResource(b.OmittedResources, hash)
+}
+
+func missingSnapshotResource(omitted []string, hash string) error {
+	if slices.Contains(omitted, hash) {
 		return errSnapshotNeedsPreparation
 	}
 	return errSnapshotResource

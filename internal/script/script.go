@@ -41,6 +41,7 @@ type Script struct {
 	Source     string
 	Kind       Kind
 	Dialect    Dialect
+	Engine     string // Host engine selection hint.
 	BinaryBody bool
 	FullHeader bool
 	Argument   *string       // nil leaves $argument undefined.
@@ -137,11 +138,13 @@ type Result struct {
 }
 
 var (
-	ErrTimeout      = errors.New("script timed out")
-	ErrNoDone       = errors.New("script ended without calling $done")
-	ErrBodyTooLarge = errors.New("script input body exceeds the size limit")
-	ErrCircuitOpen  = errors.New("script circuit breaker is open")
-	ErrBusy         = errors.New("script concurrency slot unavailable before deadline or cancellation")
+	ErrTimeout        = errors.New("script timed out")
+	ErrNoDone         = errors.New("script ended without calling $done")
+	ErrBodyTooLarge   = errors.New("script input body exceeds the size limit")
+	ErrCircuitOpen    = errors.New("script circuit breaker is open")
+	ErrBusy           = errors.New("script concurrency slot unavailable before deadline or cancellation")
+	ErrLowMemory      = errors.New("script skipped due to insufficient memory headroom")
+	ErrMemoryExceeded = errors.New("script result discarded because memory exceeded the budget")
 )
 
 // ScriptError contains the first line of a script's exception or syntax error.

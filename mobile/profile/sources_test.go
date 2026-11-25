@@ -316,6 +316,33 @@ func writeSourceBundle(t *testing.T, bundle *Bundle) string {
 	return path
 }
 
+func TestPrepareImportsLockedScriptWithRewrites(t *testing.T) {
+	const source = "$done();"
+	hash := resource.Hash([]byte(source))
+	sourcePath := writeSourceBundle(t, &Bundle{
+		Version: bundleVersion, Resources: map[string][]byte{hash: []byte(source)},
+		Profile: json.RawMessage(fmt.Sprintf(`{"schema-version":1,"scripts":[{"id":"filter","type":"http-request","pattern":"example","hash":%q}]}`, hash)),
+	})
+	const raw = `schema-version: 1
+imports: [{source: subscription, rewrites: true}]
+`
+	bundle, path := prepareSourceFixture(t, raw, PrepareOptions{Sources: map[string]string{"subscription": sourcePath}})
+	if !bundle.requiredSourceResources()[hash] || string(bundle.Resources[hash]) != source {
+		t.Fatal("imported script source was not pinned as a required resource")
+	}
+	data, err := readBundleFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := CompileSnapshot(data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(effective.Scripts) != 1 || !effective.Scripts[0].Supported || effective.Scripts[0].Hash != hash {
+		t.Fatalf("effective scripts = %+v", effective.Scripts)
+	}
+}
+
 func TestRebindRefreshesImportedSources(t *testing.T) {
 	const updated = `
 proxies: [{name: Renamed Node, type: direct}]

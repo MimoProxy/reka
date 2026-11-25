@@ -47,7 +47,7 @@ func compileSnapshotFile(ctx context.Context, path string, secrets secret.Store,
 	if err != nil {
 		return nil, err
 	}
-	eff, err := compileSnapshot(data, secrets, fullReports)
+	eff, _, err := compileSnapshot(data, secrets, snapshotOptions{fullReports: fullReports, retainScripts: runtime.GOOS != "ios"})
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -57,12 +57,25 @@ func compileSnapshotFile(ctx context.Context, path string, secrets secret.Store,
 // CompileSnapshot borrows the input only for this call. Resource values are
 // indexed in place and decoded only when requested by the compiler.
 func CompileSnapshot(data []byte, secrets secret.Store) (*compile.Effective, error) {
-	return compileSnapshot(data, secrets, false)
+	eff, _, err := compileSnapshot(data, secrets, snapshotOptions{retainScripts: runtime.GOOS != "ios"})
+	return eff, err
 }
 
-func compileSnapshot(data []byte, secrets secret.Store, fullReports bool) (*compile.Effective, error) {
+// CompileSnapshotWithScripts returns a script resource reader backed by Go-owned
+// bytes. It can outlive the caller's snapshot buffer. Returned source bytes are
+// read-only and the reader is nil if there are no supported scripts.
+func CompileSnapshotWithScripts(data []byte, secrets secret.Store) (*compile.Effective, func(string) ([]byte, error), error) {
+	return compileSnapshot(data, secrets, snapshotOptions{retainScripts: true})
+}
+
+type snapshotOptions struct {
+	fullReports   bool
+	retainScripts bool
+}
+
+func compileSnapshot(data []byte, secrets secret.Store, options snapshotOptions) (*compile.Effective, func(string) ([]byte, error), error) {
 	var bundle Bundle
-	resources := make(map[string][]byte)
+	reader := &snapshotResourceReader{encoded: make(map[string][]byte)}
 	snapshot := struct {
 		*Bundle
 		Resources resourceIndex `json:"resources"`
@@ -71,7 +84,7 @@ func compileSnapshot(data []byte, secrets secret.Store, fullReports bool) (*comp
 		Bundle: &bundle,
 		Resources: func(object []byte) error {
 			if bytes.Equal(object, []byte("null")) {
-				clear(resources)
+				clear(reader.encoded)
 				return nil
 			}
 			// Use slices of the caller's input, which outlives UnmarshalJSON.
@@ -79,33 +92,98 @@ func compileSnapshot(data []byte, secrets secret.Store, fullReports bool) (*comp
 			if start < 0 {
 				return errInvalidSnapshot
 			}
-			return indexResources(data[start:start+len(object)], resources)
+			return indexResources(data[start:start+len(object)], reader.encoded)
 		},
 	}
 	if len(data) > MaxBundleBytes || json.Unmarshal(data, &snapshot) != nil || bundle.Version != bundleVersion {
-		return nil, errInvalidSnapshot
+		return nil, nil, errInvalidSnapshot
 	}
-	rawResource := func(hash string) []byte {
-		raw := resources[hash]
-		if len(raw) > MaxBundleBytes/8 {
-			// Clear document parsing allocations before loading a large resource.
-			runtime.GC()
-		}
-		return raw
-	}
-	read := func(hash string) ([]byte, error) {
-		var value []byte
-		if raw := rawResource(hash); raw != nil && json.Unmarshal(raw, &value) == nil && value != nil {
-			return value, nil
-		}
-		return nil, bundle.missingResource(hash)
-	}
-	opts := bundle.compileOptions(read, secrets, false)
-	opts.OmitProvenance = !fullReports
+	reader.omitted = bundle.OmittedResources
+	opts := bundle.compileOptions(reader.read, secrets, false)
+	opts.OmitProvenance = !options.fullReports
 	opts.ReadPrecompiledRuleSet = bundle.Precompiled.reader(func(hash string) (*router.PrecompiledRuleSet, []byte) {
-		return streamPrecompiledRuleSet(rawResource(hash), hash), nil
+		return streamPrecompiledRuleSet(reader.raw(hash), hash), nil
 	})
-	return bundle.compileEffective(opts)
+	eff, err := bundle.compileEffective(opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	if options.retainScripts {
+		if err := reader.retainScripts(eff.Scripts); err != nil {
+			return nil, nil, err
+		}
+	}
+	// Keep only resources the runtime reads. Map Local decodes its original
+	// bytes on demand, so request results have their own body buffers.
+	var mapLocal map[string][]byte
+	if eff.HTTPRewrite != nil && len(reader.encoded) > 0 {
+		mapLocal = make(map[string][]byte)
+		for hash := range bundle.mapLocalResourceHashes() {
+			if raw := reader.encoded[hash]; raw != nil {
+				mapLocal[hash] = bytes.Clone(raw)
+			}
+		}
+	}
+	reader.encoded, reader.omitted = mapLocal, nil
+	if len(reader.scripts) == 0 {
+		return eff, nil, nil
+	}
+	return eff, reader.scripts.read, nil
+}
+
+type snapshotResourceReader struct {
+	encoded map[string][]byte
+	omitted []string
+	scripts snapshotScriptSources
+}
+
+type snapshotScriptSources map[string][]byte
+
+func (s snapshotScriptSources) read(hash string) ([]byte, error) {
+	if source := s[hash]; source != nil {
+		return source, nil
+	}
+	return nil, errSnapshotResource
+}
+
+func (r *snapshotResourceReader) raw(hash string) []byte {
+	raw := r.encoded[hash]
+	if len(raw) > MaxBundleBytes/8 {
+		// Clear document parsing allocations before loading a large resource.
+		runtime.GC()
+	}
+	return raw
+}
+
+func (r *snapshotResourceReader) read(hash string) ([]byte, error) {
+	var value []byte
+	if raw := r.raw(hash); raw != nil && json.Unmarshal(raw, &value) == nil && value != nil {
+		return value, nil
+	}
+	if source := r.scripts[hash]; source != nil {
+		return source, nil
+	}
+	return nil, missingSnapshotResource(r.omitted, hash)
+}
+
+func (r *snapshotResourceReader) retainScripts(scripts []compile.Script) error {
+	if len(scripts) == 0 {
+		return nil
+	}
+	r.scripts = make(snapshotScriptSources)
+	for _, script := range scripts {
+		if !script.Supported || r.scripts[script.Hash] != nil {
+			continue
+		}
+		// Compilation validated the source. Decode it into owned memory before
+		// dropping the snapshot's resource index and returning to the caller.
+		source, err := r.read(script.Hash)
+		if err != nil {
+			return err
+		}
+		r.scripts[script.Hash] = source
+	}
+	return nil
 }
 
 // Decode Base64 directly into the matcher reader while verifying the digest.

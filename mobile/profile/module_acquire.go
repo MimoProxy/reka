@@ -32,13 +32,14 @@ type ModuleAcquireOptions struct {
 }
 
 type ModuleAcquireResult struct {
-	Status      string           `json:"status"` // updated, not-modified, or failed
-	ErrorCode   string           `json:"errorCode,omitempty"`
-	Metadata    *module.Metadata `json:"metadata,omitempty"`
-	Hostnames   *ModuleHostnames `json:"hostnames,omitempty"`
-	Added       []string         `json:"added,omitempty"`
-	Removed     []string         `json:"removed,omitempty"`
-	NextCheckMS int64            `json:"nextCheckMs,omitempty"`
+	Status       string                      `json:"status"` // updated, not-modified, or failed
+	ErrorCode    string                      `json:"errorCode,omitempty"`
+	Metadata     *module.Metadata            `json:"metadata,omitempty"`
+	Hostnames    *ModuleHostnames            `json:"hostnames,omitempty"`
+	Added        []string                    `json:"added,omitempty"`
+	Removed      []string                    `json:"removed,omitempty"`
+	NextCheckMS  int64                       `json:"nextCheckMs,omitempty"`
+	ScriptErrors []moduleacquire.ScriptError `json:"scriptErrors,omitempty"`
 }
 
 // AcquireModule writes a complete candidate snapshot atomically on success,
@@ -84,7 +85,7 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 		client = subscription.HTTPClientWithControl(nil, systemLookup)
 		defer client.CloseIdleConnections()
 	}
-	download := moduleacquire.Options{Client: client, Blobs: blobs, Force: req.Force}
+	download := moduleacquire.Options{Client: client, Blobs: blobs, Force: req.Force, IncludeScripts: true}
 	download.ResolveURL = func(url string) (string, error) {
 		name, ref := secret.ParseRef(url)
 		if !ref {
@@ -100,6 +101,9 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 	if old != nil && old.Source.Module.Request == req.Module.RequestHash() {
 		download.Previous = model.Source{ID: old.Source.ID, Module: &old.Source.Module, Lock: &old.Source.Lock}
 		download.PreviousEntries = old.Entries
+		if old.Interval == req.Module.Interval && maps.Equal(old.Arguments, req.Module.Arguments) {
+			download.PreviousScriptErrors = old.ScriptErrors
+		}
 		for _, data := range old.Resources {
 			if _, err := blobs.Put(data); err != nil {
 				return fail("resource_store_failed")
@@ -112,7 +116,8 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 	}
 	snapshot := ModuleSnapshot{
 		Version: moduleSnapshotVersion, Source: acquired.Snapshot, Entries: acquired.Entries,
-		Arguments: req.Module.Arguments, Resources: make(map[string][]byte),
+		Arguments: req.Module.Arguments, Interval: req.Module.Interval, Resources: make(map[string][]byte),
+		ScriptErrors: acquired.ScriptErrors,
 	}
 	if !acquired.Next.IsZero() {
 		snapshot.NextCheckMS = acquired.Next.UnixMilli()
@@ -130,6 +135,7 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 	hosts := snapshot.hostnames()
 	result := ModuleAcquireResult{
 		Status: "updated", Metadata: &acquired.Metadata, Hostnames: &hosts, NextCheckMS: snapshot.NextCheckMS,
+		ScriptErrors: snapshot.ScriptErrors,
 	}
 	var previous ModuleHostnames
 	if old != nil {
@@ -154,7 +160,7 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 
 func (s *ModuleSnapshot) hostnames() ModuleHostnames {
 	result, _ := module.Convert(s.readRoot(), module.Options{
-		ID: s.Source.ID, Arguments: s.Arguments, Resource: s.resourceResolver(),
+		ID: s.Source.ID, Arguments: s.Arguments, ResourceForKind: s.resourceResolver(),
 	})
 	return moduleHostnames(result)
 }

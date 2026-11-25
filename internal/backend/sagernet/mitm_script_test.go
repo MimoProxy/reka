@@ -188,6 +188,40 @@ func TestMITMScriptUnsupportedDoesNotReadBody(t *testing.T) {
 	}
 }
 
+func TestMITMScriptRecordsMemoryOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		duration time.Duration
+		executed bool
+	}{
+		{"skipped", script.ErrLowMemory, time.Millisecond, false},
+		{"discarded", script.ErrMemoryExceeded, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodGet, "https://origin.test/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			match := &MITMScript{ID: "memory", Run: func(context.Context, *script.Input) (script.Result, error) {
+				return script.Result{Duration: tc.duration}, fmt.Errorf("host: %w", tc.err)
+			}}
+			var got api.MITMScriptRun
+			var executed bool
+			handler := mitmHTTPHandler{route: &MITMRoute{
+				OnScript: func(run api.MITMScriptRun, ran bool) {
+					got, executed = run, ran
+				},
+			}}
+			var stats mitmRequestStats
+			oversize := handler.runScript(t.Context(), match, mitmScriptInput{request: request}, mitmBufferedBody{}, &stats, nil)
+			if got.ID != match.ID || got.Result != "low-memory" || executed != tc.executed || oversize {
+				t.Fatalf("run = %+v, executed = %v, oversize = %v", got, executed, oversize)
+			}
+		})
+	}
+}
+
 func TestMITMScriptConnectionStats(t *testing.T) {
 	var runs []api.MITMScriptRun
 	for i := range maxConnectionEvents + 1 {

@@ -7,6 +7,9 @@ import (
 	"github.com/MimoProxy/reka/internal/script/gojaengine"
 )
 
+// Use the script host's default concurrency outside the Packet Tunnel budget.
+const platformScriptConcurrency = 0
+
 func platformScriptEngine(factory func() script.Engine) script.Engine {
 	if factory != nil {
 		return factory()

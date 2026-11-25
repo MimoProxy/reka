@@ -25,6 +25,7 @@ type sourceResources struct {
 	ID       string                `json:"id"`
 	RuleSets []pinnedResource      `json:"rule-sets"`
 	MapLocal []pinnedResource      `json:"map-local"`
+	Scripts  []pinnedResource      `json:"scripts"`
 	Module   *model.ModuleSnapshot `json:"module"`
 	Lock     *model.SourceLock     `json:"lock"`
 }
@@ -41,9 +42,11 @@ func (s sourceResources) hashes() []string {
 
 func (s sourceResources) requiredHashes() []string {
 	var hashes []string
-	for _, item := range s.MapLocal {
-		if item.Hash != "" {
-			hashes = append(hashes, item.Hash)
+	for _, list := range [][]pinnedResource{s.MapLocal, s.Scripts} {
+		for _, item := range list {
+			if item.Hash != "" {
+				hashes = append(hashes, item.Hash)
+			}
 		}
 	}
 	if s.Module != nil && s.Lock != nil {
@@ -55,8 +58,8 @@ func (s sourceResources) requiredHashes() []string {
 	return hashes
 }
 
-// A precompiled rule can cover a digest also used by a module or Map Local.
-// Those consumers still need the original bytes in the extension snapshot.
+// A precompiled rule can cover a digest also used by a module, a Map Local
+// entry, or a script. Those consumers need the original bytes in the snapshot.
 func (b *Bundle) requiredSourceResources() map[string]bool {
 	var document sourceDocument
 	if len(b.Sources) == 0 || json.Unmarshal(b.Sources, &document) != nil {
@@ -72,6 +75,52 @@ func (b *Bundle) requiredSourceResources() map[string]bool {
 		}
 	}
 	return required
+}
+
+// mapLocalResourceHashes enumerates the file resources that may still be
+// read by rewrites after snapshot compilation.
+func (b *Bundle) mapLocalResourceHashes() map[string]bool {
+	var document sourceDocument
+	_ = json.Unmarshal(b.Sources, &document)
+	required := make(map[string]bool)
+	for _, entry := range append(document.Sources, b.Profile) {
+		var refs sourceResources
+		if json.Unmarshal(entry, &refs) != nil {
+			continue
+		}
+		for _, item := range refs.MapLocal {
+			required[item.Hash] = true
+		}
+		if refs.Module != nil && refs.Lock != nil {
+			for _, lock := range refs.Lock.Resources {
+				if lock.Kind == "map-local" {
+					required[lock.Hash] = true
+				}
+			}
+		}
+	}
+	patches, _ := parseOverlay(b.Overlay)
+	for _, patch := range patches {
+		if kind, hash := overlayResourceHash(patch); kind == "map-local" && hash != "" {
+			required[hash] = true
+		}
+	}
+	return required
+}
+
+func overlayResourceHash(patch model.Op) (string, string) {
+	path, err := model.SplitPath(patch.Path)
+	if err != nil || len(path) == 0 {
+		return "", ""
+	}
+	var item pinnedResource
+	switch {
+	case patch.Op == "insert" && len(path) == 1, patch.Op == "set" && len(path) == 2:
+		_ = json.Unmarshal(patch.Value, &item)
+	case patch.Op == "set" && len(path) == 3 && path[2] == "hash":
+		_ = json.Unmarshal(patch.Value, &item.Hash)
+	}
+	return path[0], item.Hash
 }
 
 func (b *Bundle) prepareSources(ctx context.Context, profile *model.Profile, options PrepareOptions, read func(string) ([]byte, error)) error {
@@ -212,7 +261,7 @@ var dnsKeys = []string{"dns", "rule-sets"}
 func importedKeys(imp model.Import, marker bool) []string {
 	var keys []string
 	if imp.Rewrites {
-		keys = append(keys, "mitm", "http-rewrites", "header-rewrites", "body-rewrites", "map-local")
+		keys = append(keys, "mitm", "http-rewrites", "header-rewrites", "body-rewrites", "map-local", "scripts")
 	}
 	if marker {
 		// A rule marker routes through the source's own rules, which may
@@ -260,7 +309,7 @@ func loadSource(id, path string, keys []string, read func(string) ([]byte, error
 		}
 	}
 	encoded, err := json.Marshal(entry)
-	if err != nil || len(entry["rule-sets"]) == 0 && len(entry["map-local"]) == 0 {
+	if err != nil || len(entry["rule-sets"]) == 0 && len(entry["map-local"]) == 0 && len(entry["scripts"]) == 0 {
 		return encoded, nil, err
 	}
 	var refs sourceResources
@@ -316,19 +365,9 @@ func (b *Bundle) refreshSources(ctx context.Context, profile *model.Profile, pre
 		return err
 	}
 	for _, patch := range patches {
-		path, err := model.SplitPath(patch.Path)
-		if err != nil || len(path) == 0 || path[0] != "rule-sets" && path[0] != "map-local" {
-			continue
-		}
-		var set pinnedResource
-		switch {
-		case patch.Op == "insert" && len(path) == 1, patch.Op == "set" && len(path) == 2:
-			_ = json.Unmarshal(patch.Value, &set)
-		case patch.Op == "set" && len(path) == 3 && path[2] == "hash":
-			_ = json.Unmarshal(patch.Value, &set.Hash)
-		}
-		if set.Hash != "" {
-			kept[set.Hash] = true
+		kind, hash := overlayResourceHash(patch)
+		if hash != "" && (kind == "rule-sets" || kind == "map-local" || kind == "scripts") {
+			kept[hash] = true
 		}
 	}
 	var retained []json.RawMessage

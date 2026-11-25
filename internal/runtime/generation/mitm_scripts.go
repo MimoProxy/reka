@@ -1,18 +1,24 @@
 package generation
 
 import (
+	"container/list"
 	"context"
 	"log/slog"
 	"regexp"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/runtime"
 	"github.com/MimoProxy/reka/internal/script"
 )
+
+// Reka budgets diagnostics for several full modules while bounding the memory
+// retained for script IDs and error messages across generations.
+const mitmScriptItemCapacity = 4 * model.MaxModuleScripts
 
 type mitmScriptTable struct {
 	requests, responses []mitmScriptEntry
@@ -52,7 +58,7 @@ func newMITMScriptTable(defs []compile.Script, logger *slog.Logger) mitmScriptTa
 			pattern: pattern, id: def.ID, module: def.Module, requiresBody: def.RequiresBody,
 			spec: script.Script{
 				Key: def.Hash, Name: name, Path: path, Kind: kind, Dialect: script.Dialect(def.Format),
-				BinaryBody: def.BinaryBodyMode, Argument: argument,
+				Engine: def.Engine, BinaryBody: def.BinaryBodyMode, Argument: argument,
 				Timeout: time.Duration(def.Timeout) * time.Second, MaxSize: def.MaxSize,
 			},
 		}
@@ -89,9 +95,13 @@ func (e *Engine) initScripts() {
 		return
 	}
 	e.scriptHost = script.NewHost(engine, script.Limits{
-		HardMaxSize: compile.ScriptMaxBodySize, StoreValueMax: scriptStoreValueMax,
+		Concurrency: platformScriptConcurrency, HardMaxSize: compile.ScriptMaxBodySize, StoreValueMax: scriptStoreValueMax,
 	}, script.Environment{})
-	e.scriptStore = newScriptStore(e.opts.StateRoot, e.scriptLogger())
+	stateDir := e.opts.ScriptStateDir
+	if stateDir == "" {
+		stateDir = e.opts.StateRoot
+	}
+	e.scriptStore = newScriptStore(stateDir, e.scriptLogger())
 	e.scriptNotifications = newScriptNotifications()
 }
 
@@ -104,6 +114,10 @@ func (e *Engine) scriptLogger() *slog.Logger {
 
 func (e *Engine) mitmScriptMatcher(snap *runtime.Snapshot[*sagernet.Outbound], state routingState) func(script.Kind, string) *sagernet.MITMScript {
 	g := snap.Value.(*generation)
+	readSource := g.readScriptSource
+	if readSource == nil {
+		readSource = g.eff.ScriptSource
+	}
 	return func(kind script.Kind, url string) *sagernet.MITMScript {
 		ent := g.scripts.match(kind, url)
 		if ent == nil {
@@ -114,9 +128,9 @@ func (e *Engine) mitmScriptMatcher(snap *runtime.Snapshot[*sagernet.Outbound], s
 		}
 		if e.scriptHost != nil {
 			matched.Run = func(ctx context.Context, input *script.Input) (script.Result, error) {
-				// Keep source bytes only for this run. The host shares compiled
-				// programs across generations through the locked source hash.
-				source, err := g.eff.ScriptSource(ent.spec.Key)
+				// The locked source hash lets the host share compiled programs
+				// across generations.
+				source, err := readSource(ent.spec.Key)
 				if err != nil {
 					return script.Result{}, err
 				}
@@ -138,41 +152,91 @@ func (e *Engine) mitmScriptMatcher(snap *runtime.Snapshot[*sagernet.Outbound], s
 }
 
 type mitmScriptCounters struct {
-	runs, modified, failed, timeouts, oversize, circuitOpen atomic.Uint64
+	mu sync.Mutex
+
+	runs, modified, failed                     uint64
+	timeouts, oversize, circuitOpen, lowMemory uint64
+
+	items  map[string]*list.Element
+	recent list.List
 }
 
 func (c *mitmScriptCounters) record(run api.MITMScriptRun, executed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if executed {
-		c.runs.Add(1)
+		c.runs++
 	}
 	switch run.Result {
 	case "modified":
-		c.modified.Add(1)
+		c.modified++
 	case "failed":
-		c.failed.Add(1)
+		c.failed++
 	case "timeout":
-		c.timeouts.Add(1)
+		c.timeouts++
 	case "oversize":
-		c.oversize.Add(1)
+		c.oversize++
 	case "circuit-open":
-		c.circuitOpen.Add(1)
+		c.circuitOpen++
+	case "low-memory":
+		c.lowMemory++
 	}
+	elem := c.items[run.ID]
+	if elem == nil {
+		if len(c.items) >= mitmScriptItemCapacity {
+			oldest := c.recent.Back()
+			delete(c.items, oldest.Value.(*api.MITMScriptItem).ID)
+			c.recent.Remove(oldest)
+		}
+		if c.items == nil {
+			c.items = make(map[string]*list.Element)
+		}
+		elem = c.recent.PushFront(&api.MITMScriptItem{ID: run.ID})
+		c.items[run.ID] = elem
+	} else {
+		c.recent.MoveToFront(elem)
+	}
+	item := elem.Value.(*api.MITMScriptItem)
+	if executed {
+		item.Runs++
+	}
+	item.Matches++
+	item.LastResult, item.LastError = run.Result, run.Error
+	item.LastDurationMS, item.LastAt = run.DurationMS, time.Now().UTC()
+}
+
+func (c *mitmScriptCounters) status(status string, table *mitmScriptTable) api.MITMScriptStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info := api.MITMScriptStatus{
+		Status: status, Count: table.count(), Runs: c.runs, Modified: c.modified,
+		Failed: c.failed, Timeouts: c.timeouts, Oversize: c.oversize,
+		CircuitOpen: c.circuitOpen, LowMemory: c.lowMemory,
+	}
+	if info.Count != 0 {
+		info.Items = make([]api.MITMScriptItem, 0, info.Count)
+	}
+	for _, entries := range [...][]mitmScriptEntry{table.requests, table.responses} {
+		for _, entry := range entries {
+			var item api.MITMScriptItem
+			if elem := c.items[entry.id]; elem != nil {
+				item = *elem.Value.(*api.MITMScriptItem)
+			}
+			item.ID, item.Module, item.Name, item.Type = entry.id, entry.module, entry.spec.Name, string(entry.spec.Kind)
+			info.Items = append(info.Items, item)
+		}
+	}
+	return info
 }
 
 func (e *Engine) scriptStatus(g *generation) api.MITMScriptStatus {
 	status := "disabled"
-	count := g.scripts.count()
 	if e.scriptHost == nil {
 		status = "unsupported"
-	} else if g.eff != nil && g.eff.MITM.Enabled && count != 0 {
+	} else if g.eff != nil && g.eff.MITM.Enabled && g.scripts.count() != 0 {
 		status = "enabled"
 	}
-	c := &e.scriptRuns
-	info := api.MITMScriptStatus{
-		Status: status, Count: count, Runs: c.runs.Load(), Modified: c.modified.Load(),
-		Failed: c.failed.Load(), Timeouts: c.timeouts.Load(), Oversize: c.oversize.Load(),
-		CircuitOpen: c.circuitOpen.Load(),
-	}
+	info := e.scriptRuns.status(status, &g.scripts)
 	if e.scriptNotifications != nil {
 		info.Notifications, info.NotificationsDropped = e.scriptNotifications.counts()
 	}

@@ -26,16 +26,32 @@ type MITMBypassInfo struct {
 
 // MITMScriptStatus reports the active table and engine-wide counters.
 type MITMScriptStatus struct {
-	Status               string `json:"status"`
-	Count                int    `json:"count"`
-	Runs                 uint64 `json:"runs"`
-	Modified             uint64 `json:"modified"`
-	Failed               uint64 `json:"failed"`
-	Timeouts             uint64 `json:"timeouts"`
-	Oversize             uint64 `json:"oversize"`
-	CircuitOpen          uint64 `json:"circuit_open"`
-	Notifications        uint64 `json:"notifications"`
-	NotificationsDropped uint64 `json:"notifications_dropped"`
+	Status               string           `json:"status"`
+	Count                int              `json:"count"`
+	Runs                 uint64           `json:"runs"`
+	Modified             uint64           `json:"modified"`
+	Failed               uint64           `json:"failed"`
+	Timeouts             uint64           `json:"timeouts"`
+	Oversize             uint64           `json:"oversize"`
+	CircuitOpen          uint64           `json:"circuit_open"`
+	LowMemory            uint64           `json:"low_memory"`
+	Notifications        uint64           `json:"notifications"`
+	NotificationsDropped uint64           `json:"notifications_dropped"`
+	Items                []MITMScriptItem `json:"items,omitempty"`
+}
+
+// MITMScriptItem reports the definition and most recent activity for a script.
+type MITMScriptItem struct {
+	ID             string    `json:"id"`
+	Module         string    `json:"module,omitempty"`
+	Name           string    `json:"name,omitempty"`
+	Type           string    `json:"type"`
+	Runs           uint64    `json:"runs"`    // Matches that reached the engine.
+	Matches        uint64    `json:"matches"` // Includes skipped matches.
+	LastResult     string    `json:"last_result,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+	LastDurationMS int64     `json:"last_duration_ms"`
+	LastAt         time.Time `json:"last_at,omitempty"`
 }
 
 type MITMScriptRun struct {

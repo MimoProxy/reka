@@ -20,16 +20,20 @@ const maxModuleSnapshotBytes = 2 * moduleacquire.MaxBundleSize
 // ModuleSnapshot is an app-owned JSON file. Source is a sources document
 // entry. Resources contains Base64 blobs named by SHA-256, including the
 // module text at source.lock.root. Entries holds HTTP validators and check
-// times keyed by "root" or source.lock.resources[].id. Arguments records the
-// values used to acquire this version so hostname changes can be compared.
+// times keyed by "root" or moduleacquire.EntryKey. Arguments and Interval
+// record the settings used to acquire this version for comparison on refresh.
 type ModuleSnapshot struct {
-	Version     int                           `json:"version"`
-	Source      moduleacquire.Snapshot        `json:"source"`
-	Resources   map[string][]byte             `json:"resources"`
-	Entries     map[string]subscription.Entry `json:"entries"`
-	Arguments   map[string]string             `json:"arguments,omitempty"`
-	NextCheckMS int64                         `json:"nextCheckMs,omitempty"`
+	Version      int                           `json:"version"`
+	Source       moduleacquire.Snapshot        `json:"source"`
+	Resources    map[string][]byte             `json:"resources"`
+	Entries      map[string]subscription.Entry `json:"entries"`
+	Arguments    map[string]string             `json:"arguments,omitempty"`
+	Interval     int                           `json:"interval,omitempty"`
+	NextCheckMS  int64                         `json:"nextCheckMs,omitempty"`
+	ScriptErrors []moduleacquire.ScriptError   `json:"scriptErrors,omitempty"`
 }
+
+type moduleResourceKey struct{ kind, value string }
 
 // LoadModuleSnapshot reads and verifies the resource lock and its blobs.
 func LoadModuleSnapshot(path string) (*ModuleSnapshot, error) {
@@ -48,22 +52,39 @@ func (s *ModuleSnapshot) valid() bool {
 	source := s.Source
 	if s.Version != moduleSnapshotVersion || source.ID == "" ||
 		source.Module.Format != model.ModuleFormatSurge || !resource.ValidHash(source.Module.Request) ||
-		len(source.Lock.Resources) > model.MaxModuleResources || len(s.Resources) > model.MaxModuleResources+1 {
+		len(source.Lock.Resources) > model.MaxModuleResources+model.MaxModuleScripts ||
+		len(s.ScriptErrors) > model.MaxModuleScripts {
 		return false
 	}
 	limits := map[string]int{source.Lock.Root: model.MaxDocumentSize}
-	requests, ids := make(map[string]bool), make(map[string]bool)
+	requests, ids := make(map[moduleResourceKey]bool), make(map[moduleResourceKey]bool)
+	counts := make(map[string]int)
 	total := len(s.Resources[source.Lock.Root])
 	for _, lock := range source.Lock.Resources {
-		if lock.Kind != "map-local" || len(lock.ID) != 24 || !strings.HasPrefix(lock.Request, lock.ID) ||
-			!resource.ValidHash(lock.Request) || requests[lock.Request] || ids[lock.ID] {
+		request, id := moduleResourceKey{lock.Kind, lock.Request}, moduleResourceKey{lock.Kind, lock.ID}
+		if len(lock.ID) != 24 || !strings.HasPrefix(lock.Request, lock.ID) ||
+			!resource.ValidHash(lock.Request) || requests[request] || ids[id] {
 			return false
 		}
-		requests[lock.Request], ids[lock.ID] = true, true
-		limits[lock.Hash] = httprewrite.MaxMapLocalSize
+		requests[request], ids[id] = true, true
+		counts[lock.Kind]++
+		var limit int
+		switch lock.Kind {
+		case "map-local":
+			limit = httprewrite.MaxMapLocalSize
+		case "script":
+			limit = model.MaxScriptSize
+		default:
+			return false
+		}
+		if previous, exists := limits[lock.Hash]; exists {
+			limit = min(limit, previous)
+		}
+		limits[lock.Hash] = limit
 		total += len(s.Resources[lock.Hash])
 	}
-	if len(s.Resources) != len(limits) || total > moduleacquire.MaxBundleSize {
+	if counts["map-local"] > model.MaxModuleResources || counts["script"] > model.MaxModuleScripts ||
+		len(s.Resources) != len(limits) || total > moduleacquire.MaxBundleSize {
 		return false
 	}
 	for hash, limit := range limits {
@@ -79,13 +100,13 @@ func (s *ModuleSnapshot) readRoot() []byte {
 	return s.Resources[s.Source.Lock.Root]
 }
 
-func (s *ModuleSnapshot) resourceResolver() func(string) (string, bool) {
-	locked := make(map[string]string, len(s.Source.Lock.Resources))
+func (s *ModuleSnapshot) resourceResolver() func(string, string) (string, bool) {
+	locked := make(map[moduleResourceKey]string, len(s.Source.Lock.Resources))
 	for _, lock := range s.Source.Lock.Resources {
-		locked[lock.Request] = lock.Hash
+		locked[moduleResourceKey{lock.Kind, lock.Request}] = lock.Hash
 	}
-	return func(url string) (string, bool) {
-		hash, ok := locked[resource.Hash([]byte(url))]
+	return func(kind, url string) (string, bool) {
+		hash, ok := locked[moduleResourceKey{kind, resource.Hash([]byte(url))}]
 		return hash, ok
 	}
 }

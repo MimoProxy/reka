@@ -200,6 +200,38 @@ func TestHostCircuitBreaker(t *testing.T) {
 	check(ErrCircuitOpen)
 }
 
+func TestHostMemoryErrorsAndCircuitBreaker(t *testing.T) {
+	runErr := ErrLowMemory
+	h := newTestHost(t, fakeEngine{run: func(context.Context, *Job) (Done, error) {
+		return Done{Called: true}, runErr
+	}}, Limits{BreakerFailures: 2, BreakerCooldown: time.Minute})
+	now := time.Unix(100, 0)
+	h.now = func() time.Time { return now }
+	s := &Script{Kind: KindHTTPRequest, Source: "source"}
+	check := func(want error) {
+		t.Helper()
+		if _, err := h.Run(t.Context(), s, &Input{}, Services{}); !errors.Is(err, want) {
+			t.Fatalf("run error = %v, want %v", err, want)
+		}
+	}
+	for range 3 {
+		check(ErrLowMemory)
+	}
+	runErr = ErrMemoryExceeded
+	check(ErrMemoryExceeded)
+	runErr = ErrLowMemory
+	check(ErrLowMemory)
+	runErr = ErrMemoryExceeded
+	check(ErrMemoryExceeded)
+	check(ErrCircuitOpen)
+
+	now = now.Add(time.Minute)
+	runErr = ErrLowMemory
+	check(ErrLowMemory)
+	runErr = nil
+	check(nil)
+}
+
 func TestHostCircuitIsScopedToCacheKey(t *testing.T) {
 	h := newTestHost(t, fakeEngine{run: func(context.Context, *Job) (Done, error) {
 		return Done{}, ErrNoDone
@@ -320,6 +352,25 @@ func TestPurgeAllUnregistersClosedHosts(t *testing.T) {
 	h2.Purge()
 	if second != 3 {
 		t.Fatalf("direct purge count = %d, want 3", second)
+	}
+}
+
+func TestPurgeAllAllowsHostToUnregisterDuringPurge(t *testing.T) {
+	var h *Host
+	var calls int
+	h = newTestHost(t, fakeEngine{purge: func() {
+		if !liveHosts.TryLock() {
+			t.Error("purge callback ran with the host registry locked")
+			return
+		}
+		liveHosts.Unlock()
+		h.Close()
+		calls++
+	}}, Limits{})
+	PurgeAll()
+	PurgeAll()
+	if calls != 1 {
+		t.Fatalf("purge callback ran %d times", calls)
 	}
 }
 

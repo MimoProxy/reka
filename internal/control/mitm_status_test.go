@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"reflect"
 	"runtime"
 	"slices"
 	"testing"
@@ -30,7 +31,7 @@ func TestGetMITMStatus(t *testing.T) {
 	if runtime.GOOS == "ios" {
 		wantScripts.Status = "unsupported"
 	}
-	if status.Scripts != wantScripts {
+	if !reflect.DeepEqual(status.Scripts, wantScripts) {
 		t.Fatalf("initial MITM script status = %+v, want %+v", status.Scripts, wantScripts)
 	}
 }

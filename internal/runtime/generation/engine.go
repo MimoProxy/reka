@@ -70,9 +70,11 @@ type EngineOptions struct {
 	// ObserveRoute runs synchronously, including for pre-match rejections.
 	ObserveRoute  func(RouteObservation)
 	PacketHistory *history.Store
-	// ScriptEngine replaces the default HTTP script engine on supported platforms.
+	// ScriptEngine supplies the HTTP script engine. A nil factory uses the platform default.
 	ScriptEngine func() script.Engine
-	mitmNow      func() time.Time
+	// ScriptStateDir overrides StateRoot for persistent script storage.
+	ScriptStateDir string
+	mitmNow        func() time.Time
 }
 
 type RouteObservation struct {
@@ -102,6 +104,8 @@ type generation struct {
 	mitm          *mitmGeneration
 	mitmCAError   string
 	scripts       mitmScriptTable
+
+	readScriptSource func(string) ([]byte, error)
 }
 
 // Engine turns effective configurations into running generations: it
@@ -425,10 +429,19 @@ type Prepared struct {
 	// changes are the listener changes, applied in Activate.
 	changes []listenerChange
 	done    bool
+
+	readScriptSource func(string) ([]byte, error)
 }
 
 // Plan returns the plan this preparation implements.
 func (p *Prepared) Plan() Plan { return p.plan }
+
+// SetScriptSourceReader binds verified script sources to the prepared
+// generation. The reader must remain usable after the caller's input is
+// released. Set it before activation.
+func (p *Prepared) SetScriptSourceReader(read func(string) ([]byte, error)) {
+	p.readScriptSource = read
+}
 
 // PrepareError is a failure to prepare; nothing changed.
 type PrepareError struct {
@@ -671,6 +684,7 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 		g.inUDP[l.ID] = l.UDP
 	}
 	g.scripts = newMITMScriptTable(eff.Scripts, e.scriptLogger())
+	g.readScriptSource = p.readScriptSource
 	g.loadMITM(previousGeneration, p.outbounds, e.scriptHost != nil)
 	genNo, err := e.rt.CommitValue(p.outbounds, g)
 	if err != nil {

@@ -18,20 +18,23 @@ import (
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
+	"github.com/MimoProxy/reka/internal/script"
 	"github.com/MimoProxy/reka/mobile/profile"
 )
 
 const ProfileAddress4 = "172.27.255.1/30"
 
 type profileSession struct {
-	mu      sync.Mutex
-	engine  *generation.Engine
-	base    *compile.Effective
-	summary profile.Summary
-	pinned  map[string]bool
-	rev     uint64
-	trace   *routeTrace
-	sets    map[string]*router.RuleSet
+	mu               sync.Mutex
+	engine           *generation.Engine
+	base             *compile.Effective
+	summary          profile.Summary
+	pinned           map[string]bool
+	rev              uint64
+	trace            *routeTrace
+	sets             map[string]*router.RuleSet
+	retainScripts    bool
+	readScriptSource func(string) ([]byte, error)
 }
 
 type ProfileStatus struct {
@@ -134,7 +137,9 @@ func (s *Session) ProviderClient(name string) (*http.Client, error) {
 }
 
 func openProfileSession(snapshot []byte, controls profile.Controls, trace, probeOnly bool) (*Session, error) {
-	base, err := profile.CompileSnapshot(snapshot, controls.Secrets)
+	host := scriptHost.Load()
+	retainScripts := host != nil && !probeOnly
+	base, readScriptSource, err := compileProfileSnapshot(snapshot, controls, retainScripts)
 	if err != nil {
 		return nil, err
 	}
@@ -156,12 +161,24 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	if runtime.GOOS == "ios" {
 		opts.Resolver = net.DefaultResolver
 	}
-	p := &profileSession{base: base, summary: profile.Describe(base), sets: collectRuleSets(base.Router.Rules())}
+	p := &profileSession{
+		base: base, summary: profile.Describe(base), sets: collectRuleSets(base.Router.Rules()),
+		retainScripts: retainScripts, readScriptSource: readScriptSource,
+	}
 	if trace {
 		p.trace = &routeTrace{}
 		opts.ObserveRoute = p.trace.record
 	}
+	if probeOnly {
+		opts.ScriptEngine = func() script.Engine { return nil }
+	} else if retainScripts {
+		opts.ScriptEngine = host.factory
+		opts.ScriptStateDir = controls.ScriptState
+	}
 	p.engine = generation.NewEngine(opts)
+	if retainScripts {
+		p.engine.SetScriptNotifier(host.notify)
+	}
 	if controls.FakeIPState != "" {
 		if err := p.engine.DNSState(controls.FakeIPState); err != nil {
 			s.logger.Warn("Could not restore fake IP state", "err", err)
@@ -178,6 +195,14 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	return s, nil
 }
 
+func compileProfileSnapshot(snapshot []byte, controls profile.Controls, retainScripts bool) (*compile.Effective, func(string) ([]byte, error), error) {
+	if retainScripts {
+		return profile.CompileSnapshotWithScripts(snapshot, controls.Secrets)
+	}
+	base, err := profile.CompileSnapshot(snapshot, controls.Secrets)
+	return base, nil, err
+}
+
 func (s *Session) SetRealDNS(real bool) {
 	if s.profile != nil {
 		s.profile.engine.SetPacketFlowRealDNS(real)
@@ -185,13 +210,13 @@ func (s *Session) SetRealDNS(real bool) {
 }
 
 func (p *profileSession) publish(base *compile.Effective, summary profile.Summary, controls profile.Controls) error {
-	_, _, err := p.activate(base, summary, controls)
+	_, _, err := p.activate(base, summary, p.readScriptSource, controls)
 	return err
 }
 
 // activate publishes a new generation and reports whether it belongs to a
 // different profile than the one it replaces.
-func (p *profileSession) activate(base *compile.Effective, summary profile.Summary, controls profile.Controls) (uint64, bool, error) {
+func (p *profileSession) activate(base *compile.Effective, summary profile.Summary, readScriptSource func(string) ([]byte, error), controls profile.Controls) (uint64, bool, error) {
 	eff, err := profile.ApplyControls(base, summary, controls)
 	if err != nil {
 		return 0, false, fmt.Errorf("invalid policy or routing mode: %w", err)
@@ -200,6 +225,7 @@ func (p *profileSession) activate(base *compile.Effective, summary profile.Summa
 	if err != nil {
 		return 0, false, fmt.Errorf("could not prepare profile outbounds or DNS: %w", err)
 	}
+	prepared.SetScriptSourceReader(readScriptSource)
 	_, scope := p.engine.History()
 	profileID := controls.ProfileID
 	if profileID == "" {
@@ -220,6 +246,7 @@ func (p *profileSession) activate(base *compile.Effective, summary profile.Summa
 	}
 	p.rev++
 	p.base, p.summary, p.pinned = base, summary, pinned
+	p.readScriptSource = readScriptSource
 	return gen, profileID != scope.ProfileID, nil
 }
 
@@ -259,7 +286,7 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	// Reclaim pages from the previous switch before allocating the new profile.
 	debug.FreeOSMemory()
 	defer debug.FreeOSMemory()
-	base, err := profile.CompileSnapshot(snapshot, controls.Secrets)
+	base, readScriptSource, err := compileProfileSnapshot(snapshot, controls, p.retainScripts)
 	if err != nil {
 		s.logger.Warn("Profile refresh could not be compiled", "profile", controls.ProfileID, "err", err)
 		return err
@@ -267,7 +294,7 @@ func (s *Session) ReplaceProfile(snapshot []byte, controls profile.Controls) err
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
-	gen, switched, err := p.activate(base, profile.Describe(base), controls)
+	gen, switched, err := p.activate(base, profile.Describe(base), readScriptSource, controls)
 	if err != nil {
 		s.logger.Warn("Profile refresh could not be applied", "profile", controls.ProfileID, "err", err)
 		return err

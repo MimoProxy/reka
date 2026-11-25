@@ -62,8 +62,12 @@ func (h *Host) Close() {
 // PurgeAll discards rebuildable engine state for all registered hosts.
 func PurgeAll() {
 	liveHosts.Lock()
-	defer liveHosts.Unlock()
+	hosts := make([]*Host, 0, len(liveHosts.hosts))
 	for h := range liveHosts.hosts {
+		hosts = append(hosts, h)
+	}
+	liveHosts.Unlock()
+	for _, h := range hosts {
 		h.Purge()
 	}
 }
@@ -216,7 +220,7 @@ func (h *Host) finishRun(key string, state *breakerState, err error) {
 		// This execution was admitted before the current cooldown or trial.
 		return
 	}
-	failed := err != nil && !errors.Is(err, context.Canceled)
+	failed := err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrLowMemory)
 	if state.probing {
 		state.probing = false
 		switch {

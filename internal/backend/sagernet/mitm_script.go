@@ -72,7 +72,8 @@ func (s *mitmHTTPHandler) runScript(ctx context.Context, match *MITMScript, inpu
 		result, err = match.Run(ctx, job)
 		// Coarse clocks, as on Windows, can report a zero duration for a run
 		// that reached the engine, so classify by outcome as well.
-		executed = err == nil || result.Duration > 0 || mitmScriptReachedEngine(err)
+		executed = !errors.Is(err, script.ErrLowMemory) &&
+			(err == nil || result.Duration > 0 || mitmScriptReachedEngine(err))
 		if err == nil {
 			err = apply(result)
 		}
@@ -154,6 +155,8 @@ func mitmScriptOutcome(action script.Action, err error) (result, message string)
 		return "circuit-open", ""
 	case errors.Is(err, script.ErrBusy):
 		return "busy", ""
+	case errors.Is(err, script.ErrLowMemory), errors.Is(err, script.ErrMemoryExceeded):
+		return "low-memory", ""
 	}
 	var scriptErr *script.ScriptError
 	if errors.As(err, &scriptErr) {
@@ -164,7 +167,8 @@ func mitmScriptOutcome(action script.Action, err error) (result, message string)
 
 func mitmScriptReachedEngine(err error) bool {
 	var scriptErr *script.ScriptError
-	return errors.Is(err, script.ErrTimeout) || errors.Is(err, script.ErrNoDone) || errors.As(err, &scriptErr)
+	return errors.Is(err, script.ErrTimeout) || errors.Is(err, script.ErrNoDone) ||
+		errors.Is(err, script.ErrMemoryExceeded) || errors.As(err, &scriptErr)
 }
 
 func mitmScriptHeaders(header http.Header) []script.HeaderField {

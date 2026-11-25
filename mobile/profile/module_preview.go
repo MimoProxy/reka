@@ -37,7 +37,7 @@ type ModuleHostnames struct {
 
 // PreviewModule converts a module with the supplied arguments and optionally
 // resolves rule policies using an existing prepared profile. It uses only
-// locked Map Local resources from an acquired module snapshot.
+// locked Map Local and script resources from an acquired module snapshot.
 func PreviewModule(ctx context.Context, req ModulePreviewRequest, secrets secret.Store) (ModulePreviewResult, error) {
 	text, opts, err := readModuleInput(ctx, req.ModuleInput)
 	if err != nil {
@@ -89,7 +89,7 @@ func readModuleInput(ctx context.Context, input ModuleInput) ([]byte, module.Opt
 		if err != nil {
 			return nil, opts, err
 		}
-		opts.ID, opts.Resource = snapshot.Source.ID, snapshot.resourceResolver()
+		opts.ID, opts.ResourceForKind = snapshot.Source.ID, snapshot.resourceResolver()
 		if opts.Arguments == nil {
 			opts.Arguments = snapshot.Arguments
 		}
