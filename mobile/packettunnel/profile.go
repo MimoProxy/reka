@@ -36,14 +36,20 @@ type profileSession struct {
 	retainScripts      bool
 	readScriptSource   func(string) ([]byte, error)
 	networkUnavailable bool
+	// lanProxyError explains why the requested LAN proxy is not listening.
+	lanProxyError string
 }
 
 type ProfileStatus struct {
-	Mode      string        `json:"mode"`
-	BlockQUIC string        `json:"blockQuic,omitempty"`
-	IPVersion string        `json:"ipVersion,omitempty"`
-	Groups    []GroupStatus `json:"groups"`
-	Routes    []RouteHit    `json:"routes,omitempty"`
+	Mode      string `json:"mode"`
+	BlockQUIC string `json:"blockQuic,omitempty"`
+	IPVersion string `json:"ipVersion,omitempty"`
+	// LANProxy is the address the LAN proxy listens on, and LANProxyError
+	// why a requested one could not be opened.
+	LANProxy      string        `json:"lanProxy,omitempty"`
+	LANProxyError string        `json:"lanProxyError,omitempty"`
+	Groups        []GroupStatus `json:"groups"`
+	Routes        []RouteHit    `json:"routes,omitempty"`
 }
 
 type GroupStatus struct {
@@ -219,11 +225,28 @@ func (p *profileSession) publish(base *compile.Effective, summary profile.Summar
 // activate publishes a new generation and reports whether it belongs to a
 // different profile than the one it replaces.
 func (p *profileSession) activate(base *compile.Effective, summary profile.Summary, readScriptSource func(string) ([]byte, error), controls profile.Controls) (uint64, bool, error) {
+	lanProxyError := ""
+	if controls.LANProxy != nil {
+		if err := controls.LANProxy.Validate(); err != nil {
+			lanProxyError, controls.LANProxy = err.Error(), nil
+		}
+	}
 	eff, err := profile.ApplyControls(base, summary, controls)
 	if err != nil {
 		return 0, false, fmt.Errorf("invalid policy or routing mode: %w", err)
 	}
 	prepared, err := p.engine.Prepare(eff)
+	var prepareErr *generation.PrepareError
+	if err != nil && controls.LANProxy != nil && errors.As(err, &prepareErr) &&
+		prepareErr.Path == "/listeners/"+profile.LANProxyListenerID+"/listen" {
+		// A port taken by another app must not keep the tunnel down. The
+		// profile starts without the LAN proxy and the app shows why.
+		lanProxyError = prepareErr.Err.Error()
+		controls.LANProxy = nil
+		if eff, err = profile.ApplyControls(base, summary, controls); err == nil {
+			prepared, err = p.engine.Prepare(eff)
+		}
+	}
 	if err != nil {
 		return 0, false, fmt.Errorf("could not prepare profile outbounds or DNS: %w", err)
 	}
@@ -248,6 +271,7 @@ func (p *profileSession) activate(base *compile.Effective, summary profile.Summa
 	}
 	p.rev++
 	p.base, p.summary, p.pinned = base, summary, pinned
+	p.lanProxyError = lanProxyError
 	p.readScriptSource = readScriptSource
 	return gen, profileID != scope.ProfileID, nil
 }
@@ -334,6 +358,13 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 		BlockQUIC: eff.Routing.BlockQUIC,
 		IPVersion: eff.IPVersionOverride,
 		Groups:    make([]GroupStatus, 0, len(eff.Groups)),
+
+		LANProxyError: p.lanProxyError,
+	}
+	for _, listener := range eff.Listeners {
+		if listener.ID == profile.LANProxyListenerID {
+			status.LANProxy = listener.Listen.String()
+		}
 	}
 	observed := p.engine.GroupStatus()
 	for _, group := range eff.Groups {

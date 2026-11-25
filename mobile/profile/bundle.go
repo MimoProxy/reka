@@ -101,8 +101,11 @@ type Controls struct {
 	ScriptState string `json:"scriptState,omitempty"`
 	// LogFile is where an extension session appends its log as JSON lines,
 	// so the log outlives the extension process.
-	LogFile string       `json:"logFile,omitempty"`
-	Secrets secret.Store `json:"-"`
+	LogFile string `json:"logFile,omitempty"`
+	// LANProxy, when set, shares the tunnel with other devices on the local
+	// network through a mixed listener.
+	LANProxy *LANProxy    `json:"lanProxy,omitempty"`
+	Secrets  secret.Store `json:"-"`
 }
 
 func readBundleFile(path string) ([]byte, error) {
@@ -372,6 +375,9 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 		return nil, errors.New("unknown QUIC blocking mode")
 	}
 	eff.Routing = model.Routing{Mode: mode, Global: global, BlockQUIC: blockQUIC}
+	if err := applyLANProxy(eff, controls.LANProxy); err != nil {
+		return nil, err
+	}
 	opts := router.Options{Outbounds: ids, Groups: eff.Groups, Final: base.Final}
 	eff.Router, err = router.New(base.Router.Rules(), opts)
 	if err != nil {
