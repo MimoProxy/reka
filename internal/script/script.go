@@ -1,4 +1,4 @@
-// Package script hosts Surge-compatible HTTP scripts with replaceable execution engines.
+// Package script hosts Surge-compatible scripts with replaceable execution engines.
 package script
 
 import (
@@ -13,13 +13,21 @@ import (
 	"unicode/utf8"
 )
 
-// Kind identifies the HTTP phase in which a script runs.
+// Kind identifies when a script runs.
 type Kind string
 
 const (
 	KindHTTPRequest  Kind = "http-request"
 	KindHTTPResponse Kind = "http-response"
+	KindCron         Kind = "cron"
+	KindGeneric      Kind = "generic"
+	KindEvent        Kind = "event"
 )
+
+// IsHTTP reports whether the script runs during an HTTP exchange.
+func (k Kind) IsHTTP() bool {
+	return k == KindHTTPRequest || k == KindHTTPResponse
+}
 
 // Dialect identifies the platform whose $done semantics apply. The zero value
 // uses Surge semantics.
@@ -34,7 +42,7 @@ const (
 // HeaderField is one wire header field. Header lists retain order and duplicates.
 type HeaderField struct{ Name, Value string }
 
-// Script is the source and options for one HTTP script.
+// Script is the source and options for one script.
 type Script struct {
 	Key            string // Cache key. An empty key uses the source hash.
 	Name           string
@@ -115,7 +123,8 @@ type Job struct {
 // Done represents the first $done argument independently of dialect and phase.
 type Done struct {
 	Called     bool
-	HasValue   bool // The argument is neither undefined nor null.
+	HasValue   bool            // The argument is neither undefined nor null.
+	Value      json.RawMessage // The serialized argument for a background script.
 	URL        *string
 	Status     *int // The status or statusCode field.
 	Headers    []HeaderField
@@ -139,15 +148,17 @@ const (
 // Result is the host's interpretation of a $done argument. Set flags
 // distinguish omission from an explicit empty header list or body.
 type Result struct {
-	Action     Action
-	URL        *string
-	Status     int // Zero leaves the response status unchanged.
-	Headers    []HeaderField
-	HeadersSet bool
-	Body       []byte
-	BodySet    bool
-	Response   *Response
-	Duration   time.Duration // Time spent in the engine.
+	Action         Action
+	URL            *string
+	Status         int // Zero leaves the response status unchanged.
+	Headers        []HeaderField
+	HeadersSet     bool
+	Body           []byte
+	BodySet        bool
+	Response       *Response
+	Value          json.RawMessage
+	ValueTruncated bool          // Value is a JSON string preview when truncated.
+	Duration       time.Duration // Time spent in the engine.
 }
 
 var (

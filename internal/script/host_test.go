@@ -2,11 +2,13 @@ package script
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 )
@@ -101,6 +103,56 @@ func TestHostInterpretsDone(t *testing.T) {
 	}
 	if response.Status != 0 {
 		t.Fatal("host mutated the engine response")
+	}
+}
+
+func TestHostBackgroundDone(t *testing.T) {
+	for _, kind := range []Kind{KindCron, KindGeneric, KindEvent} {
+		t.Run(string(kind), func(t *testing.T) {
+			value := json.RawMessage(`{"title":"Panel","content":"Example","abort":true}`)
+			h := newTestHost(t, fakeEngine{run: func(_ context.Context, job *Job) (Done, error) {
+				if job.Script.Kind != kind || job.Input.Response != nil {
+					t.Errorf("unexpected background job: %+v", job)
+				}
+				return Done{Called: true, HasValue: true, Value: value, Abort: true, BodySet: true}, nil
+			}}, Limits{})
+			got, err := h.Run(t.Context(), &Script{Kind: kind}, &Input{}, Services{})
+			if err != nil || got.Action != ActionPass || got.BodySet || got.ValueTruncated || string(got.Value) != string(value) {
+				t.Fatalf("Run = %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestHostTruncatesBackgroundValue(t *testing.T) {
+	atLimit := `"` + strings.Repeat("a", maxDoneValue-2) + `"`
+	overLimit := `{"content":"` + strings.Repeat(`<🌊\n`, maxDoneValue) + `"}`
+	for _, tc := range []struct {
+		name, value string
+		truncated   bool
+	}{
+		{name: "at the limit", value: atLimit},
+		{name: "oversized object", value: overLimit, truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t, fakeEngine{run: func(context.Context, *Job) (Done, error) {
+				return Done{Called: true, HasValue: true, Value: json.RawMessage(tc.value)}, nil
+			}}, Limits{})
+			got, err := h.Run(t.Context(), &Script{Kind: KindGeneric}, &Input{}, Services{})
+			if err != nil || got.ValueTruncated != tc.truncated || len(got.Value) > maxDoneValue || !json.Valid(got.Value) {
+				t.Fatalf("Run = %v with %d bytes, truncated = %t", err, len(got.Value), got.ValueTruncated)
+			}
+			if !tc.truncated {
+				if string(got.Value) != tc.value {
+					t.Fatal("value changed within limit")
+				}
+				return
+			}
+			var preview string
+			if err := json.Unmarshal(got.Value, &preview); err != nil || !strings.HasPrefix(tc.value, preview) || preview == "" {
+				t.Fatal("truncated value is missing a valid JSON prefix")
+			}
+		})
 	}
 }
 
@@ -333,6 +385,80 @@ func TestHostConcurrencyQueueTimeout(t *testing.T) {
 	}
 	if _, err := h.Run(t.Context(), s, &Input{}, Services{}); err != nil {
 		t.Fatalf("queue timeout affected the circuit or slot: %v", err)
+	}
+}
+
+func TestHostCanceledQueuedRunDoesNotReadSource(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started, release := make(chan struct{}), make(chan struct{})
+		defer close(release)
+		h := newTestHost(t, fakeEngine{run: func(ctx context.Context, job *Job) (Done, error) {
+			if job.Script.Key != "running" {
+				t.Errorf("unexpected engine run for %q", job.Script.Key)
+				return Done{Called: true}, nil
+			}
+			close(started)
+			select {
+			case <-release:
+				return Done{Called: true}, nil
+			case <-ctx.Done():
+				return Done{}, ctx.Err()
+			}
+		}}, Limits{Concurrency: 1})
+		go func() {
+			if _, err := h.Run(t.Context(), &Script{Kind: KindGeneric, Key: "running"}, &Input{}, Services{}); err != nil {
+				t.Errorf("running script: %v", err)
+			}
+		}()
+		<-started
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			_, err := h.RunWithSource(ctx, &Script{Kind: KindCron, Key: "queued"}, &Input{}, Services{}, func(key string) ([]byte, error) {
+				t.Errorf("read source for queued script %q", key)
+				return []byte("$done()"), nil
+			})
+			result <- err
+		}()
+		synctest.Wait()
+		cancel()
+		if err := <-result; !errors.Is(err, ErrBusy) {
+			t.Fatalf("queued run returned %v, want %v", err, ErrBusy)
+		}
+	})
+}
+
+func TestHostRunsWithLockedSource(t *testing.T) {
+	const key, source = "locked", "$done()"
+	var calls int
+	h := newTestHost(t, fakeEngine{run: func(_ context.Context, job *Job) (Done, error) {
+		calls++
+		if job.Script.Key != key || job.Script.Source != source {
+			t.Errorf("loaded script = %+v", job.Script)
+		}
+		return Done{Called: true}, nil
+	}}, Limits{BreakerFailures: 1})
+	spec := &Script{Kind: KindGeneric, Key: key}
+	readErr := errors.New("source unavailable")
+	_, err := h.RunWithSource(t.Context(), spec, &Input{}, Services{}, func(string) ([]byte, error) {
+		return nil, readErr
+	})
+	if !errors.Is(err, readErr) || calls != 0 {
+		t.Fatalf("failed read returned %v after %d engine calls", err, calls)
+	}
+	read := func(got string) ([]byte, error) {
+		if got != key {
+			t.Errorf("source key = %q, want %q", got, key)
+		}
+		return []byte(source), nil
+	}
+	if _, err := h.RunWithSource(t.Context(), spec, &Input{}, Services{}, read); err != nil || calls != 1 || spec.Source != "" {
+		t.Fatalf("successful read returned %v after %d engine calls, script = %+v", err, calls, spec)
+	}
+	spec.Key = ""
+	if _, err := h.RunWithSource(t.Context(), spec, &Input{}, Services{}, read); err == nil || calls != 1 {
+		t.Fatalf("missing key returned %v after %d engine calls", err, calls)
 	}
 }
 

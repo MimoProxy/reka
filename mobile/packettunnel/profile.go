@@ -25,16 +25,17 @@ import (
 const ProfileAddress4 = "172.27.255.1/30"
 
 type profileSession struct {
-	mu               sync.Mutex
-	engine           *generation.Engine
-	base             *compile.Effective
-	summary          profile.Summary
-	pinned           map[string]bool
-	rev              uint64
-	trace            *routeTrace
-	sets             map[string]*router.RuleSet
-	retainScripts    bool
-	readScriptSource func(string) ([]byte, error)
+	mu                 sync.Mutex
+	engine             *generation.Engine
+	base               *compile.Effective
+	summary            profile.Summary
+	pinned             map[string]bool
+	rev                uint64
+	trace              *routeTrace
+	sets               map[string]*router.RuleSet
+	retainScripts      bool
+	readScriptSource   func(string) ([]byte, error)
+	networkUnavailable bool
 }
 
 type ProfileStatus struct {

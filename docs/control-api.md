@@ -134,6 +134,9 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `ListSecrets` | 无 | `names` 数组，不含值 |
 | `GenerateMITMCA` / `ImportMITMCA` / `GetMITMCA` / `ExportMITMCA` / `DeleteMITMCA` | 见 [MITM CA](#mitm-ca) | CA 状态、公开证书或删除结果 |
 | `GetMITMStatus` | 无 | 当前转发配置、CA 加载结果、临时绕过和累计计数，见 [MITM 状态](#mitm-status) |
+| `ListScripts` | 无 | 脚本配置与后台运行状态 |
+| `RunScript` | `id`，可选 `argument`、`wait: true` | 手动触发的后台脚本运行记录 |
+| `GetScriptRuns` | 可选 `id`、`limit` | 最近的后台脚本运行记录数组，新到旧 |
 | `Subscribe` | 可选 `types`、`epoch`、`after` | `subscribed: true`、`epoch`，持续推送事件 |
 | `Unsubscribe` | 无 | `subscribed: false` |
 
@@ -409,7 +412,34 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 `pinning_bypasses` 的每项包含 `hostname`、`reason`、`expires_at`。列表跨配置代际生效，按主机名记录，保留至多 256 项。`connections_total` 从进入 MITM 转发时开始计数，包含后续握手失败的连接。`requests_total` 统计已解析的请求，包含本地响应。两个计数均从本次内核运行开始累计。
 
-`scripts.status` 为 `enabled`、`disabled` 或 `unsupported`。`count` 是当前活动配置可匹配的 HTTP 脚本数。桌面与 Android 在启用 MITM 且有可匹配脚本时报告 `enabled`，iOS 报告 `unsupported`。`runs` 统计执行次数，`modified`、`failed`、`timeouts`、`oversize`、`circuit_open` 分别统计修改、失败、超时、正文超限和熔断放行。`notifications` 和 `notifications_dropped` 统计已交给接收端及被限速丢弃的通知。所有脚本计数跨配置代际累计。使用 `rekactl mitm-status` 查看状态。
+`scripts.status` 为 `enabled`、`disabled` 或 `unsupported`。`count` 是当前活动配置可匹配的 HTTP 脚本数。有脚本引擎、已启用 MITM 且有可匹配脚本时报告 `enabled`。缺少脚本引擎时报告 `unsupported`。`runs` 统计执行次数，`modified`、`failed`、`timeouts`、`oversize`、`circuit_open` 分别统计修改、失败、超时、正文超限和熔断放行。`notifications` 和 `notifications_dropped` 统计已交给接收端及被限速丢弃的通知。所有脚本计数跨配置代际累计。使用 `rekactl mitm-status` 查看状态。
+
+<a id="background-scripts"></a>
+
+### 后台脚本
+
+`ListScripts` 返回 `status` 和全部配置脚本的 `scripts` 数组。后台状态 `enabled` 表示存在可运行的后台脚本，`disabled` 表示当前配置没有可运行的后台脚本，`unsupported` 表示内核没有脚本引擎。
+
+每个脚本包含 `id`、`name`、`type`、`supported`、`timeout`（秒）和 `running`（是否正在后台运行）。适用时附带 `module`、`cronexp`、`event_name`、`argument`、`next_run` 和 `last_run`。`next_run` 是 cron 的下一次计划时刻。`last_run` 是后台脚本最近运行的摘要，省略返回值和日志。
+
+`RunScript` 支持可运行的 `cron`、`generic` 和 `event`。省略 `argument` 时使用配置中的参数，传入空字符串会将本次的 `$argument` 设为空字符串。默认等待运行结束。使用 `wait: false` 时，新启动的运行返回 `result: "running"` 和 `run_id`。同一脚本的重叠触发返回 `overlap`。
+
+`GetScriptRuns` 按运行开始时间从新到旧返回记录，包括正在运行的脚本。省略 `id` 或传入空字符串可查看所有脚本。`limit` 默认 20，最大为内存记录容量（iOS 16 条，其他平台 64 条）。
+
+每条运行记录包含 `run_id`、`id`、`name`、`type`、`trigger`、`started_at`、`duration_ms` 和 `result`，适用时附带 `module`、`event` 和 `error`。`trigger` 取 `cron`、`event` 或 `manual`，`event` 为事件名称。`value` 是 `$done` 的 JSON 参数，最多 16 KiB。超出时返回 JSON 字符串预览并标记 `value_truncated: true`。`logs` 是由 `level` 和 `message` 组成的列表，每次运行最多 64 行、共 16 KiB，超出时标记 `logs_truncated: true`。
+
+`result` 取值为 `running`、`done`、`failed`、`timeout`、`no-done`、`circuit-open`、`busy`、`low-memory`、`overlap` 和 `unsupported`。
+
+iOS Packet Tunnel 操作使用 `scripts`、`runScript` 和 `scriptRuns`。`runScript` 必须提供 `target`，可传 `argument` 和 `wait`，默认立即返回。`scriptRuns` 可按 `target` 和 `limit` 筛选。
+
+```sh
+./bin/rekactl scripts
+./bin/rekactl script-run sample -argument 'region=sg'
+./bin/rekactl script-run sample -no-wait
+./bin/rekactl -json script-runs -id sample -limit 5
+```
+
+三个命令均支持置于子命令前的全局 `-json`。
 
 ## 8. 事件订阅与恢复
 

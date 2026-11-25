@@ -184,15 +184,17 @@ func callWithThis(fn goja.Callable, this goja.Value, args ...goja.Value) goja.Va
 
 func (s *session) installGlobals(start time.Time) error {
 	spec, in := s.job.Script, s.job.Input
-	req := s.vm.NewObject()
-	s.set(req, "id", in.Request.ID)
-	s.set(req, "method", in.Request.Method)
-	s.set(req, "url", in.Request.URL)
-	s.set(req, "headers", s.headers(in.Request.Headers, spec.FullHeader))
-	if spec.Kind == script.KindHTTPRequest && in.Request.Body != nil {
-		s.set(req, "body", s.inputBody(in.Request.Body))
+	if spec.Kind.IsHTTP() {
+		req := s.vm.NewObject()
+		s.set(req, "id", in.Request.ID)
+		s.set(req, "method", in.Request.Method)
+		s.set(req, "url", in.Request.URL)
+		s.set(req, "headers", s.headers(in.Request.Headers, spec.FullHeader))
+		if spec.Kind == script.KindHTTPRequest && in.Request.Body != nil {
+			s.set(req, "body", s.inputBody(in.Request.Body))
+		}
+		s.global("$request", req)
 	}
-	s.global("$request", req)
 	if spec.Kind == script.KindHTTPResponse {
 		resp := s.vm.NewObject()
 		s.set(resp, "status", in.Response.Status)

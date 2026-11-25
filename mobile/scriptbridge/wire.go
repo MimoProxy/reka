@@ -59,6 +59,8 @@ type runLimits struct {
 	UngzipMax       int64 `json:"ungzipMax"`
 }
 
+// Background jobs omit request and response. Native hosts use kind to select
+// the globals and return the raw JSON argument in the completion's value.
 type jobInput struct {
 	Key        string         `json:"key"`
 	Name       string         `json:"name"`
@@ -71,13 +73,13 @@ type jobInput struct {
 	Argument   any            `json:"argument"`
 	TimeoutMS  int64          `json:"timeoutMs"`
 	SourceSize int            `json:"sourceSize"`
-	Request    requestInput   `json:"request"`
+	Request    *requestInput  `json:"request,omitempty"`
 	Response   *responseInput `json:"response,omitempty"`
 	Env        environment    `json:"env"`
 	Limits     runLimits      `json:"limits"`
 }
 
-func marshalJob(job *script.Job) (metadata, responseBody []byte, err error) {
+func marshalJob(job *script.Job) (metadata, requestBody, responseBody []byte, err error) {
 	spec, input := job.Script, job.Input
 	timeout := spec.Timeout
 	if timeout <= 0 {
@@ -87,20 +89,15 @@ func marshalJob(job *script.Job) (metadata, responseBody []byte, err error) {
 	if spec.ArgumentObject {
 		argument, err = script.ParseArgumentObject(spec.Argument)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	request := input.Request
 	env, limits := job.Env, job.Limits
 	w := jobInput{
 		Key: spec.CacheKey(), Name: spec.Name, Path: spec.Path, Kind: spec.Kind,
 		Dialect: spec.Dialect, Engine: spec.Engine, BinaryBody: spec.BinaryBody,
 		FullHeader: spec.FullHeader, Argument: argument,
 		TimeoutMS: max(1, timeout.Milliseconds()), SourceSize: len(spec.Source),
-		Request: requestInput{
-			ID: request.ID, Method: request.Method, URL: request.URL,
-			Headers: encodeHeaders(request.Headers), HasBody: request.Body != nil,
-		},
 		Env: environment{
 			System: env.System, SurgeVersion: env.SurgeVersion, SurgeBuild: env.SurgeBuild,
 			Language: env.Language, DeviceModel: env.DeviceModel,
@@ -110,9 +107,17 @@ func marshalJob(job *script.Job) (metadata, responseBody []byte, err error) {
 			LogLineMax: limits.LogLineMax, StoreValueMax: limits.StoreValueMax, UngzipMax: limits.UngzipMax,
 		},
 	}
-	if res := input.Response; spec.Kind == script.KindHTTPResponse && res != nil {
-		w.Response = &responseInput{Status: res.Status, Headers: encodeHeaders(res.Headers), HasBody: res.Body != nil}
-		responseBody = res.Body
+	if spec.Kind.IsHTTP() {
+		request := input.Request
+		w.Request = &requestInput{
+			ID: request.ID, Method: request.Method, URL: request.URL,
+			Headers: encodeHeaders(request.Headers), HasBody: request.Body != nil,
+		}
+		requestBody = request.Body
+		if res := input.Response; spec.Kind == script.KindHTTPResponse && res != nil {
+			w.Response = &responseInput{Status: res.Status, Headers: encodeHeaders(res.Headers), HasBody: res.Body != nil}
+			responseBody = res.Body
+		}
 	}
 	metadata, err = json.Marshal(w)
 	return
@@ -131,16 +136,17 @@ type doneError struct {
 }
 
 type doneOutput struct {
-	Called     bool          `json:"called"`
-	HasValue   bool          `json:"hasValue"`
-	URL        *string       `json:"url"`
-	Status     *int          `json:"status"`
-	Headers    headerPairs   `json:"headers"`
-	HeadersSet bool          `json:"headersSet"`
-	BodySet    bool          `json:"bodySet"`
-	Response   *doneResponse `json:"response"`
-	Abort      bool          `json:"abort"`
-	Error      *doneError    `json:"error"`
+	Called     bool            `json:"called"`
+	HasValue   bool            `json:"hasValue"`
+	Value      json.RawMessage `json:"value,omitempty"`
+	URL        *string         `json:"url"`
+	Status     *int            `json:"status"`
+	Headers    headerPairs     `json:"headers"`
+	HeadersSet bool            `json:"headersSet"`
+	BodySet    bool            `json:"bodySet"`
+	Response   *doneResponse   `json:"response"`
+	Abort      bool            `json:"abort"`
+	Error      *doneError      `json:"error"`
 }
 
 func (result completion) decode() (script.Done, error) {
@@ -157,6 +163,9 @@ func (result completion) decode() (script.Done, error) {
 	done := script.Done{
 		Called: w.Called, HasValue: w.HasValue, URL: w.URL, Status: w.Status,
 		Headers: w.Headers.decode(), HeadersSet: w.HeadersSet, BodySet: w.BodySet, Abort: w.Abort,
+	}
+	if string(w.Value) != "null" {
+		done.Value = w.Value
 	}
 	if w.BodySet {
 		done.Body = explicitBody(result.body)

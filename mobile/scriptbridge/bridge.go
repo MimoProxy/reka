@@ -1,4 +1,4 @@
-// Package scriptbridge runs HTTP scripts through a native host.
+// Package scriptbridge runs scripts through a native host.
 package scriptbridge
 
 import (
@@ -73,7 +73,7 @@ func (b *Bridge) Run(ctx context.Context, job *script.Job) (script.Done, error) 
 	normalized := *job
 	normalized.Limits = job.Limits.WithDefaults()
 	job = &normalized
-	metadata, responseBody, err := marshalJob(job)
+	metadata, requestBody, responseBody, err := marshalJob(job)
 	if err != nil {
 		return script.Done{}, err
 	}
@@ -94,7 +94,7 @@ func (b *Bridge) Run(ctx context.Context, job *script.Job) (script.Done, error) 
 	run := b.next
 	b.runs[run] = r
 	b.mu.Unlock()
-	b.host.Start(run, metadata, job.Input.Request.Body, responseBody)
+	b.host.Start(run, metadata, requestBody, responseBody)
 
 	var result completion
 	select {

@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp/syntax"
+	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
 	scriptapi "github.com/MimoProxy/reka/internal/script"
+	"github.com/MimoProxy/reka/internal/script/cron"
 )
 
 // Script is a validated script definition. Hash is the locked source reference.
@@ -23,6 +25,9 @@ type Script struct {
 	Timeout        int    `json:"timeout"` // Seconds.
 	Argument       string `json:"argument,omitempty"`
 	ArgumentType   string `json:"argument-type,omitempty"`
+	CronExp        string `json:"cronexp,omitempty"`
+	EventName      string `json:"event-name,omitempty"`
+	WakeSystem     *bool  `json:"wake-system,omitempty"`
 	Engine         string `json:"engine"`
 	Format         string `json:"format"`
 	Hash           string `json:"hash,omitempty"`
@@ -86,7 +91,8 @@ func (c *compiler) compileScript(def model.Script, path string) Script {
 		RequiresBody: valueOr(def.RequiresBody, false), BinaryBodyMode: valueOr(def.BinaryBodyMode, false),
 		Timeout: valueOr(def.Timeout, model.DefaultScriptTimeout), Argument: valueOr(def.Argument, ""),
 		ArgumentType: valueOr(def.ArgumentType, ""),
-		Engine:       valueOr(def.Engine, "auto"), Format: valueOr(def.Format, "surge"), Hash: valueOr(def.Hash, ""),
+		CronExp:      valueOr(def.CronExp, ""), EventName: strings.TrimSpace(valueOr(def.EventName, "")), WakeSystem: def.WakeSystem,
+		Engine: valueOr(def.Engine, "auto"), Format: valueOr(def.Format, "surge"), Hash: valueOr(def.Hash, ""),
 	}
 	switch script.Type {
 	case "http-request", "http-response":
@@ -96,7 +102,23 @@ func (c *compiler) compileScript(def model.Script, path string) Script {
 		} else if _, err := syntax.Parse(script.Pattern, syntax.Perl); err != nil {
 			c.errorf(doc, path+"/pattern", "script.pattern", "invalid RE2 pattern: %v", err)
 		}
-	case "cron", "generic", "event", "dns", "rule":
+	case "cron":
+		script.Supported = true
+		if _, err := cron.Parse(script.CronExp); err != nil {
+			c.errorf(doc, path+"/cronexp", "script.cronexp", "%v", err)
+		}
+	case "generic":
+		script.Supported = true
+	case "event":
+		switch script.EventName {
+		case "":
+			c.errorf(doc, path+"/event-name", "script.event-name", "event scripts require an event name")
+		case "network-changed":
+			script.Supported = true
+		default:
+			c.warnf(doc, path+"/event-name", "script.unsupported-event", "script event %q is not supported", script.EventName)
+		}
+	case "dns", "rule":
 		c.warnf(doc, path+"/type", "script.unsupported-type", "script type %q is not supported", script.Type)
 	default:
 		c.errorf(doc, path+"/type", "script.type", "invalid script type %q", script.Type)

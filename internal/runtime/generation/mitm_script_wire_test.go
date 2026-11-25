@@ -471,6 +471,27 @@ $httpClient.get(%[1]q, (err, res, data) => {
 	checkScriptWireBody(t, readScriptWireResponse(t, client, req), http.StatusOK, "/rule/named")
 }
 
+func TestGenericScriptWireHTTPClientWithoutMITM(t *testing.T) {
+	remote := scriptWireUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.URL.Path)
+	}, false)
+	engine := NewEngine(EngineOptions{})
+	t.Cleanup(engine.Close)
+	source := fmt.Sprintf(`
+$httpClient.get(%[1]q, (error, response, body) => {
+  if (error || response.status !== 200) throw Error("default routing failed: " + error);
+  $httpClient.get({url: %[2]q, policy: "DIRECT"}, (policyError, policyResponse, policyBody) => {
+    if (policyError || policyResponse.status !== 200) throw Error("policy routing failed: " + policyError);
+    $done({content: body + policyBody});
+  });
+});`, remote.URL+"/rule", remote.URL+"/policy")
+	activateScriptTestProfile(t, engine, 1, source, false, compile.Script{ID: "widget", Type: "generic", Supported: true})
+	run, err := engine.RunScript(t.Context(), "widget", nil, true)
+	if err != nil || run.Result != "done" || string(run.Value) != `{"content":"/rule/policy"}` {
+		t.Fatalf("generic HTTP client run = %+v, %v", run, err)
+	}
+}
+
 func TestMITMScriptWirePersistentStore(t *testing.T) {
 	f := newScriptWireFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unexpected origin request", http.StatusBadRequest)

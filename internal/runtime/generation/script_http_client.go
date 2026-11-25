@@ -27,6 +27,13 @@ type scriptHTTPClient struct {
 	engine   *Engine
 	snapshot *runtime.Snapshot[*sagernet.Outbound]
 	state    routingState
+	routing  scriptRouting
+}
+
+type scriptRouting interface {
+	retain() bool
+	release()
+	outboundPins() map[*sagernet.Outbound]*sagernet.PinnedOutbound
 }
 
 var _ script.HTTPClient = scriptHTTPClient{}
@@ -39,10 +46,10 @@ func (c scriptHTTPClient) Do(ctx context.Context, input *script.HTTPRequest) (*s
 		return nil, errors.New("HTTP client request body exceeds size limit")
 	}
 	g := c.snapshot.Value.(*generation)
-	if !g.mitm.retain() {
+	if !c.routing.retain() {
 		return nil, errors.New("HTTP client routing generation is unavailable")
 	}
-	defer g.mitm.release()
+	defer c.routing.release()
 	policy := ""
 	if input.Policy != "" {
 		var err error
@@ -57,7 +64,7 @@ func (c scriptHTTPClient) Do(ctx context.Context, input *script.HTTPRequest) (*s
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	ctx = sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, g.mitm.pins), c.snapshot)
+	ctx = sniffSnapshotContext(sagernet.WithPinnedOutbounds(ctx, c.routing.outboundPins()), c.snapshot)
 	req, err := http.NewRequestWithContext(ctx, input.Method, input.URL, bytes.NewReader(input.Body))
 	if err != nil {
 		return nil, err
@@ -77,10 +84,10 @@ func (c scriptHTTPClient) Do(ctx context.Context, input *script.HTTPRequest) (*s
 		// deadline and retain the outbound pins even when net/http detaches
 		// the dial context and returns before a dial has stopped.
 		DialContext: func(_ context.Context, network, address string) (net.Conn, error) {
-			if !g.mitm.retain() {
+			if !c.routing.retain() {
 				return nil, errors.New("HTTP client routing generation is unavailable")
 			}
-			defer g.mitm.release()
+			defer c.routing.release()
 			return c.dial(ctx, g, policy, network, address)
 		},
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: input.Insecure},
@@ -182,7 +189,7 @@ func (c scriptHTTPClient) dial(ctx context.Context, g *generation, policy, netwo
 			if !ok {
 				return c.snapshot.Generation, nil, nil, false, nil
 			}
-			release, borrowed := g.mitm.pins[out].Borrow()
+			release, borrowed := c.routing.outboundPins()[out].Borrow()
 			return c.snapshot.Generation, out, release, borrowed, nil
 		}
 		route := c.engine.routeWithAcquire(ctx, md, acquire, c.snapshot, c.state, false)
@@ -298,9 +305,9 @@ func (e *Engine) scriptListenerPort(g *generation, port uint16) bool {
 	return debug.Port() == port
 }
 
-func (e *Engine) scriptServices(snap *runtime.Snapshot[*sagernet.Outbound], state routingState, id, module string, log func(level, msg string)) script.Services {
+func (e *Engine) scriptServices(snap *runtime.Snapshot[*sagernet.Outbound], state routingState, routing scriptRouting, id, module string, log func(level, msg string)) script.Services {
 	return script.Services{
-		HTTP:   scriptHTTPClient{engine: e, snapshot: snap, state: state},
+		HTTP:   scriptHTTPClient{engine: e, snapshot: snap, state: state, routing: routing},
 		Store:  e.scriptStore,
 		Notify: scriptNotifier{notices: e.scriptNotifications, id: id, module: module},
 		Log:    log,

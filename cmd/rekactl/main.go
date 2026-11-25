@@ -46,6 +46,9 @@ configuration
 runtime
   status
   mitm-status                               show MITM and script counters
+  scripts                                   list configured scripts
+  script-run ID [-argument TEXT] [-no-wait]  run a background script
+  script-runs [-id ID] [-limit N]            list recent background script runs
   group-status                               observed automatic choices and health
   explain DESTINATION [-network tcp|udp] [-source ADDR] [-addr IP]... [-resolve] [-process NAME]
   connections
@@ -196,6 +199,12 @@ func run(args []string) error {
 		return cmdStatus()
 	case "mitm-status":
 		return cmdMITMStatus(rest)
+	case "scripts":
+		return cmdScripts(rest)
+	case "script-run":
+		return cmdScriptRun(rest)
+	case "script-runs":
+		return cmdScriptRuns(rest)
 	case "explain":
 		return cmdExplain(rest)
 	case "connections":

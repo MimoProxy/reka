@@ -25,6 +25,8 @@ type Operation struct {
 	Offset     int                  `json:"offset,omitempty"`
 	Limit      int                  `json:"limit,omitempty"`
 	Target     string               `json:"target,omitempty"`
+	Argument   *string              `json:"argument,omitempty"`
+	Wait       bool                 `json:"wait,omitempty"`
 	Network    string               `json:"network,omitempty"`
 	Resolve    bool                 `json:"resolve,omitempty"`
 	Rule       string               `json:"rule,omitempty"`
@@ -113,6 +115,19 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return s.historyPage(history.DNS, op)
 	case "logs":
 		return s.historyPage(history.Logs, op)
+	case "scripts", "runScript", "scriptRuns":
+		if s.profile == nil {
+			return nil, errors.New("the operation requires a profile")
+		}
+		engine := s.profile.engine
+		switch op.Action {
+		case "scripts":
+			return engine.ListScripts(), nil
+		case "runScript":
+			return engine.RunScript(s.ctx, op.Target, op.Argument, op.Wait)
+		default:
+			return engine.GetScriptRuns(op.Target, op.Limit), nil
+		}
 	case "probe":
 		return s.probe(op)
 	case "speedStart":
@@ -272,6 +287,10 @@ func (s *Session) NetworkChanged(available, changed bool) {
 		if changed {
 			p.engine.CloseConnections(nil)
 		}
+		if available && (changed || p.networkUnavailable) {
+			p.engine.NotifyNetworkChanged()
+		}
+		p.networkUnavailable = !available
 	} else {
 		s.outbound.CloseIdleConnections()
 		if changed {

@@ -31,6 +31,11 @@ type Script struct {
 	Hash           *string           `yaml:"hash"`
 	Download       *ResourceDownload `yaml:"download"`
 	File           *string           `yaml:"file"`
+
+	// Omit absent settings from JSON so existing module script IDs stay stable.
+	CronExp    *string `yaml:"cronexp" json:",omitempty"`
+	EventName  *string `yaml:"event-name" json:",omitempty"`
+	WakeSystem *bool   `yaml:"wake-system" json:",omitempty"`
 }
 
 func ValidScriptFile(path string) bool {

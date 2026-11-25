@@ -586,25 +586,30 @@ URL 重写改变目标主机时，内核用该连接所属配置的路由为请�
 
 ### 脚本 `scripts`
 
-`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。桌面平台与 Android 在 MITM HTTP/1.1 转发时执行脚本，请求与响应方向各取第一条匹配。iOS 仍合成及匹配脚本，记录 `unsupported` 后原样放行。 [脚本运行与执行顺序](modules.md#script-execution)
+`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。HTTP 脚本在 MITM HTTP/1.1 转发时执行，请求与响应方向各取第一条匹配。后台脚本独立于 MITM 运行。iOS 由客户端提供脚本引擎。 [脚本运行与执行顺序](modules.md#script-execution)
 
 | 字段 | 类型 / 默认值 | 含义及限制 |
 | --- | --- | --- |
 | `id` | 必填字符串 | 原生稳定 ID，同一层内唯一 |
 | `name` | 可选字符串 | 显示名称 |
-| `type` | 必填字符串 | `http-request` 或 `http-response`。`cron`、`generic`、`event`、`dns`、`rule` 可保留配置，编译时发出警告并标记为不可执行 |
+| `type` | 必填字符串 | 支持 `http-request`、`http-response`、`cron`、`generic` 和 `event`。`dns` 和 `rule` 标记为不可执行，并产生编译警告 |
 | `pattern` | RE2 正则 | HTTP 脚本必填，匹配完整 URL，编译时检查语法 |
-| `requires-body` | 布尔，默认 `false` | 是否向脚本提供消息体 |
-| `binary-body-mode` | 布尔，默认 `false` | 以字节传递消息体 |
-| `max-size` | 整数，单位为字节 | iOS 默认值和硬上限均为 512 KiB。其他平台默认 10 MiB，硬上限 32 MiB。`0` 和 `-1` 使用硬上限，正数与硬上限取较小值。需要正文时，传输体或解码后的正文超过限额会跳过脚本 |
+| `cronexp` | 字符串 | `cron` 脚本必填。五字段为分、时、日、月、周，六字段在最前面加秒 |
+| `event-name` | 字符串 | `event` 脚本必填。支持 `network-changed`，其他事件名称保留并标记为不可执行 |
+| `wake-system` | 可选布尔 | 兼容设置。Reka 无法唤醒设备 |
+| `requires-body` | 布尔，默认 `false` | 是否向 HTTP 脚本提供消息体 |
+| `binary-body-mode` | 布尔，默认 `false` | 以字节向 HTTP 脚本传递消息体 |
+| `max-size` | 整数，单位为字节 | HTTP 脚本正文限额。iOS 默认值和硬上限均为 512 KiB。其他平台默认 10 MiB，硬上限 32 MiB。`0` 和 `-1` 使用硬上限，正数与硬上限取较小值。需要正文时，传输体或解码后的正文超过限额会跳过脚本 |
 | `timeout` | 整数，1–3600 秒，默认 5 秒 | 脚本运行时限 |
 | `argument` | 可选字符串 | 非空值原样传给脚本，省略或空字符串时 `$argument` 为 `undefined` |
 | `argument-type` | `string` 或 `object`，默认 `string` | 使用 `object` 时，`argument` 必须是 JSON 对象文本，脚本从 `$argument` 读取解析后的对象 |
-| `engine` | `auto`（默认）、`jsc`、`webview` | 保留兼容设置。桌面平台与 Android 使用 goja，iOS 暂停执行脚本 |
+| `engine` | `auto`（默认）、`jsc`、`webview` | 保留兼容设置。桌面平台与 Android 使用 goja，iOS 由客户端选择引擎 |
 | `format` | `surge`（默认）、`loon`、`stash` | 请求脚本的无参 `$done()` 在 `surge` 中放行，在 `loon` 和 `stash` 中中断连接。响应脚本的无参 `$done()` 均放行 |
-| `hash` | SHA-256 字符串 | HTTP 脚本必填，引用非空且不超过 2 MiB 的已入库源码 |
+| `hash` | SHA-256 字符串 | 可执行的脚本必填，引用非空且不超过 2 MiB 的已入库源码 |
 | `download` | 可选对象 | `url` 为不含内联凭据或片段的 HTTP(S) URL，或 secret 引用。`interval` 为 300–604800 秒，省略或设为 `0` 时使用 86400 秒。`automatic` 默认 `false` |
 | `file` | 可选绝对路径 | 手动刷新时从内核所在设备读取普通文件 |
+
+`cronexp` 支持 `*`、数值、列表、范围和步长，日与周字段也支持 `?`。步长可写为 `*/n`、`a-b/n` 或 `a/n`，其中 `a/n` 从 `a` 开始匹配至该字段上限。月份和星期可用不区分大小写的英语三字母缩写，`0` 和 `7` 均表示星期日。同时限定日和周时，匹配任一字段即可。`"*/30 0,1,7-23 * * *"` 指在列出的小时内每半小时触发一次。
 
 `download` 和 `file` 最多写一个。两者均省略时，脚本固定使用 `hash`。为 profile 脚本声明刷新来源前，先通过 `StageResource` 入库首个版本，再提交包含 `hash` 的脚本配置。执行 `rekactl resource list` 可查看托管脚本，执行 `rekactl resource refresh script ID` 可手动刷新。刷新只接受非空、至多 2 MiB 的 UTF-8 源码，失败时保留原哈希。 [控制 API](control-api.md#托管脚本)
 

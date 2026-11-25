@@ -12,10 +12,11 @@ import (
 )
 
 type sceneObservation struct {
-	name      string
-	addresses []netip.Addr
-	at        time.Time
-	err       string
+	name                 string
+	addresses            []netip.Addr
+	addressesUnavailable bool
+	at                   time.Time
+	err                  string
 }
 
 type manualScene struct {
@@ -24,13 +25,19 @@ type manualScene struct {
 }
 
 // refreshSceneObservation is called under the engine lifecycle lock.
-func (e *Engine) refreshSceneObservation(g *generation) {
+func (e *Engine) refreshSceneObservation(g *generation) *sceneObservation {
 	if g.eff == nil || !slices.ContainsFunc(g.eff.NetworkScenes, func(scene compile.NetworkScene) bool {
 		return scene.Interface != "" || len(scene.CIDRs) != 0
 	}) {
 		e.sceneObservation.Store(nil)
-		return
+		return nil
 	}
+	obs := e.observeSceneInterface()
+	e.sceneObservation.Store(obs)
+	return obs
+}
+
+func (e *Engine) observeSceneInterface() *sceneObservation {
 	obs := &sceneObservation{at: time.Now().UTC()}
 	iface, err := e.sceneInterface()
 	if err != nil {
@@ -39,7 +46,9 @@ func (e *Engine) refreshSceneObservation(g *generation) {
 		obs.err = "default interface is down"
 	} else {
 		obs.name = iface.Name
-		if addrs, err := iface.Addrs(); err == nil {
+		if addrs, err := iface.Addrs(); err != nil {
+			obs.addressesUnavailable = true
+		} else {
 			for _, value := range addrs {
 				if p, err := netip.ParsePrefix(value.String()); err == nil {
 					obs.addresses = append(obs.addresses, p.Addr().Unmap())
@@ -47,7 +56,7 @@ func (e *Engine) refreshSceneObservation(g *generation) {
 			}
 		}
 	}
-	e.sceneObservation.Store(obs)
+	return obs
 }
 
 func (e *Engine) sceneInterface() (*net.Interface, error) {

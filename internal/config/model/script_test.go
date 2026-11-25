@@ -43,6 +43,23 @@ func TestDecodeScriptFieldDiagnostics(t *testing.T) {
 	}
 }
 
+func TestDecodeBackgroundScriptFields(t *testing.T) {
+	const input = `schema-version: 1
+scripts:
+  - {id: refresh, type: cron, cronexp: "0 10 * * *", wake-system: false}
+  - {id: network, type: event, event-name: network-changed}
+`
+	profile, positions, ds := ParseProfile([]byte(input))
+	if ds.HasErrors() || len(profile.Scripts) != 2 {
+		t.Fatal(ds)
+	}
+	cron, event := profile.Scripts[0], profile.Scripts[1]
+	if cron.CronExp == nil || *cron.CronExp != "0 10 * * *" || cron.WakeSystem == nil || *cron.WakeSystem ||
+		event.EventName == nil || *event.EventName != "network-changed" || event.WakeSystem != nil || positions["/scripts/network/event-name"].Line != 4 {
+		t.Fatalf("background scripts = %+v, positions = %+v", profile.Scripts, positions)
+	}
+}
+
 func TestScriptDownloadURLsMaskAndRestore(t *testing.T) {
 	const raw = `https://cdn.example.test/script?token=private-value`
 	for _, tc := range []struct {

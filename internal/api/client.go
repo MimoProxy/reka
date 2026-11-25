@@ -159,6 +159,24 @@ func (c *Client) ListModules() ([]ModuleInfo, error) {
 	return modules, err
 }
 
+func (c *Client) ListScripts() (ScriptList, error) {
+	var list ScriptList
+	err := c.Call("ListScripts", nil, &list)
+	return list, err
+}
+
+func (c *Client) RunScript(req RunScriptRequest) (ScriptRun, error) {
+	var run ScriptRun
+	err := c.Call("RunScript", req, &run)
+	return run, err
+}
+
+func (c *Client) GetScriptRuns(req GetScriptRunsRequest) ([]ScriptRun, error) {
+	var runs []ScriptRun
+	err := c.Call("GetScriptRuns", req, &runs)
+	return runs, err
+}
+
 func (c *Client) GetModuleReport(req GetModuleReportRequest) (module.Report, error) {
 	var report module.Report
 	err := c.Call("GetModuleReport", req, &report)

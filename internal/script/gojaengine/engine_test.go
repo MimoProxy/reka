@@ -143,6 +143,36 @@ func TestLanguageFeatures(t *testing.T) {
 	})
 }
 
+func TestBackgroundGlobalsAndDone(t *testing.T) {
+	host := newTestHost(t, script.Limits{}, script.Environment{System: "test"})
+	argument := "input"
+	for _, kind := range []script.Kind{script.KindCron, script.KindGeneric, script.KindEvent} {
+		t.Run(string(kind), func(t *testing.T) {
+			result := runScript(t, host, script.Script{Kind: kind, Argument: &argument, Source: `
+				if (typeof $request !== "undefined" || typeof $response !== "undefined" ||
+					$argument !== "input" || $environment.system !== "test") {
+					throw new Error("unexpected background globals");
+				}
+				setTimeout(() => $done({type: $script.type, abort: true, body: "text"}), 0);
+			`}, &script.Input{}, script.Services{})
+			want := fmt.Sprintf(`{"type":%q,"abort":true,"body":"text"}`, kind)
+			if string(result.Value) != want || result.Action != script.ActionPass || result.BodySet || result.ValueTruncated {
+				t.Fatalf("Run = %+v, want value %s", result, want)
+			}
+		})
+	}
+	for _, argument := range []string{"", "undefined", "null", "false", "0", `""`, "[1,2]"} {
+		result := runScript(t, host, script.Script{Kind: script.KindGeneric, Source: "$done(" + argument + ")"}, &script.Input{}, script.Services{})
+		want := argument
+		if want == "undefined" || want == "null" {
+			want = ""
+		}
+		if string(result.Value) != want {
+			t.Errorf("$done(%s) value = %s, want %s", argument, result.Value, want)
+		}
+	}
+}
+
 func TestDone(t *testing.T) {
 	host := newTestHost(t, script.Limits{}, script.Environment{})
 	tests := []struct {

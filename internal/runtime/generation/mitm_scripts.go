@@ -43,25 +43,9 @@ func newMITMScriptTable(defs []compile.Script, logger *slog.Logger) mitmScriptTa
 			logger.Warn("invalid HTTP script pattern", "source", "script", "script_id", def.ID, "err", err)
 			continue
 		}
-		name, path := def.Name, def.Path
-		if name == "" {
-			name = def.ID
-		}
-		if path == "" {
-			path = def.ID
-		}
-		var argument *string
-		if def.Argument != "" {
-			argument = &def.Argument
-		}
 		entry := mitmScriptEntry{
 			pattern: pattern, id: def.ID, module: def.Module, requiresBody: def.RequiresBody,
-			spec: script.Script{
-				Key: def.Hash, Name: name, Path: path, Kind: kind, Dialect: script.Dialect(def.Format),
-				Engine: def.Engine, BinaryBody: def.BinaryBodyMode, Argument: argument,
-				ArgumentObject: def.ArgumentType == "object",
-				Timeout:        time.Duration(def.Timeout) * time.Second, MaxSize: def.MaxSize,
-			},
+			spec: scriptSpec(def),
 		}
 		if kind == script.KindHTTPRequest {
 			table.requests = append(table.requests, entry)
@@ -70,6 +54,26 @@ func newMITMScriptTable(defs []compile.Script, logger *slog.Logger) mitmScriptTa
 		}
 	}
 	return table
+}
+
+func scriptSpec(def compile.Script) script.Script {
+	name, path := def.Name, def.Path
+	if name == "" {
+		name = def.ID
+	}
+	if path == "" {
+		path = def.ID
+	}
+	var argument *string
+	if def.Argument != "" {
+		argument = &def.Argument
+	}
+	return script.Script{
+		Key: def.Hash, Name: name, Path: path, Kind: script.Kind(def.Type), Dialect: script.Dialect(def.Format),
+		Engine: def.Engine, BinaryBody: def.BinaryBodyMode, Argument: argument,
+		ArgumentObject: def.ArgumentType == "object",
+		Timeout:        time.Duration(def.Timeout) * time.Second, MaxSize: def.MaxSize,
+	}
 }
 
 func (t *mitmScriptTable) count() int { return len(t.requests) + len(t.responses) }
@@ -98,12 +102,21 @@ func (e *Engine) initScripts() {
 	e.scriptHost = script.NewHost(engine, script.Limits{
 		Concurrency: platformScriptConcurrency, HardMaxSize: compile.ScriptMaxBodySize, StoreValueMax: scriptStoreValueMax,
 	}, script.Environment{})
+	e.initBackgroundScripts(engine)
 	stateDir := e.opts.ScriptStateDir
 	if stateDir == "" {
 		stateDir = e.opts.StateRoot
 	}
 	e.scriptStore = newScriptStore(stateDir, e.scriptLogger())
 	e.scriptNotifications = newScriptNotifications()
+}
+
+func (e *Engine) debugScriptLog(ctx context.Context, id, level, message string) {
+	logger := e.scriptLogger()
+	if logger.Enabled(ctx, slog.LevelDebug) {
+		logger.DebugContext(ctx, "script "+id+": "+message,
+			"source", "script", "script_id", id, "console_level", level)
+	}
 }
 
 func (e *Engine) scriptLogger() *slog.Logger {
@@ -139,13 +152,11 @@ func (e *Engine) mitmScriptMatcher(snap *runtime.Snapshot[*sagernet.Outbound], s
 				spec.Source = string(source)
 				var log func(string, string)
 				if g.eff.MITM.ScriptLog {
-					logger := e.scriptLogger()
 					log = func(level, message string) {
-						logger.DebugContext(ctx, "script "+ent.id+": "+message,
-							"source", "script", "script_id", ent.id, "console_level", level)
+						e.debugScriptLog(ctx, ent.id, level, message)
 					}
 				}
-				return e.scriptHost.Run(ctx, &spec, input, e.scriptServices(snap, state, ent.id, ent.module, log))
+				return e.scriptHost.Run(ctx, &spec, input, e.scriptServices(snap, state, g.mitm, ent.id, ent.module, log))
 			}
 		}
 		return matched

@@ -62,6 +62,10 @@ type mitmGeneration struct {
 
 func (m *mitmGeneration) retain() bool { return m != nil && retainMITMRef(&m.refs) }
 
+func (m *mitmGeneration) outboundPins() map[*sagernet.Outbound]*sagernet.PinnedOutbound {
+	return m.pins
+}
+
 func (m *mitmGeneration) release() {
 	if m != nil && m.refs.Add(-1) == 0 {
 		closeSniffPins(m.pins)

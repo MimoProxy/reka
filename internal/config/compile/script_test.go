@@ -138,6 +138,13 @@ func TestScriptFieldValidation(t *testing.T) {
 		{"missing pattern", "id: sample, type: http-request, hash: " + hash, "script.pattern", "/scripts/sample/pattern", reader},
 		{"empty pattern", "id: sample, type: http-request, pattern: '', hash: " + hash, "script.pattern", "/scripts/sample/pattern", reader},
 		{"lookahead pattern", strings.Replace(defaultFields, scriptPattern, `(?=bad)`, 1), "script.pattern", "/scripts/sample/pattern", reader},
+		{"missing cron expression", "id: sample, type: cron, hash: " + hash, "script.cronexp", "/scripts/sample/cronexp", reader},
+		{"invalid cron expression", "id: sample, type: cron, cronexp: '*/0 * * * *', hash: " + hash, "script.cronexp", "/scripts/sample/cronexp", reader},
+		{"missing event name", "id: sample, type: event, hash: " + hash, "script.event-name", "/scripts/sample/event-name", reader},
+		{"empty event name", "id: sample, type: event, event-name: '   '", "script.event-name", "/scripts/sample/event-name", reader},
+		{"cron requires hash", "id: sample, type: cron, cronexp: '* * * * *'", "script.resource", "/scripts/sample/hash", reader},
+		{"generic requires hash", "id: sample, type: generic", "script.resource", "/scripts/sample/hash", reader},
+		{"supported event requires hash", "id: sample, type: event, event-name: network-changed", "script.resource", "/scripts/sample/hash", reader},
 		{"negative limit", defaultFields + ", max-size: -2", "script.max-size", "/scripts/sample/max-size", reader},
 		{"zero timeout", defaultFields + ", timeout: 0", "script.timeout", "/scripts/sample/timeout", reader},
 		{"too long timeout", defaultFields + ", timeout: 3601", "script.timeout", "/scripts/sample/timeout", reader},
@@ -172,7 +179,7 @@ func TestScriptFieldValidation(t *testing.T) {
 }
 
 func TestUnsupportedScriptTypes(t *testing.T) {
-	for _, typ := range []string{"cron", "generic", "event", "dns", "rule"} {
+	for _, typ := range []string{"dns", "rule"} {
 		t.Run(typ, func(t *testing.T) {
 			eff, ds := Compile(scriptProfile("id: sample, type: "+typ+`, pattern: '(?=ignored)', requires-body: true`), nil, Options{})
 			if ds.HasErrors() || len(eff.Scripts) != 1 || eff.Scripts[0].Supported || eff.Scripts[0].Type != typ {
@@ -182,6 +189,36 @@ func TestUnsupportedScriptTypes(t *testing.T) {
 				t.Fatalf("unsupported script diagnostics: %v", ds)
 			}
 		})
+	}
+}
+
+func TestCompileBackgroundScripts(t *testing.T) {
+	const profile = `schema-version: 1
+scripts:
+  - {id: schedule, type: cron, cronexp: "*/30 0,1,7-23 * * *", wake-system: true, requires-body: true, binary-body-mode: true, max-size: 10, timeout: 1200, hash: %s}
+  - {id: panel, type: generic, argument: view=compact, hash: %s}
+  - {id: refresh, type: event, event-name: network-changed, wake-system: false, hash: %s}
+  - {id: later, type: event, event-name: other-event}
+`
+	hash := resource.Hash([]byte(scriptSource))
+	eff, ds := Compile([]byte(fmt.Sprintf(profile, hash, hash, hash)), nil, Options{ReadResource: scriptReader(scriptSource)})
+	if ds.HasErrors() || len(eff.Scripts) != 4 {
+		t.Fatalf("background scripts compile: %v", ds)
+	}
+	if len(ds) != 1 || ds[0].Severity != model.SeverityWarning || ds[0].Code != "script.unsupported-event" || ds[0].Path != "/scripts/later/event-name" {
+		t.Fatalf("unexpected diagnostics: %v", ds)
+	}
+	scheduled, generic, event, unsupported := eff.Scripts[0], eff.Scripts[1], eff.Scripts[2], eff.Scripts[3]
+	if !scheduled.Supported || scheduled.CronExp != "*/30 0,1,7-23 * * *" || scheduled.WakeSystem == nil || !*scheduled.WakeSystem || scheduled.Timeout != 1200 ||
+		!scheduled.RequiresBody || !scheduled.BinaryBodyMode || scheduled.MaxSize != 10 || !generic.Supported || generic.Argument != "view=compact" ||
+		!event.Supported || event.EventName != "network-changed" || event.WakeSystem == nil || *event.WakeSystem || unsupported.Supported || unsupported.EventName != "other-event" {
+		t.Fatalf("compiled background scripts: %+v", eff.Scripts)
+	}
+	data, err := json.Marshal(eff.Scripts)
+	if err != nil || !strings.Contains(string(data), `"cronexp":"*/30 0,1,7-23 * * *"`) ||
+		!strings.Contains(string(data), `"event-name":"network-changed"`) || !strings.Contains(string(data), `"wake-system":false`) ||
+		strings.Count(string(data), `"cronexp":`) != 1 || strings.Count(string(data), `"wake-system":`) != 2 {
+		t.Fatalf("background scripts JSON: %s (%v)", data, err)
 	}
 }
 

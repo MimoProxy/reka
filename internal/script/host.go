@@ -2,11 +2,14 @@ package script
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Host applies execution limits and interprets script results. A host can run
@@ -83,15 +86,30 @@ func (h *Host) Purge() {
 // a concurrency slot. Callers must keep s and in unchanged until Run returns.
 // An error leaves the HTTP exchange unchanged.
 func (h *Host) Run(ctx context.Context, s *Script, in *Input, svc Services) (Result, error) {
+	return h.run(ctx, s, in, svc, nil)
+}
+
+// RunWithSource is like Run but loads the source after acquiring an execution
+// slot. The script must have a locked Key understood by readSource.
+func (h *Host) RunWithSource(ctx context.Context, s *Script, in *Input, svc Services, readSource func(string) ([]byte, error)) (Result, error) {
+	if s == nil || s.Key == "" || readSource == nil {
+		return Result{}, errors.New("lazy script run requires a locked key and source reader")
+	}
+	return h.run(ctx, s, in, svc, readSource)
+}
+
+func (h *Host) run(ctx context.Context, s *Script, in *Input, svc Services, readSource func(string) ([]byte, error)) (Result, error) {
 	if err := h.validate(ctx, s, in); err != nil {
 		return Result{}, err
 	}
-	maxSize := h.limits.HardMaxSize
-	if s.MaxSize > 0 {
-		maxSize = min(maxSize, s.MaxSize)
-	}
-	if int64(len(in.Request.Body)) > maxSize || in.Response != nil && int64(len(in.Response.Body)) > maxSize {
-		return Result{}, ErrBodyTooLarge
+	if s.Kind.IsHTTP() {
+		maxSize := h.limits.HardMaxSize
+		if s.MaxSize > 0 {
+			maxSize = min(maxSize, s.MaxSize)
+		}
+		if int64(len(in.Request.Body)) > maxSize || in.Response != nil && int64(len(in.Response.Body)) > maxSize {
+			return Result{}, ErrBodyTooLarge
+		}
 	}
 	key := s.CacheKey()
 	if h.circuitOpen(key) {
@@ -112,8 +130,23 @@ func (h *Host) Run(ctx context.Context, s *Script, in *Input, svc Services) (Res
 	if ctx.Err() != nil {
 		return Result{}, ErrBusy
 	}
-	// Recheck after waiting. Another execution may have opened the circuit or
-	// claimed the trial while this run was queued.
+	if readSource != nil {
+		source, err := readSource(key)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			if err == context.DeadlineExceeded {
+				err = ErrTimeout
+			}
+			return Result{}, err
+		}
+		spec := *s
+		spec.Source = string(source)
+		s = &spec
+	}
+	// Another execution may have opened the circuit while this run waited.
+	// Only an execution can change breaker state.
 	state := h.beginRun(key)
 	if state == nil {
 		return Result{}, ErrCircuitOpen
@@ -138,7 +171,7 @@ func (h *Host) validate(ctx context.Context, s *Script, in *Input) error {
 		return errors.New("script run requires a context, engine, script and input")
 	}
 	switch s.Kind {
-	case KindHTTPRequest:
+	case KindHTTPRequest, KindCron, KindGeneric, KindEvent:
 	case KindHTTPResponse:
 		if in.Response == nil {
 			return errors.New("http-response script requires a response")
@@ -155,6 +188,12 @@ func (h *Host) validate(ctx context.Context, s *Script, in *Input) error {
 }
 
 func interpret(s *Script, done Done) Result {
+	if !s.Kind.IsHTTP() {
+		if len(done.Value) > maxDoneValue {
+			return Result{Value: doneValuePreview(done.Value), ValueTruncated: true}
+		}
+		return Result{Value: done.Value}
+	}
 	request := s.Kind == KindHTTPRequest
 	// Loon and Stash document no-argument aborts for request scripts. For
 	// response scripts, infer pass-through since their manuals are silent.
@@ -182,6 +221,21 @@ func interpret(s *Script, done Done) Result {
 		result.Action, result.Body, result.BodySet = ActionModify, done.Body, true
 	}
 	return result
+}
+
+func doneValuePreview(value json.RawMessage) json.RawMessage {
+	encode := func(end int) []byte {
+		for end > 0 && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		encoded, _ := json.Marshal(string(value[:end]))
+		return encoded
+	}
+	// Encode the prefix as a string so a partial JSON object or array stays valid.
+	end := sort.Search(maxDoneValue-1, func(n int) bool {
+		return len(encode(n)) > maxDoneValue
+	}) - 1
+	return encode(end)
 }
 
 func (h *Host) blocked(state *breakerState) bool {

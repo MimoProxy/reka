@@ -295,6 +295,44 @@ func (f notifyFunc) Post(notification script.Notification) {
 	f(notification)
 }
 
+func TestBackgroundScriptServices(t *testing.T) {
+	host := newTestHost(t, script.Limits{}, script.Environment{})
+	for _, kind := range []script.Kind{script.KindCron, script.KindGeneric} {
+		t.Run(string(kind), func(t *testing.T) {
+			store := &testStore{values: make(map[string]string)}
+			var gotNotification script.Notification
+			var gotLog string
+			services := script.Services{
+				Store:  store,
+				Notify: notifyFunc(func(n script.Notification) { gotNotification = n }),
+				Log:    func(level, message string) { gotLog = level + ":" + message },
+				HTTP: httpFunc(func(_ context.Context, req *script.HTTPRequest) (*script.HTTPResponse, error) {
+					if req.Method != "GET" || req.URL != "https://example.test/panel" {
+						return nil, fmt.Errorf("unexpected HTTP request: %+v", req)
+					}
+					return &script.HTTPResponse{Status: 200, Body: []byte("panel data")}, nil
+				}),
+			}
+			result := runScript(t, host, script.Script{Kind: kind, Source: `
+				$httpClient.get("https://example.test/panel", (err, response, body) => {
+					if (err || response.status !== 200 || !$persistentStore.write(body, "panel")) {
+						throw new Error("HTTP or store operation failed");
+					}
+					const content = $persistentStore.read("panel");
+					$notification.post("Panel", "", content);
+					console.info(content);
+					$done({title: "Panel", content});
+				});
+			`}, &script.Input{}, services)
+			if string(result.Value) != `{"title":"Panel","content":"panel data"}` ||
+				gotNotification.Title != "Panel" || gotNotification.Body != "panel data" ||
+				gotLog != "info:panel data" {
+				t.Fatalf("value = %s, notification = %+v, log = %q", result.Value, gotNotification, gotLog)
+			}
+		})
+	}
+}
+
 func TestNotification(t *testing.T) {
 	host := newTestHost(t, script.Limits{}, script.Environment{})
 	var got script.Notification

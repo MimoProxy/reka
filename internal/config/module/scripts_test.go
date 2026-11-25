@@ -56,9 +56,10 @@ func TestUnsupportedScriptSettings(t *testing.T) {
 	for _, tc := range []struct {
 		name, settings, code string
 	}{
-		{"cron", "type=cron, cronexp=0 10 * * *", "module.script-type"},
-		{"generic", "type=generic", "module.script-type"},
-		{"event", "type=event", "module.script-type"},
+		{"missing cron expression", "type=cron, script-path=" + path, "module.script-cronexp"},
+		{"invalid cron expression", "type=cron, cronexp=*/0 * * * *, script-path=" + path, "module.script-cronexp"},
+		{"missing event name", "type=event, script-path=" + path, "module.script-event-name"},
+		{"blank event name", `type=event, event-name="  ", script-path=` + path, "module.script-event-name"},
 		{"dns", "type=dns", "module.script-type"},
 		{"rule", "type=rule", "module.script-type"},
 		{"unknown type", "type=unknown", "module.script-type"},
@@ -71,9 +72,7 @@ func TestUnsupportedScriptSettings(t *testing.T) {
 		{"missing path", "type=http-request, pattern=^https://example.test", "module.script-path"},
 		{"unknown setting", http + ", extra=1", "module.script-setting"},
 		{"full headers", http + ", full-header-mode=1", "module.script-setting"},
-		{"wake", http + ", wake-system=true", "module.script-setting"},
-		{"cron setting", http + ", cronexp=0 10 * * *", "module.script-setting"},
-		{"event setting", http + ", event-name=example", "module.script-setting"},
+		{"wake", "type=cron, cronexp=0 10 * * *, wake-system=maybe, script-path=" + path, "module.script-wake-system"},
 		{"requires-body", http + ", requires-body=maybe", "module.script-requires-body"},
 		{"binary-body-mode", http + ", binary-body-mode=2", "module.script-binary-body-mode"},
 		{"max-size range", http + ", max-size=-2", "module.script-max-size"},
@@ -102,6 +101,60 @@ func TestUnsupportedScriptSettings(t *testing.T) {
 				t.Fatalf("unsupported script would be downloaded %+v", refs)
 			}
 		})
+	}
+}
+
+func TestBackgroundScriptConversion(t *testing.T) {
+	const url = "https://example.test/background.js"
+	const input = `#!arguments=schedule:0 10 * * *
+[Script]
+Quoted cron = type=cron, cronexp="*/30 0,1,7-23 * * *", wake-system=1, timeout=1200, script-path=` + url + `
+Argument cron = type=cron, cronexp={{{schedule}}}, wake-system=FaLsE, script-path=` + url + `
+Single-quoted cron = type=cron, cronexp='0 0,12 * * *', wake-system=0, script-path=` + url + `
+Panel = type=generic, argument="mode=compact,items=3", script-path=` + url + `
+Changed = type=event, event-name=network-changed, wake-system=true, script-path=` + url + `
+Unknown event = type=event, event-name=other-event, script-path=` + url + `
+`
+	hash := resource.Hash([]byte("background"))
+	args := map[string]string{"schedule": "0/5 * 6-23 * * *"}
+	result, report := Convert([]byte(input), Options{
+		Arguments: args,
+		ResourceForKind: func(kind, path string) (string, bool) {
+			return hash, kind == "script" && path == url
+		},
+	})
+	if !report.CanApply || report.Partial || report.Scripts != (Count{Total: 6, Imported: 6}) || len(result.Scripts) != 6 || len(report.ScriptItems) != 6 {
+		t.Fatalf("unexpected conversion %+v", report)
+	}
+	for i, want := range []struct{ kind, cronExp, eventName string }{
+		{"cron", "*/30 0,1,7-23 * * *", ""},
+		{"cron", args["schedule"], ""},
+		{"cron", "0 0,12 * * *", ""},
+		{"generic", "", ""},
+		{"event", "", "network-changed"},
+		{"event", "", "other-event"},
+	} {
+		script, item := result.Scripts[i], report.ScriptItems[i]
+		if script.Type != want.kind || script.Pattern != nil || *script.Hash != hash || item.Type != want.kind ||
+			item.Pattern != "" || item.CronExp != want.cronExp || item.EventName != want.eventName || item.ID != script.ID || !item.Locked {
+			t.Fatalf("script = %+v, report item = %+v", script, item)
+		}
+		if (script.CronExp != nil && *script.CronExp != want.cronExp) || (want.cronExp != "" && script.CronExp == nil) ||
+			(script.EventName != nil && *script.EventName != want.eventName) || (want.eventName != "" && script.EventName == nil) {
+			t.Fatalf("unexpected script schedules: %+v", script)
+		}
+	}
+	literal, argument, quoted, panel, changed := result.Scripts[0], result.Scripts[1], result.Scripts[2], result.Scripts[3], result.Scripts[4]
+	if !*literal.WakeSystem || *argument.WakeSystem || *quoted.WakeSystem || !*changed.WakeSystem || *literal.Timeout != 1200 || *panel.Argument != "mode=compact,items=3" {
+		t.Fatalf("unexpected script settings: %+v", result.Scripts)
+	}
+	items, err := json.Marshal(report.ScriptItems)
+	if err != nil || strings.Count(string(items), `"cronexp":`) != 3 || strings.Count(string(items), `"event_name":`) != 2 {
+		t.Fatalf("script items = %s (%v)", items, err)
+	}
+	_, refs := Inspect([]byte(input), args)
+	if !slices.Equal(refs.Scripts, []ScriptReference{{url, model.DefaultResourceInterval}}) {
+		t.Fatalf("background script references: %+v", refs.Scripts)
 	}
 }
 

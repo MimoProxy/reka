@@ -138,7 +138,7 @@ func TestJobEncodesArgumentObject(t *testing.T) {
 	job := newJob()
 	job.Script.Argument = &argument
 	job.Script.ArgumentObject = true
-	metadata, _, err := marshalJob(job)
+	metadata, _, _, err := marshalJob(job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestJobEncodesArgumentObject(t *testing.T) {
 	}
 	assertJSON(t, wire.Argument, object)
 	argument = `[]`
-	if _, _, err := marshalJob(job); err == nil {
+	if _, _, _, err := marshalJob(job); err == nil {
 		t.Fatal("non-object argument was accepted")
 	}
 }
@@ -180,6 +180,43 @@ func TestRunRequestResponse(t *testing.T) {
 	if err != nil || done.Body == nil || len(done.Body) != 0 || done.Response == nil ||
 		done.Response.Status != 404 || !bytes.Equal(done.Response.Body, []byte{1, 0, 2}) {
 		t.Fatalf("Run = %+v, %v", done, err)
+	}
+}
+
+func TestRunBackgroundJobAndValue(t *testing.T) {
+	for _, tc := range []struct {
+		kind script.Kind
+		done string
+		want string
+	}{
+		{script.KindCron, `{"called":true}`, ""},
+		{script.KindEvent, `{"called":true,"value":null}`, ""},
+		{script.KindGeneric, `{"called":true,"hasValue":true,"value":{"title":"Panel","content":"Example"}}`,
+			`{"title":"Panel","content":"Example"}`},
+	} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			host := &fakeHost{}
+			b := New(host, Options{})
+			job := newJob()
+			job.Script.Kind = tc.kind
+			job.Input.Request.Body = []byte("request")
+			job.Input.Response = &script.Response{Body: []byte("response")}
+			host.start = func(run uint64, data, request, response []byte) {
+				var metadata map[string]json.RawMessage
+				if err := json.Unmarshal(data, &metadata); err != nil {
+					t.Fatal(err)
+				}
+				if string(metadata["kind"]) != `"`+string(tc.kind)+`"` ||
+					metadata["request"] != nil || metadata["response"] != nil || request != nil || response != nil {
+					t.Errorf("unexpected background job: %s, %#v, %#v", data, request, response)
+				}
+				b.Done(run, []byte(tc.done), nil, nil)
+			}
+			done, err := b.Run(t.Context(), job)
+			if err != nil || !done.Called || string(done.Value) != tc.want {
+				t.Fatalf("Run = %+v, %v", done, err)
+			}
+		})
 	}
 }
 

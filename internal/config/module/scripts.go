@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/script/cron"
 )
 
 // ScriptReference identifies a remote script and its refresh interval in seconds.
@@ -26,6 +27,8 @@ type ScriptItem struct {
 	MaxSize        *int64 `json:"max_size,omitempty"`
 	Timeout        int    `json:"timeout"`
 	Engine         string `json:"engine"`
+	CronExp        string `json:"cronexp,omitempty"`
+	EventName      string `json:"event_name,omitempty"`
 	Hash           string `json:"hash,omitempty"`
 	Locked         bool   `json:"locked"`
 }
@@ -46,12 +49,22 @@ func (c *converter) addScript(line int, script model.Script, ref ScriptReference
 		URL    string
 	}{script, ref.URL}, line)
 	hash := c.opts.resourceHash("script", ref.URL)
-	c.report.ScriptItems = append(c.report.ScriptItems, ScriptItem{
-		ID: script.ID, Name: *script.Name, Type: script.Type, Pattern: *script.Pattern,
+	item := ScriptItem{
+		ID: script.ID, Name: *script.Name, Type: script.Type,
 		RequiresBody: *script.RequiresBody, BinaryBodyMode: *script.BinaryBodyMode,
 		MaxSize: script.MaxSize, Timeout: *script.Timeout, Engine: *script.Engine,
 		Hash: hash, Locked: hash != "",
-	})
+	}
+	if script.Pattern != nil {
+		item.Pattern = *script.Pattern
+	}
+	if script.CronExp != nil {
+		item.CronExp = *script.CronExp
+	}
+	if script.EventName != nil {
+		item.EventName = *script.EventName
+	}
+	c.report.ScriptItems = append(c.report.ScriptItems, item)
 	if hash == "" {
 		return unsupported("module.script-unavailable", "module script is not downloaded; refresh the module")
 	}
@@ -90,8 +103,12 @@ func parseScriptFields(name, format string, fields []scriptSetting) (model.Scrip
 			break
 		}
 	}
-	if script.Type != "http-request" && script.Type != "http-response" {
-		return script, ref, unsupported("module.script-type", "only http-request and http-response script types are supported")
+	switch script.Type {
+	case "http-request", "http-response", "cron", "generic", "event":
+	case "dns", "rule":
+		return script, ref, unsupported("module.script-type", "dns and rule script types are not supported")
+	default:
+		return script, ref, unsupported("module.script-type", "expected http-request, http-response, cron, generic or event script type")
 	}
 	script.Name = ptr(name)
 	script.Format = ptr(format)
@@ -108,15 +125,25 @@ func parseScriptFields(name, format string, fields []scriptSetting) (model.Scrip
 		case "type", "debug":
 		case "pattern":
 			script.Pattern = ptr(value)
-		case "requires-body", "binary-body-mode":
+		case "cronexp":
+			if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+				value = value[1 : len(value)-1]
+			}
+			script.CronExp = ptr(value)
+		case "event-name":
+			script.EventName = ptr(strings.TrimSpace(value))
+		case "requires-body", "binary-body-mode", "wake-system":
 			flag, ok := parseScriptBool(value)
 			if !ok {
 				return script, ref, unsupported("module.script-"+field.key, field.key+" must be 1, 0, true or false")
 			}
-			if field.key == "requires-body" {
+			switch field.key {
+			case "requires-body":
 				script.RequiresBody = ptr(flag)
-			} else {
+			case "binary-body-mode":
 				script.BinaryBodyMode = ptr(flag)
+			case "wake-system":
+				script.WakeSystem = ptr(flag)
 			}
 		case "max-size":
 			limit, err := strconv.ParseInt(value, 10, 64)
@@ -154,11 +181,25 @@ func parseScriptFields(name, format string, fields []scriptSetting) (model.Scrip
 			return script, ref, unsupported("module.script-setting", "unsupported script setting")
 		}
 	}
-	if script.Pattern == nil || *script.Pattern == "" {
-		return script, ref, unsupported("module.script-pattern", "HTTP scripts require a URL pattern")
-	}
-	if issue := validateMatch(*script.Pattern); issue.skips() {
-		return script, ref, issue
+	switch script.Type {
+	case "http-request", "http-response":
+		if script.Pattern == nil || *script.Pattern == "" {
+			return script, ref, unsupported("module.script-pattern", "HTTP scripts require a URL pattern")
+		}
+		if issue := validateMatch(*script.Pattern); issue.skips() {
+			return script, ref, issue
+		}
+	case "cron":
+		if script.CronExp == nil {
+			return script, ref, unsupported("module.script-cronexp", "cron scripts require a cron expression")
+		}
+		if _, err := cron.Parse(*script.CronExp); err != nil {
+			return script, ref, unsupported("module.script-cronexp", err.Error())
+		}
+	case "event":
+		if script.EventName == nil || *script.EventName == "" {
+			return script, ref, unsupported("module.script-event-name", "event scripts require an event name")
+		}
 	}
 	parsed, err := url.Parse(ref.URL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.Fragment != "" {

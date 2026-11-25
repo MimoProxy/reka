@@ -125,6 +125,7 @@ var Methods = []string{
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"AddModule", "RemoveModule", "SetModuleEnabled", "SetModuleArguments", "RefreshModule", "ListModules", "GetModuleReport", "PreviewModule",
 	"GenerateMITMCA", "ImportMITMCA", "GetMITMCA", "ExportMITMCA", "DeleteMITMCA", "GetMITMStatus",
+	"ListScripts", "RunScript", "GetScriptRuns",
 	"InstallManagedResource", "ListManagedResources", "RefreshManagedResource",
 	"GetConnectionTimeline", "AddTemporaryRule", "ListTemporaryRules", "RemoveTemporaryRule",
 	"RunNodeArena", "GetNetworkScene", "SetNetworkScene", "GetTrafficBudgets",
@@ -189,7 +190,11 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	if req.Method == "Hello" {
 		state, err := svc.ProfileState("")
 		if err != nil {
@@ -547,6 +552,36 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 		return svc.Engine().HTTPSDebugStatus(), nil
 	case "GetMITMStatus":
 		return svc.Engine().MITMStatus(), nil
+	case "ListScripts":
+		return svc.Engine().ListScripts(), nil
+	case "RunScript":
+		p, err := decode[api.RunScriptRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if p.ID == "" {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: "script ID required"}
+		}
+		run, wait, err := svc.Engine().StartScript(s.ctx, p.ID, p.Argument)
+		if errors.Is(err, generation.ErrScriptNotFound) {
+			return nil, &service.Error{Code: service.CodeNotFound, Message: err.Error()}
+		}
+		if err != nil {
+			return nil, &service.Error{Code: service.CodeBadRequest, Message: err.Error()}
+		}
+		if wait != nil && (p.Wait == nil || *p.Wait) {
+			// Admission pins the run's generation so a switch can proceed.
+			release()
+			release = nil
+			return wait(s.ctx)
+		}
+		return run, nil
+	case "GetScriptRuns":
+		p, err := decode[api.GetScriptRunsRequest](req.Params)
+		if err != nil {
+			return nil, err
+		}
+		return svc.Engine().GetScriptRuns(p.ID, p.Limit), nil
 	case "StopHTTPSDebug":
 		svc.Engine().StopHTTPSDebug()
 		return api.HTTPSDebugStatus{}, nil

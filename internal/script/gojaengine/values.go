@@ -188,6 +188,14 @@ func (s *session) arrayItems(o *goja.Object, visit func(goja.Value)) {
 
 func (s *session) readDone(v goja.Value) script.Done {
 	done := script.Done{Called: true, HasValue: !absent(v)}
+	if !s.job.Script.Kind.IsHTTP() {
+		if done.HasValue {
+			if value, ok := s.jsonString(v); ok {
+				done.Value = []byte(value)
+			}
+		}
+		return done
+	}
 	o, ok := v.(*goja.Object)
 	if !ok {
 		return done

@@ -99,7 +99,7 @@ Section names are case-insensitive. Lines beginning with `#`, `;`, or `//` are c
 | `[Map Local]` | Local file `data` | Unsupported. Only the profile's module `file` can open a local file. |
 | `[Host]` | Static IPs, DNS server entries, aliases | Unsupported. DNS hosts are owned by the native DNS configuration. |
 | `[General]`, `[Replica]`, `[Proxy]`, `[Proxy Group]`, `[WireGuard …]`, `[Ruleset]`, `[Ruleset …]` | All entries | Ignored. Modules cannot change general settings or define policies, tunnels, or rule sets. |
-| `[Script]` | `http-request` and `http-response` with an HTTP(S) source | Converted to native script declarations when the source is pinned. |
+| `[Script]` | `http-request`, `http-response`, `cron`, `generic` and `event` with an HTTP(S) source | Converted to native script declarations when the source is pinned. |
 | `[Panel]`, `[MTProto]`, `[SSID Setting]`, `[Snell Server]`, unknown sections | All entries | Unsupported. |
 
 The report lists line numbers, section names, statuses and short explanations. Counts distinguish imported and unavailable entries. `partial` indicates ignored or unsupported lines. `can_apply` is false when conversion reports an error. Valid entries still contribute when the report is partial. Native validation runs after composition, including checks for MITM hostnames and locked rule resources.
@@ -149,20 +149,23 @@ The name on the left of `=` becomes the display name. Reka substitutes module ar
 
 | Surge setting | Conversion |
 | --- | --- |
-| `type`, `pattern` | Imports `http-request` and `http-response` with a required RE2 URL pattern. |
-| `requires-body`, `binary-body-mode` | Accept `1`, `0`, `true` and `false` regardless of case. Both default to `false`. |
-| `max-size` | Byte limit. `0` and `-1` use the platform hard limit. Positive values are capped at that limit. Omission uses the platform default. |
+| `type`, `pattern` | Imports `http-request`, `http-response`, `cron`, `generic` and `event`. A RE2 URL pattern is required for HTTP scripts. |
+| `cronexp` | Required for `cron`. Accepts five fields (minute through weekday) or six fields (with seconds first). A quoted value can contain commas. |
+| `event-name` | Required for `event`. `network-changed` runs on network changes. Other names are retained as unsupported. |
+| `wake-system` | Accepts `1`, `0`, `true` and `false`. Reka preserves this setting for compatibility and schedules only while the kernel is running. |
+| `requires-body`, `binary-body-mode` | Apply to HTTP scripts. Accept `1`, `0`, `true` and `false` regardless of case. Both default to `false`. |
+| `max-size` | HTTP script byte limit. `0` and `-1` use the platform hard limit. Positive values are capped at that limit. Omission uses the platform default. |
 | `timeout`, `argument` | Time limit in seconds from 1 to 3600, default 5. `argument` is preserved as a string. |
 | `engine` | Accepts `auto`, `jsc` and `webview`, default `auto`. Desktop platforms ignore this setting. The iOS client chooses the engine. |
 | `script-path` | Requires a remote HTTP(S) URL. Relative and local paths are skipped. |
 | `script-update-interval` | Positive values are clamped to 300–604800 seconds. Reka uses the module interval when omitted or set to `0` or `-1`, with a default of 86400 seconds. The Surge manual specifies the default and leaves these two explicit values undefined. |
 | `debug` | Accepted and ignored. |
 
-Imported scripts use `format: surge`. The report skips other types, including `cron`, `generic`, `event`, `dns` and `rule`, and rows with a missing `type`. For HTTP scripts, keys such as `full-header-mode`, `wake-system`, `cronexp` and `event-name` are unsupported. Unknown settings, malformed values and incompatible patterns also skip the entire row. [Surge scripting manual](https://manual.nssurge.com/scripting/overview.html)
+Imported scripts use `format: surge`. The report skips unsupported types such as `dns` and `rule`, rows with a missing `type`, unknown settings such as `full-header-mode`, and rows with invalid settings or patterns. [Surge scripting manual](https://manual.nssurge.com/scripting/overview.html)
 
 ### Script execution
 
-On desktop platforms and Android, Reka runs `http-request` and `http-response` scripts inside MITM HTTP/1.1 forwarding with the goja engine. iOS uses the script engine supplied by its host. Traffic outside intercepted HTTP and other script types never reaches this path.
+Reka runs `http-request` and `http-response` scripts inside MITM HTTP/1.1 forwarding. Desktop platforms and Android use goja. On iOS, script execution requires a client-provided engine. Without an engine, an HTTP match is recorded as `unsupported` and the exchange passes through unchanged.
 
 Each request is processed in this order: URL rewrite → request header rewrite → Map Local → request body rewrite → request script → upstream → response header rewrite → response body rewrite → response script → client. The Surge manual states that body rewrites run before scripts. It does not order Map Local and scripts; Reka treats Map Local as the end of processing, so neither request nor response scripts run for a local response. A response returned by a request script is likewise written to the client without response rewrites or response scripts. [Surge body rewrite](https://manual.nssurge.com/http/body-rewrite.html)
 
@@ -174,13 +177,21 @@ Each request is processed in this order: URL rewrite → request header rewrite 
 - Exceptions, timeouts, an open circuit, a busy host, or a session that ends without `$done` leave the exchange as it was before the script. A bare `$done()` passes through with `format: surge`. With `loon` and `stash` it aborts a request script and passes a response script through.
 - The request and response scripts of one exchange share `$request.id`.
 
+### Background scripts
+
+- `cron` runs on its schedule in the local time zone while the kernel is running. On wake, the scheduler skips a trigger more than one minute overdue and calculates the next occurrence from the current time. `wake-system` is a compatibility setting and cannot wake the device.
+- `generic` runs on demand through `RunScript` or `rekactl script-run`.
+- `event` with `event-name: network-changed` runs after a network change. The kernel combines repeated notifications within one second. Other event names are accepted and listed as unsupported.
+
+These scripts run independently of MITM. `RunScript` can also start supported cron and event scripts. A script ID can have one active run at a time across all trigger types. An overlapping trigger is recorded as `overlap` and discarded. `$request` and `$response` are undefined. The JSON argument to `$done` is available in the run record. [Control API](control-api.md#background-scripts)
+
 ### Script services
 
 - `$httpClient` routes with the active rules by default. `policy` selects an outbound or group by ID or display name, or the built-in `DIRECT` and `REJECT`; IDs win over names, and unknown or ambiguous names return an error to the script. `policy-descriptor` is not supported. The timeout defaults to 5 seconds, as in Surge, and is bounded by the script session. Request and response bodies are each limited to the platform's default script body size. Requests dial the selected outbound directly, so they never pass through an inbound and are never intercepted again. Destinations on a loopback or unspecified address, including names that resolve to one, are rejected when the port belongs to a kernel listener. `insecure` skips server certificate verification, `auto-redirect` controls redirects, and `auto-cookie` uses a temporary cookie jar for that request and its redirects.
 - `$persistentStore` is shared by the whole kernel process, with Surge's naming: scripts with the same script path share the default key, and explicit keys are shared by all scripts. A script with neither a download URL nor a file path uses its ID as its path. Limits on desktop and Android are 4 MiB per value and 16 MiB in total; on iOS they are 256 KiB and 1 MiB. Keys are at most 1 KiB, and the total counts both keys and values. A write over a limit returns `false`. When the kernel has a state directory, writes are coalesced over one second and saved atomically to `scripts/store.json` with mode `0600`, and pending writes are flushed on shutdown. Without a state directory the store is kept in memory.
 - `$notification.post` publishes a `script.notification` control API event for clients to display. Each script refills 10 notifications per minute with a burst of 5, and at most 60 are accepted in any one-minute window across all scripts. Dropped notifications are counted in the MITM status. [Events](control-api.md)
 - `$utils.geoip` and the ASN lookups have no runtime data source yet and return `null`.
-- `console` output is off by default. Set `mitm.script-log: true` in `local.yaml` to write it to the kernel log at debug level with the script ID. [MITM settings](configuration-reference.md)
+- Background run records capture up to 64 lines and 16 KiB of `console` output per run. Set `mitm.script-log: true` in `local.yaml` to also write script console output to the kernel log at debug level with the script ID. [MITM settings](configuration-reference.md)
 
 ## Refresh and caching
 

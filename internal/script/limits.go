@@ -17,6 +17,8 @@ const (
 	defaultMaxHTTPInFlight = 64
 	// defaultLogLineMax matches Surge's maximum log line size.
 	defaultLogLineMax = 512 << 10
+	// maxDoneValue is Reka's limit on a recorded background script value.
+	maxDoneValue = 16 << 10
 	// DefaultStoreValueMax matches Surge's iOS limit on one persistent store value.
 	DefaultStoreValueMax = 4 << 20
 	// defaultCacheBytes is Reka's budget for roughly 3 MiB of source, based on
@@ -28,7 +30,7 @@ const (
 	defaultBreakerCooldown = time.Minute
 )
 
-// Limits bounds HTTP script execution. Nonpositive values use defaults.
+// Limits bounds script execution. Nonpositive values use defaults.
 type Limits struct {
 	Concurrency     int
 	HardMaxSize     int64

@@ -70,11 +70,12 @@ type EngineOptions struct {
 	// ObserveRoute runs synchronously, including for pre-match rejections.
 	ObserveRoute  func(RouteObservation)
 	PacketHistory *history.Store
-	// ScriptEngine supplies the HTTP script engine. A nil factory uses the platform default.
+	// ScriptEngine supplies the script engine. A nil factory uses the platform default.
 	ScriptEngine func() script.Engine
 	// ScriptStateDir overrides StateRoot for persistent script storage.
 	ScriptStateDir string
 	mitmNow        func() time.Time
+	scriptClock    *scriptSchedulerClock
 }
 
 type RouteObservation struct {
@@ -141,6 +142,7 @@ type Engine struct {
 	scriptStore         *scriptStore
 	scriptNotifications *scriptNotifications
 	scriptRuns          mitmScriptCounters
+	backgroundScripts   backgroundScripts
 	scriptClashPort     atomic.Uint32
 
 	mu        sync.Mutex
@@ -700,6 +702,7 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 		}
 		return 0, &ActivateError{Err: err}
 	}
+	e.activateBackgroundScripts(eff.Scripts, profileID == previousGeneration.historyScope.ProfileID)
 	previousGeneration.mitm.release()
 	if profileID != previousGeneration.historyScope.ProfileID {
 		e.backend.StopHTTPSDebug()
@@ -1438,6 +1441,7 @@ func (e *Engine) Close() {
 		return
 	}
 	e.closed = true
+	e.stopBackgroundScripts()
 	if e.takeover != nil {
 		if err := e.takeover.Close(); err != nil {
 			slog.Error("network recovery incomplete", "err", err)
@@ -1459,6 +1463,7 @@ func (e *Engine) Close() {
 	}
 	e.listeners = nil
 	e.mu.Unlock()
+	e.backgroundScripts.workers.Wait()
 	e.backend.CloseConnections(nil)
 	g.mitm.release()
 	e.rt.Close()
@@ -1466,6 +1471,7 @@ func (e *Engine) Close() {
 	e.fake.Close()
 	if e.scriptHost != nil {
 		e.scriptHost.Close()
+		e.backgroundScripts.host.Close()
 		e.scriptHost.Purge()
 		e.scriptStore.close()
 	}
@@ -1644,7 +1650,13 @@ func (e *Engine) CheckNetwork() {
 	defer e.mu.Unlock()
 	if !e.closed {
 		_, g := e.current()
-		e.refreshSceneObservation(g)
+		obs := e.refreshSceneObservation(g)
+		if !e.opts.HostPacketFlow && e.backgroundScripts.hasNetworkEvent {
+			if obs == nil {
+				obs = e.observeSceneInterface()
+			}
+			e.observeScriptNetwork(obs)
+		}
 	}
 }
 
