@@ -328,3 +328,33 @@ func TestHostMemoryBudgetAndCircuitBreaker(t *testing.T) {
 		t.Fatalf("Start called %d times, Purge %d times", starts, purges)
 	}
 }
+
+// The preflight check projects the run's cost from its body size, so a
+// small body still runs where a large one at the same footprint is skipped.
+func TestPreflightCountsBodySize(t *testing.T) {
+	var starts int
+	host := &fakeHost{}
+	b := New(host, Options{
+		Footprint:    func() uint64 { return 30 },
+		SkipAbove:    35,
+		RunCost:      func(bodyBytes int) uint64 { return 2 + uint64(bodyBytes) },
+		DiscardAbove: 35,
+	})
+	host.start = func(run uint64, _, _, _ []byte) {
+		starts++
+		b.Done(run, []byte(`{"called":true}`), nil, nil)
+	}
+	small := newJob()
+	small.Input.Request = script.Request{Body: []byte("ab")}
+	if _, err := b.Run(context.Background(), small); err != nil {
+		t.Fatalf("small body: %v", err)
+	}
+	large := newJob()
+	large.Input.Request = script.Request{Body: []byte("abcd")}
+	if _, err := b.Run(context.Background(), large); !errors.Is(err, script.ErrLowMemory) {
+		t.Fatalf("large body = %v, want preflight skip", err)
+	}
+	if starts != 1 {
+		t.Fatalf("host started %d runs, want 1", starts)
+	}
+}

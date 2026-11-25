@@ -251,8 +251,10 @@ func start(open func() (*packettunnel.Session, error), extension bool, failure *
 		// libbox sets 4/5 of the extension's 50 MB limit; the same ratio
 		// of the 25 MiB steady budget leaves room for the 4–6 MiB the
 		// extension holds outside Go (JavaScriptCore, system frameworks)
-		// and keeps the footprint below the 28 MiB above which HTTP
-		// scripts are skipped. On an iPhone with Bilibili and YouTube
+		// and leaves room for HTTP scripts under their 38 MiB budget. With
+		// every ad-blocked app open, memory outside Go reached about
+		// 12 MiB, so a higher limit would leave little headroom below the
+		// memory guard. On an iPhone with Bilibili and YouTube
 		// traffic through HTTPS interception, 28 MiB let Go reach 27.6 MiB
 		// and the footprint 31 MiB. With 20 MiB the same kind of load
 		// peaked at 24.5 MiB, with collection taking about 8% of two

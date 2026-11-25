@@ -27,8 +27,14 @@ type Host interface {
 
 // Options controls preflight and post-run memory checks.
 type Options struct {
-	Footprint    func() uint64 // Nil disables memory checks.
-	SkipAbove    uint64
+	Footprint func() uint64 // Nil disables memory checks.
+	// SkipAbove is the highest footprint a run may be expected to reach. A
+	// run is skipped when the current footprint plus RunCost of its body
+	// bytes exceeds it.
+	SkipAbove uint64
+	// RunCost estimates the memory a run adds for the given request and
+	// response body bytes. Nil counts as zero.
+	RunCost      func(bodyBytes int) uint64
 	DiscardAbove uint64
 }
 
@@ -67,15 +73,21 @@ func New(host Host, opts Options) *Bridge {
 
 // Run hands the script to the host and waits for completion or cancellation.
 func (b *Bridge) Run(ctx context.Context, job *script.Job) (script.Done, error) {
-	if b.opts.Footprint != nil && b.opts.Footprint() > b.opts.SkipAbove {
-		return script.Done{}, script.ErrLowMemory
-	}
 	normalized := *job
 	normalized.Limits = job.Limits.WithDefaults()
 	job = &normalized
 	metadata, requestBody, responseBody, err := marshalJob(job)
 	if err != nil {
 		return script.Done{}, err
+	}
+	if b.opts.Footprint != nil {
+		var cost uint64
+		if b.opts.RunCost != nil {
+			cost = b.opts.RunCost(len(requestBody) + len(responseBody))
+		}
+		if b.opts.Footprint()+cost > b.opts.SkipAbove {
+			return script.Done{}, script.ErrLowMemory
+		}
 	}
 	if ctx.Err() != nil {
 		return script.Done{}, runContextError(ctx)
