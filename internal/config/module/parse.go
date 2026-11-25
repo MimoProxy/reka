@@ -364,14 +364,33 @@ func word(s string, assignment bool) (value, rest string, ok bool) {
 			return s[:i], s[i:], true
 		}
 		if assignment && r == '=' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\'') {
-			value, rest, ok = quoted(s[i+1:])
-			return s[:i+1] + value, rest, ok && (rest == "" || startsSpace(rest))
+			if value, rest, ok = quoted(s[i+1:]); ok && (rest == "" || startsSpace(rest)) {
+				return s[:i+1] + value, rest, true
+			}
+			// Surge modules put unescaped quotes inside values such as
+			// data="{"code":0}". The value then ends at the first matching
+			// quote followed by whitespace or the end of the line.
+			if end := closingQuote(s[i+1:]); end > 0 {
+				return s[:i+1] + s[i+2:i+1+end], s[i+2+end:], true
+			}
+			return "", "", false
 		}
 		if r == '=' {
 			assignment = false
 		}
 	}
 	return s, "", true
+}
+
+// closingQuote returns the index of the first quote matching s[0] that is
+// followed by whitespace or the end of s, or 0 when there is none.
+func closingQuote(s string) int {
+	for j := 1; j < len(s); j++ {
+		if s[j] == s[0] && (j+1 == len(s) || startsSpace(s[j+1:])) {
+			return j
+		}
+	}
+	return 0
 }
 
 func startsSpace(s string) bool {
