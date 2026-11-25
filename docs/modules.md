@@ -112,11 +112,13 @@ The report lists line numbers, section names, statuses and short explanations. C
 | `[Argument]` | `input`, `select`, and `switch`. The first value is the default. A `select` override outside the choices is used with a warning. |
 | `[Rule]` | Uses the shared rule converter. `PROXY` uses the profile argument or plugin default when supplied, then resolves against effective policies. With no argument, Reka resolves a policy named `PROXY`. Loon response-specific routing rejects use native `reject`, and `REJECT-DROP` uses `reject-drop`. |
 | `[Rewrite]`, `[URL Rewrite]` | URL changes and redirects, reject responses, header edits, inline JSON and regex body edits, and Map Local-compatible mock responses. |
-| `[Script]` | `http-request`, `http-response`, `request`, and `response` with an HTTP(S) script URL. Disabled entries are skipped and `tag` is the display name. HTTP scripts use `format: loon` and a 10-second default timeout. |
+| `[Script]` | `http-request`, `http-response`, `request`, `response`, `cron`, `generic`, and `network-changed` with an HTTP(S) script URL. Disabled entries are skipped and `tag` is the display name. Scripts use `format: loon`. HTTP scripts default to a 10-second timeout, and the other types default to 300 seconds. |
 | `[MITM]` | `hostname` with optional `%APPEND%` or `%INSERT%`. Other MITM settings are ignored. |
 | `[Map Local]` | Uses the same inline and locked remote response formats as Surge. |
 
 Declared `{name}` placeholders expand in plugin text. Undeclared single-brace placeholders stay literal, including regex quantifiers. Expressions also accept `${name}`, and Surge-style `{{{name}}}` works with Loon modules. `argument=[{Player},{Enabled}]` passes an object as `$argument`. A `switch` becomes a JavaScript boolean, and other values become strings. A quoted `argument="..."` is passed as a string. Native script declarations can express an object using `argument-type: object` and an `argument` string containing a JSON object. [Loon legacy scripts](https://nsloon.app/en/docs/Script/)
+
+A `cron` entry starts with a quoted expression or an argument placeholder, using five fields or six fields with seconds first. `generic` runs on demand and `network-changed` becomes an `event` script with `event-name: network-changed`. Both are described in [background scripts](#background-scripts). Loon's legacy syntax runs only the first `network-changed` entry. Reka follows the newer syntax and runs every enabled entry. `img-url` and `img_url` are display settings and are ignored. [Loon scripts](https://nsloon.app/en/docs/Script/script_v2)
 
 The expression subset has the form below. It matches the URL and accepts the optional case-insensitive `i` flag and a named capture. In redirect targets, `${capture[1]}` expands to the first capture. Supported calls include reject responses, redirects, `script` with optional object arguments, and request or response `json.delete`, `json.replace`, and `json.jq`. Other conditions, combined conditions, other flags and remote `jq_file` filters are reported as unsupported. [Loon expressions](https://nsloon.app/en/docs/Rewrite/rewrite_v2/)
 
@@ -126,6 +128,9 @@ request if ${url} ~= /^https:\/\/example\.test\/(.*)/i as capture then redirect(
 
 [Script]
 response if ${url} ~= /^https:\/\/example\.test/ then script("https://example.test/hook.js", {${Player}, ${Enabled}}) with requires_body=true
+cron ${Schedule} then script("https://example.test/daily.js", {${Player}}) with tag="Daily", timeout=120
+generic then script("https://example.test/panel.js", "mode=compact") with tag="Panel", img_url="network"
+network-changed then script("https://example.test/changed.js") with tag="Changed"
 ```
 
 ## Stash overrides
@@ -140,6 +145,8 @@ response if ${url} ~= /^https:\/\/example\.test/ then script("https://example.te
 | `http.body-rewrite` | Inline request or response jq filters and regex replacements. |
 | `http.mock` | Inline responses with status, headers, and text, JSON, or Base64 data. |
 | `http.script`, `script-providers` | A request or response script selects its provider by `name`. The provider supplies an HTTP(S) `url` and optional `interval`. Acquisition pins the script source and execution uses `format: stash`. |
+| `cron.script` | Each entry selects a provider by `name` and becomes a `cron` script. `cron` is required, with five fields or six fields with seconds first. `argument` and `timeout` are optional. [Stash scheduled tasks](https://stash.wiki/en/script/scheduled-tasks) |
+| `tiles` | Each tile selects a provider by `name` and becomes a `generic` script. Stash runs tile scripts without a request and shows the object passed to `$done`, which matches an on-demand generic run. `argument` and `timeout` are converted. `interval`, `title`, `content`, `icon`, `backgroundColor`, `url`, and `collapsed` are display settings and are ignored. Reka does not refresh tiles on the `interval`. [Stash tiles](https://stash.wiki/en/script/tile) |
 
 The importer skips Stash arguments, provider-based body rewrites, and proxy, DNS, controller, and other local settings. A missing script provider is reported on the script entry. YAML parser errors prevent application, and report positions refer to the original YAML nodes, including folded rewrite strings. [Stash HTTP rewrites](https://stash.wiki/en/http-engine/rewrite)
 

@@ -39,6 +39,28 @@ func (c *converter) convertStash(text []byte) {
 			} else {
 				c.report.record(key.Line, "rules", stashExpectedList())
 			}
+		case "cron":
+			fields, ok := stashMapping(value)
+			if !ok {
+				c.report.record(key.Line, "cron", unsupported("module.section", "expected a cron mapping with unique keys"))
+				continue
+			}
+			for i := 0; i < len(value.Content); i += 2 {
+				name := value.Content[i]
+				if name.Value != "script" {
+					c.report.record(name.Line, "cron."+name.Value, unsupported("module.section", "unknown cron setting"))
+				} else if seq := stashSequence(fields["script"]); seq != nil {
+					c.stashScripts("cron.script", stashCronScript, seq.Content, providers)
+				} else {
+					c.report.record(name.Line, "cron.script", stashExpectedList())
+				}
+			}
+		case "tiles":
+			if seq := stashSequence(value); seq != nil {
+				c.stashScripts("tiles", stashTileScript, seq.Content, providers)
+			} else {
+				c.report.record(key.Line, "tiles", stashExpectedList())
+			}
 		case "script-providers":
 			if providers == nil {
 				c.report.record(key.Line, key.Value, unsupported("module.script-provider", "expected a mapping of script providers with unique names"))
@@ -82,8 +104,6 @@ func stashTopLevel(key string) outcome {
 		return ignored("module.proxy", "modules cannot define policies")
 	case "dns", "hosts":
 		return unsupported("module.host", "modules cannot change DNS settings")
-	case "cron", "tiles":
-		return ignored("module.script-type", "modules support only request and response scripts")
 	case "external-controller", "secret", "mode", "log-level", "tun", "mixed-port", "port", "socks-port", "allow-lan", "bind-address", "ipv6":
 		return ignored("module.general", "modules cannot modify general settings")
 	default:
@@ -139,16 +159,23 @@ func (c *converter) stashHTTPItems(section, key string, nodes []*yaml.Node, prov
 				issue = c.mitm(node.Line, "hostname="+host)
 			}
 		case "script":
-			script, ref, parsed := parseStashScript(node, providers)
-			issue = parsed
-			if !issue.skips() {
-				issue = c.addScript(node.Line, script, ref)
-			}
-			c.report.Scripts.record(!issue.skips())
+			c.stashScripts(section, stashHTTPScript, []*yaml.Node{node}, providers)
+			continue
 		default:
 			issue = c.stashRewrite(node, key)
 			c.report.Rewrites.record(!issue.skips())
 		}
+		c.report.record(node.Line, section, issue)
+	}
+}
+
+func (c *converter) stashScripts(section, kind string, nodes []*yaml.Node, providers map[string]stashProvider) {
+	for _, node := range nodes {
+		script, ref, issue := parseStashScript(node, providers, kind)
+		if !issue.skips() {
+			issue = c.addScript(node.Line, script, ref)
+		}
+		c.report.Scripts.record(!issue.skips())
 		c.report.record(node.Line, section, issue)
 	}
 }

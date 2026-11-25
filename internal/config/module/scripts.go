@@ -94,6 +94,11 @@ func parseScript(text string) (model.Script, ScriptReference, outcome) {
 // https://nsloon.app/en/docs/Script/
 const loonScriptTimeout = 10
 
+// Loon's script documentation specifies a 300-second default for cron,
+// generic and network-changed scripts.
+// https://nsloon.app/en/docs/Script/script_v2
+const loonBackgroundScriptTimeout = 300
+
 func parseScriptFields(name, format string, fields []scriptSetting) (model.Script, ScriptReference, outcome) {
 	var script model.Script
 	var ref ScriptReference
@@ -117,6 +122,9 @@ func parseScriptFields(name, format string, fields []scriptSetting) (model.Scrip
 	script.Timeout = ptr(model.DefaultScriptTimeout)
 	if format == model.ModuleFormatLoon {
 		script.Timeout = ptr(loonScriptTimeout)
+		if script.Type != "http-request" && script.Type != "http-response" {
+			script.Timeout = ptr(loonBackgroundScriptTimeout)
+		}
 	}
 	script.Engine = ptr("auto")
 	for _, field := range fields {

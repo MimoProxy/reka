@@ -14,11 +14,10 @@ func inspectStash(text []byte, interval int) (Metadata, ResourceReferences) {
 		return Metadata{}, ResourceReferences{}
 	}
 	refs := newReferenceCollector(interval)
-	http, _ := stashMapping(fields["http"])
-	if scripts := stashSequence(http["script"]); scripts != nil {
-		providers := parseStashProviders(fields["script-providers"])
-		for _, item := range scripts.Content {
-			_, ref, issue := parseStashScript(item, providers)
+	providers := parseStashProviders(fields["script-providers"])
+	for _, group := range stashScriptGroups(fields) {
+		for _, item := range group.items {
+			_, ref, issue := parseStashScript(item, providers, group.kind)
 			if !issue.skips() {
 				refs.script(ref)
 			}
@@ -27,7 +26,38 @@ func inspectStash(text []byte, interval int) (Metadata, ResourceReferences) {
 	return stashMetadata(fields), refs.refs
 }
 
-func parseStashScript(node *yaml.Node, providers map[string]stashProvider) (model.Script, ScriptReference, outcome) {
+// Stash script entries come from three places. Each selects a provider by name.
+const (
+	stashHTTPScript = "http"
+	stashCronScript = "cron"
+	stashTileScript = "tile"
+)
+
+type stashScriptGroup struct {
+	kind  string
+	items []*yaml.Node
+}
+
+func stashScriptGroups(fields map[string]*yaml.Node) []stashScriptGroup {
+	var groups []stashScriptGroup
+	http, _ := stashMapping(fields["http"])
+	if scripts := stashSequence(http["script"]); scripts != nil {
+		groups = append(groups, stashScriptGroup{stashHTTPScript, scripts.Content})
+	}
+	cron, _ := stashMapping(fields["cron"])
+	if scripts := stashSequence(cron["script"]); scripts != nil {
+		groups = append(groups, stashScriptGroup{stashCronScript, scripts.Content})
+	}
+	if tiles := stashSequence(fields["tiles"]); tiles != nil {
+		groups = append(groups, stashScriptGroup{stashTileScript, tiles.Content})
+	}
+	return groups
+}
+
+// parseStashScript converts an http.script entry, a cron.script entry, or a
+// tile. Tiles become generic scripts: Stash runs the tile script without a
+// request and displays the object passed to $done.
+func parseStashScript(node *yaml.Node, providers map[string]stashProvider, kind string) (model.Script, ScriptReference, outcome) {
 	var script model.Script
 	var ref ScriptReference
 	fields, ok := stashMapping(node)
@@ -49,12 +79,21 @@ func parseStashScript(node *yaml.Node, providers map[string]stashProvider) (mode
 	if provider.interval != "" {
 		settings = append(settings, scriptSetting{"script-update-interval", provider.interval})
 	}
+	switch kind {
+	case stashCronScript:
+		settings = append(settings, scriptSetting{"type", "cron"})
+	case stashTileScript:
+		settings = append(settings, scriptSetting{"type", "generic"})
+	}
 	for i := 0; i < len(node.Content); i += 2 {
 		key, value := node.Content[i].Value, node.Content[i+1]
-		switch key {
-		case "name", "debug":
+		switch {
+		case key == "name" || key == "debug":
 			continue
-		case "type", "match", "argument":
+		case kind == stashTileScript && stashTileDisplayKey(key):
+			// Tile defaults and refresh interval belong to the client display.
+			continue
+		case key == "argument" || kind == stashHTTPScript && (key == "type" || key == "match") || kind == stashCronScript && key == "cron":
 			text, ok := stashString(value)
 			if !ok {
 				return script, ref, unsupported("module.script-syntax", "expected a script setting string")
@@ -69,9 +108,11 @@ func parseStashScript(node *yaml.Node, providers map[string]stashProvider) (mode
 				}
 			case "match":
 				key = "pattern"
+			case "cron":
+				key = "cronexp"
 			}
 			settings = append(settings, scriptSetting{key, text})
-		case "require-body", "binary-mode", "timeout", "max-size":
+		case key == "timeout" || kind == stashHTTPScript && (key == "require-body" || key == "binary-mode" || key == "max-size"):
 			text, ok := stashScriptScalar(value)
 			if !ok {
 				return script, ref, unsupported("module.script-syntax", "expected a boolean or numeric script setting")
@@ -88,6 +129,15 @@ func parseStashScript(node *yaml.Node, providers map[string]stashProvider) (mode
 		}
 	}
 	return parseScriptFields(name, model.ModuleFormatStash, settings)
+}
+
+func stashTileDisplayKey(key string) bool {
+	switch key {
+	case "interval", "title", "content", "icon", "backgroundColor", "url", "collapsed":
+		return true
+	default:
+		return false
+	}
 }
 
 type stashProvider struct {

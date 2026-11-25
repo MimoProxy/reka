@@ -16,6 +16,7 @@ type loonExpression struct {
 	action   string
 	params   []string
 	settings string
+	cronExp  string // Set by background script expressions.
 }
 
 func isLoonExpression(text string) bool {
@@ -62,31 +63,35 @@ func parseLoonExpression(text string) (loonExpression, outcome) {
 	if !strings.EqualFold(keyword, "then") {
 		return expression, badExpression("only a single URL regex condition is supported")
 	}
+	return expression, expression.parseAction(rest)
+}
+
+// parseAction reads the text after then: an action call and optional settings.
+func (e *loonExpression) parseAction(rest string) outcome {
 	action, args, call := strings.Cut(strings.TrimSpace(rest), "(")
-	expression.action = strings.ToLower(strings.TrimSpace(action))
+	e.action = strings.ToLower(strings.TrimSpace(action))
 	if !call {
-		if expression.action == "reject" {
-			return expression, outcome{}
+		if e.action == "reject" {
+			return outcome{}
 		}
-		return expression, badExpression("expected an action call")
+		return badExpression("expected an action call")
 	}
 	end, ok := loonGroupEnd("(" + args)
 	if !ok {
-		return expression, badExpression("invalid action arguments")
+		return badExpression("invalid action arguments")
 	}
-	expression.params, ok = splitLoonList(args[:end-1], true)
+	e.params, ok = splitLoonList(args[:end-1], true)
 	if !ok {
-		return expression, badExpression("invalid action arguments")
+		return badExpression("invalid action arguments")
 	}
-	tail = strings.TrimSpace(args[end:])
-	if tail != "" {
+	if tail := strings.TrimSpace(args[end:]); tail != "" {
 		keyword, rest, ok := word(tail, false)
 		if !ok || !strings.EqualFold(keyword, "with") || strings.TrimSpace(rest) == "" {
-			return expression, badExpression("unexpected text after the action")
+			return badExpression("unexpected text after the action")
 		}
-		expression.settings = strings.TrimSpace(rest)
+		e.settings = strings.TrimSpace(rest)
 	}
-	return expression, outcome{}
+	return outcome{}
 }
 
 func loonDelimitedRegexp(text string) (pattern, rest string, ok bool) {
@@ -165,6 +170,9 @@ func (e loonExpression) script(args loonArguments, remaining *int) (script model
 		return script, ref, badExpression("invalid script action settings")
 	}
 	fields = append(fields, scriptSetting{"script-path", source})
+	if e.cronExp != "" {
+		fields = append(fields, scriptSetting{"cronexp", e.cronExp})
+	}
 	var object string
 	if len(e.params) == 2 {
 		if strings.HasPrefix(e.params[1], "{") {

@@ -251,3 +251,73 @@ func TestStashDocumentErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestStashCronAndTileScripts(t *testing.T) {
+	const input = `name: Background
+cron:
+  script:
+    - name: daily
+      cron: '12 0 * * *'
+      argument: '{ "key": false }'
+      timeout: 10
+    - name: seconds
+      cron: "02 00 10 * * *"
+    - name: daily
+      cron: '*/0 * * * *'
+    - name: seconds
+    - name: daily
+      cron: '0 9 * * *'
+      match: example.test
+  schedule: []
+tiles:
+  - name: panel
+    interval: 600
+    title: 'Tile'
+    content: 'Before the first run'
+    icon: 'calendar'
+    backgroundColor: '#663399'
+    collapsed: true
+    url: https://example.test/
+    argument: |-
+      TYPE=TILE&flag=1
+    timeout: 30
+  - name: panel
+    type: request
+script-providers:
+  daily: {url: https://example.test/daily.js, interval: 3600}
+  seconds: {url: https://example.test/seconds.js}
+  panel: {url: https://example.test/panel.js}
+`
+	hash := resource.Hash([]byte("background"))
+	opts := Options{Format: model.ModuleFormatStash, ResourceForKind: func(kind, path string) (string, bool) {
+		return hash, kind == "script"
+	}}
+	result, report := Convert([]byte(input), opts)
+	if !report.CanApply || !report.Partial || report.Scripts != (Count{Total: 7, Imported: 3, Unavailable: 4}) || len(result.Scripts) != 3 {
+		t.Fatalf("unexpected report %+v", report)
+	}
+	for i, want := range []struct {
+		name, kind, cronExp, argument string
+		timeout                       int
+	}{
+		{"daily", "cron", "12 0 * * *", `{ "key": false }`, 10},
+		{"seconds", "cron", "02 00 10 * * *", "", model.DefaultScriptTimeout},
+		{"panel", "generic", "", "TYPE=TILE&flag=1", 30},
+	} {
+		script := result.Scripts[i]
+		if *script.Name != want.name || script.Type != want.kind || *script.Format != model.ModuleFormatStash || valueOf(script.CronExp) != want.cronExp ||
+			valueOf(script.Argument) != want.argument || *script.Timeout != want.timeout || script.Pattern != nil || *script.Hash != hash {
+			t.Fatalf("script %d = %+v", i, script)
+		}
+	}
+	for line, code := range map[int]string{10: "module.script-cronexp", 12: "module.script-cronexp", 13: "module.script-setting", 16: "module.section", 29: "module.script-setting"} {
+		if !slices.ContainsFunc(report.Lines, func(got Line) bool { return got.Line == line && got.Code == code }) {
+			t.Fatalf("line %d lacks %s: %+v", line, code, report.Lines)
+		}
+	}
+	_, refs := InspectWithOptions([]byte(input), opts)
+	want := []ScriptReference{{"https://example.test/daily.js", 3600}, {"https://example.test/seconds.js", model.DefaultResourceInterval}, {"https://example.test/panel.js", model.DefaultResourceInterval}}
+	if !slices.Equal(refs.Scripts, want) {
+		t.Fatalf("references = %+v", refs.Scripts)
+	}
+}

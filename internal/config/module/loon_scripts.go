@@ -18,12 +18,29 @@ func parseLoonScript(text string, args loonArguments, remaining *int) (model.Scr
 	var ref ScriptReference
 	direction, rest, ok := word(text, false)
 	direction = strings.TrimPrefix(strings.ToLower(direction), "http-")
-	if !ok || direction != "request" && direction != "response" {
-		return script, ref, unsupported("module.script-type", "only HTTP request and response scripts are supported")
-	}
-	pattern, settings, ok := word(rest, false)
-	if !ok {
-		return script, ref, unsupported("module.script-pattern", "HTTP scripts require a URL pattern")
+	var pattern, settings, cronExp string
+	switch {
+	case !ok:
+		return script, ref, unsupported("module.script-type", "expected a script type")
+	case direction == "request" || direction == "response":
+		if pattern, settings, ok = word(rest, false); !ok {
+			return script, ref, unsupported("module.script-pattern", "HTTP scripts require a URL pattern")
+		}
+	case direction == "cron":
+		if pattern, settings, ok = word(rest, false); !ok {
+			return script, ref, unsupported("module.script-cronexp", "cron scripts require a cron expression")
+		}
+		if then, action, ok := word(settings, false); ok && strings.EqualFold(then, "then") {
+			return loonBackgroundExpression(direction, pattern, action, args, remaining)
+		}
+		cronExp, pattern = pattern, ""
+	case direction == "generic" || direction == "network-changed":
+		settings = rest
+		if then, action, ok := word(settings, false); ok && strings.EqualFold(then, "then") {
+			return loonBackgroundExpression(direction, "", action, args, remaining)
+		}
+	default:
+		return script, ref, unsupported("module.script-type", "expected an HTTP, cron, generic or network-changed script")
 	}
 	argumentQuoted := false
 	fields, ok := parseScriptSettingsWithSeparator(settings, loonNextSetting, func(key string) {
@@ -33,6 +50,9 @@ func parseLoonScript(text string, args loonArguments, remaining *int) (model.Scr
 	})
 	if !ok {
 		return script, ref, unsupported("module.script-syntax", "expected unique comma-separated script settings")
+	}
+	if direction == "cron" {
+		fields = append([]scriptSetting{{"cronexp", cronExp}}, fields...)
 	}
 	var object string
 	if !argumentQuoted {
@@ -48,13 +68,28 @@ func parseLoonScript(text string, args loonArguments, remaining *int) (model.Scr
 	return makeLoonScript(direction, pattern, fields, object, args, remaining)
 }
 
-func makeLoonScript(direction, pattern string, settings []scriptSetting, object string, args loonArguments, remaining *int) (model.Script, ScriptReference, outcome) {
+// loonBackgroundExpression parses the script(...) action of the cron,
+// generic and network-changed expression forms.
+func loonBackgroundExpression(kind, cronExp, action string, args loonArguments, remaining *int) (model.Script, ScriptReference, outcome) {
+	expression := loonExpression{phase: kind, cronExp: cronExp}
+	if issue := expression.parseAction(action); issue.status != "" {
+		return model.Script{}, ScriptReference{}, issue
+	}
+	if expression.action != "script" {
+		return model.Script{}, ScriptReference{}, badExpression("background scripts require a script action")
+	}
+	return expression.script(args, remaining)
+}
+
+// makeLoonScript builds a script of the Loon kind request, response, cron,
+// generic or network-changed. pattern is the URL pattern of HTTP scripts.
+func makeLoonScript(kind, pattern string, settings []scriptSetting, object string, args loonArguments, remaining *int) (model.Script, ScriptReference, outcome) {
 	var script model.Script
 	var ref ScriptReference
 	seen := make(map[string]bool)
 	for i, field := range settings {
 		key := strings.ReplaceAll(field.key, "_", "-")
-		if seen[key] || key == "type" || key == "pattern" {
+		if seen[key] || key == "type" || key == "pattern" || key == "event-name" || key == "cronexp" && kind != "cron" {
 			return script, ref, unsupported("module.script-syntax", "expected unique script settings")
 		}
 		seen[key] = true
@@ -73,11 +108,20 @@ func makeLoonScript(direction, pattern string, settings []scriptSetting, object 
 			}
 		}
 	}
-	pattern, issue := args.expandDeferred(pattern, remaining)
-	if issue.skips() {
-		return script, ref, issue
+	var fields []scriptSetting
+	switch kind {
+	case "request", "response":
+		pattern, issue := args.expandDeferred(pattern, remaining)
+		if issue.skips() {
+			return script, ref, issue
+		}
+		fields = []scriptSetting{{"type", "http-" + kind}, {"pattern", pattern}}
+	case "network-changed":
+		fields = []scriptSetting{{"type", "event"}, {"event-name", "network-changed"}}
+	default:
+		fields = []scriptSetting{{"type", kind}}
 	}
-	fields := []scriptSetting{{"type", "http-" + direction}, {"pattern", pattern}}
+	var issue outcome
 	var name, scriptURL string
 	for _, field := range settings {
 		if field.key == "enable" || field.key == "img-url" || field.key == "argument" && object != "" {
@@ -98,7 +142,7 @@ func makeLoonScript(direction, pattern string, settings []scriptSetting, object 
 		}
 	}
 	if name == "" {
-		name = "http-" + direction
+		name = fields[0].value
 		if parsed, err := url.Parse(scriptURL); err == nil && nameFromPath(parsed.Path) != "" {
 			name = nameFromPath(parsed.Path)
 		}

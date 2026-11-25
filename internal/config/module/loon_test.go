@@ -206,9 +206,9 @@ declared = input,first
 declared = input,duplicate
 malformed = switch,invalid
 [Script]
-cron "0 0 * * *" script-path=https://example.test/script.js
-generic script-path=https://example.test/script.js
-network-changed script-path=https://example.test/script.js
+dns script-path=https://example.test/script.js
+cron "*/0 * * * *" script-path=https://example.test/script.js
+generic then reject()
 request .* script-path=https://example.test/script.js,argument=[{missing}]
 request .* script-path=https://example.test/script.js,argument=[{declared}],requires-body=true,requires_body=true
 request .* script-path=https://example.test/script.js,enable=false
@@ -254,4 +254,73 @@ Keep = input, "--", tag = Kept, desc = comma separated: a,b,c
 	if len(result.HTTPRewrites) != 1 {
 		t.Fatalf("rewrites = %+v", result.HTTPRewrites)
 	}
+}
+
+func TestLoonBackgroundScripts(t *testing.T) {
+	const base = "https://example.test/"
+	const input = `[Argument]
+cron = input,"30 8 * * *",tag=Schedule
+appName = input,Example
+Enabled = switch,true
+[Script]
+cron "0 18 * * *" script-path=` + base + `a.js, timeout=20, tag=Daily, img-url=https://example.test/a.png, enable=true
+cron "0 0 8-22 * * ?" script-path=` + base + `b.js, tag=Seconds
+cron {cron} script-path=` + base + `c.js,tag = Argument,argument=[{appName},{Enabled}],enable={Enabled}
+generic script-path = ` + base + `d.js, timeout = 10, tag = Panel, img-url = location.circle.system
+network-changed script-path=` + base + `e.js, argument="TYPE=EVENT&a=1"
+cron "0/24 * * * *" then script("` + base + `f.js") with tag="Expression", enable=true
+cron ${cron} then script("` + base + `g.js", {${appName}}) with tag="Object", timeout=120
+generic then script("` + base + `h.js") with tag="Lookup", img_url="location.circle.system", timeout=10
+network-changed then script("` + base + `i.js", "mode=1") with tag="Changed", debug=true
+cron "0 9 * * *" script-path=` + base + `j.js, enable=false
+cron "0 9 * * *" script-path=` + base + `k.js, cronexp=0 10 * * *
+generic script-path=` + base + `l.js, pattern=.*
+`
+	hash := resource.Hash([]byte("background"))
+	opts := Options{Format: model.ModuleFormatLoon, ResourceForKind: func(kind, path string) (string, bool) {
+		return hash, kind == "script" && strings.HasPrefix(path, base)
+	}}
+	result, report := Convert([]byte(input), opts)
+	if !report.CanApply || !report.Partial || report.Scripts != (Count{Total: 12, Imported: 9, Unavailable: 3}) || len(result.Scripts) != 9 {
+		t.Fatalf("unexpected report %+v", report)
+	}
+	for i, want := range []struct {
+		name, kind, cronExp, event, argument string
+		timeout                              int
+		object                               bool
+	}{
+		{"Daily", "cron", "0 18 * * *", "", "", 20, false},
+		{"Seconds", "cron", "0 0 8-22 * * ?", "", "", 300, false},
+		{"Argument", "cron", "30 8 * * *", "", `{"appName":"Example","Enabled":true}`, 300, true},
+		{"Panel", "generic", "", "", "", 10, false},
+		{"e.js", "event", "", "network-changed", "TYPE=EVENT&a=1", 300, false},
+		{"Expression", "cron", "0/24 * * * *", "", "", 300, false},
+		{"Object", "cron", "30 8 * * *", "", `{"appName":"Example"}`, 120, true},
+		{"Lookup", "generic", "", "", "", 10, false},
+		{"Changed", "event", "", "network-changed", "mode=1", 300, false},
+	} {
+		script := result.Scripts[i]
+		if *script.Name != want.name || script.Type != want.kind || *script.Format != model.ModuleFormatLoon || *script.Timeout != want.timeout ||
+			script.Pattern != nil || valueOf(script.CronExp) != want.cronExp || valueOf(script.EventName) != want.event ||
+			valueOf(script.Argument) != want.argument || (script.ArgumentType != nil) != want.object || *script.Hash != hash {
+			t.Fatalf("script %d = %+v", i, script)
+		}
+	}
+	for line, code := range map[int]string{15: "module.script-disabled", 16: "module.script-syntax", 17: "module.script-syntax"} {
+		if !slices.ContainsFunc(report.Lines, func(got Line) bool { return got.Line == line && got.Code == code }) {
+			t.Fatalf("line %d lacks %s: %+v", line, code, report.Lines)
+		}
+	}
+	_, refs := InspectWithOptions([]byte(input), opts)
+	if len(refs.Scripts) != 9 {
+		t.Fatalf("background script references: %+v", refs.Scripts)
+	}
+}
+
+func valueOf[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
