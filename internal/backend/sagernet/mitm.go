@@ -22,9 +22,10 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-// MITMRoute contains the HTTPS settings pinned by Route.Release, with an
+// MITMRoute contains the HTTP processing settings pinned by Route.Release, with an
 // independent routing callback for requests rewritten to another origin.
 type MITMRoute struct {
+	PlainHTTP            bool
 	Host                 string
 	Issuer               *ca.Issuer
 	Rewrite              *httprewrite.Set
@@ -39,7 +40,7 @@ type MITMRoute struct {
 	OnScript             func(run api.MITMScriptRun, executed bool)
 }
 
-func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, originalDestination string, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {
+func (b *Backend) relayHTTPEngine(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, originalDestination string, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {
 	ctx, cancel := context.WithCancel(ctx)
 	var closeOnce sync.Once
 	closeRaw := func() { closeOnce.Do(func() { _ = conn.Close() }) }
@@ -49,6 +50,7 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 	mitm := rt.MITM
 	attempt.mu.Lock()
 	attempt.MITM = true
+	attempt.MITMPlainHTTP = mitm.PlainHTTP
 	attempt.mu.Unlock()
 	if mitm.OnConnection != nil {
 		mitm.OnConnection()
@@ -87,7 +89,7 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 		}
 	}()
 
-	// SOCKS may be waiting for its success reply before sending ClientHello.
+	// SOCKS may be waiting for its success reply before sending application data.
 	_ = conn.SetDeadline(time.Now().Add(mitmTLSHandshakeTimeout))
 	if err = N.ReportConnHandshakeSuccess(conn, conn); err != nil {
 		return
@@ -98,9 +100,53 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 		processUpload: &processTraffic.upload, processDownload: &processTraffic.download,
 	}
 	host := mitm.Host
-	// Sniffing wraps the original socket in sniffReplayConn, so the consumed
-	// ClientHello bytes remain readable here.
 	listener := newSingleConnListener(clientWire)
+	var clientProtocol string
+	if !mitm.PlainHTTP {
+		host, clientProtocol, err = handshakeMITM(ctx, listener, clientWire, mitm)
+		if err != nil {
+			return
+		}
+	}
+	_ = conn.SetDeadline(time.Time{})
+	stage = "relay"
+
+	attempt.mu.Lock()
+	ready := time.Now().UTC()
+	attempt.ReadyAt = &ready
+	attempt.MITMClientProtocol = clientProtocol
+	attempt.mu.Unlock()
+
+	h2 := mitm.H2 && !mitm.PlainHTTP
+	upstream := newMITMUpstream(ctx, rt, metadata, host, mitm.SkipServerCertVerify, h2, attempt)
+	handler := &mitmHTTPHandler{
+		backend: b, route: mitm, attempt: attempt, metadata: metadata,
+		upstream: upstream, host: host, closeWire: closeRaw,
+	}
+	defer func() {
+		cancel()
+		upstream.close()
+		// The HTTP/2 connection may close while its handlers still unwind.
+		// Finish request diagnostics before releasing the pinned route.
+		handler.waitForRequests()
+	}()
+	server := &http.Server{
+		Handler: handler, Protocols: mitmHTTPProtocols(h2), MaxHeaderBytes: relayHTTPMaxHeaderBytes,
+		ReadHeaderTimeout: C.TCPTimeout, IdleTimeout: mitmHTTPIdleTimeout,
+		DisableGeneralOptionsHandler: true,
+		BaseContext:                  func(net.Listener) context.Context { return ctx },
+	}
+	if h2 {
+		server.HTTP2 = mitmHTTP2Config()
+	}
+	_ = server.Serve(listener)
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+}
+
+func handshakeMITM(ctx context.Context, listener *singleConnListener, clientWire *mitmClientConn, mitm *MITMRoute) (string, string, error) {
+	host := mitm.Host
 	clientTLS := tls.Server(listener.conn, &tls.Config{
 		MinVersion: tls.VersionTLS12, NextProtos: mitmTLSNextProtos(mitm.H2), SessionTicketsDisabled: true,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -118,49 +164,16 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 	// Keep the close notification below TLS so Serve sees the negotiated ALPN
 	// on the concrete *tls.Conn and can dispatch it to its HTTP/2 server.
 	listener.conn = clientTLS
-	if err = clientTLS.HandshakeContext(ctx); err != nil {
+	if err := clientTLS.HandshakeContext(ctx); err != nil {
 		if ctx.Err() == nil && mitm.OnPinFailure != nil {
 			if reason := mitmPinFailure(err, clientWire.certSent); reason != "" {
 				mitm.OnPinFailure(host, reason)
 			}
 		}
-		return
+		return "", "", err
 	}
-	_ = conn.SetDeadline(time.Time{})
 	clientWire.certSelected = false
-	stage = "relay"
-
-	attempt.mu.Lock()
-	ready := time.Now().UTC()
-	attempt.ReadyAt = &ready
-	attempt.MITMClientProtocol = clientTLS.ConnectionState().NegotiatedProtocol
-	attempt.mu.Unlock()
-
-	upstream := newMITMUpstream(ctx, rt, metadata, host, mitm.SkipServerCertVerify, mitm.H2, attempt)
-	handler := &mitmHTTPHandler{
-		backend: b, route: mitm, attempt: attempt, metadata: metadata,
-		upstream: upstream, host: host, closeWire: closeRaw,
-	}
-	defer func() {
-		cancel()
-		upstream.close()
-		// The HTTP/2 connection may close while its handlers still unwind.
-		// Finish request diagnostics before releasing the pinned route.
-		handler.waitForRequests()
-	}()
-	server := &http.Server{
-		Handler: handler, Protocols: mitmHTTPProtocols(mitm.H2), MaxHeaderBytes: relayHTTPMaxHeaderBytes,
-		ReadHeaderTimeout: C.TCPTimeout, IdleTimeout: mitmHTTPIdleTimeout,
-		DisableGeneralOptionsHandler: true,
-		BaseContext:                  func(net.Listener) context.Context { return ctx },
-	}
-	if mitm.H2 {
-		server.HTTP2 = mitmHTTP2Config()
-	}
-	_ = server.Serve(listener)
-	if ctx.Err() != nil {
-		err = ctx.Err()
-	}
+	return host, clientTLS.ConnectionState().NegotiatedProtocol, nil
 }
 
 type mitmClientConn struct {

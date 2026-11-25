@@ -4,7 +4,7 @@ import (
 	"container/list"
 	"context"
 	"log/slog"
-	"regexp"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -12,6 +12,7 @@ import (
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/runtime"
 	"github.com/MimoProxy/reka/internal/script"
 )
@@ -21,11 +22,11 @@ import (
 const mitmScriptItemCapacity = 4 * model.MaxModuleScripts
 
 type mitmScriptTable struct {
-	requests, responses []mitmScriptEntry
+	requests, responses               []mitmScriptEntry
+	requestPatterns, responsePatterns httprewrite.URLPatterns
 }
 
 type mitmScriptEntry struct {
-	pattern      *regexp.Regexp
 	id, module   string
 	requiresBody bool
 	spec         script.Script
@@ -38,20 +39,18 @@ func newMITMScriptTable(defs []compile.Script, logger *slog.Logger) mitmScriptTa
 		if !def.Supported || kind != script.KindHTTPRequest && kind != script.KindHTTPResponse {
 			continue
 		}
-		pattern, err := regexp.Compile(def.Pattern)
-		if err != nil {
+		entries, patterns := &table.requests, &table.requestPatterns
+		if kind == script.KindHTTPResponse {
+			entries, patterns = &table.responses, &table.responsePatterns
+		}
+		if err := patterns.Add(def.Pattern); err != nil {
 			logger.Warn("invalid HTTP script pattern", "source", "script", "script_id", def.ID, "err", err)
 			continue
 		}
-		entry := mitmScriptEntry{
-			pattern: pattern, id: def.ID, module: def.Module, requiresBody: def.RequiresBody,
+		*entries = append(*entries, mitmScriptEntry{
+			id: def.ID, module: def.Module, requiresBody: def.RequiresBody,
 			spec: scriptSpec(def),
-		}
-		if kind == script.KindHTTPRequest {
-			table.requests = append(table.requests, entry)
-		} else {
-			table.responses = append(table.responses, entry)
-		}
+		})
 	}
 	return table
 }
@@ -78,17 +77,31 @@ func scriptSpec(def compile.Script) script.Script {
 
 func (t *mitmScriptTable) count() int { return len(t.requests) + len(t.responses) }
 
+func (t *mitmScriptTable) MayMatchHTTP(host string, port uint16) bool {
+	return t.mayMatchHTTPRequest(host, port) || t.responsePatterns.MayMatchHTTP(host, port)
+}
+
+func (t *mitmScriptTable) NamesHTTP(host string, port uint16) bool {
+	return t.requestPatterns.NamesHTTP(host, port) || t.responsePatterns.NamesHTTP(host, port)
+}
+
+func (t *mitmScriptTable) mayMatchHTTPRequest(host string, port uint16) bool {
+	return t.requestPatterns.MayMatchHTTP(host, port)
+}
+
+func (t *mitmScriptTable) MayMatchHTTPAddr(addr netip.Addr, port uint16) bool {
+	return t.requestPatterns.MayMatchHTTPAddr(addr, port) || t.responsePatterns.MayMatchHTTPAddr(addr, port)
+}
+
 func (t *mitmScriptTable) match(kind script.Kind, url string) *mitmScriptEntry {
-	var entries []mitmScriptEntry
 	switch kind {
 	case script.KindHTTPRequest:
-		entries = t.requests
+		if i := t.requestPatterns.FirstMatch(url); i >= 0 {
+			return &t.requests[i]
+		}
 	case script.KindHTTPResponse:
-		entries = t.responses
-	}
-	for i := range entries {
-		if entries[i].pattern.MatchString(url) {
-			return &entries[i]
+		if i := t.responsePatterns.FirstMatch(url); i >= 0 {
+			return &t.responses[i]
 		}
 	}
 	return nil
@@ -156,7 +169,7 @@ func (e *Engine) mitmScriptMatcher(snap *runtime.Snapshot[*sagernet.Outbound], s
 						e.debugScriptLog(ctx, ent.id, level, message)
 					}
 				}
-				return e.scriptHost.Run(ctx, &spec, input, e.scriptServices(snap, state, g.mitm, ent.id, ent.module, log))
+				return e.scriptHost.Run(ctx, &spec, input, e.scriptServices(snap, state, g.httpEngine, ent.id, ent.module, log))
 			}
 		}
 		return matched
@@ -245,7 +258,7 @@ func (e *Engine) scriptStatus(g *generation) api.MITMScriptStatus {
 	status := "disabled"
 	if e.scriptHost == nil {
 		status = "unsupported"
-	} else if g.eff != nil && g.eff.MITM.Enabled && g.scripts.count() != 0 {
+	} else if g.eff != nil && g.scripts.count() != 0 && (g.eff.MITM.Enabled || g.httpEngine != nil && g.httpEngine.plainScripts) {
 		status = "enabled"
 	}
 	info := e.scriptRuns.status(status, &g.scripts)

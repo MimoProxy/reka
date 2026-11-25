@@ -34,14 +34,14 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 		metadata.Destination = M.ParseSocksaddr(destination)
 	}
 	if _, debug := conn.(*debugBridge); !debug && rt.MITM != nil {
-		if rt.MITM.H2 {
-			go b.relayMITM(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
+		if rt.MITM.PlainHTTP || rt.MITM.H2 {
+			go b.relayHTTPEngine(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
 			return
 		}
 		go func() {
 			conn, requiresH2 := peekMITMClientHello(conn)
 			if !requiresH2 {
-				b.relayMITM(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
+				b.relayHTTPEngine(ctx, rt, conn, metadata, originalDestination, onClose, attempt)
 				return
 			}
 			// An HTTP/1.1-only MITM handshake would fail for this client, and

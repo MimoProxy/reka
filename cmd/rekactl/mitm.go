@@ -24,6 +24,7 @@ func cmdMITMStatus(args []string) error {
 	}
 	fmt.Printf("MITM enabled=%t CA loaded=%t HTTP/2=%s hostnames=%d connections=%d requests=%d\n",
 		status.Enabled, status.CALoaded, status.H2, status.HostnameCount, status.Connections, status.Requests)
+	fmt.Printf("Plain HTTP connections=%d requests=%d\n", status.PlainHTTPConnections, status.PlainHTTPRequests)
 	if status.CAError != "" {
 		fmt.Println("CA error", status.CAError)
 	}
@@ -39,6 +40,9 @@ func cmdMITMStatus(args []string) error {
 
 func mitmProtocols(info api.MITMConnectionInfo) string {
 	var protocols []string
+	if info.MITMPlainHTTP {
+		protocols = append(protocols, "plain-http")
+	}
 	if info.MITMClientProtocol != "" {
 		protocols = append(protocols, "client="+info.MITMClientProtocol)
 	}
@@ -65,12 +69,13 @@ func cmdRequests(args []string) error {
 		return err
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tCONNECTION\tMETHOD\tHOST\tPATH\tSTATUS\tDURATION\tSCRIPTS")
+	fmt.Fprintln(w, "ID\tCONNECTION\tMETHOD\tSCHEME\tHOST\tPATH\tSTATUS\tDURATION\tSCRIPTS")
 	for _, row := range page.Rows {
 		var request struct {
 			ID           uint64              `json:"id"`
 			ConnectionID uint64              `json:"connection_id"`
 			Method       string              `json:"method"`
+			Scheme       string              `json:"scheme"`
 			Host         string              `json:"host"`
 			Path         string              `json:"path"`
 			StatusCode   int                 `json:"status_code"`
@@ -80,7 +85,7 @@ func cmdRequests(args []string) error {
 		if err := json.Unmarshal(row.Data, &request); err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%d\t%dms\t%s\n", request.ID, request.ConnectionID, request.Method,
+		fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%d\t%dms\t%s\n", request.ID, request.ConnectionID, request.Method, request.Scheme,
 			request.Host, request.Path, request.StatusCode, request.DurationMS, scriptRuns(request.Scripts))
 	}
 	if err := w.Flush(); err != nil {

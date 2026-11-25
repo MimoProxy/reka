@@ -110,7 +110,7 @@ func TestMITMIssuerLifetime(t *testing.T) {
 	if rt.Release != nil {
 		defer rt.Release()
 	}
-	if rt.MITM == nil || rt.MITM.Issuer != previous.mitm.issuer.Issuer {
+	if rt.MITM == nil || rt.MITM.Issuer != previous.httpEngine.issuer.Issuer {
 		t.Fatal("matching route did not receive its generation's issuer")
 	}
 	if !rt.MITM.H2 {
@@ -122,27 +122,27 @@ func TestMITMIssuerLifetime(t *testing.T) {
 	}
 	activateMITMTestConfig(t, e, store, profile, 3)
 	_, same := e.current()
-	if same.mitm.issuer != previous.mitm.issuer || same.mitm.issuer.refs.Load() != 2 {
+	if same.httpEngine.issuer != previous.httpEngine.issuer || same.httpEngine.issuer.refs.Load() != 2 {
 		t.Fatal("activation did not reuse the same CA issuer")
 	}
-	if stillCached, err := same.mitm.issuer.Certificate("origin.test"); err != nil || stillCached != leaf {
+	if stillCached, err := same.httpEngine.issuer.Certificate("origin.test"); err != nil || stillCached != leaf {
 		t.Fatal("activation lost the leaf cache")
 	}
 	saveMITMTestCA(t, store)
 	activateMITMTestConfig(t, e, store, profile, 4)
 	_, replacement := e.current()
-	if replacement.mitm.issuer == previous.mitm.issuer || previous.mitm.issuer.refs.Load() != 1 {
+	if replacement.httpEngine.issuer == previous.httpEngine.issuer || previous.httpEngine.issuer.refs.Load() != 1 {
 		t.Fatal("activation did not retire the old CA with the running route retained")
 	}
 	if _, err := rt.MITM.Issuer.Certificate("old.origin.test"); err != nil {
 		t.Fatal(err)
 	}
 	rt.Release()
-	if previous.mitm.issuer.refs.Load() != 0 || previous.mitm.issuer.Issuer != nil {
+	if previous.httpEngine.issuer.refs.Load() != 0 || previous.httpEngine.issuer.Issuer != nil {
 		t.Fatal("connection release left the retired issuer live")
 	}
 	e.Close()
-	if replacement.mitm.issuer.refs.Load() != 0 || replacement.mitm.issuer.Issuer != nil {
+	if replacement.httpEngine.issuer.refs.Load() != 0 || replacement.httpEngine.issuer.Issuer != nil {
 		t.Fatal("engine shutdown left its active issuer live")
 	}
 }

@@ -266,6 +266,14 @@ func (a *connectionAttempt) recordMITMUpstreamProtocol(protocol string) {
 	}
 }
 
+func (a *connectionAttempt) setMITMPassthrough(reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.EndedAt.IsZero() {
+		a.MITMSkipped = reason
+	}
+}
+
 func (a *connectionAttempt) mitmInfoLocked() api.MITMConnectionInfo {
 	info := a.MITMConnectionInfo
 	info.MITMMatchedIDs = slices.Clone(info.MITMMatchedIDs)

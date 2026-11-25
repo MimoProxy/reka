@@ -3,6 +3,7 @@ package httprewrite
 import (
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -117,6 +118,47 @@ type mapRule struct {
 // Such rewrites can choose an upstream authority at request time.
 func (s *Set) MayChangeRequestURL() bool {
 	return s != nil && slices.ContainsFunc(s.http, func(rule urlRule) bool { return rule.action == "header" })
+}
+
+// MayMatchHTTP reports whether any rule could apply to a plain HTTP
+// connection. An empty host or zero port leaves that part unconstrained.
+func (s *Set) MayMatchHTTP(host string, port uint16) bool {
+	if s == nil {
+		return false
+	}
+	var scratch httpHostBuffer
+	return s.mayMatchHTTP(scratch.key([]byte(trimHostKey(host))), port, false)
+}
+
+// NamesHTTP is MayMatchHTTP without rules that name no host. Such rules
+// match every port, so sniffing for them is limited to the default port.
+func (s *Set) NamesHTTP(host string, port uint16) bool {
+	if s == nil {
+		return false
+	}
+	var scratch httpHostBuffer
+	return s.mayMatchHTTP(scratch.key([]byte(trimHostKey(host))), port, true)
+}
+
+// MayMatchHTTPAddr avoids allocating the textual address on a passthrough flow.
+func (s *Set) MayMatchHTTPAddr(addr netip.Addr, port uint16) bool {
+	if s == nil {
+		return false
+	}
+	var host httpHostBuffer
+	return s.mayMatchHTTP(addr.Unmap().AppendTo(host[:0]), port, false)
+}
+
+func (s *Set) mayMatchHTTP(host []byte, port uint16, named bool) bool {
+	for _, index := range [...]*ruleIndex{
+		&s.httpIndex, &s.mapIndex, &s.headerIndex[requestPhase], &s.headerIndex[responsePhase],
+		&s.bodyIndex[requestPhase], &s.bodyIndex[responsePhase],
+	} {
+		if index.mayMatchHTTP(host, port, named) {
+			return true
+		}
+	}
+	return false
 }
 
 // A transparent one-pixel GIF89a image.

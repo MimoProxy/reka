@@ -102,7 +102,7 @@ type generation struct {
 	// when the saved rules or the final target can route to one.
 	dropOutbounds map[string]bool
 	rulesMayDrop  bool
-	mitm          *mitmGeneration
+	httpEngine    *httpGeneration
 	mitmCAError   string
 	scripts       mitmScriptTable
 
@@ -114,36 +114,38 @@ type generation struct {
 // switches atomically. Commits are serialized by the caller (ConfigService)
 // and additionally by an internal lock.
 type Engine struct {
-	temporary           atomic.Pointer[temporaryRules]
-	temporarySequence   uint64
-	sceneObservation    atomic.Pointer[sceneObservation]
-	packetInterface     atomic.Pointer[string]
-	packetNetworks      atomic.Pointer[[2]netip.Prefix]
-	sceneManual         atomic.Pointer[manualScene]
-	arenaRunning        atomic.Bool
-	history             *history.Store
-	probeOnce           sync.Once
-	probeSlots          chan struct{}
-	tunSerial           uint64
-	takeover            *platform.Takeover
-	networkErr          error
-	guard               *sagernet.SocketGuard
-	fake                *RD.FakePool
-	dnsListener         *sagernet.DNSListener
-	dnsAddress          string
-	opts                EngineOptions
-	packetFlowRealDNS   atomic.Bool
-	backend             *sagernet.Backend
-	rt                  *runtime.Runtime[*sagernet.Outbound]
-	mitmBypasses        mitmBypassTable
-	mitmConnections     atomic.Uint64
-	mitmRequests        atomic.Uint64
-	scriptHost          *script.Host
-	scriptStore         *scriptStore
-	scriptNotifications *scriptNotifications
-	scriptRuns          mitmScriptCounters
-	backgroundScripts   backgroundScripts
-	scriptClashPort     atomic.Uint32
+	temporary            atomic.Pointer[temporaryRules]
+	temporarySequence    uint64
+	sceneObservation     atomic.Pointer[sceneObservation]
+	packetInterface      atomic.Pointer[string]
+	packetNetworks       atomic.Pointer[[2]netip.Prefix]
+	sceneManual          atomic.Pointer[manualScene]
+	arenaRunning         atomic.Bool
+	history              *history.Store
+	probeOnce            sync.Once
+	probeSlots           chan struct{}
+	tunSerial            uint64
+	takeover             *platform.Takeover
+	networkErr           error
+	guard                *sagernet.SocketGuard
+	fake                 *RD.FakePool
+	dnsListener          *sagernet.DNSListener
+	dnsAddress           string
+	opts                 EngineOptions
+	packetFlowRealDNS    atomic.Bool
+	backend              *sagernet.Backend
+	rt                   *runtime.Runtime[*sagernet.Outbound]
+	mitmBypasses         mitmBypassTable
+	mitmConnections      atomic.Uint64
+	mitmRequests         atomic.Uint64
+	plainHTTPConnections atomic.Uint64
+	plainHTTPRequests    atomic.Uint64
+	scriptHost           *script.Host
+	scriptStore          *scriptStore
+	scriptNotifications  *scriptNotifications
+	scriptRuns           mitmScriptCounters
+	backgroundScripts    backgroundScripts
+	scriptClashPort      atomic.Uint32
 
 	mu        sync.Mutex
 	listeners map[string]*listener
@@ -687,10 +689,10 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	}
 	g.scripts = newMITMScriptTable(eff.Scripts, e.scriptLogger())
 	g.readScriptSource = p.readScriptSource
-	g.loadMITM(previousGeneration, p.outbounds, e.scriptHost != nil)
+	g.loadHTTPEngine(previousGeneration, p.outbounds, e.scriptHost != nil)
 	genNo, err := e.rt.CommitValue(p.outbounds, g)
 	if err != nil {
-		g.mitm.release()
+		g.httpEngine.release()
 		for _, o := range p.created {
 			o.Close()
 		}
@@ -703,7 +705,7 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 		return 0, &ActivateError{Err: err}
 	}
 	e.activateBackgroundScripts(eff.Scripts, profileID == previousGeneration.historyScope.ProfileID)
-	previousGeneration.mitm.release()
+	previousGeneration.httpEngine.release()
 	if profileID != previousGeneration.historyScope.ProfileID {
 		e.backend.StopHTTPSDebug()
 	}
@@ -1109,7 +1111,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	)
 	genNo, out, release, ok, err := acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
 		if mitm != nil {
-			g.mitm.release()
+			g.httpEngine.release()
 			mitm = nil
 		}
 		snapshot = s
@@ -1181,7 +1183,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	}
 	if !ok {
 		if mitm != nil {
-			g.mitm.release()
+			g.httpEngine.release()
 		}
 		if fakeRelease != nil {
 			fakeRelease()
@@ -1201,7 +1203,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		result.Release = func() {
 			once.Do(func() {
 				release()
-				g.mitm.release()
+				g.httpEngine.release()
 			})
 		}
 	}
@@ -1241,9 +1243,9 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		}
 	}
 	if mitm != nil && fixed == nil {
-		if g.mitm.pins != nil {
+		if g.httpEngine.pins != nil {
 			result.Context = func(ctx context.Context) context.Context {
-				return sagernet.WithPinnedOutbounds(ctx, g.mitm.pins)
+				return sagernet.WithPinnedOutbounds(ctx, g.httpEngine.pins)
 			}
 		}
 		result = retainSniffSnapshot(result, snapshot)
@@ -1465,7 +1467,7 @@ func (e *Engine) Close() {
 	e.mu.Unlock()
 	e.backgroundScripts.workers.Wait()
 	e.backend.CloseConnections(nil)
-	g.mitm.release()
+	g.httpEngine.release()
 	e.rt.Close()
 	e.backend.Close()
 	e.fake.Close()

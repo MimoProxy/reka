@@ -297,16 +297,18 @@ type Connection struct {
 }
 
 type MITMConnectionInfo struct {
-	MITM                  bool              `json:"mitm,omitempty"`
+	// MITM records that the HTTP engine accepted the connection.
+	MITM bool `json:"mitm,omitempty"`
+	// MITMPlainHTTP identifies connections accepted without a TLS handshake.
+	MITMPlainHTTP         bool              `json:"mitm_plain_http,omitempty"`
 	MITMRequests          uint64            `json:"mitm_requests,omitempty"`
 	MITMMatchedIDs        []string          `json:"mitm_matched_ids,omitempty"`
 	MITMBodyPassthroughs  uint64            `json:"mitm_body_passthroughs,omitempty"`
 	MITMScripts           []MITMScriptStats `json:"mitm_scripts,omitempty"`
 	MITMClientProtocol    string            `json:"mitm_client_protocol,omitempty"`
 	MITMUpstreamProtocols []string          `json:"mitm_upstream_protocols,omitempty"`
-	// MITMSkipped is set when a connection matched MITM but was relayed
-	// without decryption. "h2-disabled" means the client only offered HTTP/2
-	// while MITM HTTP/2 is off.
+	// MITMSkipped records why the rest of the connection was relayed directly:
+	// h2-disabled, h2c, connect, absolute-form, or upgrade.
 	MITMSkipped string `json:"mitm_skipped,omitempty"`
 }
 

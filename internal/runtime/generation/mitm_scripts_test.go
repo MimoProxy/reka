@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -55,6 +56,40 @@ func TestMITMScriptTableOrder(t *testing.T) {
 	}
 	if got := table.match(script.KindHTTPRequest, "https://other.test/other"); got != nil {
 		t.Fatalf("unexpected script = %+v", got)
+	}
+}
+
+func TestMITMScriptTableMayMatchHTTP(t *testing.T) {
+	tests := []struct {
+		kind          script.Kind
+		pattern, host string
+		port          uint16
+		want          bool
+	}{
+		{script.KindHTTPRequest, `^http://example\.com/`, "example.com", 80, true},
+		{script.KindHTTPResponse, `^https?://example\.com/`, "example.net", 80, false},
+		{script.KindHTTPResponse, `^http://example\.com:8080/`, "example.com", 8080, true},
+		{script.KindHTTPResponse, `^http://example\.com:8080/`, "", 80, false},
+		{script.KindHTTPRequest, `^https:\/\/[^?]+/path`, "", 0, false},
+		{script.KindHTTPResponse, `^https?:\/\/[^?]+/path`, "example.net", 8080, true},
+		{script.KindHTTPRequest, `/path`, "example.net", 80, true},
+		{script.KindHTTPResponse, `^http://192\.0\.2\.1/`, "192.0.2.1", 80, true},
+		{script.KindHTTPRequest, `^http://\[2001:db8::1\]/`, "2001:db8::1", 80, true},
+	}
+	for _, test := range tests {
+		table := newMITMScriptTable([]compile.Script{
+			{Type: string(test.kind), Pattern: test.pattern, Supported: true},
+			{Type: string(script.KindHTTPRequest), Pattern: ".*"},
+		}, slog.Default())
+		if got := table.MayMatchHTTP(test.host, test.port); got != test.want {
+			t.Errorf("%q for %q port %d = %t, want %t", test.pattern, test.host, test.port, got, test.want)
+		}
+		if got := table.mayMatchHTTPRequest(test.host, test.port); got != (test.want && test.kind == script.KindHTTPRequest) {
+			t.Errorf("request script candidate for %q = %t", test.pattern, got)
+		}
+		if addr, err := netip.ParseAddr(test.host); err == nil && table.MayMatchHTTPAddr(addr, test.port) != test.want {
+			t.Errorf("address lookup for %q disagrees with its hostname lookup", test.pattern)
+		}
 	}
 }
 

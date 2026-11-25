@@ -46,6 +46,32 @@ func TestConnectionMITMProtocolSnapshots(t *testing.T) {
 	}
 }
 
+func TestPlainHTTPConnectionDiagnostics(t *testing.T) {
+	attempt := (&Backend{}).beginConnection(t.Context(), Metadata{})
+	assertFields := func(info api.MITMConnectionInfo, plain, reason string) {
+		t.Helper()
+		data, err := json.Marshal(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if string(fields["mitm_plain_http"]) != plain || string(fields["mitm_skipped"]) != reason {
+			t.Fatalf("unexpected HTTP connection fields: %s", data)
+		}
+	}
+	_, live := attempt.activeInfo()
+	assertFields(live, "", "")
+	attempt.MITM, attempt.MITMPlainHTTP = true, true
+	attempt.setMITMPassthrough("upgrade")
+	_, live = attempt.activeInfo()
+	assertFields(live, "true", `"upgrade"`)
+	attempt.complete("eof", "")
+	assertFields(attempt.trace().MITMConnectionInfo, "true", `"upgrade"`)
+}
+
 func TestConnectionEventBuffer(t *testing.T) {
 	if size := unsafe.Sizeof(connectionEvent{}); size > 80 {
 		t.Fatalf("retained event uses %d bytes", size)

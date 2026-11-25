@@ -24,6 +24,8 @@ const (
 	mitmBypassDuration = 10 * time.Minute
 	mitmBypassCapacity = 256
 	mitmQUIC           = "mitm-quic"
+	// The default HTTP port in sing-box common/urltest and mihomo listener/http.
+	plainHTTPPort = 80
 )
 
 // Each generation owns one reference to its issuer, which can be shared.
@@ -44,29 +46,29 @@ func retainMITMRef(counter *atomic.Int64) bool {
 }
 
 func (i *mitmIssuer) release() {
-	if i.refs.Add(-1) == 0 {
+	if i != nil && i.refs.Add(-1) == 0 {
 		i.Close()
 		i.Issuer = nil
 	}
 }
 
-// The active generation, prepared sniffs and intercepted connections keep
-// this state alive. Transparent URL rewrites can select any rule target, so
-// those generations keep one shared pin per outbound until their flows end.
-type mitmGeneration struct {
-	issuer  *mitmIssuer
-	pins    map[*sagernet.Outbound]*sagernet.PinnedOutbound
-	reroute bool
-	refs    atomic.Int64
+// Prepared sniffs and HTTP connections retain the generation across reloads.
+// Rewrites and script fetches share outbound pins. Only TLS needs an issuer.
+type httpGeneration struct {
+	issuer                  *mitmIssuer
+	pins                    map[*sagernet.Outbound]*sagernet.PinnedOutbound
+	reroute                 bool
+	plainHTTP, plainScripts bool
+	refs                    atomic.Int64
 }
 
-func (m *mitmGeneration) retain() bool { return m != nil && retainMITMRef(&m.refs) }
+func (m *httpGeneration) retain() bool { return m != nil && retainMITMRef(&m.refs) }
 
-func (m *mitmGeneration) outboundPins() map[*sagernet.Outbound]*sagernet.PinnedOutbound {
+func (m *httpGeneration) outboundPins() map[*sagernet.Outbound]*sagernet.PinnedOutbound {
 	return m.pins
 }
 
-func (m *mitmGeneration) release() {
+func (m *httpGeneration) release() {
 	if m != nil && m.refs.Add(-1) == 0 {
 		closeSniffPins(m.pins)
 		m.pins = nil
@@ -74,14 +76,56 @@ func (m *mitmGeneration) release() {
 	}
 }
 
-func (g *generation) loadMITM(previous *generation, outbounds map[string]*sagernet.Outbound, scriptsSupported bool) {
-	if g.eff == nil || !g.eff.MITM.Enabled {
+func (g *generation) loadHTTPEngine(previous *generation, outbounds map[string]*sagernet.Outbound, scriptsSupported bool) {
+	if g.eff == nil {
 		return
+	}
+	issuer := g.loadMITMIssuer(previous)
+	scriptRouting := scriptsSupported && g.scripts.count() != 0
+	if issuer == nil && g.eff.HTTPRewrite == nil && !scriptRouting {
+		return
+	}
+	httpEnabled := canSniffHTTP(g.eff)
+	plainScripts := httpEnabled && scriptRouting && g.scripts.MayMatchHTTP("", 0)
+	plainHTTP := plainScripts || httpEnabled && g.eff.HTTPRewrite.MayMatchHTTP("", 0)
+	tls := issuer != nil && len(g.eff.MITM.Hostnames) != 0
+	m := &httpGeneration{issuer: issuer, plainHTTP: plainHTTP, plainScripts: plainScripts}
+	if tls || plainHTTP {
+		requestScripts := tls && scriptRouting && len(g.scripts.requests) != 0 || plainScripts && g.scripts.mayMatchHTTPRequest("", 0)
+		m.reroute = g.eff.HTTPRewrite.MayChangeRequestURL() || requestScripts
+		needed := sniffDNSDependencies(g, outbounds)
+		// Both request and response scripts may use the routed HTTP client.
+		if m.reroute || tls && scriptRouting || plainScripts {
+			for _, out := range outbounds {
+				needed[out] = true
+			}
+		}
+		if len(needed) != 0 {
+			m.pins = make(map[*sagernet.Outbound]*sagernet.PinnedOutbound, len(needed))
+		}
+		for out := range needed {
+			pin, err := out.Pin()
+			if err != nil {
+				closeSniffPins(m.pins)
+				issuer.release()
+				g.mitmCAError = "HTTP routing generation unavailable"
+				return
+			}
+			m.pins[out] = pin
+		}
+	}
+	m.refs.Store(1)
+	g.httpEngine = m
+}
+
+func (g *generation) loadMITMIssuer(previous *generation) *mitmIssuer {
+	if !g.eff.MITM.Enabled {
+		return nil
 	}
 	store := g.eff.MITMCAStore()
 	if store == nil {
 		g.mitmCAError = "MITM CA store unavailable"
-		return
+		return nil
 	}
 	authority, err := ca.Load(store)
 	if err != nil {
@@ -89,66 +133,73 @@ func (g *generation) loadMITM(previous *generation, outbounds map[string]*sagern
 		if errors.Is(err, ca.ErrNotFound) {
 			g.mitmCAError = "no MITM CA installed"
 		}
-		return
+		return nil
 	}
 	info := authority.Info()
 	if !time.Now().Before(info.NotAfter) {
 		g.mitmCAError = "MITM CA has expired"
-		return
+		return nil
 	}
-	var pins map[*sagernet.Outbound]*sagernet.PinnedOutbound
-	scriptRouting := scriptsSupported && g.scripts.count() != 0
-	reroute := len(g.eff.MITM.Hostnames) != 0 && (g.eff.HTTPRewrite.MayChangeRequestURL() || scriptRouting && len(g.scripts.requests) != 0)
-	if len(g.eff.MITM.Hostnames) != 0 {
-		needed := sniffDNSDependencies(g, outbounds)
-		if reroute || scriptRouting {
-			for _, out := range outbounds {
-				needed[out] = true
-			}
-		}
-		if len(needed) != 0 {
-			pins = make(map[*sagernet.Outbound]*sagernet.PinnedOutbound, len(needed))
-		}
-		for out := range needed {
-			pin, err := out.Pin()
-			if err != nil {
-				closeSniffPins(pins)
-				g.mitmCAError = "MITM routing generation unavailable"
-				return
-			}
-			pins[out] = pin
+	if previous.httpEngine != nil && previous.httpEngine.issuer != nil && previous.httpEngine.issuer.fingerprint == info.FingerprintSHA256 {
+		issuer := previous.httpEngine.issuer
+		issuer.refs.Add(1)
+		return issuer
+	}
+	issuer := &mitmIssuer{
+		Issuer:      ca.NewIssuer(authority, ca.IssuerOptions{}),
+		fingerprint: info.FingerprintSHA256,
+		notAfter:    info.NotAfter,
+	}
+	issuer.refs.Store(1)
+	return issuer
+}
+
+func (g *generation) mayMatchPlainHTTP(host string, port uint16) bool {
+	if strings.Contains(host, ":") {
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return g.mayMatchPlainHTTPAddr(addr.Unmap(), port)
 		}
 	}
-	var i *mitmIssuer
-	if previous.mitm != nil && previous.mitm.issuer.fingerprint == info.FingerprintSHA256 {
-		i = previous.mitm.issuer
-		i.refs.Add(1)
-	} else {
-		i = &mitmIssuer{
-			Issuer:      ca.NewIssuer(authority, ca.IssuerOptions{}),
-			fingerprint: info.FingerprintSHA256,
-			notAfter:    info.NotAfter,
-		}
-		i.refs.Store(1)
+	return g.eff.HTTPRewrite.MayMatchHTTP(host, port) || g.httpEngine.plainScripts && g.scripts.MayMatchHTTP(host, port)
+}
+
+// Surge notes that sniffing may miss cleartext HTTP on other ports. Rules
+// that name no host match any port, so they only extend sniffing to port 80.
+// A flow sniffed for another reason is still admitted by mayMatchPlainHTTP.
+func (g *generation) maySniffPlainHTTP(host string, port uint16) bool {
+	if port == plainHTTPPort {
+		return g.mayMatchPlainHTTP(host, port)
 	}
-	g.mitm = &mitmGeneration{issuer: i, pins: pins, reroute: reroute}
-	g.mitm.refs.Store(1)
+	if addr, err := netip.ParseAddr(host); err == nil {
+		host = addr.Unmap().String()
+	}
+	return g.eff.HTTPRewrite.NamesHTTP(host, port) || g.httpEngine.plainScripts && g.scripts.NamesHTTP(host, port)
+}
+
+func (g *generation) mayMatchPlainHTTPAddr(addr netip.Addr, port uint16) bool {
+	return g.eff.HTTPRewrite.MayMatchHTTPAddr(addr, port) || g.httpEngine.plainScripts && g.scripts.MayMatchHTTPAddr(addr, port)
 }
 
 func (g *generation) mitmAvailable() bool {
-	return g.mitm != nil && time.Now().Before(g.mitm.issuer.notAfter)
+	return g.httpEngine != nil && g.httpEngine.issuer != nil && time.Now().Before(g.httpEngine.issuer.notAfter)
 }
 
-func mitmHostname(md sagernet.Metadata) string {
+func httpHostHint(md sagernet.Metadata) string {
 	// The destination can already carry a domain from fake IP or an
 	// explicit proxy target. A sniffed hint covers address-only connections.
 	host := md.Destination.Domain
 	if host == "" {
 		host = md.SniffedDomain
 	}
-	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	if addr, err := netip.ParseAddr(host); err == nil {
-		return addr.Unmap().String()
+	return strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+}
+
+func mitmHostname(md sagernet.Metadata) string {
+	host := httpHostHint(md)
+	if strings.Contains(host, ":") {
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return addr.Unmap().String()
+		}
 	}
 	return router.NormalizeDomain(host)
 }
@@ -175,37 +226,77 @@ func (e *Engine) mitmBlocksQUIC(g *generation, md sagernet.Metadata) bool {
 
 func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state routingState, md sagernet.Metadata) *sagernet.MITMRoute {
 	g := snap.Value.(*generation)
-	if md.Network != "tcp" || md.Protocol != "" && md.Protocol != "tls" {
+	if g.httpEngine == nil || md.Network != "tcp" || md.SkipMITM {
 		return nil
 	}
-	host := mitmHostname(md)
-	if !e.mitmMatches(g, md, host) || !g.mitm.retain() {
+	var host string
+	plain := md.Protocol == "http"
+	switch md.Protocol {
+	case "http":
+		// Plain HTTP requires sniffing; disabling sniffing disables admission.
+		if !g.httpEngine.plainHTTP {
+			return nil
+		}
+		port := md.Destination.Port
+		if hint := httpHostHint(md); hint != "" {
+			if !g.mayMatchPlainHTTP(hint, port) {
+				return nil
+			}
+			host = mitmHostname(md)
+		} else {
+			addr := md.Destination.Addr.Unmap()
+			if !addr.IsValid() || !g.mayMatchPlainHTTPAddr(addr, port) {
+				return nil
+			}
+			host = addr.String()
+		}
+	case "", "tls":
+		if g.httpEngine.issuer == nil {
+			return nil
+		}
+		host = mitmHostname(md)
+		if !e.mitmMatches(g, md, host) {
+			return nil
+		}
+	default:
+		return nil
+	}
+	if !g.httpEngine.retain() {
 		return nil
 	}
 	route := &sagernet.MITMRoute{
-		Host: host, Issuer: g.mitm.issuer.Issuer, Rewrite: g.eff.HTTPRewrite,
-		MaxBodySize: compile.MITMMaxBodySize, SkipServerCertVerify: g.eff.MITM.SkipServerCertVerify, H2: g.eff.MITM.H2,
-		OnPinFailure: func(_, reason string) { e.mitmBypasses.insert(host, reason) },
-		OnConnection: func() { e.mitmConnections.Add(1) },
-		OnRequest:    func() { e.mitmRequests.Add(1) },
+		Host: host, PlainHTTP: plain, Rewrite: g.eff.HTTPRewrite, MaxBodySize: compile.MITMMaxBodySize,
 	}
-	if g.scripts.count() != 0 {
+	if plain {
+		route.OnConnection = func() { e.plainHTTPConnections.Add(1) }
+		route.OnRequest = func() { e.plainHTTPRequests.Add(1) }
+	} else {
+		route.Issuer = g.httpEngine.issuer.Issuer
+		route.H2 = g.eff.MITM.H2
+		route.SkipServerCertVerify = g.eff.MITM.SkipServerCertVerify
+		route.OnPinFailure = func(_, reason string) { e.mitmBypasses.insert(host, reason) }
+		route.OnConnection = func() { e.mitmConnections.Add(1) }
+		route.OnRequest = func() { e.mitmRequests.Add(1) }
+	}
+	if g.scripts.count() != 0 && (!plain || e.scriptHost != nil) {
 		route.MatchScript = e.mitmScriptMatcher(snap, state)
 		route.OnScript = e.scriptRuns.record
 	}
-	if g.mitm.reroute {
+	if g.httpEngine.reroute {
+		// Capture metadata only on routes that can change the destination.
+		original := md
 		route.Reroute = func(ctx context.Context, dest sagernet.Destination) sagernet.Route {
-			target := md
+			target := original
 			target.Destination, target.SniffedDomain = dest, ""
 			withPins := func(ctx context.Context) context.Context {
-				return sagernet.WithPinnedOutbounds(ctx, g.mitm.pins)
+				return sagernet.WithPinnedOutbounds(ctx, g.httpEngine.pins)
 			}
 			acquire := func(pick func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error) {
 				out, ok := pick(snap)
 				if !ok {
 					return snap.Generation, nil, nil, false, nil
 				}
-				release, borrowed := g.mitm.pins[out].Borrow()
+				release, borrowed := g.httpEngine.pins[out].Borrow()
 				return snap.Generation, out, release, borrowed, nil
 			}
 			rt := e.routeWithAcquire(withPins(ctx), target, acquire, snap, state, false)
@@ -225,15 +316,17 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 func (e *Engine) MITMStatus() api.MITMStatus {
 	_, g := e.current()
 	status := api.MITMStatus{
-		CALoaded:        g.mitmAvailable(),
-		CAError:         g.mitmCAError,
-		H2:              "disabled",
-		PinningBypasses: e.mitmBypasses.list(),
-		Connections:     e.mitmConnections.Load(),
-		Requests:        e.mitmRequests.Load(),
-		Scripts:         e.scriptStatus(g),
+		CALoaded:             g.mitmAvailable(),
+		CAError:              g.mitmCAError,
+		H2:                   "disabled",
+		PinningBypasses:      e.mitmBypasses.list(),
+		Connections:          e.mitmConnections.Load(),
+		Requests:             e.mitmRequests.Load(),
+		PlainHTTPConnections: e.plainHTTPConnections.Load(),
+		PlainHTTPRequests:    e.plainHTTPRequests.Load(),
+		Scripts:              e.scriptStatus(g),
 	}
-	if g.mitm != nil && !status.CALoaded {
+	if g.httpEngine != nil && g.httpEngine.issuer != nil && !status.CALoaded {
 		status.CAError = "MITM CA has expired"
 	}
 	if g.eff != nil {

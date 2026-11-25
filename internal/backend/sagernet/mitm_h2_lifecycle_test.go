@@ -197,7 +197,7 @@ func TestMITMHTTP2UpstreamResetKeepsOtherStreams(t *testing.T) {
 		}
 	})
 	res, err := fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/reset-before-headers", nil))
-	assertMITMH2WireReply(t, res, err, http.StatusBadGateway, "HTTPS upstream request failed\n")
+	assertMITMH2WireReply(t, res, err, http.StatusBadGateway, "HTTP upstream request failed\n")
 	res, err = fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/script-abort", nil))
 	if res != nil {
 		res.Body.Close()
@@ -395,7 +395,7 @@ func TestMITMHTTP2UpstreamGoAwayAcceptedStream(t *testing.T) {
 				_, err = io.ReadAll(res.Body)
 				assertMITMH2StreamReset(t, err)
 			} else {
-				assertMITMH2WireReply(t, res, err, http.StatusBadGateway, "HTTPS upstream request failed\n")
+				assertMITMH2WireReply(t, res, err, http.StatusBadGateway, "HTTP upstream request failed\n")
 			}
 			assertMITMH2OriginDone(t, ctx, served, 1)
 			local, err := mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/local", nil)

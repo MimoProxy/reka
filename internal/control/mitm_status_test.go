@@ -24,8 +24,18 @@ func TestGetMITMStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.H2 != "enabled" || status.Enabled || status.CALoaded || status.CAError != "" ||
-		status.PinningBypasses == nil || len(status.PinningBypasses) != 0 || status.Connections != 0 || status.Requests != 0 {
+		status.PinningBypasses == nil || len(status.PinningBypasses) != 0 || status.Connections != 0 || status.Requests != 0 ||
+		status.PlainHTTPConnections != 0 || status.PlainHTTPRequests != 0 {
 		t.Fatalf("initial MITM status = %+v", status)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(reply.Result, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"plain_http_connections_total", "plain_http_requests_total"} {
+		if string(fields[key]) != "0" {
+			t.Fatalf("initial %s = %s, want 0", key, fields[key])
+		}
 	}
 	wantScripts := api.MITMScriptStatus{Status: "disabled"}
 	if runtime.GOOS == "ios" {

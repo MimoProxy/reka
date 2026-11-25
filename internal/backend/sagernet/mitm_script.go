@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
@@ -192,14 +191,14 @@ func readMITMScriptHeaders(fields []script.HeaderField) (http.Header, error) {
 	return header, nil
 }
 
-func applyMITMRequestScript(request *http.Request, result script.Result) (destination Destination, reroute bool, err error) {
+func applyMITMRequestScript(request *http.Request, result script.Result, allowHTTP, upgrade bool) (destination Destination, reroute bool, err error) {
 	target, host, header := request.URL, request.Host, request.Header
 	if result.URL != nil {
-		target, destination, err = mitmUpstreamTarget(*result.URL)
+		target, destination, err = mitmUpstreamTarget(*result.URL, allowHTTP)
 		if err != nil {
-			return Destination{}, false, errors.New("invalid script HTTPS request URL")
+			return Destination{}, false, errors.New("invalid script HTTP request URL")
 		}
-		reroute = !strings.EqualFold(target.Hostname(), request.URL.Hostname()) || mitmHTTPSPort(target) != mitmHTTPSPort(request.URL)
+		reroute = !sameMITMOrigin(target, request.URL)
 		if host == request.URL.Host {
 			host = target.Host
 		}
@@ -214,10 +213,10 @@ func applyMITMRequestScript(request *http.Request, result script.Result) (destin
 			host = replacement
 		}
 		if !httpguts.ValidHostHeader(host) {
-			return Destination{}, false, errors.New("invalid script HTTPS request authority")
+			return Destination{}, false, errors.New("invalid script HTTP request authority")
 		}
 		header.Del("Host")
-		stripHTTPHopHeaders(header)
+		stripMITMRequestHopHeaders(header, upgrade)
 		if !result.BodySet {
 			preserveMITMBodyHeaders(header, request.Header, request.ContentLength)
 		}

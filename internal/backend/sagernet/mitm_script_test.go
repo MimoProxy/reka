@@ -40,7 +40,7 @@ func TestMITMRequestScriptResult(t *testing.T) {
 			{Name: "Transfer-Encoding", Value: "chunked"},
 		},
 	}
-	destination, reroute, err := applyMITMRequestScript(request, result)
+	destination, reroute, err := applyMITMRequestScript(request, result, false, false)
 	if err != nil || !reroute || destination.String() != "origin.test:8443" {
 		t.Fatalf("destination %v, reroute %v, error %v", destination, reroute, err)
 	}
@@ -59,7 +59,7 @@ func TestMITMRequestScriptResult(t *testing.T) {
 
 	invalid := "http://origin.test/invalid"
 	result.URL = &invalid
-	if _, _, err := applyMITMRequestScript(request, result); err == nil || request.URL.String() != target {
+	if _, _, err := applyMITMRequestScript(request, result, false, false); err == nil || request.URL.String() != target {
 		t.Fatalf("invalid result changed URL to %v, error %v", request.URL, err)
 	}
 }

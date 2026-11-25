@@ -242,7 +242,7 @@ func (s *Set) addURLRule(r HTTPRewrite, v validator) {
 		v.fail("action", "must be header, 302, 307, or reject")
 	}
 	if parsed != nil {
-		s.httpIndex.add(len(s.http), parsed)
+		s.httpIndex.add(parsed)
 		s.http = append(s.http, rule)
 	}
 }
@@ -291,7 +291,7 @@ func (s *Set) addHeaderRule(r HeaderRewrite, v validator) {
 		v.fail("value", "invalid HTTP header field value")
 	}
 	if parsed != nil && validPhase {
-		s.headerIndex[phase].add(len(s.header[phase]), parsed)
+		s.headerIndex[phase].add(parsed)
 		s.header[phase] = append(s.header[phase], rule)
 	}
 }
@@ -326,7 +326,7 @@ func (s *Set) addBodyRule(r BodyRewrite, v validator) {
 		}
 	}
 	if parsed != nil && validPhase {
-		s.bodyIndex[phase].add(len(s.body[phase]), parsed)
+		s.bodyIndex[phase].add(parsed)
 		s.body[phase] = append(s.body[phase], rule)
 	}
 }
@@ -390,7 +390,7 @@ func (s *Set) addMapRule(r MapLocal, v validator) {
 		rule.header.Set("Content-Type", contentType)
 	}
 	if parsed != nil {
-		s.mapIndex.add(len(s.mapLocal), parsed)
+		s.mapIndex.add(parsed)
 		s.mapLocal = append(s.mapLocal, rule)
 	}
 }

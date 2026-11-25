@@ -7,15 +7,17 @@ import (
 
 // MITMStatus reports the active configuration and runtime counters.
 type MITMStatus struct {
-	Enabled         bool             `json:"enabled"`
-	CALoaded        bool             `json:"ca_loaded"`
-	CAError         string           `json:"ca_error,omitempty"`
-	H2              string           `json:"h2"`
-	HostnameCount   int              `json:"hostname_count"`
-	PinningBypasses []MITMBypassInfo `json:"pinning_bypasses"`
-	Connections     uint64           `json:"connections_total"`
-	Requests        uint64           `json:"requests_total"`
-	Scripts         MITMScriptStatus `json:"scripts"`
+	Enabled              bool             `json:"enabled"`
+	CALoaded             bool             `json:"ca_loaded"`
+	CAError              string           `json:"ca_error,omitempty"`
+	H2                   string           `json:"h2"`
+	HostnameCount        int              `json:"hostname_count"`
+	PinningBypasses      []MITMBypassInfo `json:"pinning_bypasses"`
+	Connections          uint64           `json:"connections_total"` // TLS MITM connections.
+	Requests             uint64           `json:"requests_total"`    // Requests on TLS MITM connections.
+	PlainHTTPConnections uint64           `json:"plain_http_connections_total"`
+	PlainHTTPRequests    uint64           `json:"plain_http_requests_total"`
+	Scripts              MITMScriptStatus `json:"scripts"`
 }
 
 type MITMBypassInfo struct {

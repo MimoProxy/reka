@@ -166,6 +166,8 @@ func observeMITMUpstreamProtocol(ctx context.Context, attempt *connectionAttempt
 			// upstream closes or resets the stream before sending headers.
 			conn, ok := info.Conn.(interface{ ConnectionState() tls.ConnectionState })
 			if !ok {
+				// The cleartext transport only negotiates HTTP/1.1.
+				attempt.recordMITMUpstreamProtocol("http/1.1")
 				return
 			}
 			switch conn.ConnectionState().NegotiatedProtocol {

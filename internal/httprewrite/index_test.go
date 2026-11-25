@@ -2,6 +2,7 @@ package httprewrite
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"runtime"
 	"slices"
@@ -66,14 +67,14 @@ func TestRuleIndexMatchesLinearScan(t *testing.T) {
 			t.Fatal(err)
 		}
 		lazy[i] = re
-		index.add(i, parsed)
+		index.add(parsed)
 		compiled[i] = regexp.MustCompile(pattern)
 	}
 	if want := []int{0, 3, 5, 6, 7, 9, 17}; !slices.Equal(index.byHost["example.com"], want) {
 		t.Fatalf("example.com indexed rules = %v, want %v", index.byHost["example.com"], want)
 	}
-	if want := []int{19}; !slices.Equal(index.byHost["[::1]"], want) {
-		t.Fatalf("[::1] indexed rules = %v, want %v", index.byHost["[::1]"], want)
+	if want := []int{19}; !slices.Equal(index.byHost["::1"], want) {
+		t.Fatalf("IPv6 indexed rules = %v, want %v", index.byHost["::1"], want)
 	}
 	for _, url := range urls {
 		t.Run(url, func(t *testing.T) {
@@ -108,6 +109,80 @@ func TestLazyRegexpCompilesOnDemand(t *testing.T) {
 	compiled := re.get()
 	if !compiled.MatchString("abc") || re.get() != compiled {
 		t.Fatal("regexp was not compiled and cached")
+	}
+}
+
+func TestMayMatchHTTP(t *testing.T) {
+	tests := []struct {
+		pattern, host string
+		port          uint16
+		want          bool
+	}{
+		{`^http://example\.com/path`, "example.com", 80, true},
+		{`^http://example\.com/path`, "example.net", 80, false},
+		{`^http://example\.com/path`, "example.com", 8080, false},
+		{`^http://example\.com:8080/`, "example.com", 8080, true},
+		{`^http://example\.com:8080/`, "", 80, false},
+		{`^http://example\.com:8080/`, "", 0, true},
+		{`^http://example\.com:80/`, "", 0, false},
+		{`^http://example\.com:8`, "example.com", 8080, true},
+		{`^http://example\.com:[0-9]+/`, "", 80, false},
+		{`^https://example\.com/path`, "example.com", 80, false},
+		{`^https:\/\/[^?]+/path`, "", 0, false},
+		{`^https?:\/\/[^?]+/path`, "example.net", 8181, true},
+		{`^https?://EXAMPLE\.COM/`, "example.com", 80, true},
+		{`^https://example\.com/|/path`, "example.net", 80, true},
+		{`/path`, "example.net", 8080, true},
+		{`^http://192\.0\.2\.1/`, "192.0.2.1", 80, true},
+		{`^http://\[2001:db8::1\]:8080/`, "2001:db8::1", 8080, true},
+	}
+	for _, test := range tests {
+		set, err := New(Spec{HTTPRewrites: []HTTPRewrite{{Match: test.pattern, Action: "reject"}}}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := set.MayMatchHTTP(test.host, test.port); got != test.want {
+			t.Errorf("%q for %q port %d = %t, want %t", test.pattern, test.host, test.port, got, test.want)
+		}
+		if set.http[0].match.regexp != nil {
+			t.Errorf("connection lookup compiled %q", test.pattern)
+		}
+	}
+}
+
+func TestMayMatchHTTPRuleKinds(t *testing.T) {
+	pattern := `^http://example\.com:8080/`
+	request, response, jq, gif := "request", "response", ".", "tiny-gif"
+	for _, spec := range []Spec{
+		{HTTPRewrites: []HTTPRewrite{{Match: pattern, Action: "reject"}}},
+		{HeaderRewrites: []HeaderRewrite{{Match: pattern, Op: "del", Name: "X-Test", Phase: &request}}},
+		{HeaderRewrites: []HeaderRewrite{{Match: pattern, Op: "del", Name: "X-Test", Phase: &response}}},
+		{BodyRewrites: []BodyRewrite{{Match: pattern, Phase: request, JQ: &jq}}},
+		{BodyRewrites: []BodyRewrite{{Match: pattern, Phase: response, JQ: &jq}}},
+		{MapLocal: []MapLocal{{Match: pattern, DataType: &gif}}},
+	} {
+		set, err := New(spec, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !set.MayMatchHTTP("example.com", 8080) {
+			t.Errorf("missing connection candidate for %+v", spec)
+		}
+		if n := testing.AllocsPerRun(100, func() {
+			if set.MayMatchHTTP("Very.Long.Mixed.Case.Unrelated.Example.Net.", 8080) {
+				t.Fatal("indexed rule selected an unrelated host")
+			}
+		}); n != 0 {
+			t.Errorf("unrelated host lookup allocated %v times", n)
+		}
+		addr := netip.MustParseAddr("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff")
+		if n := testing.AllocsPerRun(100, func() {
+			if set.MayMatchHTTPAddr(addr, 8080) {
+				t.Fatal("indexed rule selected an unrelated address")
+			}
+		}); n != 0 {
+			t.Errorf("unrelated address lookup allocated %v times", n)
+		}
 	}
 }
 

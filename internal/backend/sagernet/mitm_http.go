@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -21,7 +22,6 @@ import (
 	"github.com/MimoProxy/reka/internal/script"
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
-	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	"golang.org/x/net/http/httpguts"
 )
@@ -58,6 +58,17 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.requests.Done()
 
 	s.attempt.mu.Lock()
+	if s.route.PlainHTTP {
+		s.attempt.MITMClientProtocol = strings.ToLower(r.Proto)
+	}
+	if s.route.PlainHTTP && r.ProtoMajor == 2 && r.Method == "PRI" && r.RequestURI == "*" {
+		s.attempt.MITMClientProtocol = "h2c"
+		s.attempt.mu.Unlock()
+		if err := s.forwardHTTPProxyRequest(r.Context(), w, r, "h2c"); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
 	s.attempt.MITMRequests++
 	s.attempt.mu.Unlock()
 	if s.route.OnRequest != nil {
@@ -65,12 +76,15 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	request := r.Clone(r.Context())
-	request.URL = mitmRequestURL(r, s.host, s.metadata.Destination.Port)
+	originalURL := mitmRequestURL(r, s.host, s.metadata.Destination.Port, s.route.PlainHTTP)
+	request.URL = originalURL
 	request.RequestURI = ""
 	request.TransferEncoding = nil
 	request.Close = false
-	clientAcceptsTrailers := s.route.H2 && httpguts.HeaderValuesContainsToken(r.Header.Values("TE"), "trailers")
-	if s.route.H2 {
+	upgrade := r.ProtoMajor == 1 && httpUpgradeProtocol(r.Header) != ""
+	h2 := s.route.H2 && !s.route.PlainHTTP && !upgrade
+	clientAcceptsTrailers := h2 && httpguts.HeaderValuesContainsToken(r.Header.Values("TE"), "trailers")
+	if h2 {
 		for name := range request.Trailer {
 			if !validMITMTrailer(name) {
 				delete(request.Trailer, name)
@@ -130,6 +144,17 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if s.route.PlainHTTP && (r.Method == http.MethodConnect || r.URL.IsAbs()) {
+		reason := "absolute-form"
+		if r.Method == http.MethodConnect {
+			reason = "connect"
+		}
+		err = s.forwardHTTPProxyRequest(ctx, w, r, reason)
+		if err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
 	if r.Method == http.MethodConnect {
 		localError(http.StatusMethodNotAllowed, "HTTPS request tunneling is unsupported")
 		return
@@ -183,15 +208,18 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, destination, err := mitmUpstreamTarget(rewritten.URL)
+	target, destination, err := mitmUpstreamTarget(rewritten.URL, s.route.PlainHTTP)
 	if err != nil {
-		localError(http.StatusBadGateway, "Invalid HTTPS rewrite target")
+		localError(http.StatusBadGateway, "Invalid HTTP rewrite target")
 		return
 	}
 
 	requestScript := s.matchScript(script.KindHTTPRequest, rewritten.URL)
-	needsRequestRewrite := rewrite.NeedsRewrittenRequestBody(rewritten.URL)
-	requestBuffer, err := s.bufferBody(request.Body, request.ContentLength, needsRequestRewrite, requestScript)
+	needsRequestRewrite := !upgrade && rewrite.NeedsRewrittenRequestBody(rewritten.URL)
+	requestBuffer := mitmBufferedBody{reader: request.Body}
+	if !upgrade {
+		requestBuffer, err = s.bufferBody(request.Body, request.ContentLength, needsRequestRewrite, requestScript)
+	}
 	if err != nil {
 		s.recordScriptInputError(&stats, requestScript, "request")
 		if r.ProtoMajor == 1 {
@@ -213,7 +241,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		request.Host = headerHost
 	}
 	if !httpguts.ValidHostHeader(request.Host) {
-		localError(http.StatusBadGateway, "Invalid HTTPS request authority")
+		localError(http.StatusBadGateway, "Invalid HTTP request authority")
 		return
 	}
 	request.URL, request.Header = target, rewritten.Header
@@ -221,7 +249,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		request.URL.Path, request.URL.RawPath = "*", ""
 	}
 	request.Header.Del("Host")
-	stripHTTPHopHeaders(request.Header)
+	stripMITMRequestHopHeaders(request.Header, upgrade)
 	request.Body = requestBuffer.reader
 	if requestBuffer.data != nil {
 		setMITMRequestBody(request, requestBuffer.data)
@@ -234,7 +262,10 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	scriptOversize := s.runScript(r.Context(), requestScript, requestInput, requestBuffer, &stats, func(result script.Result) error {
 		switch result.Action {
 		case script.ActionModify:
-			newDestination, changed, applyErr := applyMITMRequestScript(request, result)
+			if upgrade {
+				result.BodySet = false
+			}
+			newDestination, changed, applyErr := applyMITMRequestScript(request, result, s.route.PlainHTTP, upgrade)
 			if applyErr != nil {
 				return applyErr
 			}
@@ -280,7 +311,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if clientAcceptsTrailers {
 		request.Header.Set("TE", "trailers")
 	}
-	if !s.route.H2 {
+	if !h2 {
 		request.GetBody = nil
 	}
 	if len(request.Trailer) != 0 {
@@ -300,11 +331,14 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if needsResponseRewrite || responseScript.bodyLimit() > 0 {
 		limitMITMEncodings(request.Header)
 	}
+	if s.route.PlainHTTP {
+		reroute = !sameMITMOrigin(originalURL, request.URL)
+	}
 	upstream := s.upstream
 	if reroute {
-		upstream, err = s.reroute(ctx, destination, request.URL.Hostname())
+		upstream, err = s.reroute(ctx, destination, request.URL.Hostname(), h2)
 		if err != nil {
-			localError(http.StatusBadGateway, "Could not route rewritten HTTPS request")
+			localError(http.StatusBadGateway, "Could not route rewritten HTTP request")
 			return
 		}
 		// Close before releasing the new route, even when streaming fails or
@@ -313,21 +347,62 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			upstream.close()
 			upstream.route.Release()
 		}()
+	} else if upgrade && s.route.H2 && !s.route.PlainHTTP {
+		// HTTP/1 upgrades need a dedicated upstream that cannot negotiate h2.
+		upstream = newMITMUpstream(ctx, upstream.route, s.metadata, s.host, s.route.SkipServerCertVerify, false, s.attempt)
+		defer upstream.close()
 	}
 
-	if s.route.H2 && r.ProtoMajor == 1 {
+	if h2 && r.ProtoMajor == 1 {
 		// The HTTP/2 transport can deliver response headers while it
 		// is still reading the HTTP/1.1 client's upload.
 		_ = http.NewResponseController(w).EnableFullDuplex()
 	}
-	res, err := upstream.transport.RoundTrip(request.WithContext(observeMITMUpstreamProtocol(ctx, s.attempt)))
+	ctx = observeMITMUpstreamProtocol(ctx, s.attempt)
+	var uploadDone chan error
+	if upgrade && request.Body != nil && request.Body != http.NoBody {
+		// A 101 can arrive while the transport is still reading the upload.
+		// Give the hijacked reader exclusive access to the client stream.
+		uploadDone = make(chan error, 1)
+		request.GetBody = nil
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			WroteRequest: func(info httptrace.WroteRequestInfo) { uploadDone <- info.Err },
+		})
+	}
+	res, err := upstream.transport.RoundTrip(request.WithContext(ctx))
 	if err != nil {
-		localError(http.StatusBadGateway, "HTTPS upstream request failed")
+		localError(http.StatusBadGateway, "HTTP upstream request failed")
 		return
 	}
 	if res.StatusCode == http.StatusSwitchingProtocols {
-		_ = res.Body.Close()
-		localError(http.StatusBadGateway, "HTTPS upstream protocol upgrade is unsupported")
+		tunnel, ok := res.Body.(io.ReadWriteCloser)
+		protocol := httpUpgradeProtocol(res.Header)
+		if !upgrade || !ok || protocol == "" || !strings.EqualFold(httpUpgradeProtocol(request.Header), protocol) {
+			_ = res.Body.Close()
+			localError(http.StatusBadGateway, "Unexpected HTTP upstream protocol upgrade")
+			return
+		}
+		defer tunnel.Close()
+		if uploadDone != nil {
+			select {
+			case err = <-uploadDone:
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+			if err != nil {
+				panic(http.ErrAbortHandler)
+			}
+		}
+		res.Body, res.ContentLength = nil, 0
+		obs.response(res)
+		buffered := hijack()
+		if err = res.Write(buffered); err == nil {
+			err = buffered.Flush()
+		}
+		if err == nil {
+			s.attempt.setMITMPassthrough("upgrade")
+			err = s.relayHTTPDuplex(r.Context(), hijacked, buffered.Reader, tunnel, upstream.close)
+		}
 		return
 	}
 	obs.response(res)
@@ -337,7 +412,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A response whose body could not be read has not been sent.
 		s.recordScriptInputError(&stats, responseScript, "response")
 		obs.clearOriginStatus()
-		localError(http.StatusBadGateway, "Could not read HTTPS upstream response")
+		localError(http.StatusBadGateway, "Could not read HTTP upstream response")
 		return
 	}
 	defer responseBuffer.releaseBudget()
@@ -393,7 +468,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hasBody := mitmResponseHasBody(r.Method, response.StatusCode)
 	streaming := hasBody && response.Body == nil && responseBuffer.reader != http.NoBody
 	var announced []string
-	if s.route.H2 && hasBody {
+	if h2 && hasBody {
 		announced = announceMITMTrailers(w, res.Trailer)
 		if r.ProtoMajor == 1 && (len(announced) != 0 || streaming && res.ProtoMajor == 2) {
 			// A streaming HTTP/2 origin may send unannounced trailers
@@ -412,7 +487,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if streaming {
 		var writer io.Writer = w
-		if res.ContentLength < 0 || s.route.H2 && (r.ProtoMajor == 2 || res.ProtoMajor == 2) {
+		if res.ContentLength < 0 || h2 && (r.ProtoMajor == 2 || res.ProtoMajor == 2) {
 			// Deliver each chunk of a streaming response as it arrives.
 			flusher := http.NewResponseController(w)
 			if err = flusher.Flush(); err != nil {
@@ -420,15 +495,12 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			writer = mitmStreamWriter{ResponseWriter: w, flusher: flusher}
 		}
-		// Reuse relay-sized pooled buffers; io.Copy allocates 32 KiB per response.
-		buffer := buf.Get(buf.BufferSize)
-		_, err = io.CopyBuffer(writer, responseBuffer.reader, buffer)
-		_ = buf.Put(buffer)
+		err = copyHTTPStream(writer, responseBuffer.reader)
 	}
 	if err != nil {
 		panic(http.ErrAbortHandler)
 	}
-	if s.route.H2 {
+	if h2 {
 		writeMITMTrailers(w, res.Trailer, announced)
 	}
 }
@@ -440,7 +512,7 @@ func (s *mitmHTTPHandler) waitForRequests() {
 	s.requests.Wait()
 }
 
-func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, host string) (*mitmUpstream, error) {
+func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, host string, h2 bool) (*mitmUpstream, error) {
 	if s.route.Reroute == nil {
 		return nil, errRejected
 	}
@@ -454,13 +526,17 @@ func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, 
 	metadata := s.metadata
 	metadata.Destination = M.ParseSocksaddr(destination.String())
 	metadata.Domain = host
-	return newMITMUpstream(ctx, route, metadata, host, s.route.SkipServerCertVerify, s.route.H2, s.attempt), nil
+	return newMITMUpstream(ctx, route, metadata, host, s.route.SkipServerCertVerify, h2, s.attempt), nil
 }
 
-func mitmRequestURL(r *http.Request, host string, port uint16) *url.URL {
+func mitmRequestURL(r *http.Request, host string, port uint16, plainHTTP bool) *url.URL {
 	// The HTTP authority may name a virtual host within the TCP destination.
 	// It does not change where the original outbound dials or verifies TLS.
-	if authority, err := url.Parse("https://" + r.Host); err == nil &&
+	scheme := "https"
+	if plainHTTP {
+		scheme = "http"
+	}
+	if authority, err := url.Parse(scheme + "://" + r.Host); err == nil &&
 		authority.Hostname() != "" && authority.User == nil && authority.Path == "" &&
 		authority.RawQuery == "" && authority.Fragment == "" {
 		host = authority.Hostname()
@@ -471,9 +547,9 @@ func mitmRequestURL(r *http.Request, host string, port uint16) *url.URL {
 		}
 	}
 	u := *r.URL
-	u.Scheme, u.Host, u.Opaque, u.User = "https", host, "", nil
+	u.Scheme, u.Host, u.Opaque, u.User = scheme, host, "", nil
 	switch {
-	case port != 443:
+	case port != mitmDefaultPort(scheme):
 		u.Host = net.JoinHostPort(host, itoa(port))
 	case strings.Contains(host, ":"):
 		u.Host = "[" + host + "]"
@@ -484,14 +560,14 @@ func mitmRequestURL(r *http.Request, host string, port uint16) *url.URL {
 	return &u
 }
 
-func mitmUpstreamTarget(raw string) (*url.URL, Destination, error) {
-	invalid := errors.New("invalid HTTPS rewrite target")
+func mitmUpstreamTarget(raw string, allowHTTP bool) (*url.URL, Destination, error) {
+	invalid := errors.New("invalid HTTP rewrite target")
 	target, err := url.Parse(raw)
-	if err != nil || target.Scheme != "https" || target.Hostname() == "" || target.User != nil || target.Fragment != "" {
+	if err != nil || target.Scheme != "https" && !(allowHTTP && target.Scheme == "http") || target.Hostname() == "" || target.User != nil || target.Fragment != "" {
 		return nil, Destination{}, invalid
 	}
 	host := target.Hostname()
-	destination := Destination{Domain: host, Port: mitmHTTPSPort(target)}
+	destination := Destination{Domain: host, Port: mitmURLPort(target)}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		destination.Addr, destination.Domain = addr.Unmap(), ""
 	} else if !M.IsDomainName(host) {
@@ -503,10 +579,22 @@ func mitmUpstreamTarget(raw string) (*url.URL, Destination, error) {
 	return target, destination, nil
 }
 
-func mitmHTTPSPort(target *url.URL) uint16 {
+func sameMITMOrigin(a, b *url.URL) bool {
+	return a.Scheme == b.Scheme && strings.EqualFold(a.Hostname(), b.Hostname()) && mitmURLPort(a) == mitmURLPort(b)
+}
+
+// Use the HTTP origin ports used by sing-box urltest and mihomo adapters.
+func mitmDefaultPort(scheme string) uint16 {
+	if scheme == "http" {
+		return 80
+	}
+	return 443
+}
+
+func mitmURLPort(target *url.URL) uint16 {
 	port := target.Port()
 	if port == "" {
-		return 443
+		return mitmDefaultPort(target.Scheme)
 	}
 	number, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {

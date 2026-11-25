@@ -27,9 +27,9 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 		if !e.flowMaySniff(g, md, state, options) {
 			return sagernet.PreparedFlow{Route: e.route}
 		}
-		var mitm *mitmGeneration
-		if g.mitm.retain() {
-			mitm = g.mitm
+		var httpEngine *httpGeneration
+		if g.httpEngine.retain() {
+			httpEngine = g.httpEngine
 		} else if e.rt.Current() != snap {
 			continue
 		}
@@ -60,7 +60,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 		if !valid {
 			closeSniffPins(pins)
 			closeSniffPins(dnsPins)
-			mitm.release()
+			httpEngine.release()
 			// Retirement without a newer snapshot is shutdown (or an invalid
 			// resource), not a publication race. Do not spin waiting for one.
 			if e.rt.Current() == snap {
@@ -87,7 +87,7 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 			}
 			closeSniffPins(dnsPins)
 			dnsPins = nil
-			mitm.release()
+			httpEngine.release()
 		}
 		acquire := func(pick func(*runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool)) (uint64, *sagernet.Outbound, func(), bool, error) {
 			outbound, ok := pick(snap)
@@ -127,8 +127,42 @@ func (e *Engine) prepareFlow(ctx context.Context, md sagernet.Metadata) sagernet
 	}
 }
 
+// A sniff rule can replace the default protocol list for its flows.
+func canSniffHTTP(eff *compile.Effective) bool {
+	cfg := eff.Sniff
+	if !cfg.Enabled {
+		return false
+	}
+	defaultHTTP := slices.Contains(cfg.Protocols, "http")
+	if len(cfg.Rules) == 0 {
+		return defaultHTTP
+	}
+	for _, rule := range cfg.Rules {
+		if rule.Action == "sniff" && (slices.Contains(rule.Protocols, "http") || len(rule.Protocols) == 0 && defaultHTTP) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) flowMaySniff(g *generation, md sagernet.Metadata, state routingState, options sagernet.SniffOptions) bool {
-	return options.Enabled && (!g.eff.SniffForRouting || e.routingNeedsDomain(g, md, state) || e.mitmNeedsDomain(g, md, options))
+	if !options.Enabled {
+		return false
+	}
+	if !g.eff.SniffForRouting || e.routingNeedsDomain(g, md, state) || e.mitmNeedsDomain(g, md, options) {
+		return true
+	}
+	if g.httpEngine == nil || !g.httpEngine.plainHTTP || md.SkipMITM || md.Network != "tcp" || !slices.Contains(options.Protocols, "http") {
+		return false
+	}
+	// A real address alone does not tell us which Host the client will send.
+	host := httpHostHint(md)
+	if md.Destination.Domain == "" && md.Destination.Addr.IsValid() {
+		if domain, ok := e.fake.Peek(md.Destination.Addr); ok {
+			host = domain
+		}
+	}
+	return g.maySniffPlainHTTP(host, md.Destination.Port)
 }
 
 func (e *Engine) mitmNeedsDomain(g *generation, md sagernet.Metadata, options sagernet.SniffOptions) bool {
