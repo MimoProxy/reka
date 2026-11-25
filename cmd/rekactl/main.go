@@ -798,14 +798,14 @@ func cmdConnections() error {
 	}
 	sort.Slice(out.Connections, func(i, j int) bool { return out.Connections[i].ID < out.Connections[j].ID })
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNET\tDESTINATION\tOUTBOUND\tRULE\tGEN\tUP\tDOWN\tAGE\tSCRIPTS")
+	fmt.Fprintln(w, "ID\tNET\tDESTINATION\tOUTBOUND\tRULE\tGEN\tUP\tDOWN\tAGE\tMITM PROTOCOLS\tSCRIPTS")
 	for _, c := range out.Connections {
 		rule := c.RuleID
 		if rule == "" {
 			rule = c.Rule
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n", c.ID, c.Network, c.Destination, c.Outbound, rule,
-			c.Generation, c.Upload, c.Download, time.Since(c.Start).Round(time.Second), scriptStats(c.MITMScripts))
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n", c.ID, c.Network, c.Destination, c.Outbound, rule,
+			c.Generation, c.Upload, c.Download, time.Since(c.Start).Round(time.Second), mitmProtocols(c.MITMConnectionInfo), scriptStats(c.MITMScripts))
 	}
 	return w.Flush()
 }

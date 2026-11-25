@@ -2,7 +2,6 @@ package sagernet
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
@@ -34,6 +34,10 @@ type mitmHTTPHandler struct {
 	upstream  *mitmUpstream
 	host      string
 	closeWire func()
+
+	mu       sync.Mutex
+	closing  bool
+	requests sync.WaitGroup
 }
 
 type mitmRequestStats struct {
@@ -44,6 +48,15 @@ type mitmRequestStats struct {
 }
 
 func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		panic(http.ErrAbortHandler)
+	}
+	s.requests.Add(1)
+	s.mu.Unlock()
+	defer s.requests.Done()
+
 	s.attempt.mu.Lock()
 	s.attempt.MITMRequests++
 	s.attempt.mu.Unlock()
@@ -55,8 +68,23 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	request.URL = mitmRequestURL(r, s.host, s.metadata.Destination.Port)
 	request.RequestURI = ""
 	request.TransferEncoding = nil
-	request.Trailer = nil
 	request.Close = false
+	clientAcceptsTrailers := s.route.H2 && httpguts.HeaderValuesContainsToken(r.Header.Values("TE"), "trailers")
+	if s.route.H2 {
+		for name := range request.Trailer {
+			if !validMITMTrailer(name) {
+				delete(request.Trailer, name)
+			}
+		}
+		if len(request.Trailer) == 0 {
+			request.Trailer = nil
+		} else if request.Body != nil && request.Body != http.NoBody {
+			// net/http populates the inbound values once Body reaches EOF.
+			request.Body = mitmRequestTrailerBody{ReadCloser: request.Body, inbound: r.Trailer, outbound: request.Trailer}
+		}
+	} else {
+		request.Trailer = nil
+	}
 
 	ctx, obs := s.backend.beginRequest(r.Context(), request, s.metadata.Inbound, r.RemoteAddr)
 	bindRequestConnection(ctx, s.attempt)
@@ -131,6 +159,19 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch rewritten.Connection {
 	case httprewrite.Close, httprewrite.Drop:
+		if r.ProtoMajor == 2 {
+			if rewritten.Connection == httprewrite.Drop {
+				timer := time.NewTimer(s.backend.halfCloseTimeout)
+				defer timer.Stop()
+				select {
+				case <-r.Context().Done():
+					err = r.Context().Err()
+				case <-timer.C:
+					err = context.DeadlineExceeded
+				}
+			}
+			panic(http.ErrAbortHandler)
+		}
 		buffered := hijack()
 		if rewritten.Connection == httprewrite.Close {
 			return
@@ -153,10 +194,13 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestBuffer, err := s.bufferBody(request.Body, request.ContentLength, needsRequestRewrite, requestScript)
 	if err != nil {
 		s.recordScriptInputError(&stats, requestScript, "request")
-		w.Header().Set("Connection", "close")
+		if r.ProtoMajor == 1 {
+			w.Header().Set("Connection", "close")
+		}
 		localError(http.StatusBadRequest, "Could not read request body")
 		return
 	}
+	defer requestBuffer.releaseBudget()
 	requestPassthrough := needsRequestRewrite && requestBuffer.exceeds(s.route.MaxBodySize)
 	if needsRequestRewrite && !requestPassthrough {
 		rewrite.ApplyRequestBody(&rewritten, requestBuffer.data)
@@ -199,6 +243,15 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if result.BodySet && requestBuffer.data == nil {
 				mitmAllowEarlyResponse(w, r)
+				if len(request.Trailer) != 0 && requestBuffer.reader != nil && requestBuffer.reader != http.NoBody {
+					// The replacement is complete, but the original upload
+					// still needs to reach EOF to make its trailers available.
+					request.Body = prefixedMITMBody{
+						Reader: io.MultiReader(request.Body, mitmTrailerDrain{requestBuffer.reader}),
+						Closer: requestBuffer.reader,
+					}
+					request.GetBody = nil
+				}
 			}
 		case script.ActionRespond:
 			var applyErr error
@@ -217,8 +270,28 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if abort {
+		if r.ProtoMajor == 2 {
+			panic(http.ErrAbortHandler)
+		}
 		hijack()
 		return
+	}
+
+	if clientAcceptsTrailers {
+		request.Header.Set("TE", "trailers")
+	}
+	if !s.route.H2 {
+		request.GetBody = nil
+	}
+	if len(request.Trailer) != 0 {
+		// HTTP/1.1 requires chunked framing to send trailers. The HTTP/2
+		// transport ignores TransferEncoding and sends trailing HEADERS.
+		request.Header.Del("Content-Length")
+		if request.Body == http.NoBody {
+			setMITMRequestBody(request, nil)
+		}
+		request.TransferEncoding = []string{"chunked"}
+		request.ContentLength = -1
 	}
 
 	finalURL := request.URL.String()
@@ -242,7 +315,12 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	res, err := upstream.transport.RoundTrip(request.WithContext(ctx))
+	if s.route.H2 && r.ProtoMajor == 1 {
+		// The HTTP/2 transport can deliver response headers while it
+		// is still reading the HTTP/1.1 client's upload.
+		_ = http.NewResponseController(w).EnableFullDuplex()
+	}
+	res, err := upstream.transport.RoundTrip(request.WithContext(observeMITMUpstreamProtocol(ctx, s.attempt)))
 	if err != nil {
 		localError(http.StatusBadGateway, "HTTPS upstream request failed")
 		return
@@ -262,6 +340,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		localError(http.StatusBadGateway, "Could not read HTTPS upstream response")
 		return
 	}
+	defer responseBuffer.releaseBudget()
 	responsePassthrough := needsResponseRewrite && responseBuffer.exceeds(s.route.MaxBodySize)
 	rewriteBody := responseBuffer.data
 	if responsePassthrough {
@@ -296,6 +375,9 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		stats.passthroughs++
 	}
 	if abort {
+		if r.ProtoMajor == 2 {
+			panic(http.ErrAbortHandler)
+		}
 		hijack()
 		return
 	}
@@ -308,17 +390,29 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// length response, including when the original encoding is retained.
 		response.Header.Set("Content-Length", strconv.Itoa(len(response.Body)))
 	}
+	hasBody := mitmResponseHasBody(r.Method, response.StatusCode)
+	streaming := hasBody && response.Body == nil && responseBuffer.reader != http.NoBody
+	var announced []string
+	if s.route.H2 && hasBody {
+		announced = announceMITMTrailers(w, res.Trailer)
+		if r.ProtoMajor == 1 && (len(announced) != 0 || streaming && res.ProtoMajor == 2) {
+			// A streaming HTTP/2 origin may send unannounced trailers
+			// even with Content-Length. Give HTTP/1.1 a chunked body.
+			response.Header.Del("Content-Length")
+		}
+		preserveMITMGRPCTrailersOnly(response.Header, res)
+	}
 	writeMITMHeaders(w, response.Header, response.StatusCode)
-	if !mitmResponseHasBody(r.Method, response.StatusCode) {
+	if !hasBody {
 		return
 	}
 	if response.Body != nil {
 		if len(response.Body) != 0 {
 			_, err = w.Write(response.Body)
 		}
-	} else if responseBuffer.reader != http.NoBody {
+	} else if streaming {
 		var writer io.Writer = w
-		if res.ContentLength < 0 {
+		if res.ContentLength < 0 || s.route.H2 && (r.ProtoMajor == 2 || res.ProtoMajor == 2) {
 			// Deliver each chunk of a streaming response as it arrives.
 			flusher := http.NewResponseController(w)
 			if err = flusher.Flush(); err != nil {
@@ -334,6 +428,16 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic(http.ErrAbortHandler)
 	}
+	if s.route.H2 {
+		writeMITMTrailers(w, res.Trailer, announced)
+	}
+}
+
+func (s *mitmHTTPHandler) waitForRequests() {
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+	s.requests.Wait()
 }
 
 func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, host string) (*mitmUpstream, error) {
@@ -350,7 +454,7 @@ func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, 
 	metadata := s.metadata
 	metadata.Destination = M.ParseSocksaddr(destination.String())
 	metadata.Domain = host
-	return newMITMUpstream(ctx, route, metadata, host, s.route.SkipServerCertVerify, s.attempt), nil
+	return newMITMUpstream(ctx, route, metadata, host, s.route.SkipServerCertVerify, s.route.H2, s.attempt), nil
 }
 
 func mitmRequestURL(r *http.Request, host string, port uint16) *url.URL {
@@ -415,10 +519,17 @@ type mitmBufferedBody struct {
 	data      []byte
 	reader    io.ReadCloser
 	truncated bool
+	release   func()
 }
 
 func (b mitmBufferedBody) exceeds(limit int) bool {
 	return b.truncated || len(b.data) > limit
+}
+
+func (b mitmBufferedBody) releaseBudget() {
+	if b.release != nil {
+		b.release()
+	}
 }
 
 func (s *mitmHTTPHandler) bufferBody(body io.ReadCloser, length int64, needsRewrite bool, match *MITMScript) (mitmBufferedBody, error) {
@@ -430,26 +541,7 @@ func (s *mitmHTTPHandler) bufferBody(body io.ReadCloser, length int64, needsRewr
 	if body == nil || body == http.NoBody || !needsRewrite && limit == 0 {
 		return buffer, nil
 	}
-	if length > int64(limit) {
-		buffer.truncated = true
-		return buffer, nil
-	}
-	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
-	if err != nil {
-		return buffer, err
-	}
-	if len(data) <= limit {
-		buffer.data = data
-	} else {
-		buffer.truncated = true
-		buffer.reader = prefixedMITMBody{Reader: io.MultiReader(bytes.NewReader(data), body), Closer: body}
-	}
-	return buffer, nil
-}
-
-type prefixedMITMBody struct {
-	io.Reader
-	io.Closer
+	return mitmBufferBudget.buffer(body, length, int64(limit))
 }
 
 func limitMITMEncodings(header http.Header) {
@@ -477,6 +569,77 @@ func writeMITMHeaders(w http.ResponseWriter, header http.Header, status int) {
 		w.Header()[key] = values
 	}
 	w.WriteHeader(status)
+}
+
+func announceMITMTrailers(w http.ResponseWriter, trailer http.Header) []string {
+	var announced []string
+	for name := range trailer {
+		if validMITMTrailer(name) {
+			announced = append(announced, name)
+		}
+	}
+	if len(announced) != 0 {
+		slices.Sort(announced)
+		w.Header().Set("Trailer", strings.Join(announced, ", "))
+	}
+	return announced
+}
+
+func writeMITMTrailers(w http.ResponseWriter, trailer http.Header, announced []string) {
+	for name, values := range trailer {
+		if len(values) == 0 || !validMITMTrailer(name) {
+			continue
+		}
+		if !slices.Contains(announced, name) {
+			name = http.TrailerPrefix + name
+		}
+		w.Header()[name] = values
+	}
+}
+
+func validMITMTrailer(name string) bool {
+	return httpguts.ValidHeaderFieldName(name) && httpguts.ValidTrailerHeader(name) &&
+		!strings.EqualFold(name, "Upgrade") && !strings.EqualFold(name, "HTTP2-Settings")
+}
+
+type mitmRequestTrailerBody struct {
+	io.ReadCloser
+	inbound, outbound http.Header
+}
+
+func (b mitmRequestTrailerBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		for name := range b.outbound {
+			b.outbound[name] = b.inbound[name]
+		}
+	}
+	return n, err
+}
+
+type mitmTrailerDrain struct{ body io.Reader }
+
+func (d mitmTrailerDrain) Read([]byte) (int, error) {
+	if _, err := io.Copy(io.Discard, d.body); err != nil {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func preserveMITMGRPCTrailersOnly(header http.Header, res *http.Response) {
+	if res.Body != http.NoBody || !strings.HasPrefix(res.Header.Get("Content-Type"), "application/grpc") ||
+		res.Header.Get("Grpc-Status") == "" {
+		return
+	}
+	// Go exposes the trailers-only block in Header. Keep its status and
+	// custom metadata even when a rule or script replaces the headers.
+	for name, values := range res.Header {
+		switch name {
+		case "Content-Type", "Content-Length":
+			continue
+		}
+		header[name] = values
+	}
 }
 
 func mitmResponseHasBody(method string, status int) bool {

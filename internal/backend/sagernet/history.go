@@ -258,12 +258,26 @@ func (a *connectionAttempt) socketEventsLocked(observed socketDialResult, direct
 	}
 }
 
-func (a *connectionAttempt) activeInfo() (string, api.MITMConnectionInfo) {
+func (a *connectionAttempt) recordMITMUpstreamProtocol(protocol string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.EndedAt.IsZero() && !slices.Contains(a.MITMUpstreamProtocols, protocol) {
+		a.MITMUpstreamProtocols = append(a.MITMUpstreamProtocols, protocol)
+	}
+}
+
+func (a *connectionAttempt) mitmInfoLocked() api.MITMConnectionInfo {
 	info := a.MITMConnectionInfo
 	info.MITMMatchedIDs = slices.Clone(info.MITMMatchedIDs)
 	info.MITMScripts = slices.Clone(info.MITMScripts)
+	info.MITMUpstreamProtocols = slices.Clone(info.MITMUpstreamProtocols)
+	return info
+}
+
+func (a *connectionAttempt) activeInfo() (string, api.MITMConnectionInfo) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	info := a.mitmInfoLocked()
 	if a.EndedAt.IsZero() {
 		if a.ReadyAt == nil {
 			return "connecting", info

@@ -23,6 +23,29 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+func TestConnectionMITMProtocolSnapshots(t *testing.T) {
+	attempt := (&Backend{}).beginConnection(t.Context(), Metadata{})
+	attempt.MITM = true
+	attempt.MITMClientProtocol = "h2"
+	for _, protocol := range []string{"http/1.1", "h2", "http/1.1", "h2"} {
+		attempt.recordMITMUpstreamProtocol(protocol)
+	}
+
+	_, live := attempt.activeInfo()
+	trace := attempt.trace()
+	want := []string{"http/1.1", "h2"}
+	for _, info := range []api.MITMConnectionInfo{live, trace.MITMConnectionInfo} {
+		if info.MITMClientProtocol != "h2" || !slices.Equal(info.MITMUpstreamProtocols, want) {
+			t.Fatalf("MITM protocols = %+v, want h2 upstream %v", info, want)
+		}
+		info.MITMUpstreamProtocols[0] = "changed"
+	}
+	attempt.complete("eof", "")
+	if got := attempt.trace().MITMUpstreamProtocols; !slices.Equal(got, want) {
+		t.Fatalf("closed trace protocols changed through a snapshot: %v", got)
+	}
+}
+
 func TestConnectionEventBuffer(t *testing.T) {
 	if size := unsafe.Sizeof(connectionEvent{}); size > 80 {
 		t.Fatalf("retained event uses %d bytes", size)

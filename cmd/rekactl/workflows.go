@@ -27,11 +27,12 @@ func cmdTimeline(args []string) error {
 		}
 		fmt.Println("History epoch", page.Epoch)
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tDESTINATION\tOUTBOUND\tCLOSED\tDURATION\tSCRIPTS")
+		fmt.Fprintln(w, "ID\tDESTINATION\tOUTBOUND\tCLOSED\tDURATION\tMITM PROTOCOLS\tSCRIPTS")
 		for _, row := range page.Rows {
 			var trace api.ConnectionTrace
 			if json.Unmarshal(row.Data, &trace) == nil {
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%dms\t%s\n", trace.ID, trace.Destination, trace.Outbound, trace.CloseReason, trace.DurationMS, scriptStats(trace.MITMScripts))
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%dms\t%s\t%s\n", trace.ID, trace.Destination, trace.Outbound, trace.CloseReason, trace.DurationMS,
+					mitmProtocols(trace.MITMConnectionInfo), scriptStats(trace.MITMScripts))
 			}
 		}
 		return w.Flush()
@@ -49,6 +50,9 @@ func cmdTimeline(args []string) error {
 	}
 	trace := result.Trace
 	fmt.Printf("%d  %s  %s\n", trace.ID, trace.Network, trace.Destination)
+	if protocols := mitmProtocols(trace.MITMConnectionInfo); protocols != "" {
+		fmt.Println("MITM protocols", protocols)
+	}
 	if len(trace.MITMScripts) > 0 {
 		fmt.Println("MITM scripts", scriptStats(trace.MITMScripts))
 	}

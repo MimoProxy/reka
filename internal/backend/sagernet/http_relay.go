@@ -15,12 +15,14 @@ const relayHTTPMaxHeaderBytes = 64 << 10
 // singleConnListener runs an HTTP server on one already accepted connection.
 // Serve returns when the connection closes, including after a hijack.
 type singleConnListener struct {
-	conn     *singleHTTPConn
+	conn     net.Conn
+	done     <-chan struct{}
 	accepted bool
 }
 
 func newSingleConnListener(conn net.Conn) *singleConnListener {
-	return &singleConnListener{conn: &singleHTTPConn{Conn: conn, done: make(chan struct{})}}
+	wire := &singleHTTPConn{Conn: conn, done: make(chan struct{})}
+	return &singleConnListener{conn: wire, done: wire.done}
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
@@ -28,7 +30,7 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 		l.accepted = true
 		return l.conn, nil
 	}
-	<-l.conn.done
+	<-l.done
 	return nil, net.ErrClosed
 }
 

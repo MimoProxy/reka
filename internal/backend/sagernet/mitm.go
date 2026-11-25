@@ -29,6 +29,7 @@ type MITMRoute struct {
 	Issuer               *ca.Issuer
 	Rewrite              *httprewrite.Set
 	MaxBodySize          int
+	H2                   bool
 	SkipServerCertVerify bool
 	Reroute              func(context.Context, Destination) Route
 	OnPinFailure         func(host, reason string)
@@ -98,9 +99,10 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 	}
 	host := mitm.Host
 	// Sniffing wraps the original socket in sniffReplayConn, so the consumed
-	// ClientHello bytes remain readable here. HTTP/2 support is deferred.
-	clientTLS := tls.Server(clientWire, &tls.Config{
-		MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}, SessionTicketsDisabled: true,
+	// ClientHello bytes remain readable here.
+	listener := newSingleConnListener(clientWire)
+	clientTLS := tls.Server(listener.conn, &tls.Config{
+		MinVersion: tls.VersionTLS12, NextProtos: mitmTLSNextProtos(mitm.H2), SessionTicketsDisabled: true,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if hello.ServerName == "" {
 				hello.ServerName = host
@@ -113,6 +115,9 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 			return cert, err
 		},
 	})
+	// Keep the close notification below TLS so Serve sees the negotiated ALPN
+	// on the concrete *tls.Conn and can dispatch it to its HTTP/2 server.
+	listener.conn = clientTLS
 	if err = clientTLS.HandshakeContext(ctx); err != nil {
 		if ctx.Err() == nil && mitm.OnPinFailure != nil {
 			if reason := mitmPinFailure(err, clientWire.certSent); reason != "" {
@@ -128,23 +133,31 @@ func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metada
 	attempt.mu.Lock()
 	ready := time.Now().UTC()
 	attempt.ReadyAt = &ready
+	attempt.MITMClientProtocol = clientTLS.ConnectionState().NegotiatedProtocol
 	attempt.mu.Unlock()
 
-	upstream := newMITMUpstream(ctx, rt, metadata, host, mitm.SkipServerCertVerify, attempt)
-	defer upstream.close()
+	upstream := newMITMUpstream(ctx, rt, metadata, host, mitm.SkipServerCertVerify, mitm.H2, attempt)
 	handler := &mitmHTTPHandler{
 		backend: b, route: mitm, attempt: attempt, metadata: metadata,
 		upstream: upstream, host: host, closeWire: closeRaw,
 	}
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
+	defer func() {
+		cancel()
+		upstream.close()
+		// The HTTP/2 connection may close while its handlers still unwind.
+		// Finish request diagnostics before releasing the pinned route.
+		handler.waitForRequests()
+	}()
 	server := &http.Server{
-		Handler: handler, Protocols: protocols, MaxHeaderBytes: relayHTTPMaxHeaderBytes,
+		Handler: handler, Protocols: mitmHTTPProtocols(mitm.H2), MaxHeaderBytes: relayHTTPMaxHeaderBytes,
 		ReadHeaderTimeout: C.TCPTimeout, IdleTimeout: mitmHTTPIdleTimeout,
 		DisableGeneralOptionsHandler: true,
 		BaseContext:                  func(net.Listener) context.Context { return ctx },
 	}
-	_ = server.Serve(newSingleConnListener(clientTLS))
+	if mitm.H2 {
+		server.HTTP2 = mitmHTTP2Config()
+	}
+	_ = server.Serve(listener)
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}

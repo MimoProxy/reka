@@ -172,7 +172,7 @@ Imported scripts use `format: surge`. The report skips unsupported types such as
 
 ### Script execution
 
-Reka runs `http-request` and `http-response` scripts inside MITM HTTP/1.1 forwarding. Desktop platforms and Android use goja. On iOS, script execution requires a client-provided engine. Without an engine, an HTTP match is recorded as `unsupported` and the exchange passes through unchanged.
+Reka runs `http-request` and `http-response` scripts during MITM forwarding over HTTP/1.1 and HTTP/2. Desktop platforms and Android use goja. On iOS, script execution requires a client-provided engine. Without an engine, an HTTP match is recorded as `unsupported` and the exchange passes through unchanged.
 
 Each request is processed in this order: URL rewrite → request header rewrite → Map Local → request body rewrite → request script → upstream → response header rewrite → response body rewrite → response script → client. The Surge manual states that body rewrites run before scripts. It does not order Map Local and scripts; Reka treats Map Local as the end of processing, so neither request nor response scripts run for a local response. A response returned by a request script is likewise written to the client without response rewrites or response scripts. [Surge body rewrite](https://manual.nssurge.com/http/body-rewrite.html)
 

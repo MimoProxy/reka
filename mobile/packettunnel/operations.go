@@ -48,22 +48,24 @@ type Operation struct {
 }
 
 type ConnectionRow struct {
-	ID                   uint64                `json:"id"`
-	StartMS              int64                 `json:"startMs"`
-	Destination          string                `json:"destination"`
-	Network              string                `json:"network"`
-	Protocol             string                `json:"protocol,omitempty"`
-	State                string                `json:"state,omitempty"`
-	Rule                 string                `json:"rule,omitempty"`
-	Groups               []string              `json:"groups,omitempty"`
-	Outbound             string                `json:"outbound"`
-	Uploaded             int64                 `json:"uploaded"`
-	Downloaded           int64                 `json:"downloaded"`
-	MITM                 bool                  `json:"mitm,omitempty"`
-	MITMRequests         uint64                `json:"mitmRequests,omitempty"`
-	MITMMatchedIDs       []string              `json:"mitmMatchedIds,omitempty"`
-	MITMBodyPassthroughs uint64                `json:"mitmBodyPassthroughs,omitempty"`
-	MITMScripts          []api.MITMScriptStats `json:"mitmScripts,omitempty"`
+	ID                    uint64                `json:"id"`
+	StartMS               int64                 `json:"startMs"`
+	Destination           string                `json:"destination"`
+	Network               string                `json:"network"`
+	Protocol              string                `json:"protocol,omitempty"`
+	State                 string                `json:"state,omitempty"`
+	Rule                  string                `json:"rule,omitempty"`
+	Groups                []string              `json:"groups,omitempty"`
+	Outbound              string                `json:"outbound"`
+	Uploaded              int64                 `json:"uploaded"`
+	Downloaded            int64                 `json:"downloaded"`
+	MITM                  bool                  `json:"mitm,omitempty"`
+	MITMRequests          uint64                `json:"mitmRequests,omitempty"`
+	MITMMatchedIDs        []string              `json:"mitmMatchedIds,omitempty"`
+	MITMBodyPassthroughs  uint64                `json:"mitmBodyPassthroughs,omitempty"`
+	MITMScripts           []api.MITMScriptStats `json:"mitmScripts,omitempty"`
+	MITMClientProtocol    string                `json:"mitmClientProtocol,omitempty"`
+	MITMUpstreamProtocols []string              `json:"mitmUpstreamProtocols,omitempty"`
 }
 
 type Latency struct {
@@ -168,6 +170,7 @@ func (s *Session) connections() []ConnectionRow {
 				Outbound: conn.Outbound, Uploaded: conn.Upload, Downloaded: conn.Download,
 				MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
 				MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
+				MITMClientProtocol: conn.MITMClientProtocol, MITMUpstreamProtocols: conn.MITMUpstreamProtocols,
 			})
 		}
 		sortConnectionRows(rows)
@@ -217,6 +220,7 @@ func (s *Session) connections() []ConnectionRow {
 			Uploaded: conn.Upload, Downloaded: conn.Download,
 			MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
 			MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
+			MITMClientProtocol: conn.MITMClientProtocol, MITMUpstreamProtocols: conn.MITMUpstreamProtocols,
 		})
 	}
 	sortConnectionRows(rows)

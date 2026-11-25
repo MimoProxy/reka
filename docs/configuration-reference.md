@@ -499,7 +499,7 @@ traffic-budgets:
 
 在 profile 的 `modules` 列表中可声明 Surge、Loon 和 Stash 模块，将锁定快照中的规则、重写、脚本和 MITM 主机名合成到有效配置。格式、参数和启停随 profile 保存，下载由模块刷新完成。 [模块文档](modules.md)
 
-MITM 对选中的入站 HTTPS 连接终结 TLS，再通过选定的出站建立新的 TLS 连接并转发 HTTP 请求。客户端需将 MITM CA 安装到自己的信任库。客户端 TLS 最低为 1.2，客户端和上游均使用 HTTP/1.1。
+MITM 对选中的入站 HTTPS 连接终结 TLS，再通过选定的出站建立新的 TLS 连接并转发 HTTP 请求。客户端需将 MITM CA 安装到自己的信任库。客户端 TLS 最低为 1.2。
 
 ### 11.1 MITM 设置
 
@@ -517,7 +517,7 @@ profile 和 source 的 `mitm` 支持以下字段。
 | --- | --- | --- |
 | `hostnames` | 字符串列表，默认空 | 按顺序匹配，第一条命中决定是否解密。`-` 前缀排除，未命中时不解密 |
 | `client-source-address` | 字符串列表，默认空 | 按入站实际客户端的 IPv4、IPv6 地址或 CIDR 选择流量。以 `-` 开头的条目优先排除。有任何允许项时，客户端必须命中其中一项。省略、空列表或仅有排除项时，其他客户端均允许 |
-| `h2` | 布尔，默认 `false` | 保留的 HTTP/2 开关。HTTP/2 尚未实现，设为 `true` 时仍只协商 HTTP/1.1 |
+| `h2` | 布尔，默认 `false`，与 Surge 一致 | 启用后向客户端提供 `h2` 和 `http/1.1`，与上游独立协商，两侧可使用不同协议。iOS 使用较小的 HTTP/2 并发流上限及接收窗口。关闭时两侧均使用 HTTP/1.1 |
 | `skip-server-cert-verify` | 布尔，默认 `false` | 跳过上游服务器证书校验 |
 | `quic-block` | 布尔，默认 `true` | 启用 MITM 且成功加载 CA 时，对命中主机名和客户端地址条件的 QUIC 流按 `mitm-quic` 原因拒绝，以便客户端回退到 TCP。临时绕过的主机名跳过该项阻断，常规路由中的 `block-quic` 仍生效 |
 
@@ -586,7 +586,7 @@ URL 重写改变目标主机时，内核用该连接所属配置的路由为请�
 
 ### 脚本 `scripts`
 
-`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。HTTP 脚本在 MITM HTTP/1.1 转发时执行，请求与响应方向各取第一条匹配。后台脚本独立于 MITM 运行。iOS 由客户端提供脚本引擎。 [脚本运行与执行顺序](modules.md#script-execution)
+`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。HTTP 脚本在 MITM HTTP/1.1 和 HTTP/2 转发时执行，请求与响应方向各取第一条匹配。后台脚本独立于 MITM 运行。iOS 由客户端提供脚本引擎。 [脚本运行与执行顺序](modules.md#script-execution)
 
 | 字段 | 类型 / 默认值 | 含义及限制 |
 | --- | --- | --- |

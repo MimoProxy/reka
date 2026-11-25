@@ -184,7 +184,7 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 	}
 	route := &sagernet.MITMRoute{
 		Host: host, Issuer: g.mitm.issuer.Issuer, Rewrite: g.eff.HTTPRewrite,
-		MaxBodySize: compile.MITMMaxBodySize, SkipServerCertVerify: g.eff.MITM.SkipServerCertVerify,
+		MaxBodySize: compile.MITMMaxBodySize, SkipServerCertVerify: g.eff.MITM.SkipServerCertVerify, H2: g.eff.MITM.H2,
 		OnPinFailure: func(_, reason string) { e.mitmBypasses.insert(host, reason) },
 		OnConnection: func() { e.mitmConnections.Add(1) },
 		OnRequest:    func() { e.mitmRequests.Add(1) },
@@ -240,7 +240,7 @@ func (e *Engine) MITMStatus() api.MITMStatus {
 		status.Enabled = g.eff.MITM.Enabled
 		status.HostnameCount = len(g.eff.MITM.Hostnames)
 		if g.eff.MITM.H2 {
-			status.H2 = "not supported yet"
+			status.H2 = "enabled"
 		}
 	}
 	return status
