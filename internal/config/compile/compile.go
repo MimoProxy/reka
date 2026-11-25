@@ -191,6 +191,7 @@ type Effective struct {
 	// ScriptFingerprint identifies the ordered script definitions and source hashes.
 	ScriptFingerprint string `json:"script-fingerprint,omitempty"`
 	mitmCAStore       secret.Store
+	readScriptSource  func(string) ([]byte, error)
 
 	// IPVersionOverride is empty when the profile's IP settings are in use.
 	IPVersionOverride string `json:"-"`

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/clashapi"
 	"github.com/MimoProxy/reka/internal/config/service"
@@ -166,6 +167,9 @@ func Start(opts Options) (*Kernel, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	logEvents.Store(svc.Events())
+	eng.SetScriptNotifier(func(notification api.ScriptNotification) {
+		svc.Events().Publish(service.EventScriptNotification, notification)
+	})
 	k := &Kernel{stateLock: stateLock, Service: svc, Handler: control.NewHandler(svc), cancel: cancel}
 
 	if err := svc.StartSubscriptions(service.RefreshOptions{Client: eng.SubscriptionClient(), ClientFor: eng.SubscriptionProxyClient}); err != nil {
@@ -204,6 +208,7 @@ func Start(opts Options) (*Kernel, error) {
 			return nil, fmt.Errorf("Clash API: %w", err)
 		}
 		k.ClashAddress = k.clash.Addr()
+		eng.SetScriptClashAddress(k.ClashAddress)
 		k.wg.Add(1)
 		go func() {
 			defer k.wg.Done()

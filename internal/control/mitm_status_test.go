@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -24,5 +25,12 @@ func TestGetMITMStatus(t *testing.T) {
 	if status.H2 != "disabled" || status.Enabled || status.CALoaded || status.CAError != "" ||
 		status.PinningBypasses == nil || len(status.PinningBypasses) != 0 || status.Connections != 0 || status.Requests != 0 {
 		t.Fatalf("initial MITM status = %+v", status)
+	}
+	wantScripts := api.MITMScriptStatus{Status: "disabled"}
+	if runtime.GOOS == "ios" {
+		wantScripts.Status = "unsupported"
+	}
+	if status.Scripts != wantScripts {
+		t.Fatalf("initial MITM script status = %+v, want %+v", status.Scripts, wantScripts)
 	}
 }

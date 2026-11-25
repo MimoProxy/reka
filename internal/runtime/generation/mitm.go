@@ -70,7 +70,7 @@ func (m *mitmGeneration) release() {
 	}
 }
 
-func (g *generation) loadMITM(previous *generation, outbounds map[string]*sagernet.Outbound) {
+func (g *generation) loadMITM(previous *generation, outbounds map[string]*sagernet.Outbound, scriptsSupported bool) {
 	if g.eff == nil || !g.eff.MITM.Enabled {
 		return
 	}
@@ -93,10 +93,11 @@ func (g *generation) loadMITM(previous *generation, outbounds map[string]*sagern
 		return
 	}
 	var pins map[*sagernet.Outbound]*sagernet.PinnedOutbound
-	reroute := len(g.eff.MITM.Hostnames) != 0 && g.eff.HTTPRewrite.MayChangeRequestURL()
+	scriptRouting := scriptsSupported && g.scripts.count() != 0
+	reroute := len(g.eff.MITM.Hostnames) != 0 && (g.eff.HTTPRewrite.MayChangeRequestURL() || scriptRouting && len(g.scripts.requests) != 0)
 	if len(g.eff.MITM.Hostnames) != 0 {
 		needed := sniffDNSDependencies(g, outbounds)
-		if reroute {
+		if reroute || scriptRouting {
 			for _, out := range outbounds {
 				needed[out] = true
 			}
@@ -184,6 +185,10 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 		OnConnection: func() { e.mitmConnections.Add(1) },
 		OnRequest:    func() { e.mitmRequests.Add(1) },
 	}
+	if g.scripts.count() != 0 {
+		route.MatchScript = e.mitmScriptMatcher(snap, state)
+		route.OnScript = e.scriptRuns.record
+	}
 	if g.mitm.reroute {
 		route.Reroute = func(ctx context.Context, dest sagernet.Destination) sagernet.Route {
 			target := md
@@ -222,6 +227,7 @@ func (e *Engine) MITMStatus() api.MITMStatus {
 		PinningBypasses: e.mitmBypasses.list(),
 		Connections:     e.mitmConnections.Load(),
 		Requests:        e.mitmRequests.Load(),
+		Scripts:         e.scriptStatus(g),
 	}
 	if g.mitm != nil && !status.CALoaded {
 		status.CAError = "MITM CA has expired"

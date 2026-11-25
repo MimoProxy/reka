@@ -196,9 +196,11 @@ ListConnections 的 offset 应为非负数；limit 为 1–1000，省略、≤0 
 
 `destination_domain` 记录入站提供的域名或 Fake IP 映射中的域名。活动连接的 `destination` 发生改写时，`original_destination` 保留入站收到的地址和端口。
 
-`ListConnections`、`ListConnectionHistory` 和 `GetConnectionTimeline` 的连接条目可包含 `mitm`、`mitm_requests`、`mitm_matched_ids` 和 `mitm_body_passthroughs`。每条连接和请求最多保留 24 个去重后的重写 ID。正文超限按请求、响应两个方向分别计数。MITM 连接的 `upload` 和 `download` 与总量、按进程统计采用相同口径，均为客户端侧的 TLS 密文字节，包括握手。MITM 的 QUIC 拒绝在连接记录中使用 `reject_reason: mitm-quic`。
+`ListConnections`、`ListConnectionHistory` 和 `GetConnectionTimeline` 的连接条目可包含 `mitm`、`mitm_requests`、`mitm_matched_ids`、`mitm_body_passthroughs` 和 `mitm_scripts`。每条连接和请求最多保留 24 个去重后的重写 ID。`mitm_scripts` 按脚本 ID 去重，最多保留 24 项。每项含 `id`、命中次数 `count` 和最近一次命中的结果 `last_result`。正文超限按请求、响应两个方向分别计数。MITM 连接的 `upload` 和 `download` 与总量、按进程统计采用相同口径，均为客户端侧的 TLS 密文字节，包括握手。MITM 的 QUIC 拒绝在连接记录中使用 `reject_reason: mitm-quic`。
 
-`ListRequestHistory` 中的 MITM 请求带 `mitm: true` 和父连接的 `connection_id`，适用时还带 `matched_ids`、`body_passthroughs` 和 `resource_error`。同一 TLS 连接内的多个请求共享连接 ID。请求记录沿用现有的 URL 和头字段脱敏。
+`ListRequestHistory` 中的 MITM 请求带 `mitm: true` 和父连接的 `connection_id`，适用时还带 `matched_ids`、`body_passthroughs`、`resource_error` 和 `scripts`。同一 TLS 连接内的多个请求共享连接 ID。请求记录沿用现有的 URL 和头字段脱敏。
+
+`scripts` 依请求、响应顺序记录命中的脚本。每项含 `id`、`phase`（`request` 或 `response`）、毫秒耗时 `duration_ms`、`result`，以及出错时可选的首行错误摘要 `error`。结果包括 `modified`、`passed`、`responded`、`aborted`、`failed`、`timeout`、`oversize`、`circuit-open`、`busy` 和 `unsupported`。使用 `rekactl connections`、`rekactl timeline` 查看连接脚本统计，使用 `rekactl requests` 查看请求脚本记录。命令均支持全局 `-json`。
 
 ```json
 {"id":10,"method":"ListConnections","params":{"offset":0,"limit":100}}
@@ -401,11 +403,13 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 ### MITM 状态
 
-`GetMITMStatus` 返回 `enabled`、`ca_loaded`、可选 `ca_error`、`h2`、`hostname_count`、`pinning_bypasses`、`connections_total` 和 `requests_total`。`enabled` 表示本机配置中的开关，`ca_loaded` 表示活动配置拥有可用的 CA。CA 状态随配置激活更新。
+`GetMITMStatus` 返回 `enabled`、`ca_loaded`、可选 `ca_error`、`h2`、`hostname_count`、`pinning_bypasses`、`connections_total`、`requests_total` 和 `scripts`。`enabled` 表示本机配置中的开关，`ca_loaded` 表示活动配置拥有可用的 CA。CA 状态随配置激活更新。
 
 `h2` 在配置启用 HTTP/2 时为 `"not supported yet"`，省略该开关或设为 `false` 时为 `"disabled"`。MITM 只协商 HTTP/1.1。
 
 `pinning_bypasses` 的每项包含 `hostname`、`reason`、`expires_at`。列表跨配置代际生效，按主机名记录，保留至多 256 项。`connections_total` 从进入 MITM 转发时开始计数，包含后续握手失败的连接。`requests_total` 统计已解析的请求，包含本地响应。两个计数均从本次内核运行开始累计。
+
+`scripts.status` 为 `enabled`、`disabled` 或 `unsupported`。`count` 是当前活动配置可匹配的 HTTP 脚本数。桌面与 Android 在启用 MITM 且有可匹配脚本时报告 `enabled`，iOS 报告 `unsupported`。`runs` 统计执行次数，`modified`、`failed`、`timeouts`、`oversize`、`circuit_open` 分别统计修改、失败、超时、正文超限和熔断放行。`notifications` 和 `notifications_dropped` 统计已交给接收端及被限速丢弃的通知。所有脚本计数跨配置代际累计。使用 `rekactl mitm-status` 查看状态。
 
 ## 8. 事件订阅与恢复
 
@@ -425,11 +429,14 @@ types 省略/空数组接收全部事件；同连接再次 Subscribe 替换上�
 | `subscription.updated` | 订阅观察状态更新 |
 | `module.updated` | 模块刷新状态更新 |
 | `traffic_budget.updated` | 订阅用量观测更新后的预算 |
+| `script.notification` | 脚本发布的通知，受每脚本和全局速率限制 |
 | `log` | 实际启用的日志记录，data 含 level、message、time |
 
 ```json
 {"event":{"epoch":"9f2c123456789abc","seq":42,"type":"config.committed","time":"2026-11-16T08:00:00Z","data":{"operation":"my-op-001","revision":13,"generation":20,"source":"api","plan":{}}}}
 ```
+
+`script.notification` 的 `data` 包含 `script_id`、可选 `module`、`title`、`subtitle`、`body`、可选 `options` 和 `time`。`options` 是原样透传的 JSON 对象，可含 `url`、`open-url`、`media-url` 或 `clipboard`。选项由接收客户端处理。标题和副标题各截断到 256 字节以内，正文截断到 4 KiB 以内，超过 8 KiB 的选项会省略。 [注入服务与限速](modules.md#script-services)
 
 seq 在一个 epoch 内递增。服务器保留最近 512 条事件；游标可用时重放 after 之后的事件，进程重启或游标不可用时先发 snapshot。snapshot 不受 types 过滤。
 

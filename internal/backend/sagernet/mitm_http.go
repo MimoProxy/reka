@@ -1,6 +1,7 @@
 package sagernet
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -14,8 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/httprewrite"
+	"github.com/MimoProxy/reka/internal/script"
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/buf"
@@ -35,6 +38,7 @@ type mitmHTTPHandler struct {
 
 type mitmRequestStats struct {
 	matches       []string
+	scripts       []api.MITMScriptRun
 	passthroughs  uint64
 	resourceError bool
 }
@@ -65,9 +69,28 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		mitmAllowEarlyResponse(w, r)
 		http.Error(w, message, code)
 	}
+	writeLocal := func(local *httprewrite.Response) {
+		status = local.StatusCode
+		mitmAllowEarlyResponse(w, r)
+		writeMITMHeaders(w, local.Header, status)
+		if mitmResponseHasBody(r.Method, status) && len(local.Body) != 0 {
+			var n int
+			n, err = w.Write(local.Body)
+			obs.down.Add(int64(n))
+		}
+	}
+	hijack := func() *bufio.ReadWriter {
+		conn, buffered, hijackErr := http.NewResponseController(w).Hijack()
+		hijacked, err = conn, hijackErr
+		if err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		return buffered
+	}
 	defer func() {
 		s.attempt.mu.Lock()
 		s.attempt.MITMMatchedIDs = appendMITMMatches(s.attempt.MITMMatchedIDs, stats.matches)
+		s.attempt.MITMScripts = appendMITMScriptStats(s.attempt.MITMScripts, stats.scripts)
 		s.attempt.MITMBodyPassthroughs += stats.passthroughs
 		s.attempt.mu.Unlock()
 		obs.setMITM(stats)
@@ -85,20 +108,11 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rewrite := s.route.Rewrite
-	originalURL := request.URL.String()
 	request.Header.Set("Host", request.URL.Host)
-	var data []byte
-	if rewrite.NeedsRequestBody(originalURL) {
-		data, request.Body, err = bufferMITMBody(request.Body, request.ContentLength, s.route.MaxBodySize, &stats)
-		if err != nil {
-			w.Header().Set("Connection", "close")
-			localError(http.StatusBadRequest, "Could not read request body")
-			return
-		}
-	}
-	rewritten := rewrite.Request(httprewrite.Request{
-		URL: originalURL, Method: request.Method, Header: request.Header, Body: data,
+	rewritten := rewrite.RequestBeforeBody(httprewrite.Request{
+		URL: request.URL.String(), Method: request.Method, Header: request.Header,
 	})
+	preBodyMatches := len(rewritten.MatchedIDs)
 	stats.addMatches(rewritten.MatchedIDs)
 
 	if rewritten.ResourceError != nil {
@@ -107,35 +121,23 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rewritten.Local != nil {
-		local := rewritten.Local
-		if local.StatusCode < http.StatusOK {
+		if rewritten.Local.StatusCode < http.StatusOK {
 			localError(http.StatusBadGateway, "Local response needs a final HTTP status")
 			return
 		}
-		status = local.StatusCode
-		mitmAllowEarlyResponse(w, r)
-		writeMITMHeaders(w, local.Header, status)
-		if r.Method != http.MethodHead && len(local.Body) != 0 {
-			var n int
-			n, err = w.Write(local.Body)
-			obs.down.Add(int64(n))
-		}
+		writeLocal(rewritten.Local)
 		return
 	}
 
 	switch rewritten.Connection {
 	case httprewrite.Close, httprewrite.Drop:
-		conn, buffered, hijackErr := http.NewResponseController(w).Hijack()
-		hijacked, err = conn, hijackErr
-		if err != nil {
-			panic(http.ErrAbortHandler)
-		}
+		buffered := hijack()
 		if rewritten.Connection == httprewrite.Close {
 			return
 		}
 		// A hijack allows us to observe peer closure even when the request
 		// body has not been read. No response or continue message is sent.
-		_ = conn.SetReadDeadline(time.Now().Add(s.backend.halfCloseTimeout))
+		_ = hijacked.SetReadDeadline(time.Now().Add(s.backend.halfCloseTimeout))
 		_, err = io.Copy(io.Discard, buffered.Reader)
 		return
 	}
@@ -145,6 +147,23 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		localError(http.StatusBadGateway, "Invalid HTTPS rewrite target")
 		return
 	}
+
+	requestScript := s.matchScript(script.KindHTTPRequest, rewritten.URL)
+	needsRequestRewrite := rewrite.NeedsRewrittenRequestBody(rewritten.URL)
+	requestBuffer, err := s.bufferBody(request.Body, request.ContentLength, needsRequestRewrite, requestScript)
+	if err != nil {
+		s.recordScriptInputError(&stats, requestScript, "request")
+		w.Header().Set("Connection", "close")
+		localError(http.StatusBadRequest, "Could not read request body")
+		return
+	}
+	requestPassthrough := needsRequestRewrite && requestBuffer.exceeds(s.route.MaxBodySize)
+	if needsRequestRewrite && !requestPassthrough {
+		rewrite.ApplyRequestBody(&rewritten, requestBuffer.data)
+		requestBuffer.data = rewritten.Body
+		stats.addMatches(rewritten.MatchedIDs[preBodyMatches:])
+	}
+
 	request.Host = target.Host
 	if headerHost := rewritten.Header.Get("Host"); headerHost != "" && headerHost != request.URL.Host {
 		request.Host = headerHost
@@ -159,21 +178,58 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Header.Del("Host")
 	stripHTTPHopHeaders(request.Header)
-	if data != nil {
-		request.ContentLength = int64(len(rewritten.Body))
-		request.Body = http.NoBody
-		if len(rewritten.Body) != 0 {
-			request.Body = io.NopCloser(bytes.NewReader(rewritten.Body))
-		}
+	request.Body = requestBuffer.reader
+	if requestBuffer.data != nil {
+		setMITMRequestBody(request, requestBuffer.data)
 	}
 
-	needsResponse := rewrite.NeedsResponseBody(rewritten.URL)
-	if needsResponse {
+	reroute := rewritten.HostChanged
+	var local *httprewrite.Response
+	var abort bool
+	requestInput := mitmScriptInput{id: obs.summary.ID, request: request}
+	scriptOversize := s.runScript(r.Context(), requestScript, requestInput, requestBuffer, &stats, func(result script.Result) error {
+		switch result.Action {
+		case script.ActionModify:
+			newDestination, changed, applyErr := applyMITMRequestScript(request, result)
+			if applyErr != nil {
+				return applyErr
+			}
+			if changed {
+				destination, reroute = newDestination, true
+			}
+			if result.BodySet && requestBuffer.data == nil {
+				mitmAllowEarlyResponse(w, r)
+			}
+		case script.ActionRespond:
+			var applyErr error
+			local, applyErr = mitmScriptResponse(result.Response)
+			return applyErr
+		case script.ActionAbort:
+			abort = true
+		}
+		return nil
+	})
+	if scriptOversize || requestPassthrough {
+		stats.passthroughs++
+	}
+	if local != nil {
+		writeLocal(local)
+		return
+	}
+	if abort {
+		hijack()
+		return
+	}
+
+	finalURL := request.URL.String()
+	responseScript := s.matchScript(script.KindHTTPResponse, finalURL)
+	needsResponseRewrite := rewrite.NeedsResponseBody(finalURL)
+	if needsResponseRewrite || responseScript.bodyLimit() > 0 {
 		limitMITMEncodings(request.Header)
 	}
 	upstream := s.upstream
-	if rewritten.HostChanged {
-		upstream, err = s.reroute(ctx, destination, target.Hostname())
+	if reroute {
+		upstream, err = s.reroute(ctx, destination, request.URL.Hostname())
 		if err != nil {
 			localError(http.StatusBadGateway, "Could not route rewritten HTTPS request")
 			return
@@ -198,27 +254,69 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	obs.response(res)
 	defer res.Body.Close()
-	var responseBody io.ReadCloser = res.Body
-	var responseData []byte
-	if needsResponse {
-		responseData, responseBody, err = bufferMITMBody(res.Body, res.ContentLength, s.route.MaxBodySize, &stats)
-		if err != nil {
-			// A response whose body could not be read has not been sent.
-			obs.clearOriginStatus()
-			localError(http.StatusBadGateway, "Could not read HTTPS upstream response")
-			return
-		}
+	responseBuffer, err := s.bufferBody(res.Body, res.ContentLength, needsResponseRewrite, responseScript)
+	if err != nil {
+		// A response whose body could not be read has not been sent.
+		s.recordScriptInputError(&stats, responseScript, "response")
+		obs.clearOriginStatus()
+		localError(http.StatusBadGateway, "Could not read HTTPS upstream response")
+		return
 	}
-	result := rewrite.Response(rewritten.URL, httprewrite.Response{
-		StatusCode: res.StatusCode, Header: res.Header, Body: responseData,
+	responsePassthrough := needsResponseRewrite && responseBuffer.exceeds(s.route.MaxBodySize)
+	rewriteBody := responseBuffer.data
+	if responsePassthrough {
+		rewriteBody = nil
+	}
+	rewrittenResponse := rewrite.Response(finalURL, httprewrite.Response{
+		StatusCode: res.StatusCode, Header: res.Header, Body: rewriteBody,
 	})
-	stats.addMatches(result.MatchedIDs)
-	writeMITMHeaders(w, result.Header, result.StatusCode)
-	if responseData != nil {
-		if len(result.Body) != 0 {
-			_, err = w.Write(result.Body)
+	stats.addMatches(rewrittenResponse.MatchedIDs)
+	response := rewrittenResponse.Response
+	if responsePassthrough {
+		response.Body = responseBuffer.data
+	}
+	length := res.ContentLength
+	if response.Body != nil {
+		length = int64(len(response.Body))
+	}
+	responseBuffer.data = response.Body
+	responseInput := mitmScriptInput{id: obs.summary.ID, request: request, response: &response}
+	scriptOversize = s.runScript(r.Context(), responseScript, responseInput, responseBuffer, &stats, func(result script.Result) error {
+		switch result.Action {
+		case script.ActionModify:
+			var applyErr error
+			response, applyErr = applyMITMResponseScript(response, length, result)
+			return applyErr
+		case script.ActionAbort:
+			abort = true
 		}
-	} else if responseBody != http.NoBody {
+		return nil
+	})
+	if scriptOversize || responsePassthrough {
+		stats.passthroughs++
+	}
+	if abort {
+		hijack()
+		return
+	}
+	if response.StatusCode != res.StatusCode {
+		obs.clearOriginStatus()
+		status = response.StatusCode
+	}
+	if response.Body != nil && responseScript.bodyLimit() > 0 {
+		// A script that needed a body can turn chunked input into a fixed
+		// length response, including when the original encoding is retained.
+		response.Header.Set("Content-Length", strconv.Itoa(len(response.Body)))
+	}
+	writeMITMHeaders(w, response.Header, response.StatusCode)
+	if !mitmResponseHasBody(r.Method, response.StatusCode) {
+		return
+	}
+	if response.Body != nil {
+		if len(response.Body) != 0 {
+			_, err = w.Write(response.Body)
+		}
+	} else if responseBuffer.reader != http.NoBody {
 		var writer io.Writer = w
 		if res.ContentLength < 0 {
 			// Deliver each chunk of a streaming response as it arrives.
@@ -230,7 +328,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Reuse relay-sized pooled buffers; io.Copy allocates 32 KiB per response.
 		buffer := buf.Get(buf.BufferSize)
-		_, err = io.CopyBuffer(writer, responseBody, buffer)
+		_, err = io.CopyBuffer(writer, responseBuffer.reader, buffer)
 		_ = buf.Put(buffer)
 	}
 	if err != nil {
@@ -289,39 +387,64 @@ func mitmUpstreamTarget(raw string) (*url.URL, Destination, error) {
 		return nil, Destination{}, invalid
 	}
 	host := target.Hostname()
-	destination := Destination{Domain: host, Port: 443}
+	destination := Destination{Domain: host, Port: mitmHTTPSPort(target)}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		destination.Addr, destination.Domain = addr.Unmap(), ""
 	} else if !M.IsDomainName(host) {
 		return nil, Destination{}, invalid
 	}
-	if port := target.Port(); port != "" {
-		number, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || number == 0 {
-			return nil, Destination{}, invalid
-		}
-		destination.Port = uint16(number)
+	if destination.Port == 0 {
+		return nil, Destination{}, invalid
 	}
 	return target, destination, nil
 }
 
-func bufferMITMBody(body io.ReadCloser, length int64, limit int, stats *mitmRequestStats) ([]byte, io.ReadCloser, error) {
-	if body == nil || body == http.NoBody {
-		return nil, body, nil
+func mitmHTTPSPort(target *url.URL) uint16 {
+	port := target.Port()
+	if port == "" {
+		return 443
+	}
+	number, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0
+	}
+	return uint16(number)
+}
+
+type mitmBufferedBody struct {
+	data      []byte
+	reader    io.ReadCloser
+	truncated bool
+}
+
+func (b mitmBufferedBody) exceeds(limit int) bool {
+	return b.truncated || len(b.data) > limit
+}
+
+func (s *mitmHTTPHandler) bufferBody(body io.ReadCloser, length int64, needsRewrite bool, match *MITMScript) (mitmBufferedBody, error) {
+	buffer := mitmBufferedBody{reader: body}
+	limit := match.bodyLimit()
+	if needsRewrite {
+		limit = max(limit, s.route.MaxBodySize)
+	}
+	if body == nil || body == http.NoBody || !needsRewrite && limit == 0 {
+		return buffer, nil
 	}
 	if length > int64(limit) {
-		stats.passthroughs++
-		return nil, body, nil
+		buffer.truncated = true
+		return buffer, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
 	if err != nil {
-		return nil, body, err
+		return buffer, err
 	}
 	if len(data) <= limit {
-		return data, body, nil
+		buffer.data = data
+	} else {
+		buffer.truncated = true
+		buffer.reader = prefixedMITMBody{Reader: io.MultiReader(bytes.NewReader(data), body), Closer: body}
 	}
-	stats.passthroughs++
-	return nil, prefixedMITMBody{Reader: io.MultiReader(bytes.NewReader(data), body), Closer: body}, nil
+	return buffer, nil
 }
 
 type prefixedMITMBody struct {
@@ -354,6 +477,10 @@ func writeMITMHeaders(w http.ResponseWriter, header http.Header, status int) {
 		w.Header()[key] = values
 	}
 	w.WriteHeader(status)
+}
+
+func mitmResponseHasBody(method string, status int) bool {
+	return method != http.MethodHead && status != http.StatusNoContent && status != http.StatusNotModified
 }
 
 func mitmAllowEarlyResponse(w http.ResponseWriter, request *http.Request) {

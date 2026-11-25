@@ -1,6 +1,8 @@
 package compile
 
 import (
+	"errors"
+	"fmt"
 	"regexp/syntax"
 
 	"github.com/MimoProxy/reka/internal/config/model"
@@ -22,6 +24,7 @@ type Script struct {
 	Engine         string `json:"engine"`
 	Format         string `json:"format"`
 	Hash           string `json:"hash,omitempty"`
+	Path           string `json:"-"` // Default persistent store scope; may contain credentials.
 	Module         string `json:"module,omitempty"`
 	Origin         Origin `json:"origin"`
 }
@@ -67,6 +70,9 @@ func (c *compiler) scripts(eff *Effective) {
 			ent.Origin = Origin{Layer: LayerProfile, Document: model.DocProfile, Path: path, Line: pos.Line, Column: pos.Column}
 		}
 		eff.Scripts = append(eff.Scripts, ent)
+		if keepScriptReader && ent.Supported {
+			eff.readScriptSource = c.opts.ReadResource
+		}
 	}
 	eff.ScriptFingerprint = fingerprint(c.profile.Scripts)
 }
@@ -114,6 +120,7 @@ func (c *compiler) compileScript(def model.Script, path string) Script {
 		c.errorf(doc, path+"/format", "script.format", "format must be surge, loon or stash")
 	}
 	if def.Download != nil {
+		script.Path = def.Download.URL
 		if err := model.ValidResourceDownload(def.Download.WithDefaultInterval()); err != nil {
 			c.errorf(doc, path+"/download", "resource.download", "%v", err)
 		}
@@ -123,7 +130,12 @@ func (c *compiler) compileScript(def model.Script, path string) Script {
 			c.errorf(doc, path+"/file", "script.source", "specify at most one script download or file")
 		} else if !model.ValidScriptFile(*def.File) {
 			c.errorf(doc, path+"/file", "script.file", "script file must be an absolute local path without NUL")
+		} else {
+			script.Path = *def.File
 		}
+	}
+	if script.Path == "" {
+		script.Path = script.ID
 	}
 	if script.Supported || def.Hash != nil {
 		c.validateScriptResource(path+"/hash", script.Hash)
@@ -144,15 +156,30 @@ func (c *compiler) validateScriptResource(path, hash string) {
 		c.errorf(doc, path, code, "script requires a locked resource hash")
 		return
 	}
-	data, err := c.opts.ReadResource(hash)
+	if _, err := readScriptSource(c.opts.ReadResource, hash); err != nil {
+		c.errorf(doc, path, code, "%v", err)
+	}
+}
+
+// ScriptSource loads a locked script resource for execution.
+func (e *Effective) ScriptSource(hash string) ([]byte, error) {
+	if e.readScriptSource == nil || !resource.ValidHash(hash) {
+		return nil, errors.New("script source unavailable")
+	}
+	return readScriptSource(e.readScriptSource, hash)
+}
+
+func readScriptSource(read func(string) ([]byte, error), hash string) ([]byte, error) {
+	data, err := read(hash)
 	switch {
 	case err != nil:
-		c.errorf(doc, path, code, "read script resource: %v", err)
+		return nil, fmt.Errorf("read script resource: %w", err)
 	case len(data) == 0:
-		c.errorf(doc, path, code, "script source is empty")
+		return nil, errors.New("script source is empty")
 	case len(data) > model.MaxScriptSize:
-		c.errorf(doc, path, code, "script source exceeds %d bytes", model.MaxScriptSize)
+		return nil, fmt.Errorf("script source exceeds %d bytes", model.MaxScriptSize)
 	case resource.Hash(data) != hash:
-		c.errorf(doc, path, code, "script resource hash mismatch")
+		return nil, errors.New("script resource hash mismatch")
 	}
+	return data, nil
 }

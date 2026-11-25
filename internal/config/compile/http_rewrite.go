@@ -23,6 +23,7 @@ type MITM struct {
 	H2                   bool                   `json:"h2"`
 	SkipServerCertVerify bool                   `json:"skip-server-cert-verify"`
 	QUICBlock            bool                   `json:"quic-block"`
+	ScriptLog            bool                   `json:"script-log"`
 	Matcher              *httprewrite.Hostnames `json:"-"`
 	ClientSourceMatcher  *ClientSourceMatcher   `json:"-"`
 }
@@ -57,9 +58,11 @@ func (c *compiler) mitm(eff *Effective) {
 		}
 	}
 	eff.setOrigin("/mitm/enabled", Origin{Layer: LayerDefault})
+	eff.setOrigin("/mitm/script-log", Origin{Layer: LayerDefault})
 	if local := c.local.MITM; local != nil {
 		eff.MITM.Enabled, eff.MITM.CA = local.Enabled, local.CA
-		for _, path := range []string{"/mitm/enabled", "/mitm/ca"} {
+		eff.MITM.ScriptLog = local.ScriptLog
+		for _, path := range []string{"/mitm/enabled", "/mitm/ca", "/mitm/script-log"} {
 			if pos, ok := c.lpos[path]; ok {
 				eff.setOrigin(path, Origin{Layer: LayerLocal, Document: model.DocLocal, Path: path, Line: pos.Line, Column: pos.Column})
 			}

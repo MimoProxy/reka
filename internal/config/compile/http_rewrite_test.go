@@ -16,18 +16,19 @@ import (
 func TestMITMDefaultsAndLocalCA(t *testing.T) {
 	for _, tc := range []struct {
 		name, local, ca string
-		enabled         bool
+		enabled, log    bool
 	}{
 		{name: "default"},
 		{name: "disabled with CA", local: "mitm: {enabled: false, ca: 'secret://mitm/ca'}", ca: "secret://mitm/ca"},
 		{name: "enabled with unresolved CA", local: "mitm: {enabled: true, ca: 'secret://mitm/ca'}", ca: "secret://mitm/ca", enabled: true},
+		{name: "script log", local: "mitm: {script-log: true}", log: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eff, diags := Compile([]byte("schema-version: 1"), []byte(tc.local), Options{})
 			if diags.HasErrors() {
 				t.Fatal(diags)
 			}
-			if got := eff.MITM; got.Enabled != tc.enabled || got.CA != tc.ca || got.H2 || got.SkipServerCertVerify || !got.QUICBlock {
+			if got := eff.MITM; got.Enabled != tc.enabled || got.CA != tc.ca || got.ScriptLog != tc.log || got.H2 || got.SkipServerCertVerify || !got.QUICBlock {
 				t.Fatalf("MITM = %+v", got)
 			}
 			if eff.HTTPRewrite != nil || eff.HTTPRewriteFingerprint != "" {
@@ -51,10 +52,13 @@ func TestMITMAndRewriteValidation(t *testing.T) {
 		{"local client source", model.DocLocal, `mitm: {client-source-address: ['192.0.2.1']}`, "schema.unknown-field", "/mitm/client-source-address"},
 		{"enabled in profile", model.DocProfile, `mitm: {enabled: false}`, localOnly, "/mitm/enabled"},
 		{"CA in profile", model.DocProfile, `mitm: {ca: 'secret://mitm/ca'}`, localOnly, "/mitm/ca"},
+		{"script log in profile", model.DocProfile, `mitm: {script-log: true}`, localOnly, "/mitm/script-log"},
 		{"enabled in source", model.DocSources, `sources: [{id: ads, mitm: {enabled: true}}]`, localOnly, "/sources/ads/mitm/enabled"},
 		{"CA in source", model.DocSources, `sources: [{id: ads, mitm: {ca: 'secret://mitm/ca'}}]`, localOnly, "/sources/ads/mitm/ca"},
+		{"script log in source", model.DocSources, `sources: [{id: ads, mitm: {script-log: true}}]`, localOnly, "/sources/ads/mitm/script-log"},
 		{"enabled in overlay", model.DocOverlay, `patches: [{op: set, path: /mitm/enabled, value: false}]`, localOnly, "/patches/#0/path"},
 		{"CA in overlay", model.DocOverlay, `patches: [{op: set, path: /mitm, value: {ca: 'secret://mitm/ca'}}]`, localOnly, "/patches/#0/value/ca"},
+		{"script log in overlay", model.DocOverlay, `patches: [{op: set, path: /mitm/script-log, value: true}]`, localOnly, "/patches/#0/path"},
 		{"invalid hostname", model.DocProfile, `mitm: {hostnames: ['']}`, "mitm.hostname", "/mitm/hostnames/#0"},
 		{"invalid port", model.DocProfile, `mitm: {hostnames: ['example.test:65536']}`, "mitm.hostname", "/mitm/hostnames/#0"},
 		{"invalid hostname character", model.DocProfile, `mitm: {hostnames: ['example.test/path']}`, "mitm.hostname", "/mitm/hostnames/#0"},

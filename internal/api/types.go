@@ -297,10 +297,11 @@ type Connection struct {
 }
 
 type MITMConnectionInfo struct {
-	MITM                 bool     `json:"mitm,omitempty"`
-	MITMRequests         uint64   `json:"mitm_requests,omitempty"`
-	MITMMatchedIDs       []string `json:"mitm_matched_ids,omitempty"`
-	MITMBodyPassthroughs uint64   `json:"mitm_body_passthroughs,omitempty"`
+	MITM                 bool              `json:"mitm,omitempty"`
+	MITMRequests         uint64            `json:"mitm_requests,omitempty"`
+	MITMMatchedIDs       []string          `json:"mitm_matched_ids,omitempty"`
+	MITMBodyPassthroughs uint64            `json:"mitm_body_passthroughs,omitempty"`
+	MITMScripts          []MITMScriptStats `json:"mitm_scripts,omitempty"`
 }
 
 // RuntimeStatus is a summary of the running state.

@@ -115,6 +115,7 @@ func (a *connectionAttempt) appendEventAtLocked(at time.Time, event connectionEv
 func (a *connectionAttempt) snapshotLocked() api.ConnectionTrace {
 	trace := a.ConnectionTrace
 	trace.MITMMatchedIDs = slices.Clone(trace.MITMMatchedIDs)
+	trace.MITMScripts = slices.Clone(trace.MITMScripts)
 	if len(a.events) == 0 {
 		return trace
 	}

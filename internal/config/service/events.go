@@ -18,6 +18,9 @@ const (
 	EventLog       = "log"
 )
 
+// EventScriptNotification is Reka's control event for notifications posted by scripts.
+const EventScriptNotification = "script.notification"
+
 const (
 	historySize     = 512
 	subscriberSize  = 256

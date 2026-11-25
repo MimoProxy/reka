@@ -22,6 +22,9 @@ type HTTPClient interface {
 	Do(ctx context.Context, req *HTTPRequest) (*HTTPResponse, error)
 }
 
+// DefaultHTTPRequestTimeout matches Surge's timeout for $httpClient requests.
+const DefaultHTTPRequestTimeout = 5 * time.Second
+
 // HTTPRequest contains the options supplied by $httpClient.
 type HTTPRequest struct {
 	Method, URL              string
@@ -52,6 +55,9 @@ type Store interface {
 type Notifier interface {
 	Post(n Notification)
 }
+
+// NotificationOptionsMax is Reka's budget for notification options in an event.
+const NotificationOptionsMax = 8 << 10
 
 // Notification is a message and its platform-specific options.
 type Notification struct {

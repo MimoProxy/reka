@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/adler32"
 	"io"
 	"math"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,8 +37,8 @@ func (s *Set) rewriteBody(phase rewritePhase, url string, header *editedHeader, 
 			return true
 		}
 		if original == nil {
-			decoded, ok := decodeBody(body, header, maxSize)
-			if !ok {
+			decoded, err := DecodeBody(body, header.value, maxSize)
+			if err != nil {
 				return false
 			}
 			original = decoded
@@ -183,10 +185,17 @@ func runJQ(code *gojq.Code, body []byte) []byte {
 	return data[:len(data)-1] // Encoder appends a newline.
 }
 
-func decodeBody(body []byte, header *editedHeader, maxSize int64) ([]byte, bool) {
-	values, _ := headerValues(header.value, "Content-Encoding")
+// ErrDecodedBodyTooLarge reports a body that exceeded its size budget.
+var ErrDecodedBodyTooLarge = errors.New("decoded HTTP body exceeds the size limit")
+
+var errBodyEncoding = errors.New("unsupported or invalid HTTP body encoding")
+
+// DecodeBody decodes identity, gzip, or deflate within the supplied size
+// budget. Identity data shares the input slice.
+func DecodeBody(body []byte, header http.Header, maxSize int64) ([]byte, error) {
+	values, _ := headerValues(header, "Content-Encoding")
 	if len(values) > 1 {
-		return nil, false
+		return nil, errBodyEncoding
 	}
 	encoding := ""
 	if len(values) == 1 {
@@ -194,44 +203,56 @@ func decodeBody(body []byte, header *editedHeader, maxSize int64) ([]byte, bool)
 	}
 	switch encoding {
 	case "", "identity":
-		return body, true
+		if int64(len(body)) > maxSize {
+			return nil, ErrDecodedBodyTooLarge
+		}
+		return body, nil
 	case "gzip":
 		r, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
-			return nil, false
+			return nil, errBodyEncoding
 		}
 		return readBody(r, maxSize)
 	case "deflate":
 		return inflateBody(body, maxSize)
 	default:
-		return nil, false
+		return nil, errBodyEncoding
 	}
 }
 
-func inflateBody(body []byte, maxSize int64) ([]byte, bool) {
+func inflateBody(body []byte, maxSize int64) ([]byte, error) {
 	// HTTP deflate uses a zlib wrapper. Also accept bare DEFLATE from senders
 	// that omit the wrapper. This uses flate for the compressed stream.
 	if len(body) >= 6 && body[0]&0x0f == 8 && body[0]>>4 <= 7 && binary.BigEndian.Uint16(body[:2])%31 == 0 {
 		if body[1]&0x20 != 0 {
-			return nil, false // Preset dictionaries are unavailable.
+			return nil, errBodyEncoding // Preset dictionaries are unavailable.
 		}
 		checksum := binary.BigEndian.Uint32(body[len(body)-4:])
 		stream := bytes.NewReader(body[2 : len(body)-4])
-		data, ok := readBody(flate.NewReader(stream), maxSize)
-		if !ok || stream.Len() != 0 || adler32.Checksum(data) != checksum {
-			return nil, false
+		data, err := readBody(flate.NewReader(stream), maxSize)
+		if err != nil {
+			return nil, err
 		}
-		return data, true
+		if stream.Len() != 0 || adler32.Checksum(data) != checksum {
+			return nil, errBodyEncoding
+		}
+		return data, nil
 	}
 	return readBody(flate.NewReader(bytes.NewReader(body)), maxSize)
 }
 
-func readBody(reader io.ReadCloser, maxSize int64) ([]byte, bool) {
+func readBody(reader io.ReadCloser, maxSize int64) ([]byte, error) {
 	defer reader.Close()
 	var input io.Reader = reader
 	if maxSize < math.MaxInt64 {
 		input = io.LimitReader(reader, maxSize+1)
 	}
 	body, err := io.ReadAll(input)
-	return body, err == nil && int64(len(body)) <= maxSize
+	if int64(len(body)) > maxSize {
+		return nil, ErrDecodedBodyTooLarge
+	}
+	if err != nil {
+		return nil, errBodyEncoding
+	}
+	return body, nil
 }
