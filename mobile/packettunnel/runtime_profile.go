@@ -25,6 +25,9 @@ const (
 	maxProfileDuration = 2 * time.Minute
 	profileChunkSize   = 48 << 10
 	profileSampleEvery = time.Second
+	// A goroutine summary is kept from the busiest sample once a profile
+	// passes this many goroutines.
+	profilePeakGoroutines = 100
 	// The runtime's default heap profiling rate.
 	profileDefaultMemRate = 512 << 10
 )
@@ -186,6 +189,8 @@ func startRuntimeProfile(duration time.Duration) error {
 	}
 	began, samples := time.Now(), newProfileSamples()
 	timeline := []map[string]float64{readProfileSample(began, samples)}
+	var peakCount float64
+	var peakGoroutines string
 	ticker := time.NewTicker(profileSampleEvery)
 	finished := time.After(duration)
 	go func() {
@@ -196,7 +201,13 @@ func startRuntimeProfile(duration time.Duration) error {
 			case <-finished:
 				running = false
 			}
-			timeline = append(timeline, readProfileSample(began, samples))
+			sample := readProfileSample(began, samples)
+			timeline = append(timeline, sample)
+			// Keep the goroutines from the busiest moment; by the end of a
+			// profile most connections of a burst have closed.
+			if count := sample["goroutines"]; count >= profilePeakGoroutines && count > peakCount*5/4 {
+				peakCount, peakGoroutines = count, goroutineProfile()
+			}
 		}
 		pprof.StopCPUProfile()
 		end, endAllocs := readRuntimeStats(), allocsProfile()
@@ -207,7 +218,9 @@ func startRuntimeProfile(duration time.Duration) error {
 			MemRate    int                  `json:"memProfileRate"`
 			Timeline   []map[string]float64 `json:"timeline"`
 			Goroutines string               `json:"goroutines"`
-		}{start, end, runtime.GOMAXPROCS(0), runtime.MemProfileRate, timeline, goroutineProfile()})
+			PeakCount  float64              `json:"peakGoroutineCount,omitempty"`
+			Peak       string               `json:"peakGoroutines,omitempty"`
+		}{start, end, runtime.GOMAXPROCS(0), runtime.MemProfileRate, timeline, goroutineProfile(), peakCount, peakGoroutines})
 		runtimeProfile.Lock()
 		defer runtimeProfile.Unlock()
 		runtimeProfile.running = false
