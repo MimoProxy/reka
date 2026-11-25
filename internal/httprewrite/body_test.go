@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 )
 
 func TestBodyReplacements(t *testing.T) {
@@ -74,6 +76,9 @@ func TestBodyLimitsAndEncodings(t *testing.T) {
 		{name: "gzip invalid", encoding: "gzip", input: []byte("broken"), pattern: ".*", value: "new"},
 		{name: "deflate", encoding: "deflate", input: compressed(t, "deflate", "old"), want: "new", pattern: "old", value: "new", changed: true},
 		{name: "deflate with zlib wrapper", encoding: "deflate", input: compressed(t, "zlib", "old"), want: "new", pattern: "old", value: "new", changed: true},
+		{name: "br", encoding: "br", input: compressed(t, "br", "old"), want: "new", pattern: "old", value: "new", changed: true},
+		{name: "br decoded too large", encoding: "br", input: compressed(t, "br", tooLarge), max: 64, pattern: "old", value: "new"},
+		{name: "br invalid", encoding: "br", input: []byte("broken"), pattern: ".*", value: "new"},
 		{name: "deflate invalid", encoding: "deflate", input: []byte("broken"), pattern: ".*", value: "new"},
 		{name: "identity", encoding: "identity", input: []byte("old"), want: "new", pattern: "old", value: "new", changed: true},
 		{name: "br passes through", encoding: "br", input: []byte("old"), pattern: "old", value: "new"},
@@ -158,9 +163,12 @@ func compressed(t *testing.T, encoding, body string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	var writer io.WriteCloser
-	if encoding == "gzip" {
+	switch encoding {
+	case "gzip":
 		writer = gzip.NewWriter(&buf)
-	} else {
+	case "br":
+		writer = brotli.NewWriter(&buf)
+	default:
 		if encoding == "zlib" {
 			buf.Write([]byte{0x78, 0x01})
 		}

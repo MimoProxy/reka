@@ -138,7 +138,7 @@ func TestMITMRelayHTTPRewrites(t *testing.T) {
 			case "/rewrite":
 				if req.Host != host || req.URL.RawQuery != "kind=test" || req.Header.Get("X-Edited") != "updated" ||
 					req.Header.Get("X-Client-Hop") != "" || req.Header.Get("HTTP2-Settings") != "" ||
-					req.Header.Get("Accept-Encoding") != "gzip, deflate" {
+					req.Header.Get("Accept-Encoding") != "br, gzip, deflate" {
 					t.Errorf("unexpected upstream request: %s %s, headers %v", req.Host, req.URL, req.Header)
 				}
 				reply.Header.Set("Content-Encoding", "gzip")

@@ -563,7 +563,7 @@ profile 和 source 的 `mitm` 支持以下字段。
 | `replace` | 非空的 `{pattern, value}` 列表 | `pattern` 为 RE2 正则，`value` 为替换模板，按列表顺序逐对替换所有匹配。消息体不是合法 UTF-8 时跳过整条规则 |
 | `jq` | 字符串 | 在 JSON 消息体上运行 jq，保留大整数精度，输出首个结果。JSON 解析失败、运行出错、无结果或超时会跳过该规则。每条 jq 的执行时限为 1 秒，无环境数据或额外输入可用 |
 
-`replace` 和 `jq` 必须二选一。仅在匹配消息体规则时缓冲消息体。iOS 的缓冲和改写上限为 512 KiB，以控制 Packet Tunnel 扩展的内存占用。其他平台上限为 10 MiB，与 Surge 桌面端一致。原始消息体超过上限时以流式方式原样转发，并统计超限透传次数。支持无 `Content-Encoding`、`identity`、`gzip` 和 `deflate`，解压后同样检查大小。需要响应体重写时，上游请求中的 `Accept-Encoding` 只声明客户端接受的 `gzip`、`deflate` 或未压缩传输。解压失败、使用多重编码或使用 `br`、`zstd` 等其他编码时，消息体原样放行。某条规则的结果超过上限时，保留该条规则执行前的消息体。消息体改动后以未压缩形式返回，移除 `Content-Encoding` 和 `Transfer-Encoding`，按新长度设置 `Content-Length`。
+`replace` 和 `jq` 必须二选一。仅在匹配消息体规则时缓冲消息体。iOS 的缓冲和改写上限为 512 KiB，以控制 Packet Tunnel 扩展的内存占用。其他平台上限为 10 MiB，与 Surge 桌面端一致。原始消息体超过上限时以流式方式原样转发，并统计超限透传次数。支持无 `Content-Encoding`、`identity`、`gzip`、`deflate` 和 `br`，解压后同样检查大小。需要响应体重写时，上游请求中的 `Accept-Encoding` 只声明客户端接受的 `gzip`、`deflate`、`br` 或未压缩传输。解压失败、使用多重编码或使用 `zstd` 等其他编码时，消息体原样放行。某条规则的结果超过上限时，保留该条规则执行前的消息体。消息体改动后以未压缩形式返回，移除 `Content-Encoding` 和 `Transfer-Encoding`，按新长度设置 `Content-Length`。
 
 ### 11.6 本地响应 `map-local`
 

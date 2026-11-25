@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/andybalholm/brotli"
 	"github.com/itchyny/gojq"
 )
 
@@ -190,7 +191,7 @@ var ErrDecodedBodyTooLarge = errors.New("decoded HTTP body exceeds the size limi
 
 var errBodyEncoding = errors.New("unsupported or invalid HTTP body encoding")
 
-// DecodeBody decodes identity, gzip, or deflate within the supplied size
+// DecodeBody decodes identity, gzip, deflate, or br within the supplied size
 // budget. Identity data shares the input slice.
 func DecodeBody(body []byte, header http.Header, maxSize int64) ([]byte, error) {
 	values, _ := headerValues(header, "Content-Encoding")
@@ -215,6 +216,10 @@ func DecodeBody(body []byte, header http.Header, maxSize int64) ([]byte, error) 
 		return readBody(r, maxSize)
 	case "deflate":
 		return inflateBody(body, maxSize)
+	case "br":
+		// The decoder sizes its ring buffer to the output of a short final
+		// stream, so small bodies do not allocate the full window.
+		return readBody(io.NopCloser(brotli.NewReader(bytes.NewReader(body))), maxSize)
 	default:
 		return nil, errBodyEncoding
 	}

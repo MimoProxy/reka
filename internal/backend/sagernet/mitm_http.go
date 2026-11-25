@@ -639,7 +639,7 @@ func limitMITMEncodings(header http.Header) {
 		for item := range strings.SplitSeq(line, ",") {
 			coding, _, _ := strings.Cut(item, ";")
 			switch strings.ToLower(strings.TrimSpace(coding)) {
-			case "gzip", "deflate", "identity":
+			case "gzip", "deflate", "br", "identity":
 				accepted = append(accepted, strings.TrimSpace(item))
 			}
 		}
