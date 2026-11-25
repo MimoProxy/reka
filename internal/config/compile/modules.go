@@ -18,6 +18,8 @@ type moduleLayer struct {
 	rewrites map[string][]*yaml.Node
 }
 
+type moduleResourceKey struct{ kind, value string }
+
 func validateModuleSnapshot(src model.Source, node *yaml.Node) error {
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		switch key := node.Content[i].Value; key {
@@ -29,18 +31,25 @@ func validateModuleSnapshot(src model.Source, node *yaml.Node) error {
 	if src.Module.Format != model.ModuleFormatSurge || !resource.ValidHash(src.Module.Request) {
 		return errors.New("invalid module format or request identity")
 	}
-	if src.Lock == nil || !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > model.MaxModuleResources {
+	if src.Lock == nil || !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > model.MaxModuleResources+model.MaxModuleScripts {
 		return errors.New("invalid module resource lock")
 	}
-	requests := map[string]bool{}
-	ids := map[string]bool{}
+	requests := map[moduleResourceKey]bool{}
+	ids := map[moduleResourceKey]bool{}
+	counts := map[string]int{}
 	for _, locked := range src.Lock.Resources {
-		if locked.Kind != "map-local" || !idRE.MatchString(locked.ID) || !strings.HasPrefix(locked.Request, locked.ID) ||
-			!resource.ValidHash(locked.Request) || !resource.ValidHash(locked.Hash) || requests[locked.Request] || ids[locked.ID] {
+		request := moduleResourceKey{locked.Kind, locked.Request}
+		id := moduleResourceKey{locked.Kind, locked.ID}
+		if (locked.Kind != "map-local" && locked.Kind != "script") || !idRE.MatchString(locked.ID) || !strings.HasPrefix(locked.Request, locked.ID) ||
+			!resource.ValidHash(locked.Request) || !resource.ValidHash(locked.Hash) || requests[request] || ids[id] {
 			return errors.New("invalid or duplicate module resource lock")
 		}
-		requests[locked.Request] = true
-		ids[locked.ID] = true
+		requests[request] = true
+		ids[id] = true
+		counts[locked.Kind]++
+	}
+	if counts["map-local"] > model.MaxModuleResources || counts["script"] > model.MaxModuleScripts {
+		return errors.New("invalid module resource lock")
 	}
 	return nil
 }
@@ -128,14 +137,14 @@ func (c *compiler) convertModules(sources map[string]model.Source, targets map[s
 			c.errorf(model.DocProfile, path, "module.resource", "locked module text is missing, oversized or corrupt; refresh the module")
 			continue
 		}
-		locked := make(map[string]string, len(src.Lock.Resources))
+		locked := make(map[moduleResourceKey]string, len(src.Lock.Resources))
 		for _, entry := range src.Lock.Resources {
-			locked[entry.Request] = entry.Hash
+			locked[moduleResourceKey{entry.Kind, entry.Request}] = entry.Hash
 		}
 		result, report := module.Convert(text, module.Options{
 			ID: def.ID, Arguments: def.Arguments, Resolve: policies.resolve,
-			Resource: func(url string) (string, bool) {
-				hash, ok := locked[resource.Hash([]byte(url))]
+			ResourceForKind: func(kind, url string) (string, bool) {
+				hash, ok := locked[moduleResourceKey{kind, resource.Hash([]byte(url))}]
 				return hash, ok
 			},
 		})
@@ -212,6 +221,9 @@ func (c *compiler) moduleNodes(id string, result *module.Result) moduleLayer {
 	}
 	for _, item := range result.MapLocal {
 		appendRewrite("map-local", item.ID, item)
+	}
+	for _, item := range result.Scripts {
+		appendRewrite("scripts", item.ID, item)
 	}
 	return layer
 }

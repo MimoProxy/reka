@@ -61,6 +61,16 @@ func TestModuleAPI(t *testing.T) {
 	if err != nil || !preview.CanApply || preview.Rules.Imported != 1 || len(preview.Arguments) != 1 || preview.Arguments[0].Value != "REJECT" {
 		t.Fatalf("preview: %+v %v", preview, err)
 	}
+	preview, err = client.PreviewModule(api.PreviewModuleRequest{Data: data + "[Script]\n" +
+		"modify = type=http-response,pattern=example,requires-body=1,binary-body-mode=true,max-size=0,timeout=9,engine=jsc,script-path=https://example.net/source.js\n"})
+	if err != nil || !preview.CanApply || preview.Scripts.Total != 1 || preview.Scripts.Unavailable != 1 || len(preview.ScriptItems) != 1 {
+		t.Fatalf("script preview: %+v %v", preview, err)
+	}
+	script := preview.ScriptItems[0]
+	if script.ID == "" || script.Name != "modify" || script.Type != "http-response" || script.Pattern != "example" || !script.RequiresBody ||
+		!script.BinaryBodyMode || script.MaxSize == nil || *script.MaxSize != 0 || script.Timeout != 9 || script.Engine != "jsc" || script.Locked || script.Hash != "" {
+		t.Fatalf("unlocked script metadata: %+v", script)
+	}
 	modules, err := client.ListModules()
 	if err != nil || len(modules) != 0 {
 		t.Fatalf("preview changed module list: %+v %v", modules, err)

@@ -326,10 +326,10 @@ func TestMapLocalAndInspect(t *testing.T) {
 (?=x)^https://example\.com/bad data=https://example.net/not-used
 `
 	args := map[string]string{"Location": "https://example.net/overridden"}
-	metadata, urls := Inspect([]byte(input), args)
+	metadata, refs := Inspect([]byte(input), args)
 	wantURLs := []string{"https://example.net/overridden", "https://example.net/other", "https://example.net/text", "https://example.net/base64", "https://example.net/gif"}
-	if metadata.Name != "Example" || !slices.Equal(urls, wantURLs) {
-		t.Fatalf("wrong URLs or metadata %+v, %+v", metadata, urls)
+	if metadata.Name != "Example" || !slices.Equal(refs.MapLocal, wantURLs) {
+		t.Fatalf("wrong URLs or metadata %+v, %+v", metadata, refs.MapLocal)
 	}
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	result, report := Convert([]byte(input), Options{Arguments: args, Resource: func(url string) (string, bool) { return hash, slices.Contains(wantURLs, url) }})

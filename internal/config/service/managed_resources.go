@@ -10,6 +10,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/moduleacquire"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/rulesdata"
@@ -25,6 +26,8 @@ func (k managedKey) collection() string {
 		return "/rule-sets"
 	case "geodata":
 		return "/geodata"
+	case "script":
+		return "/scripts"
 	default:
 		return ""
 	}
@@ -35,6 +38,7 @@ type managedDefinition struct {
 	format, behavior string
 	code, hash       string
 	download         model.ResourceDownload
+	file             string
 	revision         uint64
 }
 
@@ -46,7 +50,11 @@ func (d managedDefinition) status() api.ManagedResourceStatus {
 // The request identity excludes the active hash and the current revision.
 // Validators are additionally checked against the active hash.
 func (d managedDefinition) specHash() string {
-	raw, _ := json.Marshal([]any{d.format, d.behavior, d.code, d.download})
+	spec := []any{d.format, d.behavior, d.code, d.download}
+	if d.file != "" {
+		spec = append(spec, d.file)
+	}
+	raw, _ := json.Marshal(spec)
 	return resource.Hash(raw)
 }
 
@@ -88,13 +96,36 @@ func (m *RefreshManager) managedDefinitions() []managedDefinition {
 	if !ds.HasErrors() {
 		for _, r := range p.RuleSets {
 			if r.Download != nil && r.Hash != "" {
-				defs = append(defs, managedDefinition{managedKey{"rule-set", r.ID}, r.Format, r.Behavior, r.Code, r.Hash, *r.Download, rev})
+				defs = append(defs, managedDefinition{key: managedKey{"rule-set", r.ID}, format: r.Format,
+					behavior: r.Behavior, code: r.Code, hash: r.Hash, download: *r.Download, revision: rev})
 			}
 		}
 		for _, db := range p.Geodata {
 			if db.Download != nil && db.Hash != "" {
-				defs = append(defs, managedDefinition{managedKey{"geodata", db.ID}, db.Format, "", "", db.Hash, *db.Download, rev})
+				defs = append(defs, managedDefinition{key: managedKey{"geodata", db.ID}, format: db.Format,
+					hash: db.Hash, download: *db.Download, revision: rev})
 			}
+		}
+		for _, script := range p.Scripts {
+			if script.Hash == nil || !resource.ValidHash(*script.Hash) {
+				continue
+			}
+			def := managedDefinition{key: managedKey{"script", script.ID}, format: "surge", hash: *script.Hash, revision: rev}
+			if script.Format != nil {
+				def.format = *script.Format
+			}
+			switch {
+			case script.Download != nil && script.File == nil:
+				def.download = script.Download.WithDefaultInterval()
+				if model.ValidResourceDownload(def.download) != nil {
+					continue
+				}
+			case script.File != nil && script.Download == nil && model.ValidScriptFile(*script.File):
+				def.file = *script.File
+			default:
+				continue
+			}
+			defs = append(defs, def)
 		}
 	}
 	m.mu.Lock()
@@ -283,6 +314,20 @@ func (m *RefreshManager) saveManaged(key managedKey, record *managedRecord) {
 }
 
 func (m *RefreshManager) fetchManaged(ctx context.Context, def managedDefinition, old subscription.Entry) (subscription.Entry, error) {
+	if def.file != "" {
+		data, err := moduleacquire.ReadFile(def.file, model.MaxScriptSize)
+		if err != nil {
+			return subscription.Entry{}, err
+		}
+		if err := moduleacquire.ValidateScriptBody(data); err != nil {
+			return subscription.Entry{}, err
+		}
+		hash, err := m.blobs.Put(data)
+		if err != nil {
+			return subscription.Entry{}, &subscription.Error{Code: "resource_store_failed"}
+		}
+		return subscription.Entry{Hash: hash}, nil
+	}
 	raw, err := m.resolve(def.download.URL)
 	if err != nil {
 		return subscription.Entry{}, err
@@ -292,6 +337,9 @@ func (m *RefreshManager) fetchManaged(ctx context.Context, def managedDefinition
 		return subscription.Entry{}, &subscription.Error{Code: "invalid_url"}
 	}
 	f := &subscription.Fetcher{Client: m.client, Blobs: m.blobs, ValidateBody: func(data []byte) error {
+		if def.key.kind == "script" {
+			return moduleacquire.ValidateScriptBody(data)
+		}
 		var err error
 		if def.key.kind == "geodata" {
 			err = rulesdata.ValidateDatabase(def.key.id, def.format, data)
@@ -310,8 +358,13 @@ func (m *RefreshManager) fetchManaged(ctx context.Context, def managedDefinition
 	if old.Hash != def.hash {
 		old = subscription.Entry{}
 	}
+	kind := "rule"
+	if def.key.kind == "script" {
+		kind = "script"
+		f.MaxBytes = model.MaxScriptSize
+	}
 	batch := f.Batch(map[string]subscription.Entry{"body": old}, true)
-	_, err = batch.Fetch(ctx, "body", "rule", "", raw, nil, def.download.Interval)
+	_, err = batch.Fetch(ctx, "body", kind, "", raw, nil, def.download.Interval)
 	return batch.Entries["body"], err
 }
 
@@ -349,6 +402,9 @@ func (m *RefreshManager) applyManaged(ctx context.Context, def managedDefinition
 // InstallManagedResource fetches the first immutable version before adding a
 // definition. A failed fetch or concurrent edit cannot create an empty set.
 func (s *Service) InstallManagedResource(ctx context.Context, req api.InstallManagedResourceRequest) (Result, error) {
+	if req.Kind == "script" {
+		return Result{}, errf(CodeBadRequest, "declare the script and its staged source hash in the profile before refreshing it")
+	}
 	key := managedKey{req.Kind, req.ID}
 	if key.collection() == "" || req.ID == "" || len(req.ID) > 128 || req.Format == "" ||
 		(req.Kind == "rule-set") != (req.Behavior != "") {

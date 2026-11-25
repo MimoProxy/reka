@@ -12,7 +12,7 @@ import (
 	"github.com/MimoProxy/reka/internal/secret"
 )
 
-var rewriteKinds = []string{"http-rewrites", "header-rewrites", "body-rewrites", "map-local"}
+var rewriteKinds = []string{"http-rewrites", "header-rewrites", "body-rewrites", "map-local", "scripts"}
 
 // MITM contains the machine's HTTPS decryption settings and flow selectors.
 type MITM struct {

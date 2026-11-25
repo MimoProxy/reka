@@ -9,6 +9,13 @@ import (
 
 const DefaultResourceInterval = 86400
 
+func (d ResourceDownload) WithDefaultInterval() ResourceDownload {
+	if d.Interval == 0 {
+		d.Interval = DefaultResourceInterval
+	}
+	return d
+}
+
 func ValidResourceDownload(d ResourceDownload) error {
 	if strings.HasPrefix(d.URL, SecretPrefix) {
 		if len(d.URL) == len(SecretPrefix) {

@@ -302,12 +302,12 @@ func (d *decoder) decode(n *yaml.Node, path string, v reflect.Value, depth int) 
 		}
 		b, _ := strconv.ParseBool(n.Value)
 		v.SetBool(b)
-	case reflect.Int:
+	case reflect.Int, reflect.Int64:
 		if n.Kind != yaml.ScalarNode || n.Tag != "!!int" {
 			d.errorf(n, path, "yaml.type", "expected an integer, got %s", kindName(n))
 			return
 		}
-		i, err := strconv.ParseInt(n.Value, 0, 64)
+		i, err := strconv.ParseInt(n.Value, 0, v.Type().Bits())
 		if err != nil {
 			d.errorf(n, path, "yaml.type", "integer out of range")
 			return

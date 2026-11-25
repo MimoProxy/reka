@@ -174,7 +174,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 
 ### GetConfiguration
 
-`revision`、`profile`、`local`、`sources`、`overlay` 中四个文档字段都是 **YAML 字符串**；另有可选 `effective`、`diagnostics`、`masked`、`start_error`。`effective.provenance` 是字段来源，`effective.source_hashes` 是 source 快照摘要。
+`revision` 是配置版本。`profile`、`local`、`sources`、`overlay` 是 **YAML 字符串**。另有可选 `effective`、`diagnostics`、`masked`、`start_error`。`effective.provenance` 是字段来源，`effective.source_hashes` 是 source 快照摘要。`effective.scripts` 按合成顺序列出脚本元数据和锁定哈希，`effective.script-fingerprint` 标识脚本配置及其源码引用。
 
 默认遮罩内联凭据为 `********`；`reveal:true` 显示文档中的内联值，不要把结果写进普通日志。`secret://...` 引用不是获取 secret 原值的接口。`effective` 是编译摘要，省略部分协议/DNS/传输凭据，不能当作原始配置提交。编辑使用原始文档或 patch；遮罩原样传回按已有字段身份保留原值。
 
@@ -365,7 +365,9 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 `GetCapabilities.source_formats` 包含 `surge-module` 时，可用 `AddModule` 安装 Surge 模块。请求中的 `module` 接受 `id`、`url` 或绝对 `file`、可选的 `enabled`、`interval` 和 `arguments`。`position` 是从零开始的列表索引，省略时追加。安装成功时同一事务保存模块定义和锁定快照。所有模块修改方法都要检查提交结果的 `state`。
 
-`SetModuleArguments` 替换完整的参数覆盖映射。传入空对象可恢复模块默认值。`PreviewModule.data` 接收原始模块文本，使用当前策略表，且不下载资源或写配置。远程 Map Local 内容在预览中会提示缺少锁定资源。`GetModuleReport` 返回当前生效模块的逐行转换结果。`RefreshModule` 的 `wait` 和状态字段沿用订阅刷新结构，以 `module_id` 标识模块。配置和命令示例见 [Surge 模块](modules.md)。
+`SetModuleArguments` 替换完整的参数覆盖映射。传入空对象可恢复模块默认值。`PreviewModule.data` 接收原始模块文本，使用当前策略表，且不下载资源或写配置。远程 Map Local 和脚本在预览中会提示缺少锁定资源。`GetModuleReport` 返回当前生效模块的逐行转换结果，包含 `scripts` 计数和 `script_items`。`ListModules` 的报告摘要也包含这两个字段。
+
+`script_items` 列出可转换脚本的 `id`、`name`、`type`、`pattern`、`requires_body`、`binary_body_mode`、可选 `max_size`（字节）、`timeout`（秒）、`engine`、`locked` 和锁定时的 `hash`。省略 `max_size` 表示使用平台默认值。`RefreshModule` 的 `wait` 和状态字段沿用订阅刷新结构，以 `module_id` 标识模块。脚本下载失败时，模块状态可附带 `script_errors`，每项包含 URL 的 SHA-256 `request` 和错误 `code`。单个脚本下载失败时，模块的其他条目可以正常生效。 [Surge 模块](modules.md)
 
 ## 7. Secret 管理
 
@@ -566,6 +568,10 @@ print(digest)
 
 `InstallManagedResource` 接收 `base_revision`、`kind`（`rule-set` 或 `geodata`）、`id`、`url`、`format`、`interval` 和 `automatic`。规则集还需要 `behavior`。接口先下载首个版本并校验，再把锁定的摘要和更新设置写入当前档案。返回普通配置提交结果。
 
-`ListManagedResources` 返回不含 URL 的更新状态。`RefreshManagedResource` 使用 `{kind, id, wait}`。设 `wait: true` 可等待本次结果，失败时状态为 `stale`，已有版本继续运行。`resource.updated` 事件使用同一状态结构。命令及配置示例见[独立远程资源](rule-resources.md#independent-remote-resources)。
+`ListManagedResources` 返回不含 URL 的更新状态。`RefreshManagedResource` 使用 `{kind, id, wait}`。设 `wait: true` 可等待本次结果，失败时状态为 `stale`，已有版本继续运行。`resource.updated` 事件使用同一状态结构。 [独立远程资源](rule-resources.md#independent-remote-resources)
+
+### 托管脚本
+
+这两个接口也接受 profile 中含 `hash` 及 `download` 或 `file` 的 `script` 资源。首次配置脚本时通过 `StageResource` 入库源码，再提交脚本定义。设置 `download.automatic: true` 可定期检查远程源码，`file` 资源由显式刷新更新。 [脚本配置](configuration-reference.md#脚本-scripts)
 
 Clash 兼容面板可使用[独立的本地 HTTP 接口](clash-api.md)。

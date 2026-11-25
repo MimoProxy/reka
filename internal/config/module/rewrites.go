@@ -39,11 +39,7 @@ func (c *converter) rewrite(line int, section, text string) outcome {
 		}
 		var hash string
 		if url != "" {
-			if c.opts.Resource != nil {
-				if locked, ok := c.opts.Resource(url); ok {
-					hash = locked
-				}
-			}
+			hash = c.opts.resourceHash("map-local", url)
 			if hash == "" {
 				return failed("module.resource-missing", "module resource is not downloaded; refresh the module")
 			}

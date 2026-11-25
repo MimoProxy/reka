@@ -41,7 +41,14 @@ func cmdModule(args []string) error {
 				if m.Name != "" {
 					fmt.Printf(" — %q", m.Name)
 				}
+				if m.Report != nil {
+					fmt.Printf(" — scripts %d/%d", m.Report.Scripts.Imported, m.Report.Scripts.Total)
+				}
 				fmt.Println()
+				if m.Report != nil {
+					printModuleScripts(m.Report.ScriptItems)
+				}
+				printModuleScriptErrors(m.Status.ScriptErrors)
 			}
 		}
 		return nil
@@ -62,6 +69,7 @@ func cmdModule(args []string) error {
 				fmt.Printf(" (%s)", status.ErrorCode)
 			}
 			fmt.Println()
+			printModuleScriptErrors(status.ScriptErrors)
 		}
 		if !*async && status.State != "current" {
 			return exitError
@@ -188,9 +196,10 @@ func showModuleReport(method string, params any) error {
 		if report.Desc != "" {
 			fmt.Printf("%q\n", report.Desc)
 		}
-		fmt.Printf("rules %d/%d, rewrites %d/%d, hostnames %d/%d; partial: %t, can apply: %t\n",
+		fmt.Printf("rules %d/%d, rewrites %d/%d, hostnames %d/%d, scripts %d/%d; partial: %t, can apply: %t\n",
 			report.Rules.Imported, report.Rules.Total, report.Rewrites.Imported, report.Rewrites.Total,
-			report.Hostnames.Imported, report.Hostnames.Total, report.Partial, report.CanApply)
+			report.Hostnames.Imported, report.Hostnames.Total, report.Scripts.Imported, report.Scripts.Total, report.Partial, report.CanApply)
+		printModuleScripts(report.ScriptItems)
 		for _, arg := range report.Arguments {
 			fmt.Printf("  %q=%q (default %q)", arg.Name, arg.Value, arg.Default)
 			if arg.Description != "" {
@@ -209,4 +218,26 @@ func showModuleReport(method string, params any) error {
 		return exitError
 	}
 	return nil
+}
+
+func printModuleScripts(scripts []module.ScriptItem) {
+	for _, script := range scripts {
+		fmt.Printf("  script %s %q (%s) pattern %q, requires body %t, binary body %t, timeout %ds, engine %s",
+			script.ID, script.Name, script.Type, script.Pattern, script.RequiresBody, script.BinaryBodyMode, script.Timeout, script.Engine)
+		if script.MaxSize != nil {
+			fmt.Printf(", max size %d", *script.MaxSize)
+		}
+		if script.Locked {
+			fmt.Printf(", hash %s", script.Hash)
+		} else {
+			fmt.Print(", unlocked")
+		}
+		fmt.Println()
+	}
+}
+
+func printModuleScriptErrors(errs []api.ModuleScriptError) {
+	for _, err := range errs {
+		fmt.Printf("  script request %s: %s\n", err.Request, err.Code)
+	}
 }

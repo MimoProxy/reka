@@ -51,7 +51,7 @@ unsupported = type=http-request
 		t.Fatalf("unexpected preview: %+v", result)
 	}
 	for _, want := range []module.Line{
-		{Line: 9, Section: "script", Status: module.Unsupported, Code: "module.section"},
+		{Line: 9, Section: "script", Status: module.Unsupported, Code: "module.script-pattern"},
 		{Line: 11, Section: "map local", Status: module.Error, Code: "module.resource-missing"},
 	} {
 		if !slices.ContainsFunc(report.Lines, func(line module.Line) bool {

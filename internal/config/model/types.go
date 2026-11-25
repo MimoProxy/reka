@@ -14,6 +14,7 @@ type Profile struct {
 	HeaderRewrites []HeaderRewrite `yaml:"header-rewrites"`
 	BodyRewrites   []BodyRewrite   `yaml:"body-rewrites"`
 	MapLocal       []MapLocal      `yaml:"map-local"`
+	Scripts        []Script        `yaml:"scripts"`
 	Geodata        []GeoDatabase   `yaml:"geodata"`
 	Process        *Process        `yaml:"process"`
 	Routing        *Routing        `yaml:"routing"`
@@ -233,6 +234,7 @@ type Source struct {
 	HeaderRewrites []HeaderRewrite `yaml:"header-rewrites"`
 	BodyRewrites   []BodyRewrite   `yaml:"body-rewrites"`
 	MapLocal       []MapLocal      `yaml:"map-local"`
+	Scripts        []Script        `yaml:"scripts"`
 	DNS            *RD.Config      `yaml:"dns"`
 	Subscription   *Subscription   `yaml:"subscription"`
 	Module         *ModuleSnapshot `yaml:"module"`

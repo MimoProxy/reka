@@ -16,8 +16,12 @@ type Options struct {
 	Arguments map[string]string
 	// Resolve returns the effective policy ID on success. On failure a nonempty
 	// string is a diagnostic message, such as an ambiguous display name.
-	Resolve  func(policy string) (string, bool)
+	Resolve func(policy string) (string, bool)
+	// Resource resolves Map Local locks for callers with URL-only snapshots.
 	Resource func(url string) (hash string, ok bool)
+	// ResourceForKind resolves a lock by kind and URL. Scripts require this
+	// resolver because a Map Local file can share the same URL.
+	ResourceForKind func(kind, url string) (hash string, ok bool)
 }
 
 type Result struct {
@@ -26,6 +30,7 @@ type Result struct {
 	HeaderRewrites  []model.HeaderRewrite
 	BodyRewrites    []model.BodyRewrite
 	MapLocal        []model.MapLocal
+	Scripts         []model.Script
 	MITM            model.MITM
 	InsertHostnames []Hostname
 	AppendHostnames []Hostname
@@ -70,6 +75,8 @@ type Report struct {
 	Rules       Count             `json:"rules"`
 	Rewrites    Count             `json:"rewrites"`
 	Hostnames   Count             `json:"hostnames"`
+	Scripts     Count             `json:"scripts"`
+	ScriptItems []ScriptItem      `json:"script_items,omitempty"`
 	Lines       []Line            `json:"lines,omitempty"`
 	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
 }
@@ -154,6 +161,8 @@ func (c *converter) line(line int, section, raw, expanded string, issue outcome)
 			c.report.Rules.record(false)
 		case "url rewrite", "header rewrite", "body rewrite", "map local":
 			c.report.Rewrites.record(false)
+		case "script":
+			c.report.Scripts.record(false)
 		}
 	}
 	c.report.record(line, section, issue)
@@ -178,6 +187,10 @@ func (c *converter) convertLine(line int, section, raw, expanded string) outcome
 		issue := c.rewrite(line, section, expanded)
 		c.report.Rewrites.record(!issue.skips())
 		return issue
+	case "script":
+		issue := c.script(line, expanded)
+		c.report.Scripts.record(!issue.skips())
+		return issue
 	case "general":
 		return ignored("module.general", "modules cannot modify general settings")
 	case "proxy", "proxy group":
@@ -188,7 +201,7 @@ func (c *converter) convertLine(line int, section, raw, expanded string) outcome
 		return ignored("module.rule-set", "modules cannot define rule sets")
 	case "host":
 		return unsupported("module.host", "modules cannot change DNS host mappings")
-	case "script", "panel", "mtproto", "ssid setting", "snell server":
+	case "panel", "mtproto", "ssid setting", "snell server":
 		return unsupported("module.section", "this module section is not supported")
 	default:
 		if strings.HasPrefix(section, "ruleset ") {
@@ -199,6 +212,21 @@ func (c *converter) convertLine(line int, section, raw, expanded string) outcome
 		}
 		return unsupported("module.section", "unknown module section")
 	}
+}
+
+func (o Options) resourceHash(kind, url string) string {
+	var hash string
+	var ok bool
+	switch {
+	case o.ResourceForKind != nil:
+		hash, ok = o.ResourceForKind(kind, url)
+	case kind == "map-local" && o.Resource != nil:
+		hash, ok = o.Resource(url)
+	}
+	if !ok {
+		return ""
+	}
+	return hash
 }
 
 func (c *converter) id(prefix string, value any, line int) string {

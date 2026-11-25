@@ -45,23 +45,31 @@ type PreviewModuleRequest struct {
 }
 
 type ModuleStatus struct {
-	ModuleID    string    `json:"module_id"`
-	State       string    `json:"state"`
-	Stale       bool      `json:"stale"`
-	LastAttempt time.Time `json:"last_attempt,omitempty"`
-	LastSuccess time.Time `json:"last_success,omitempty"`
-	NextAttempt time.Time `json:"next_attempt,omitempty"`
-	ErrorCode   string    `json:"error_code,omitempty"`
-	Revision    uint64    `json:"revision,omitempty"`
-	RootHash    string    `json:"root_hash,omitempty"`
+	ModuleID     string              `json:"module_id"`
+	State        string              `json:"state"`
+	Stale        bool                `json:"stale"`
+	LastAttempt  time.Time           `json:"last_attempt,omitempty"`
+	LastSuccess  time.Time           `json:"last_success,omitempty"`
+	NextAttempt  time.Time           `json:"next_attempt,omitempty"`
+	ErrorCode    string              `json:"error_code,omitempty"`
+	Revision     uint64              `json:"revision,omitempty"`
+	RootHash     string              `json:"root_hash,omitempty"`
+	ScriptErrors []ModuleScriptError `json:"script_errors,omitempty"`
+}
+
+type ModuleScriptError struct {
+	Request string `json:"request"`
+	Code    string `json:"code"`
 }
 
 type ModuleReportSummary struct {
-	Partial   bool         `json:"partial"`
-	CanApply  bool         `json:"can_apply"`
-	Rules     module.Count `json:"rules"`
-	Rewrites  module.Count `json:"rewrites"`
-	Hostnames module.Count `json:"hostnames"`
+	Partial     bool                `json:"partial"`
+	CanApply    bool                `json:"can_apply"`
+	Rules       module.Count        `json:"rules"`
+	Rewrites    module.Count        `json:"rewrites"`
+	Hostnames   module.Count        `json:"hostnames"`
+	Scripts     module.Count        `json:"scripts"`
+	ScriptItems []module.ScriptItem `json:"script_items,omitempty"`
 }
 
 type ModuleInfo struct {

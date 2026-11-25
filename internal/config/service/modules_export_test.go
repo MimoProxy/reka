@@ -34,8 +34,11 @@ func TestExportAndRestoreModuleResources(t *testing.T) {
 	// Stage a different snapshot and child resource to exercise export and
 	// restore without fetching from a network listener.
 	const remote = "https://cdn.example.net/replacement.txt"
+	const scriptURL = "https://cdn.example.net/script.js"
 	body := []byte("replacement")
-	root := []byte("#!name=Example export\n[Map Local]\n^https://ads\\.example\\.com/ data-type=text data=" + remote + "\n")
+	script := []byte("$done();")
+	root := []byte("#!name=Example export\n[Map Local]\n^https://ads\\.example\\.com/ data-type=text data=" + remote +
+		"\n[Script]\nresponse = type=http-response,pattern=example,script-path=" + scriptURL + "\n")
 	blobs := resource.At(e.root)
 	hash, err := blobs.Put(root)
 	if err != nil {
@@ -45,18 +48,24 @@ func TestExportAndRestoreModuleResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	scriptHash, err := blobs.Put(script)
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := resource.Hash([]byte(remote))
+	scriptRequest := resource.Hash([]byte(scriptURL))
 	url := model.Module{ID: spec.ID, URL: "https://example.com/rules.sgmodule?token=synthetic"}
 	profile := fmt.Sprintf("schema-version: 1\nmodules: [{id: %s, url: %q}]\n", url.ID, url.URL)
-	snapshot := fmt.Sprintf("sources:\n - id: example\n   module: {format: surge, request: %s}\n   lock:\n     root: %s\n     resources: [{kind: map-local, id: %s, request: %s, hash: %s}]\n",
-		url.RequestHash(), hash, request[:16], request, childHash)
+	snapshot := fmt.Sprintf("sources:\n - id: example\n   module: {format: surge, request: %s}\n   lock:\n     root: %s\n     resources:\n"+
+		"     - {kind: map-local, id: %s, request: %s, hash: %s}\n     - {kind: script, id: %s, request: %s, hash: %s}\n",
+		url.RequestHash(), hash, request[:16], request, childHash, scriptRequest[:24], scriptRequest, scriptHash)
 	updated := mustLayerCommit(t, s, ChangeRequest{BaseRevision: added.Revision, Profile: &profile, Sources: &snapshot})
 
 	manifest, err := s.ExportManifest(api.ExportManifestRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bodies := map[string][]byte{hash: root, childHash: body}
+	bodies := map[string][]byte{hash: root, childHash: body, scriptHash: script}
 	if len(manifest.Resources) != len(bodies) || manifest.Revision != updated.Revision {
 		t.Fatalf("manifest: %+v", manifest)
 	}

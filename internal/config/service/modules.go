@@ -132,7 +132,7 @@ func (s *Service) SetModuleArguments(ctx context.Context, req api.SetModuleArgum
 	value, _ := json.Marshal(req.Arguments)
 	op := model.Op{Op: "set", Path: model.JoinPath("/modules", req.ModuleID, "arguments"), Value: value}
 	def.Arguments = req.Arguments
-	// New arguments can name Map Local files that are not locked yet.
+	// New arguments can reference assets that are not locked yet.
 	if src := sources[def.ID]; def.IsEnabled() && (!moduleacquire.Matches(*def, src) || !s.moduleResourcesLocked(*def, src)) {
 		return s.commitDownloadedModule(ctx, *def, src, req.BaseRevision, op)
 	}
@@ -215,7 +215,8 @@ func (s *Service) ListModules() ([]api.ModuleInfo, error) {
 			if report, ok := eff.Modules[def.ID]; ok {
 				info.Name, info.Desc, info.Arguments = report.Name, report.Desc, report.Arguments
 				info.Report = &api.ModuleReportSummary{Partial: report.Partial, CanApply: report.CanApply,
-					Rules: report.Rules, Rewrites: report.Rewrites, Hostnames: report.Hostnames}
+					Rules: report.Rules, Rewrites: report.Rewrites, Hostnames: report.Hostnames,
+					Scripts: report.Scripts, ScriptItems: report.ScriptItems}
 			}
 		}
 		// Disabled modules have no effective report, but their locked text can
@@ -281,13 +282,19 @@ func (s *Service) moduleResourcesLocked(def model.Module, src model.Source) bool
 	if err != nil {
 		return false
 	}
-	locked := make(map[string]bool, len(src.Lock.Resources))
+	type resourceKey struct{ kind, request string }
+	locked := make(map[resourceKey]bool, len(src.Lock.Resources))
 	for _, entry := range src.Lock.Resources {
-		locked[entry.Request] = true
+		locked[resourceKey{entry.Kind, entry.Request}] = true
 	}
-	_, urls := module.Inspect(text, def.Arguments)
-	for _, url := range urls {
-		if !locked[resource.Hash([]byte(url))] {
+	_, refs := module.Inspect(text, def.Arguments, def.Interval)
+	for _, url := range refs.MapLocal {
+		if !locked[resourceKey{"map-local", resource.Hash([]byte(url))}] {
+			return false
+		}
+	}
+	for _, script := range refs.Scripts {
+		if !locked[resourceKey{"script", resource.Hash([]byte(script.URL))}] {
 			return false
 		}
 	}

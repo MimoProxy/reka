@@ -103,14 +103,15 @@ func HTTPClientWithControl(control func(string, string, syscall.RawConn) error, 
 }
 
 type Entry struct {
-	Usage    *api.SubscriptionUsage `json:"usage,omitempty"`
-	Fallback bool                   `json:"fallback,omitempty"`
-	Checked  time.Time              `json:"checked,omitempty"`
-	Request  string                 `json:"request"`
-	Hash     string                 `json:"hash"`
-	ETag     string                 `json:"etag,omitempty"`
-	Modified string                 `json:"modified,omitempty"`
-	Next     time.Time              `json:"next"`
+	Usage         *api.SubscriptionUsage `json:"usage,omitempty"`
+	Fallback      bool                   `json:"fallback,omitempty"`
+	RetainedError string                 `json:"retained_error,omitempty"`
+	Checked       time.Time              `json:"checked,omitempty"`
+	Request       string                 `json:"request"`
+	Hash          string                 `json:"hash"`
+	ETag          string                 `json:"etag,omitempty"`
+	Modified      string                 `json:"modified,omitempty"`
+	Next          time.Time              `json:"next"`
 }
 type Fetcher struct {
 	Client         *http.Client
@@ -250,6 +251,28 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 func (b *Batch) Inline(id, kind, name string, data []byte) ([]byte, error) {
 	return b.record(id, kind, name, data, Entry{Request: resource.Hash(data)})
 }
+
+// Retain reuses a previously validated entry after an optional fetch fails.
+// It schedules a retry while keeping the HTTP validators usable.
+func (b *Batch) Retain(id, kind, request, code string, checked time.Time, retry time.Duration) (bool, error) {
+	entry := b.Previous[id]
+	if entry.Hash == "" || entry.Request != request {
+		return false, nil
+	}
+	data, err := b.f.Blobs.Read(entry.Hash)
+	if err != nil || len(data) == 0 || b.f.MaxBytes > 0 && len(data) > b.f.MaxBytes {
+		return false, nil
+	}
+	if b.f.ValidateBody != nil && b.f.ValidateBody(data) != nil {
+		return false, nil
+	}
+	entry.Checked = checked
+	entry.Next = checked.Add(retry)
+	entry.RetainedError = code
+	_, err = b.record(id, kind, "", data, entry)
+	return err == nil, err
+}
+
 func (b *Batch) record(id, kind, name string, data []byte, entry Entry) ([]byte, error) {
 	limit := b.f.MaxBundleBytes
 	if limit <= 0 {

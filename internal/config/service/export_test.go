@@ -164,3 +164,25 @@ func TestExportReferencesRecognizeWholeAndChildOverlayOperations(t *testing.T) {
 		t.Fatal(refs, err)
 	}
 }
+
+func TestExportScriptSourcesAcrossLayers(t *testing.T) {
+	profileHash := resource.Hash([]byte("profile script"))
+	sourceHash := resource.Hash([]byte("source script"))
+	insertedHash := resource.Hash([]byte("inserted script"))
+	overriddenHash := resource.Hash([]byte("overridden script"))
+	profile := fmt.Sprintf("schema-version: 1\nscripts: [{id: local, type: generic, hash: %s}, {id: unpinned, type: cron}]", profileHash)
+	sources := fmt.Sprintf("sources: [{id: shared, scripts: [{id: imported, type: generic, hash: %s}]}]", sourceHash)
+	overlay := fmt.Sprintf(`patches:
+  - {op: insert, path: /scripts, value: {id: inserted, type: generic, hash: %s}}
+  - {op: set, path: /scripts/shared~1imported/hash, value: %s}
+`, insertedHash, overriddenHash)
+	refs, err := exportReferences([]byte(profile), []byte(sources), []byte(overlay))
+	if err != nil || len(refs) != 4 {
+		t.Fatal(refs, err)
+	}
+	for _, hash := range []string{profileHash, sourceHash, insertedHash, overriddenHash} {
+		if !containsExportHash(refs, hash) {
+			t.Fatal("script source missing from the export", hash)
+		}
+	}
+}

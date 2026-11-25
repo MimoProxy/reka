@@ -8,7 +8,7 @@
 
 | 文件 | 顶层字段 | 用途 |
 | --- | --- | --- |
-| `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local` | 节点、分组、路由、DNS 和 HTTP 重写；必须有 `schema-version: 1` |
+| `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local`、`scripts` | 节点、分组、路由、DNS、HTTP 重写与脚本配置。必须有 `schema-version: 1` |
 | `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes`、`traffic-budgets`、`mitm` | 本机端口、日志、控制通道、系统接管、场景、预算和 MITM 开关；可为空 |
 | `sources.yaml` | `schema-version`、`sources` | 导入和订阅的原生快照 |
 | `overlay.yaml` | `schema-version`、`patches` | 对已合成资源的持久覆盖 |
@@ -410,7 +410,7 @@ Fake IP 映射写入 `<state-root>/cache/fake-ip.json`，重启恢复未过期�
 
 profile 的 `imports[]` 包含 `source`，以及 `outbounds`、`groups`、`rule-sets`、`sub-rules`、`rewrites` 的布尔开关，至少开启一种。规则通过 `rules: [{source: airport}]` 在指定位置展开；DNS 通过 `dns.from` 选用，互不自动启用。
 
-`sources.sources[]` 包含 `id`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`dns`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local`，以及可选 `subscription` 和 `lock`。订阅 URL 不应直接写进 profile 的 outbounds。
+`sources.sources[]` 包含 `id`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`dns`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local`、`scripts`，以及可选 `subscription` 和 `lock`。订阅 URL 不应直接写进 profile 的 outbounds。
 
 | `subscription` YAML 字段 | 含义 |
 | --- | --- |
@@ -497,7 +497,7 @@ traffic-budgets:
 
 ## 11. MITM 与 HTTP 重写
 
-在 profile 的 `modules` 列表中可声明 [Surge 模块](modules.md)，将锁定快照中的规则、重写和 MITM 主机名合成到有效配置。参数和启停随 profile 保存，下载由模块刷新完成。
+在 profile 的 `modules` 列表中可声明 Surge 模块，将锁定快照中的规则、重写、脚本和 MITM 主机名合成到有效配置。参数和启停随 profile 保存，下载由模块刷新完成。 [Surge 模块](modules.md)
 
 MITM 对选中的入站 HTTPS 连接终结 TLS，再通过选定的出站建立新的 TLS 连接并转发 HTTP 请求。客户端需将 MITM CA 安装到自己的信任库。客户端 TLS 最低为 1.2，客户端和上游均使用 HTTP/1.1。
 
@@ -530,7 +530,7 @@ profile 和 source 的 `mitm` 支持以下字段。
 
 替换模板中的 `$0` 表示整个匹配，`$1` 至 `$99` 引用捕获组，`$$` 表示字面 `$`。`$1x` 会在第一组后追加 `x`。引用不存在的捕获组会给出警告。
 
-`imports[].rewrites: true` 从对应 source 导入 `mitm` 和四类重写资源。重写资源按 `imports` 的顺序排列在 profile 自有资源之前，ID 变成 `source/id`。profile 中使用相同 ID 可在原位置替换整条导入资源。`mitm.hostnames` 则把 profile 列表放在前面，随后按 `imports` 顺序追加来自各 source 的列表。`client-source-address` 整个列表和三个 MITM 布尔字段依次由默认值、按导入顺序出现的 source、profile、overlay 覆盖。overlay 最后编辑合成后的重写和主机名列表。 [Sources 与 overlays](source-overlays.md#http-rewrites-and-mitm-hostnames)
+`imports[].rewrites: true` 从对应 source 导入 `mitm`、四类重写资源和 `scripts`。重写和脚本列表按模块顺序、`imports` 顺序、profile 自有条目的顺序合成。模块和 source 的条目 ID 分别加上 `module/` 和 `source/` 前缀。profile 中使用相同 ID 可在原位置替换整条导入资源。`mitm.hostnames` 则把 profile 列表放在前面，随后按 `imports` 顺序追加来自各 source 的列表。`client-source-address` 整个列表和三个 MITM 布尔字段依次由默认值、按导入顺序出现的 source、profile、overlay 覆盖。overlay 最后编辑合成后的资源和主机名列表。 [Sources 与 overlays](source-overlays.md#http-rewrites-and-mitm-hostnames)
 
 ### 11.3 URL 重写 `http-rewrites`
 
@@ -582,6 +582,29 @@ profile 和 source 的 `mitm` 支持以下字段。
 请求依次执行 URL 重写、请求头重写、本地响应匹配、请求体重写。URL 重写和本地响应各只采用第一条命中的规则。URL 重写产生重定向或拒绝时立即结束；本地响应命中后不再处理请求体。上游响应先重写响应头，再重写响应体。命中的头字段和消息体规则分别按其列表顺序执行，后续规则使用前一条的结果。本地生成的响应不经过响应重写。
 
 URL 重写改变目标主机时，内核用该连接所属配置的路由为请求重新选路，并按新主机名建立和验证上游 TLS 连接。热更新后的新连接使用新规则，已建立的客户端连接继续使用建立时的规则。HTTP 协议升级由普通 TLS 透传连接承载。
+
+### 脚本 `scripts`
+
+`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。当前提供脚本的配置、导入和刷新，执行由后续版本接入。
+
+| 字段 | 类型 / 默认值 | 含义及限制 |
+| --- | --- | --- |
+| `id` | 必填字符串 | 原生稳定 ID，同一层内唯一 |
+| `name` | 可选字符串 | 显示名称 |
+| `type` | 必填字符串 | `http-request` 或 `http-response`。`cron`、`generic`、`event`、`dns`、`rule` 可保留配置，编译时发出警告并标记为不可执行 |
+| `pattern` | RE2 正则 | HTTP 脚本必填，匹配完整 URL，编译时检查语法 |
+| `requires-body` | 布尔，默认 `false` | 是否向脚本提供消息体 |
+| `binary-body-mode` | 布尔，默认 `false` | 以字节传递消息体 |
+| `max-size` | 整数，单位为字节 | iOS 默认值和硬上限均为 512 KiB。其他平台默认 10 MiB，硬上限 32 MiB。`0` 和 `-1` 使用硬上限，正数与硬上限取较小值 |
+| `timeout` | 整数，1–3600 秒，默认 5 秒 | 脚本运行时限 |
+| `argument` | 可选字符串 | 原样传给脚本 |
+| `engine` | `auto`（默认）、`jsc`、`webview` | 桌面平台忽略此项，iOS 由客户端决定 |
+| `format` | `surge`（默认）、`loon`、`stash` | 无参数的 `$done()` 在 `surge` 中表示原样放行，在 `loon` 和 `stash` 中表示中断请求 |
+| `hash` | SHA-256 字符串 | HTTP 脚本必填，引用非空且不超过 2 MiB 的已入库源码 |
+| `download` | 可选对象 | `url` 为不含内联凭据或片段的 HTTP(S) URL，或 secret 引用。`interval` 为 300–604800 秒，省略或设为 `0` 时使用 86400 秒。`automatic` 默认 `false` |
+| `file` | 可选绝对路径 | 手动刷新时从内核所在设备读取普通文件 |
+
+`download` 和 `file` 最多写一个。两者均省略时，脚本固定使用 `hash`。为 profile 脚本声明刷新来源前，先通过 `StageResource` 入库首个版本，再提交包含 `hash` 的脚本配置。执行 `rekactl resource list` 可查看托管脚本，执行 `rekactl resource refresh script ID` 可手动刷新。刷新只接受非空、至多 2 MiB 的 UTF-8 源码，失败时保留原哈希。 [控制 API](control-api.md#托管脚本)
 
 ## 12. 源码核对入口
 

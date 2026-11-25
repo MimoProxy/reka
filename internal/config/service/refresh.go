@@ -13,6 +13,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/moduleacquire"
 	"github.com/MimoProxy/reka/internal/config/store"
 	"github.com/MimoProxy/reka/internal/resource"
 	"github.com/MimoProxy/reka/internal/rulesdata"
@@ -29,10 +30,11 @@ type RefreshOptions struct {
 	Concurrency  int
 }
 type refreshRecord struct {
-	Status   SubscriptionStatus            `json:"status"`
-	SpecHash string                        `json:"spec_hash"`
-	Failures int                           `json:"failures"`
-	Entries  map[string]subscription.Entry `json:"entries"`
+	Status       SubscriptionStatus            `json:"status"`
+	SpecHash     string                        `json:"spec_hash"`
+	Failures     int                           `json:"failures"`
+	Entries      map[string]subscription.Entry `json:"entries"`
+	ScriptErrors []moduleacquire.ScriptError   `json:"script_errors,omitempty"`
 }
 type refreshKey struct {
 	id     string
@@ -40,18 +42,20 @@ type refreshKey struct {
 }
 
 type refreshUpdate struct {
-	next       time.Time
-	entries    map[string]subscription.Entry
-	specHash   string
-	revision   uint64
-	manualOnly bool
+	next         time.Time
+	entries      map[string]subscription.Entry
+	specHash     string
+	revision     uint64
+	manualOnly   bool
+	scriptErrors []moduleacquire.ScriptError
 }
 
 type refreshWork func(context.Context, refreshRecord) (refreshUpdate, error)
 
 type refreshJob struct {
-	done   chan struct{}
-	result SubscriptionStatus
+	done         chan struct{}
+	result       SubscriptionStatus
+	scriptErrors []moduleacquire.ScriptError
 }
 type RefreshManager struct {
 	svc              *Service
@@ -398,6 +402,7 @@ func (m *RefreshManager) work(key refreshKey, job *refreshJob, refresh refreshWo
 	if err == nil {
 		record.SpecHash = update.specHash
 		record.Entries = update.entries
+		record.ScriptErrors = update.scriptErrors
 		record.Failures = 0
 		record.Status.State = "current"
 		record.Status.Stale = false
@@ -436,6 +441,9 @@ func (m *RefreshManager) work(key refreshKey, job *refreshJob, refresh refreshWo
 		// A failed new specification must back off too, rather than retrying
 		// every scheduler tick. Do not alter the old good body/validators.
 		if update.specHash != "" {
+			if record.SpecHash != update.specHash {
+				record.ScriptErrors = nil
+			}
 			record.SpecHash = update.specHash
 		}
 	}
@@ -446,11 +454,12 @@ func (m *RefreshManager) work(key refreshKey, job *refreshJob, refresh refreshWo
 		m.records[key] = record
 	}
 	job.result = record.Status
+	job.scriptErrors = record.ScriptErrors
 	delete(m.jobs, key)
 	close(job.done)
 	m.mu.Unlock()
 	if key.module {
-		m.svc.Events().Publish("module.updated", toModuleStatus(record.Status))
+		m.svc.Events().Publish("module.updated", toModuleStatus(record.Status, record.ScriptErrors))
 		return
 	}
 	m.svc.Events().Publish("subscription.updated", record.Status)

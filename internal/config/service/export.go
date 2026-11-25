@@ -136,6 +136,16 @@ func exportReferences(profile, sources, overlay []byte) ([]string, error) {
 		}
 		return nil
 	}
+	addScripts := func(scripts []model.Script) error {
+		for _, script := range scripts {
+			if script.Hash != nil {
+				if err := add(*script.Hash); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	p, _, pd := model.ParseProfile(profile)
 	ss, _, sd := model.ParseSources(sources)
 	o, _, od := model.ParseOverlay(overlay)
@@ -152,11 +162,17 @@ func exportReferences(profile, sources, overlay []byte) ([]string, error) {
 			return nil, err
 		}
 	}
+	if err := addScripts(p.Scripts); err != nil {
+		return nil, err
+	}
 	for _, src := range ss.Sources {
 		for _, rs := range src.RuleSets {
 			if err := add(rs.Hash); err != nil {
 				return nil, err
 			}
+		}
+		if err := addScripts(src.Scripts); err != nil {
+			return nil, err
 		}
 		if src.Lock != nil {
 			if err := add(src.Lock.Root); err != nil {
@@ -174,7 +190,7 @@ func exportReferences(profile, sources, overlay []byte) ([]string, error) {
 			continue
 		}
 		parts := strings.Split(strings.TrimPrefix(patch.Path, "/"), "/")
-		if len(parts) == 0 || (parts[0] != "rule-sets" && parts[0] != "geodata") {
+		if len(parts) == 0 || (parts[0] != "rule-sets" && parts[0] != "geodata" && parts[0] != "scripts") {
 			continue
 		}
 		if len(parts) == 3 && parts[2] == "hash" {

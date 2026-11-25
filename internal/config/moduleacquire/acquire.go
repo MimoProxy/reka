@@ -17,8 +17,12 @@ import (
 	"github.com/MimoProxy/reka/internal/subscription"
 )
 
-// MaxBundleSize bounds the module text and its Map Local resources together.
+// MaxBundleSize bounds the module text and all pinned resources together.
 const MaxBundleSize = 32 << 20
+
+// scriptRetryInterval bounds how long a failed script waits for its next
+// attempt, matching the cap of the source refresh backoff.
+const scriptRetryInterval = 30 * 60
 
 // Snapshot is the pin written to a sources document.
 type Snapshot struct {
@@ -28,19 +32,38 @@ type Snapshot struct {
 }
 
 type Options struct {
-	Client          *http.Client
-	Blobs           *resource.Store
-	ResolveURL      func(string) (string, error)
-	Previous        model.Source
-	PreviousEntries map[string]subscription.Entry
-	Force           bool
+	Client               *http.Client
+	Blobs                *resource.Store
+	ResolveURL           func(string) (string, error)
+	Previous             model.Source
+	PreviousEntries      map[string]subscription.Entry
+	PreviousScriptErrors []ScriptError
+	Force                bool
+	// IncludeScripts enables script pins for consumers that read script locks.
+	IncludeScripts bool
 }
 
 type Result struct {
-	Snapshot Snapshot
-	Metadata module.Metadata
-	Entries  map[string]subscription.Entry
-	Next     time.Time
+	Snapshot     Snapshot
+	Metadata     module.Metadata
+	Entries      map[string]subscription.Entry
+	Next         time.Time
+	ScriptErrors []ScriptError
+}
+
+type ScriptError struct {
+	Request string    `json:"request"`
+	Code    string    `json:"code"`
+	Checked time.Time `json:"checked"`
+}
+
+// EntryKey keeps script validators independent of Map Local validators when
+// both sections refer to the same URL. Existing Map Local keys stay stable.
+func EntryKey(lock model.ResourceLock) string {
+	if lock.Kind == "script" {
+		return "script/" + lock.ID
+	}
+	return lock.ID
 }
 
 // Matches reports whether a source pins the declared location.
@@ -49,8 +72,9 @@ func Matches(def model.Module, src model.Source) bool {
 		src.Module.Request == def.RequestHash() && resource.ValidHash(src.Lock.Root)
 }
 
-// Acquire fetches the root and all referenced Map Local resources using the
+// Acquire fetches the root and referenced resources using the
 // previous lock to validate cached entries before issuing conditional requests.
+// Script failures can leave a usable snapshot for the rest of the module.
 func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error) {
 	if model.ValidModule(&def) != nil {
 		return Result{}, &subscription.Error{Code: "module_invalid"}
@@ -60,13 +84,20 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 		return Result{}, &subscription.Error{Code: "module_source_conflict"}
 	}
 	validated := make(map[string]subscription.Entry)
+	previousFailures := make(map[string]ScriptError)
 	if Matches(def, src) {
 		if entry := opts.PreviousEntries["root"]; entry.Hash == src.Lock.Root {
 			validated["root"] = entry
 		}
 		for _, lock := range src.Lock.Resources {
-			if entry := opts.PreviousEntries[lock.ID]; entry.Hash == lock.Hash {
-				validated[lock.ID] = entry
+			key := EntryKey(lock)
+			if entry := opts.PreviousEntries[key]; entry.Hash == lock.Hash {
+				validated[key] = entry
+			}
+		}
+		if !opts.Force && len(validated) == len(src.Lock.Resources)+1 {
+			for _, failure := range opts.PreviousScriptErrors {
+				previousFailures[failure.Request] = failure
 			}
 		}
 	}
@@ -95,13 +126,19 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 	if err != nil {
 		return Result{}, err
 	}
-	meta, urls := module.Inspect(body, def.Arguments)
-	if len(urls) > model.MaxModuleResources {
+	meta, refs := module.Inspect(body, def.Arguments, interval)
+	if len(refs.MapLocal) > model.MaxModuleResources {
 		return Result{}, &subscription.Error{Code: "too_many_module_resources"}
 	}
+	if !opts.IncludeScripts {
+		refs.Scripts = nil
+	}
+	if len(refs.Scripts) > model.MaxModuleScripts {
+		return Result{}, &subscription.Error{Code: "too_many_module_scripts"}
+	}
 	fetcher.MaxBytes = httprewrite.MaxMapLocalSize
-	locks := make([]model.ResourceLock, 0, len(urls))
-	for _, url := range urls {
+	locks := make([]model.ResourceLock, 0, len(refs.MapLocal)+len(refs.Scripts))
+	for _, url := range refs.MapLocal {
 		request := resource.Hash([]byte(url))
 		id := request[:24]
 		if _, err := batch.Fetch(ctx, id, "map-local", "", url, nil, interval); err != nil {
@@ -109,21 +146,77 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 		}
 		locks = append(locks, model.ResourceLock{ID: id, Kind: "map-local", Request: request, Hash: batch.Entries[id].Hash})
 	}
+	var scriptErrors []ScriptError
+	var scriptRetry time.Time
+	fetcher.MaxBytes = model.MaxScriptSize
+	fetcher.ValidateBody = ValidateScriptBody
+	for _, script := range refs.Scripts {
+		if ctx.Err() != nil {
+			return Result{}, &subscription.Error{Code: "cancelled"}
+		}
+		request := resource.Hash([]byte(script.URL))
+		lock := model.ResourceLock{ID: request[:24], Kind: "script", Request: request}
+		key := EntryKey(lock)
+		retryAfter := time.Duration(min(script.Interval, scriptRetryInterval)) * time.Second
+		if failure, ok := previousFailures[request]; ok && validated[key].Hash == "" {
+			retry := failure.Checked.Add(retryAfter)
+			if time.Now().UTC().Before(retry) {
+				scriptErrors = append(scriptErrors, failure)
+				scriptRetry = earliest(scriptRetry, retry)
+				continue
+			}
+		}
+		_, err := batch.Fetch(ctx, key, lock.Kind, "", script.URL, nil, script.Interval)
+		if ctx.Err() != nil {
+			return Result{}, &subscription.Error{Code: "cancelled"}
+		}
+		if err != nil {
+			code := subscription.Code(err)
+			if code == "bundle_too_large" || code == "resource_store_failed" {
+				return Result{}, err
+			}
+			checked := time.Now().UTC()
+			retained, err := batch.Retain(key, lock.Kind, subscription.RequestDigest(script.URL, nil), code, checked, retryAfter)
+			if err != nil {
+				return Result{}, err
+			}
+			if !retained {
+				scriptErrors = append(scriptErrors, ScriptError{Request: request, Code: code, Checked: checked})
+				scriptRetry = earliest(scriptRetry, checked.Add(retryAfter))
+				continue
+			}
+		}
+		entry := batch.Entries[key]
+		if entry.RetainedError != "" {
+			scriptErrors = append(scriptErrors, ScriptError{Request: request, Code: entry.RetainedError, Checked: entry.Checked})
+		}
+		lock.Hash = entry.Hash
+		locks = append(locks, lock)
+	}
+	if ctx.Err() != nil {
+		return Result{}, &subscription.Error{Code: "cancelled"}
+	}
 	var next time.Time
 	if def.URL != "" {
 		next = time.Now().UTC().Add(time.Duration(interval) * time.Second)
 		for _, entry := range batch.Entries {
-			if !entry.Next.IsZero() && entry.Next.Before(next) {
-				next = entry.Next
-			}
+			next = earliest(next, entry.Next)
 		}
+		next = earliest(next, scriptRetry)
 	}
 	snapshot := Snapshot{
 		ID:     def.ID,
 		Module: model.ModuleSnapshot{Format: model.ModuleFormatSurge, Request: def.RequestHash(), Name: meta.Name, Desc: meta.Desc},
 		Lock:   model.SourceLock{Root: batch.Entries["root"].Hash, Resources: locks},
 	}
-	return Result{Snapshot: snapshot, Metadata: meta, Entries: batch.Entries, Next: next}, nil
+	return Result{Snapshot: snapshot, Metadata: meta, Entries: batch.Entries, Next: next, ScriptErrors: scriptErrors}, nil
+}
+
+func earliest(a, b time.Time) time.Time {
+	if !b.IsZero() && (a.IsZero() || b.Before(a)) {
+		return b
+	}
+	return a
 }
 
 // ReadFile reads a module or snapshot from a regular file, with a size limit.

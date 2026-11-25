@@ -186,7 +186,11 @@ type Effective struct {
 	HTTPRewrite *httprewrite.Set `json:"-"`
 	// HTTPRewriteFingerprint identifies the ordered rewrite definitions and their resource hashes.
 	HTTPRewriteFingerprint string `json:"http-rewrite-fingerprint,omitempty"`
-	mitmCAStore            secret.Store
+	// Scripts preserves the order of composed script definitions, including unsupported types.
+	Scripts []Script `json:"scripts,omitempty"`
+	// ScriptFingerprint identifies the ordered script definitions and source hashes.
+	ScriptFingerprint string `json:"script-fingerprint,omitempty"`
+	mitmCAStore       secret.Store
 
 	// IPVersionOverride is empty when the profile's IP settings are in use.
 	IPVersionOverride string `json:"-"`
@@ -281,6 +285,10 @@ func Compile(profile, local []byte, opts Options) (*Effective, model.Diagnostics
 	if c.diags.HasErrors() {
 		return nil, c.diags
 	}
+	c.checkProfileScriptDuplicates()
+	if c.diags.HasErrors() {
+		return nil, c.diags
+	}
 	needsLayers := len(opts.Sources) > 0 || len(opts.Overlay) > 0 || len(c.profile.Imports) > 0 || len(c.profile.Modules) > 0
 	for i, rule := range c.profile.Rules {
 		needsLayers = needsLayers || rule.Source != "" || hasKey(c.ppos, model.JoinPath("/rules", seg(rule.ID, i), "module"))
@@ -370,6 +378,7 @@ func (c *compiler) compose() *Effective {
 		eff.mitmCAStore = c.opts.Secrets
 	}
 	c.httpRewrites(eff)
+	c.scripts(eff)
 	c.process(eff)
 	c.sniff(eff)
 	c.network(eff)

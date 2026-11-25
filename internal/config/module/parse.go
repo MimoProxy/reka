@@ -11,22 +11,50 @@ import (
 	"github.com/MimoProxy/reka/internal/config/model"
 )
 
-// Inspect returns metadata and deduplicated remote Map Local references after
-// argument substitution, without resolving rule targets or acquiring resources.
-func Inspect(text []byte, arguments map[string]string) (Metadata, []string) {
-	var urls []string
-	seen := make(map[string]bool)
+type ResourceReferences struct {
+	MapLocal []string
+	Scripts  []ScriptReference
+}
+
+// Inspect returns metadata and deduplicated remote references after argument
+// substitution. It uses the optional module interval for scripts that inherit
+// it, falling back to the default resource interval.
+func Inspect(text []byte, arguments map[string]string, moduleInterval ...int) (Metadata, ResourceReferences) {
+	interval := model.DefaultResourceInterval
+	if len(moduleInterval) > 0 && moduleInterval[0] > 0 {
+		interval = moduleInterval[0]
+	}
+	var refs ResourceReferences
+	mapLocalSeen := make(map[string]bool)
+	scriptIndices := make(map[string]int)
 	metadata, _ := scan(text, arguments, func(_ int, section, _, expanded string, issue outcome) {
-		if section != "map local" || issue.skips() || isSection(expanded) {
+		if issue.skips() || isSection(expanded) {
 			return
 		}
-		_, url, issue := parseMapLocal(expanded)
-		if !issue.skips() && url != "" && !seen[url] {
-			seen[url] = true
-			urls = append(urls, url)
+		switch section {
+		case "map local":
+			_, url, issue := parseMapLocal(expanded)
+			if !issue.skips() && url != "" && !mapLocalSeen[url] {
+				mapLocalSeen[url] = true
+				refs.MapLocal = append(refs.MapLocal, url)
+			}
+		case "script":
+			_, ref, issue := parseScript(expanded)
+			if issue.skips() {
+				return
+			}
+			if ref.Interval == 0 {
+				ref.Interval = interval
+			}
+			if i, seen := scriptIndices[ref.URL]; seen {
+				refs.Scripts[i].Interval = min(refs.Scripts[i].Interval, ref.Interval)
+				return
+			}
+			scriptIndices[ref.URL] = len(refs.Scripts)
+			refs.Scripts = append(refs.Scripts, ref)
 		}
 	})
-	return metadata, urls
+	return metadata, refs
 }
 
 func scan(text []byte, supplied map[string]string, visit func(int, string, string, string, outcome)) (Metadata, model.Diagnostics) {

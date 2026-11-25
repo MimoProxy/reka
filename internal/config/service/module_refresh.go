@@ -21,12 +21,16 @@ func moduleSpecHash(def model.Module) string {
 	return resource.Hash(data)
 }
 
-func toModuleStatus(status SubscriptionStatus) api.ModuleStatus {
-	return api.ModuleStatus{
+func toModuleStatus(status SubscriptionStatus, scriptErrors []moduleacquire.ScriptError) api.ModuleStatus {
+	moduleStatus := api.ModuleStatus{
 		ModuleID: status.SourceID, State: status.State, Stale: status.Stale, LastAttempt: status.LastAttempt,
 		LastSuccess: status.LastSuccess, NextAttempt: status.NextAttempt, ErrorCode: status.ErrorCode,
 		Revision: status.Revision, RootHash: status.RootHash,
 	}
+	for _, e := range scriptErrors {
+		moduleStatus.ScriptErrors = append(moduleStatus.ScriptErrors, api.ModuleScriptError{Request: e.Request, Code: e.Code})
+	}
+	return moduleStatus
 }
 
 func (m *RefreshManager) moduleStatus(def model.Module, src model.Source, revision uint64) api.ModuleStatus {
@@ -35,22 +39,25 @@ func (m *RefreshManager) moduleStatus(def model.Module, src model.Source, revisi
 	r := m.record(key)
 	busy := m.jobs[key] != nil
 	m.mu.Unlock()
-	status := toModuleStatus(r.Status)
+	status := toModuleStatus(r.Status, r.ScriptErrors)
 	status.ModuleID = def.ID
 	if r.SpecHash != moduleSpecHash(def) {
 		status.State, status.Stale = "pending", true
+		status.ScriptErrors = nil
 	}
 	if moduleacquire.Matches(def, src) {
 		aligned := src.Lock.Root == status.RootHash && len(src.Lock.Resources)+1 == len(r.Entries)
 		for _, lock := range src.Lock.Resources {
-			aligned = aligned && r.Entries[lock.ID].Hash == lock.Hash
+			aligned = aligned && r.Entries[moduleacquire.EntryKey(lock)].Hash == lock.Hash
 		}
 		if !aligned {
 			status.State, status.Stale = "pending", true
 			status.Revision, status.RootHash = revision, src.Lock.Root
+			status.ScriptErrors = nil
 		}
 	} else {
 		status.RootHash = ""
+		status.ScriptErrors = nil
 		if status.State == "current" {
 			status.State, status.Stale = "pending", true
 		}
@@ -105,7 +112,7 @@ func (s *Service) RefreshModule(ctx context.Context, id string, wait bool) (api.
 	case <-ctx.Done():
 		return api.ModuleStatus{}, ctx.Err()
 	case <-job.done:
-		return toModuleStatus(job.result), nil
+		return toModuleStatus(job.result, job.scriptErrors), nil
 	}
 }
 
@@ -171,9 +178,14 @@ func moduleSourceOp(src model.Source, id string, snapshot moduleacquire.Snapshot
 
 func (m *RefreshManager) downloadModule(ctx context.Context, def model.Module, src model.Source, previous refreshRecord, force bool) (moduleacquire.Snapshot, refreshUpdate, error) {
 	update := refreshUpdate{specHash: moduleSpecHash(def), manualOnly: def.File != ""}
+	var previousErrors []moduleacquire.ScriptError
+	if previous.SpecHash == update.specHash {
+		previousErrors = previous.ScriptErrors
+	}
 	result, err := moduleacquire.Acquire(ctx, def, moduleacquire.Options{
-		Client: m.client, Blobs: m.blobs, ResolveURL: m.resolve, Previous: src, PreviousEntries: previous.Entries, Force: force,
+		Client: m.client, Blobs: m.blobs, ResolveURL: m.resolve, Previous: src, PreviousEntries: previous.Entries, Force: force, IncludeScripts: true,
+		PreviousScriptErrors: previousErrors,
 	})
-	update.entries, update.next = result.Entries, result.Next
+	update.entries, update.next, update.scriptErrors = result.Entries, result.Next, result.ScriptErrors
 	return result.Snapshot, update, err
 }

@@ -23,8 +23,16 @@ var sensitiveFields = map[string]bool{"password": true, "uuid": true, "username"
 // IsSensitive reports whether path names a credential field.
 func IsSensitive(path string) bool {
 	segs, err := SplitPath(path)
-	return err == nil && len(segs) == 3 &&
-		(segs[0] == "outbounds" && sensitiveFields[segs[2]] || segs[0] == "modules" && segs[2] == "url")
+	if err != nil {
+		return false
+	}
+	if len(segs) == 3 {
+		return segs[0] == "outbounds" && sensitiveFields[segs[2]] || segs[0] == "modules" && segs[2] == "url"
+	}
+	if len(segs) == 6 && segs[0] == "sources" {
+		segs = segs[2:]
+	}
+	return len(segs) == 4 && segs[0] == "scripts" && segs[2] == "download" && segs[3] == "url"
 }
 
 func unalias(n *yaml.Node) *yaml.Node {
@@ -79,6 +87,24 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			return
 		}
 		urlValue(n, path, dns)
+	}
+	downloadURL := func(n *yaml.Node, prefix string) {
+		if u, err := child(n, "url", false, 0); err == nil {
+			urlValue(u, JoinPath(prefix, "url"), false)
+		}
+	}
+	resourceSecrets := func(n *yaml.Node, prefix string) {
+		if download, err := child(n, "download", false, 0); err == nil {
+			downloadURL(download, JoinPath(prefix, "download"))
+		}
+	}
+	resourceList := func(n *yaml.Node, prefix string) {
+		n = unalias(n)
+		if n.Kind == yaml.SequenceNode {
+			for i, item := range n.Content {
+				resourceSecrets(item, JoinPath(prefix, ElementSegment(item, i)))
+			}
+		}
 	}
 	// dnsSecrets walks only the DNS fields that hold upstream URLs. rel is
 	// n's path relative to the dns mapping, so a patch can target any
@@ -164,15 +190,9 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	if groups, err := child(root, "groups", false, 0); err == nil {
 		groupSecrets(groups, "/groups")
 	}
-	for _, collection := range []string{"rule-sets", "geodata"} {
-		if values, e := child(root, collection, false, 0); e == nil && unalias(values).Kind == yaml.SequenceNode {
-			for i, item := range unalias(values).Content {
-				if download, e := child(item, "download", false, 0); e == nil {
-					if u, e := child(download, "url", false, 0); e == nil {
-						urlValue(u, JoinPath("/"+collection, ElementSegment(item, i), "download", "url"), false)
-					}
-				}
-			}
+	for _, collection := range []string{"rule-sets", "geodata", "scripts"} {
+		if values, err := child(root, collection, false, 0); err == nil {
+			resourceList(values, "/"+collection)
 		}
 	}
 	obs, _ := child(root, "outbounds", false, 0)
@@ -190,7 +210,8 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	if sources, err := child(root, "sources", false, 0); err == nil && unalias(sources).Kind == yaml.SequenceNode {
 		sources = unalias(sources)
 		for i, src := range sources.Content {
-			prefix := JoinPath("/sources", ElementSegment(src, i), "subscription")
+			sourcePath := JoinPath("/sources", ElementSegment(src, i))
+			prefix := sourcePath + "/subscription"
 			if subscription, e := child(src, "subscription", false, 0); e == nil && unalias(subscription).Kind == yaml.MappingNode {
 				if files, e := child(subscription, "certificate-files", false, 0); e == nil {
 					nested(files, JoinPath(prefix, "certificate-files"))
@@ -228,6 +249,9 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			if v, e := child(src, "groups", false, 0); e == nil {
 				groupSecrets(v, JoinPath("/sources", ElementSegment(src, i), "groups"))
 			}
+			if v, err := child(src, "scripts", false, 0); err == nil {
+				resourceList(v, sourcePath+"/scripts")
+			}
 			obs, _ := child(src, "outbounds", false, 0)
 			list(obs, JoinPath("/sources", ElementSegment(src, i), "outbounds"))
 		}
@@ -244,6 +268,21 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				continue
 			}
 			path, value = unalias(path), unalias(value)
+			segs, e := SplitPath(path.Value)
+			prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
+			if e == nil && len(segs) > 0 && segs[0] == "scripts" {
+				switch {
+				case len(segs) == 1 && value.Kind == yaml.SequenceNode:
+					resourceList(value, prefix)
+				case len(segs) <= 2:
+					resourceSecrets(value, prefix)
+				case len(segs) == 3 && segs[2] == "download":
+					downloadURL(value, prefix)
+				case len(segs) == 4 && segs[2] == "download" && segs[3] == "url":
+					urlValue(value, prefix, false)
+				}
+				continue
+			}
 			if path.Value == "/listeners" || strings.HasPrefix(path.Value, "/listeners/") {
 				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
 				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/username") || strings.HasSuffix(path.Value, "/password")) {
@@ -277,11 +316,9 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 				}
 			}
 
-			segs, e := SplitPath(path.Value)
 			if e != nil || len(segs) == 0 || segs[0] != "outbounds" {
 				continue
 			}
-			prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
 			switch len(segs) {
 			case 1:
 				if value.Kind == yaml.SequenceNode {
@@ -389,6 +426,13 @@ func (d *Doc) UnmaskSecrets(base *Doc) error {
 						a, b := unalias(d.Get(prefix+"/"+key)), unalias(base.Get(prefix+"/"+key))
 						if a == nil || b == nil || a.Value != b.Value {
 							err = fmt.Errorf("%s: masked overlay operation changed target; supply its credential again", path)
+							return
+						}
+					}
+					if unalias(d.Get(prefix+"/op")).Value == "insert" && unalias(d.Get(prefix+"/path")).Value == "/scripts" {
+						a, b := unalias(d.Get(prefix+"/value/id")), unalias(base.Get(prefix+"/value/id"))
+						if a == nil || b == nil || a.Value != b.Value {
+							err = fmt.Errorf("%s: masked script changed identity; supply its download URL again", path)
 							return
 						}
 					}
