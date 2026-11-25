@@ -247,12 +247,18 @@ func start(open func() (*packettunnel.Session, error), extension bool, failure *
 	if extension {
 		runtime.GOMAXPROCS(2)
 		// The limit covers all memory the Go runtime holds, not just the
-		// heap. It must sit above what the tunnel needs, or the collector
-		// runs continuously, and low enough that idle pages are returned to
-		// stay well below the extension's memory limit. sing-box's libbox
-		// uses 4/5 of 50 MB; the lower limit stays because tunnel memory is
-		// mostly live data rather than collector slack.
-		debug.SetMemoryLimit(28 << 20)
+		// heap, and under load Go grows until it reaches it. sing-box's
+		// libbox sets 4/5 of the extension's 50 MB limit; the same ratio
+		// of the 25 MiB steady budget leaves room for the 4–6 MiB the
+		// extension holds outside Go (JavaScriptCore, system frameworks)
+		// and keeps the footprint below the 28 MiB above which HTTP
+		// scripts are skipped. On an iPhone with Bilibili and YouTube
+		// traffic through HTTPS interception, 28 MiB let Go reach 27.6 MiB
+		// and the footprint 31 MiB. With 20 MiB the same kind of load
+		// peaked at 24.5 MiB, with collection taking about 8% of two
+		// cores; bursts with several hundred goroutines still exceed the
+		// limit and spend up to 17% collecting.
+		debug.SetMemoryLimit(20 << 20)
 		// GOGC 50 matches sing-box libbox's
 		// oomkiller.DefaultAppleNetworkExtensionGCPercent. Without HTTPS
 		// interception it made no measurable difference, because tunnel
