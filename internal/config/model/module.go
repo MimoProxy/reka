@@ -12,7 +12,11 @@ import (
 )
 
 const (
-	ModuleFormatSurge  = "surge"
+	// Format names match the dialects used by profile and snapshot documents.
+	ModuleFormatSurge = "surge"
+	ModuleFormatLoon  = "loon"
+	ModuleFormatStash = "stash"
+
 	MaxModuleResources = 32
 	ModuleMinInterval  = 300
 	ModuleMaxInterval  = 604800
@@ -24,6 +28,7 @@ type Module struct {
 	Enabled   *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	URL       string            `yaml:"url,omitempty" json:"url,omitempty"`
 	File      string            `yaml:"file,omitempty" json:"file,omitempty"`
+	Format    string            `yaml:"format,omitempty" json:"format,omitempty"`
 	Interval  int               `yaml:"interval,omitempty" json:"interval,omitempty"`
 	Arguments map[string]string `yaml:"arguments,omitempty" json:"arguments,omitempty"`
 }
@@ -46,6 +51,21 @@ func (m Module) RequestHash() string {
 	return resource.Hash([]byte(m.URL))
 }
 
+// MatchesSnapshot reports whether the pinned module has the requested location and format.
+func (m Module) MatchesSnapshot(snapshot *ModuleSnapshot) bool {
+	return snapshot != nil && ValidModuleFormat(snapshot.Format) &&
+		(m.Format == "" || m.Format == snapshot.Format) && snapshot.Request == m.RequestHash()
+}
+
+// ValidModuleFormat reports whether the format names a supported module dialect.
+func ValidModuleFormat(format string) bool {
+	switch format {
+	case ModuleFormatSurge, ModuleFormatLoon, ModuleFormatStash:
+		return true
+	}
+	return false
+}
+
 var moduleID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func ValidModule(m *Module) error {
@@ -54,6 +74,9 @@ func ValidModule(m *Module) error {
 	}
 	if (m.URL == "") == (m.File == "") {
 		return errors.New("specify exactly one module url or file")
+	}
+	if m.Format != "" && !ValidModuleFormat(m.Format) {
+		return errors.New("module format must be surge, loon or stash")
 	}
 	if m.File != "" && (!filepath.IsAbs(m.File) || strings.ContainsRune(m.File, 0)) {
 		return errors.New("module file must be an absolute local path")

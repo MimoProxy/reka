@@ -121,7 +121,9 @@ func (s *session) execute(program *goja.Program, start time.Time) (err error) {
 	}()
 
 	s.capturePrimitives()
-	s.installGlobals(start)
+	if err := s.installGlobals(start); err != nil {
+		return script.NewScriptError(s.job.Script.Name, err.Error())
+	}
 	s.installServices()
 	s.installWebAPIs()
 	s.installTimers()
@@ -180,7 +182,7 @@ func callWithThis(fn goja.Callable, this goja.Value, args ...goja.Value) goja.Va
 	return v
 }
 
-func (s *session) installGlobals(start time.Time) {
+func (s *session) installGlobals(start time.Time) error {
 	spec, in := s.job.Script, s.job.Input
 	req := s.vm.NewObject()
 	s.set(req, "id", in.Request.ID)
@@ -200,7 +202,18 @@ func (s *session) installGlobals(start time.Time) {
 		}
 		s.global("$response", resp)
 	}
-	if spec.Argument != nil {
+	if spec.ArgumentObject {
+		data, err := script.ParseArgumentObject(spec.Argument)
+		if err != nil {
+			return err
+		}
+		parse, _ := goja.AssertFunction(s.vm.Get("JSON").ToObject(s.vm).Get("parse"))
+		value, err := parse(goja.Undefined(), s.vm.ToValue(string(data)))
+		if err != nil {
+			return err
+		}
+		s.global("$argument", value)
+	} else if spec.Argument != nil {
 		s.global("$argument", *spec.Argument)
 	}
 	env := s.job.Env
@@ -229,6 +242,7 @@ func (s *session) installGlobals(start time.Time) {
 		}
 		panic(sessionDone{})
 	})
+	return nil
 }
 
 func (s *session) set(o *goja.Object, name string, v any) {

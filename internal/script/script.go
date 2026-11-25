@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,18 +36,30 @@ type HeaderField struct{ Name, Value string }
 
 // Script is the source and options for one HTTP script.
 type Script struct {
-	Key        string // Cache key. An empty key uses the source hash.
-	Name       string
-	Path       string // Scripts with the same path share their default storage key.
-	Source     string
-	Kind       Kind
-	Dialect    Dialect
-	Engine     string // Host engine selection hint.
-	BinaryBody bool
-	FullHeader bool
-	Argument   *string       // nil leaves $argument undefined.
-	Timeout    time.Duration // Nonpositive values use DefaultTimeout.
-	MaxSize    int64         // Nonpositive values use only the host's hard limit.
+	Key            string // Cache key. An empty key uses the source hash.
+	Name           string
+	Path           string // Scripts with the same path share their default storage key.
+	Source         string
+	Kind           Kind
+	Dialect        Dialect
+	Engine         string // Host engine selection hint.
+	BinaryBody     bool
+	FullHeader     bool
+	Argument       *string       // nil leaves $argument undefined.
+	ArgumentObject bool          // Argument holds a JSON object when set.
+	Timeout        time.Duration // Nonpositive values use DefaultTimeout.
+	MaxSize        int64         // Nonpositive values use only the host's hard limit.
+}
+
+// ParseArgumentObject validates the JSON carried by an object-valued argument.
+func ParseArgumentObject(argument *string) (json.RawMessage, error) {
+	if argument != nil && strings.HasPrefix(strings.TrimSpace(*argument), "{") {
+		data := json.RawMessage(*argument)
+		if json.Valid(data) {
+			return data, nil
+		}
+	}
+	return nil, errors.New("script argument must be a JSON object")
 }
 
 // CacheKey returns the explicit key or the SHA-256 hash of the source.

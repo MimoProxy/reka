@@ -52,7 +52,7 @@ func (b *Bundle) mergeDeviceModules(document map[string]any, profile *model.Prof
 	deviceIDs := make(map[string]bool, len(options.DeviceModules))
 	for _, def := range options.DeviceModules {
 		if profileIDs[def.ID] {
-			shadowed = append(shadowed, ModuleSummary{ID: def.ID, Origin: "device", Enabled: def.IsEnabled(), Shadowed: true})
+			shadowed = append(shadowed, ModuleSummary{ID: def.ID, Origin: "device", Enabled: def.IsEnabled(), Format: def.Format, Shadowed: true})
 			continue
 		}
 		if sourceIDs[def.ID] {

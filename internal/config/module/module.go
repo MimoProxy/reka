@@ -1,4 +1,4 @@
-// Package module converts locked Surge modules into native profile fragments.
+// Package module converts locked Surge, Loon and Stash modules into native profile fragments.
 package module
 
 import (
@@ -14,6 +14,10 @@ import (
 type Options struct {
 	ID        string
 	Arguments map[string]string
+	// Format selects the module dialect. The zero value uses Surge.
+	Format string
+	// ModuleInterval is used by InspectWithOptions for scripts that inherit it.
+	ModuleInterval int
 	// Resolve returns the effective policy ID on success. On failure a nonempty
 	// string is a diagnostic message, such as an ambiguous display name.
 	Resolve func(policy string) (string, bool)
@@ -54,10 +58,12 @@ type Metadata struct {
 }
 
 type Argument struct {
-	Name        string `json:"name"`
-	Default     string `json:"default"`
-	Value       string `json:"value"`
-	Description string `json:"description,omitempty"`
+	Name        string   `json:"name"`
+	Default     string   `json:"default"`
+	Value       string   `json:"value"`
+	Description string   `json:"description,omitempty"`
+	Type        string   `json:"type,omitempty"`
+	Options     []string `json:"options,omitempty"`
 }
 
 type Count struct {
@@ -140,16 +146,54 @@ type converter struct {
 // Convert parses a module using the supplied arguments and already available
 // policies and resources. It performs no acquisition.
 func Convert(text []byte, opts Options) (*Result, Report) {
+	if opts.Format == "" {
+		opts.Format = model.ModuleFormatSurge
+	}
 	c := converter{
 		result: Result{ItemLines: make(map[string]int), MITMLines: make(map[string]int)},
-		report: Report{ModuleID: opts.ID, Format: model.ModuleFormatSurge, CanApply: true},
+		report: Report{ModuleID: opts.ID, Format: opts.Format, CanApply: true},
 		opts:   opts,
 		seen:   make(map[string]int),
 	}
-	metadata, warnings := scan(text, opts.Arguments, c.line)
-	c.report.Metadata = metadata
+	if len(text) > model.MaxDocumentSize {
+		c.report.record(0, "", failed("module.size", "module exceeds the document size limit"))
+		return &c.result, c.report
+	}
+	var warnings model.Diagnostics
+	switch opts.Format {
+	case model.ModuleFormatSurge:
+		c.report.Metadata, warnings = scan(text, opts.Arguments, c.line)
+	case model.ModuleFormatLoon:
+		c.report.Metadata, warnings = c.convertLoon(text)
+	case model.ModuleFormatStash:
+		c.convertStash(text)
+	default:
+		c.report.record(0, "", failed("module.format", "module format must be surge, loon or stash"))
+	}
 	c.report.Diagnostics = append(c.report.Diagnostics, warnings...)
 	return &c.result, c.report
+}
+
+// InspectWithOptions finds metadata and remote references in the selected format.
+// An empty format uses Surge, as does Inspect.
+func InspectWithOptions(text []byte, opts Options) (Metadata, ResourceReferences) {
+	if len(text) > model.MaxDocumentSize {
+		return Metadata{}, ResourceReferences{}
+	}
+	interval := opts.ModuleInterval
+	if interval <= 0 {
+		interval = model.DefaultResourceInterval
+	}
+	switch opts.Format {
+	case "", model.ModuleFormatSurge:
+		return Inspect(text, opts.Arguments, interval)
+	case model.ModuleFormatLoon:
+		return inspectLoon(text, opts.Arguments, interval)
+	case model.ModuleFormatStash:
+		return inspectStash(text, interval)
+	default:
+		return Metadata{}, ResourceReferences{}
+	}
 }
 
 func (c *converter) line(line int, section, raw, expanded string, issue outcome) {
@@ -174,15 +218,7 @@ func (c *converter) convertLine(line int, section, raw, expanded string) outcome
 		return c.mitm(line, expanded)
 	case "rule":
 		rule, issue := convertRule(raw, expanded, c.opts.Resolve)
-		c.report.Rules.record(!issue.skips())
-		if !issue.skips() {
-			rule.ID = c.id("r", struct {
-				Match    model.Match
-				Outbound string
-			}{rule.Match, rule.Outbound}, line)
-			c.result.Rules = append(c.result.Rules, rule)
-		}
-		return issue
+		return c.addRule(line, rule, issue)
 	case "url rewrite", "header rewrite", "body rewrite", "map local":
 		issue := c.rewrite(line, section, expanded)
 		c.report.Rewrites.record(!issue.skips())
@@ -212,6 +248,18 @@ func (c *converter) convertLine(line int, section, raw, expanded string) outcome
 		}
 		return unsupported("module.section", "unknown module section")
 	}
+}
+
+func (c *converter) addRule(line int, rule model.Rule, issue outcome) outcome {
+	c.report.Rules.record(!issue.skips())
+	if !issue.skips() {
+		rule.ID = c.id("r", struct {
+			Match    model.Match
+			Outbound string
+		}{rule.Match, rule.Outbound}, line)
+		c.result.Rules = append(c.result.Rules, rule)
+	}
+	return issue
 }
 
 func (o Options) resourceHash(kind, url string) string {

@@ -68,7 +68,7 @@ type jobInput struct {
 	Engine     string         `json:"engine"`
 	BinaryBody bool           `json:"binaryBody"`
 	FullHeader bool           `json:"fullHeader"`
-	Argument   *string        `json:"argument"`
+	Argument   any            `json:"argument"`
 	TimeoutMS  int64          `json:"timeoutMs"`
 	SourceSize int            `json:"sourceSize"`
 	Request    requestInput   `json:"request"`
@@ -83,12 +83,19 @@ func marshalJob(job *script.Job) (metadata, responseBody []byte, err error) {
 	if timeout <= 0 {
 		timeout = script.DefaultTimeout
 	}
+	var argument any = spec.Argument
+	if spec.ArgumentObject {
+		argument, err = script.ParseArgumentObject(spec.Argument)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	request := input.Request
 	env, limits := job.Env, job.Limits
 	w := jobInput{
 		Key: spec.CacheKey(), Name: spec.Name, Path: spec.Path, Kind: spec.Kind,
 		Dialect: spec.Dialect, Engine: spec.Engine, BinaryBody: spec.BinaryBody,
-		FullHeader: spec.FullHeader, Argument: spec.Argument,
+		FullHeader: spec.FullHeader, Argument: argument,
 		TimeoutMS: max(1, timeout.Milliseconds()), SourceSize: len(spec.Source),
 		Request: requestInput{
 			ID: request.ID, Method: request.Method, URL: request.URL,

@@ -59,7 +59,8 @@ func newMITMScriptTable(defs []compile.Script, logger *slog.Logger) mitmScriptTa
 			spec: script.Script{
 				Key: def.Hash, Name: name, Path: path, Kind: kind, Dialect: script.Dialect(def.Format),
 				Engine: def.Engine, BinaryBody: def.BinaryBodyMode, Argument: argument,
-				Timeout: time.Duration(def.Timeout) * time.Second, MaxSize: def.MaxSize,
+				ArgumentObject: def.ArgumentType == "object",
+				Timeout:        time.Duration(def.Timeout) * time.Second, MaxSize: def.MaxSize,
 			},
 		}
 		if kind == script.KindHTTPRequest {

@@ -205,7 +205,7 @@ func TestPrepareModuleRequiresMatchingSnapshotOnlyWhenEnabled(t *testing.T) {
 		paths               map[string]string
 	}{
 		{name: "missing", file: file, message: "snapshot is missing"},
-		{name: "moved", file: file + ".new", message: "declared ID or location", paths: map[string]string{def.ID: moduleSnapshot}},
+		{name: "moved", file: file + ".new", message: "declared ID, location, or format", paths: map[string]string{def.ID: moduleSnapshot}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			writeFixtureFile(t, input, fmt.Appendf(nil, "schema-version: 1\nmodules: [{id: offline, file: %q}]\n", tc.file))

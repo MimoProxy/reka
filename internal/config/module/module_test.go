@@ -62,7 +62,7 @@ unknown = true
 		{Name: "hide", Default: "true", Value: "true"},
 		{Name: "Host", Default: "sub.example.com", Value: "override.example.com"},
 	}
-	if !slices.Equal(report.Arguments, wantArgs) || len(report.Diagnostics) != 1 || report.Diagnostics[0].Severity != model.SeverityWarning {
+	if !reflect.DeepEqual(report.Arguments, wantArgs) || len(report.Diagnostics) != 1 || report.Diagnostics[0].Severity != model.SeverityWarning {
 		t.Fatalf("invalid arguments %+v, diagnostics %+v", report.Arguments, report.Diagnostics)
 	}
 	if !report.Partial || !report.CanApply || report.Rules != (Count{Total: 2, Imported: 1, Unavailable: 1}) || report.Rewrites.Imported != 1 || report.Hostnames.Imported != 5 {

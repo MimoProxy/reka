@@ -25,6 +25,7 @@ type Script struct {
 	MaxSize        *int64            `yaml:"max-size"`
 	Timeout        *int              `yaml:"timeout"`
 	Argument       *string           `yaml:"argument"`
+	ArgumentType   *string           `yaml:"argument-type,omitempty"`
 	Engine         *string           `yaml:"engine"`
 	Format         *string           `yaml:"format"`
 	Hash           *string           `yaml:"hash"`

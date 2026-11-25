@@ -49,6 +49,29 @@ func runScript(t *testing.T, host *script.Host, spec script.Script, in *script.I
 	return result
 }
 
+func TestArgumentObject(t *testing.T) {
+	const source = `
+if (typeof $argument !== "object" || Object.getPrototypeOf($argument) !== Object.prototype ||
+    $argument.Player !== "Example" || $argument.enabled !== true || $argument.other.value !== 2) {
+    throw new Error("unexpected argument");
+}
+$done({body: "object received"});`
+	argument := `{"Player":"Example","enabled":true,"other":{"value":2}}`
+	host := newTestHost(t, script.Limits{}, script.Environment{})
+	result := runScript(t, host, script.Script{
+		Source: source, Argument: &argument, ArgumentObject: true,
+	}, nil, script.Services{})
+	if string(result.Body) != "object received" {
+		t.Fatalf("body = %q", result.Body)
+	}
+	for _, malformed := range []string{`{"value":`, `null`, `[]`} {
+		spec := script.Script{Source: `$done()`, Kind: script.KindHTTPRequest, Argument: &malformed, ArgumentObject: true}
+		if _, err := host.Run(context.Background(), &spec, testInput(spec.Kind), script.Services{}); err == nil || !strings.Contains(err.Error(), "must be a JSON object") {
+			t.Fatalf("invalid argument error = %v", err)
+		}
+	}
+}
+
 func TestLanguageFeatures(t *testing.T) {
 	host := newTestHost(t, script.Limits{}, script.Environment{})
 	tests := []struct {

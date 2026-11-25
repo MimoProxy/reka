@@ -1,6 +1,6 @@
-# Surge modules
+# Surge, Loon and Stash modules
 
-Reka loads Surge `.sgmodule` files from a URL or an absolute file path. The profile owns the module's settings. The source snapshot pins the original text, remote Map Local files and script sources by SHA-256. Validation and planning use those pinned bytes. Loon `.plugin` and Stash `.stoverride` are currently unsupported.
+Reka loads Surge `.sgmodule`, Loon `.plugin` and `.lpx`, and Stash `.stoverride` modules from a URL or an absolute file path. The profile owns the module settings. The source snapshot pins the original text, remote Map Local files and script sources by SHA-256. Validation and planning use those pinned bytes.
 
 ## Profile configuration
 
@@ -10,6 +10,7 @@ modules:
   - id: filters
     enabled: true
     url: https://example.com/filters.sgmodule
+    format: surge
     interval: 86400
     arguments: {PROXY: Example route, host: api.example.com}
 outbounds:
@@ -22,9 +23,15 @@ rules:
 
 `id` uses native stable ID syntax and must be unique among modules and native sources. Use exactly one `url` or `file`. URLs accept HTTP(S) or a `secret://` reference. Ordinary configuration reads mask inline URLs. A `file` must be an absolute path on the kernel host and refer to an ordinary file. Omit `enabled` for `true`. Omit `interval` or set it to `0` to check remote modules every 86,400 seconds. Explicit intervals are 300–604,800 seconds.
 
-The corresponding entry in `sources.yaml` contains `id`, `module`, and `lock`. `module` records format `surge`, the SHA-256 identity of the declared URL or `file:` plus the path, and the module's display name and description when present. `lock.root` identifies the original text. `lock.resources` holds the URL identity and content hash for each `map-local` or `script` resource. Use profile `modules` to activate snapshots and `{module: ID}` to place their rules. Module snapshot entries cannot also define native source fields.
+The corresponding entry in `sources.yaml` contains `id`, `module`, and `lock`. `module` records the selected format, the SHA-256 identity of the declared URL or `file:` plus the path, and the module's display name and description when present. `lock.root` identifies the original text. `lock.resources` holds the URL identity and content hash for each `map-local` or `script` resource. Use profile `modules` to activate snapshots and `{module: ID}` to place their rules. Module snapshot entries cannot also define native source fields.
 
-## Parameters and policy references
+## Format detection
+
+Set `format` to `surge`, `loon`, or `stash` to choose the parser. Omit it for automatic detection. A recognized filename or URL path extension takes precedence over the document contents. The extensions are `.sgmodule` for Surge, `.plugin` and `.lpx` for Loon, and `.stoverride`, `.yaml` and `.yml` for Stash. Matching is case-insensitive and excludes URL query strings.
+
+For an unrecognized extension, Reka checks the first significant line after skipping a BOM and comments. A section heading or `#!` metadata indicates a line-based module. An `[Argument]` section, `#!loon_version`, Loon JSON or dictionary and array reject actions, or an `if ${url}` expression selects Loon. Other line-based modules use Surge. A top-level YAML mapping with `name`, `http`, `rules`, or `script-providers` selects Stash. Unidentified content uses the historical Surge default. Changing the explicit format to a different dialect requires a fresh snapshot.
+
+## Surge parameters and policy references
 
 Place metadata lines at the beginning of the module. See the [Surge parameter syntax](https://manual.nssurge.com/profile/module.html#parameter-tables).
 
@@ -53,7 +60,7 @@ Built-in Surge policies are matched case-insensitively. Other policies resolve f
 
 Overlays apply to the composed configuration. MITM hostname patches use `/mitm/hostnames/#N`. Module provenance records the module ID and the original text line. Disabled modules need no snapshot and contribute no effective entries.
 
-## Conversion support
+## Surge conversion support
 
 Section names are case-insensitive. Lines beginning with `#`, `;`, or `//` are comments, with `#!` reserved for leading metadata. Inline `#` characters are preserved. A regex incompatible with Go's RE2 engine is unsupported, including lookahead and lookbehind.
 
@@ -97,7 +104,46 @@ Section names are case-insensitive. Lines beginning with `#`, `;`, or `//` are c
 
 The report lists line numbers, section names, statuses and short explanations. Counts distinguish imported and unavailable entries. `partial` indicates ignored or unsupported lines. `can_apply` is false when conversion reports an error. Valid entries still contribute when the report is partial. Native validation runs after composition, including checks for MITM hostnames and locked rule resources.
 
-## Scripts
+## Loon plugins
+
+| Section | Conversion |
+| --- | --- |
+| Metadata | `name`, `desc`, `icon`, and `category` are displayed. Other keys are informational. |
+| `[Argument]` | `input`, `select`, and `switch`. The first value is the default. A `select` override outside the choices is used with a warning. |
+| `[Rule]` | Uses the shared rule converter. `PROXY` uses the profile argument or plugin default when supplied, then resolves against effective policies. With no argument, Reka resolves a policy named `PROXY`. Loon response-specific routing rejects use native `reject`, and `REJECT-DROP` uses `reject-drop`. |
+| `[Rewrite]`, `[URL Rewrite]` | URL changes and redirects, reject responses, header edits, inline JSON and regex body edits, and Map Local-compatible mock responses. |
+| `[Script]` | `http-request`, `http-response`, `request`, and `response` with an HTTP(S) script URL. Disabled entries are skipped and `tag` is the display name. HTTP scripts use `format: loon` and a 10-second default timeout. |
+| `[MITM]` | `hostname` with optional `%APPEND%` or `%INSERT%`. Other MITM settings are ignored. |
+| `[Map Local]` | Uses the same inline and locked remote response formats as Surge. |
+
+Declared `{name}` placeholders expand in plugin text. Undeclared single-brace placeholders stay literal, including regex quantifiers. Expressions also accept `${name}`, and Surge-style `{{{name}}}` works with Loon modules. `argument=[{Player},{Enabled}]` passes an object as `$argument`. A `switch` becomes a JavaScript boolean, and other values become strings. A quoted `argument="..."` is passed as a string. Native script declarations can express an object using `argument-type: object` and an `argument` string containing a JSON object. [Loon legacy scripts](https://nsloon.app/en/docs/Script/)
+
+The expression subset has the form below. It matches the URL and accepts the optional case-insensitive `i` flag and a named capture. In redirect targets, `${capture[1]}` expands to the first capture. Supported calls include reject responses, redirects, `script` with optional object arguments, and request or response `json.delete`, `json.replace`, and `json.jq`. Other conditions, combined conditions, other flags and remote `jq_file` filters are reported as unsupported. [Loon expressions](https://nsloon.app/en/docs/Rewrite/rewrite_v2/)
+
+```ini
+[Rewrite]
+request if ${url} ~= /^https:\/\/example\.test\/(.*)/i as capture then redirect(302, "https://example.net/${capture[1]}")
+
+[Script]
+response if ${url} ~= /^https:\/\/example\.test/ then script("https://example.test/hook.js", {${Player}, ${Enabled}}) with requires_body=true
+```
+
+## Stash overrides
+
+| YAML path | Conversion |
+| --- | --- |
+| `name`, `desc`, `icon`, `category` | Display metadata. Other metadata keys are informational. |
+| `rules` | Clash-style rule strings. Named `RULE-SET` entries can refer to existing native rule sets. `MATCH` and remote rule-set URLs are unsupported. |
+| `http.mitm` | Hostname strings, including exclusions with `-` and `%APPEND%` or `%INSERT%` prefixes. |
+| `http.url-rewrite` | `302`, `307`, `transparent`, and reject responses. `transparent` changes the URL directly. |
+| `http.header-rewrite` | Request and response header add, delete, replace, and regex replacement. |
+| `http.body-rewrite` | Inline request or response jq filters and regex replacements. |
+| `http.mock` | Inline responses with status, headers, and text, JSON, or Base64 data. |
+| `http.script`, `script-providers` | A request or response script selects its provider by `name`. The provider supplies an HTTP(S) `url` and optional `interval`. Acquisition pins the script source and execution uses `format: stash`. |
+
+The importer skips Stash arguments, provider-based body rewrites, and proxy, DNS, controller, and other local settings. A missing script provider is reported on the script entry. YAML parser errors prevent application, and report positions refer to the original YAML nodes, including folded rewrite strings. [Stash HTTP rewrites](https://stash.wiki/en/http-engine/rewrite)
+
+## Surge scripts
 
 The name on the left of `=` becomes the display name. Reka substitutes module arguments before parsing script settings. A setting ends at a comma followed by another `key=` or at the end of the line, so values can contain commas, equals signs and unescaped quotes, as in embedded JSON arguments. Double quotes around a value are removed, and `\"` inside them stands for a quote.
 
@@ -116,7 +162,7 @@ Imported scripts use `format: surge`. The report skips other types, including `c
 
 ### Script execution
 
-On desktop platforms and Android, Reka runs `http-request` and `http-response` scripts inside MITM HTTP/1.1 forwarding with the goja engine. iOS builds the script table and matches URLs, but does not run scripts yet: a hit is recorded as `unsupported` and the exchange passes through unchanged. Traffic that is not intercepted and other script types never reach this path.
+On desktop platforms and Android, Reka runs `http-request` and `http-response` scripts inside MITM HTTP/1.1 forwarding with the goja engine. iOS uses the script engine supplied by its host. Traffic outside intercepted HTTP and other script types never reaches this path.
 
 Each request is processed in this order: URL rewrite → request header rewrite → Map Local → request body rewrite → request script → upstream → response header rewrite → response body rewrite → response script → client. The Surge manual states that body rewrites run before scripts. It does not order Map Local and scripts; Reka treats Map Local as the end of processing, so neither request nor response scripts run for a local response. A response returned by a request script is likewise written to the client without response rewrites or response scripts. [Surge body rewrite](https://manual.nssurge.com/http/body-rewrite.html)
 
@@ -150,7 +196,9 @@ When `SetModuleArguments` (or `rekactl module set-arguments`) makes an enabled m
 
 ```sh
 ./bin/rekactl module preview ./filters.sgmodule -argument PROXY='Example route'
+./bin/rekactl module preview ./filters.plugin -argument PROXY=direct
 ./bin/rekactl module add filters https://example.com/filters.sgmodule -argument PROXY='Example route'
+./bin/rekactl module add overrides https://example.com/download -format stash
 ./bin/rekactl module add local-filters -file /path/to/filters.sgmodule -disabled
 ./bin/rekactl module list
 ./bin/rekactl module report filters
@@ -161,12 +209,12 @@ When `SetModuleArguments` (or `rekactl module set-arguments`) makes an enabled m
 ./bin/rekactl module remove filters
 ```
 
-Use `-position N` to insert at a zero-based module index, `-interval N` to set the remote refresh interval, or `-argument NAME=VALUE` repeatedly. `set-arguments` replaces the argument map, and passing no arguments restores defaults. The CLI waits for refresh unless `-async` is set. Pass `-` to preview from stdin, or put `-json` before `module` for machine-readable output.
+Use `-format` on `add` or `preview` to select a dialect, `-position N` to insert at a zero-based module index, `-interval N` to set the remote refresh interval, or `-argument NAME=VALUE` repeatedly. `set-arguments` replaces the argument map, and passing no arguments restores defaults. The CLI waits for refresh unless `-async` is set. Pass `-` to preview from stdin, or put `-json` before `module` for machine-readable output.
 
-The control API exposes `AddModule`, `RemoveModule`, `SetModuleEnabled`, `SetModuleArguments`, `RefreshModule`, `ListModules`, `GetModuleReport`, and `PreviewModule`. Mutating profile calls use `base_revision`. `ListModules` returns source type, status, metadata, argument declarations and the available effective report summary. `GetModuleReport` returns the current effective report for an enabled module. `PreviewModule` uses current effective policies and performs no network or configuration writes. The preview reports remote Map Local references and scripts as unavailable without a lock. The preview, report and list summary include script counts and the lock status of convertible script lines. `GetCapabilities` advertises `surge-module` in `source_formats`. [Control API](control-api.md#surge-模块)
+The control API exposes `AddModule`, `RemoveModule`, `SetModuleEnabled`, `SetModuleArguments`, `RefreshModule`, `ListModules`, `GetModuleReport`, and `PreviewModule`. Mutating profile calls use `base_revision`. `ListModules` returns format, source type, status, metadata, argument declarations and the available effective report summary. `GetModuleReport` returns the current effective report for an enabled module. `PreviewModule` accepts optional `format` and `filename` fields, uses current effective policies, and performs no network or configuration writes. The preview reports remote Map Local references and scripts as unavailable without a lock. The preview, report and list summary include script counts and the lock status of convertible script lines. `GetCapabilities` advertises `surge-module`, `loon-module`, and `stash-module` in `source_formats`. [Control API](control-api.md#模块)
 
 ## Mobile preparation
 
 Mobile apps can pass an ordered `deviceModules` list when preparing native profiles or imported subscriptions such as Clash. Device modules follow modules declared by the profile. If an ID appears in both lists, the profile declaration takes precedence. Supply app-managed snapshot paths for enabled modules in `modules`. With `rebindSnapshot`, omit `deviceModules` to keep the archived list or pass `[]` to clear it.
 
-App-managed module snapshots continue to support Map Local locks. The kernel service acquires script locks for its own snapshots.
+App-managed and kernel-service snapshots pin both Map Local files and script sources. Mobile module preview accepts an explicit `format` or a `filename` hint for raw text. An existing snapshot supplies its pinned format.

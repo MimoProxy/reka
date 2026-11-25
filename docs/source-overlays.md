@@ -1,6 +1,6 @@
 # Sources and overlays
 
-The source layer accepts **normalized native snapshots**. [Local Clash/share-link conversion](clash-import.md) runs before this layer; [background downloads, provider resources and stale-cache reporting](subscriptions.md) feed it too. [Surge modules](modules.md) keep their original text in a locked source snapshot and convert it during composition.
+The source layer accepts **normalized native snapshots**. Local Clash and share-link conversion runs before this layer. Background downloads and provider resources also feed it. Surge, Loon, and Stash modules keep their original text in a locked source snapshot for conversion during composition. [Clash and share-link conversion](clash-import.md) · [Downloads and caches](subscriptions.md) · [Modules](modules.md)
 
 ## Documents and ownership
 
@@ -137,7 +137,7 @@ For the hostname list, `#N` is a zero-based position in the list as it exists at
 
 The API accepts whole `sources`/`overlay` strings and `sources_patch`/`overlay_patch` structural edits alongside the existing profile/local fields. They participate in validation, planning, operation identity, conflict reporting and crash recovery. Submit one request for related changes that must be atomic. No HTTP requests or subscriptions are refreshed during validation or planning.
 
-`rekactl get`, `validate`, `plan`, `commit`, `set` and `remove` support the new documents (`-sources`/`-overlay` for edit commands). `GetCapabilities` advertises `source_formats: ["native", "clash", "links", "surge-module"]`.
+`rekactl get`, `validate`, `plan`, `commit`, `set` and `remove` support the new documents (`-sources`/`-overlay` for edit commands). `GetCapabilities` advertises `source_formats: ["native", "clash", "links", "surge-module", "loon-module", "stash-module"]`.
 
 The candidate directory exports all four YAML files. Each saved file is committed individually, so use the API for changes that require several documents together. Invalid candidates stay on disk with `.errors` and do not change the active revision.
 

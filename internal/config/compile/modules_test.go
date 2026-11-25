@@ -1,6 +1,7 @@
 package compile
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -96,6 +97,8 @@ func TestModuleLayerValidation(t *testing.T) {
 		{"ambiguous policy", moduleProfile + `outbounds: [{id: a, name: Unavailable, type: direct}, {id: b, name: Unavailable, type: direct}]`, "module.rule-policy", moduleOptions(body)},
 		{"no snapshot", moduleProfile, "module.download", Options{}},
 		{"changed location", strings.Replace(moduleProfile, "example.com", "example.net", 1), "module.download", moduleOptions(enabledBody)},
+		{"changed format", strings.Replace(moduleProfile, "{id: filter,", "{id: filter, format: loon,", 1), "module.download", moduleOptions(enabledBody)},
+		{"invalid format", strings.Replace(moduleProfile, "{id: filter,", "{id: filter, format: other,", 1), "module.definition", moduleOptions(enabledBody)},
 		{"no resource reader", moduleProfile, "module.resource", Options{Sources: moduleOptions(enabledBody).Sources}},
 		{"corrupt root", moduleProfile, "module.resource", Options{Sources: moduleOptions(enabledBody).Sources, ReadResource: func(string) ([]byte, error) { return []byte("other"), nil }}},
 		{"unknown marker", moduleProfile + "rules: [{module: unknown}]", "module.missing", moduleOptions(enabledBody)},
@@ -125,6 +128,95 @@ func TestModuleLayerValidation(t *testing.T) {
 				}
 			}
 			t.Fatalf("missing diagnostic %q: %v", tc.code, ds)
+		})
+	}
+}
+
+func TestCompileLoonAndStashSnapshots(t *testing.T) {
+	const loon = `#!name=Loon filters
+[Argument]
+Player = input, sample
+Enabled = switch, true, false
+[Rule]
+DOMAIN,example.test,PROXY
+[Rewrite]
+^https://example\.test/blocked reject-200
+[Script]
+http-response ^https://example\.test/ script-path=https://example.test/hook.js, argument=[{Player},{Enabled}]
+[MITM]
+hostname = %APPEND% example.test
+`
+	const stash = `name: Stash filters
+rules:
+  - DOMAIN,example.test,DIRECT
+http:
+  mitm: [example.test]
+  url-rewrite:
+    - '^https://example\.test/blocked - reject-200'
+  script:
+    - {match: '^https://example\.test/', name: hook, type: response, argument: sample}
+script-providers:
+  hook: {url: 'https://example.test/hook.js'}
+`
+	const location = "https://example.test/module"
+	const scriptURL = "https://example.test/hook.js"
+	const hook = "$done({})"
+	for _, tc := range []struct {
+		format, fields, body, argument, argumentType string
+		scriptLine                                   int
+	}{
+		{"loon", ", arguments: {PROXY: direct, Player: override}", loon, "", "object", 10},
+		{"stash", ", format: stash", stash, "sample", "", 9},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			def := model.Module{URL: location}
+			root := resource.Hash([]byte(tc.body))
+			scriptRequest := resource.Hash([]byte(scriptURL))
+			scriptHash := resource.Hash([]byte(hook))
+			sources := fmt.Sprintf(`sources:
+  - id: filters
+    module: {format: %s, request: %s}
+    lock:
+      root: %s
+      resources:
+        - {kind: script, id: %s, request: %s, hash: %s}
+`, tc.format, def.RequestHash(), root, scriptRequest[:16], scriptRequest, scriptHash)
+			profile := fmt.Sprintf("schema-version: 1\nmodules: [{id: filters, url: %s%s}]\n", location, tc.fields)
+			eff := compileModule(t, profile, Options{
+				Sources: []byte(sources),
+				ReadResource: func(hash string) ([]byte, error) {
+					switch hash {
+					case root:
+						return []byte(tc.body), nil
+					case scriptHash:
+						return []byte(hook), nil
+					}
+					return nil, resource.ErrCorrupt
+				},
+			})
+			report := eff.Modules["filters"]
+			if report.Format != tc.format || report.Rules.Imported != 1 || report.Rewrites.Imported != 1 || report.Scripts.Imported != 1 {
+				t.Fatalf("module report = %+v", report)
+			}
+			if len(eff.Rules) == 0 || eff.Rules[0].Target != "direct" || !slices.Equal(eff.MITM.Hostnames, []string{"example.test"}) || len(eff.Scripts) != 1 {
+				t.Fatalf("unexpected composition: rules = %v, MITM = %+v, scripts = %v", eff.Rules, eff.MITM, eff.Scripts)
+			}
+			got := eff.Scripts[0]
+			if got.Format != tc.format || got.ArgumentType != tc.argumentType || got.Hash != scriptHash || got.Origin.Line != tc.scriptLine {
+				t.Fatalf("compiled script = %+v", got)
+			}
+			if tc.argumentType == "object" {
+				var argument map[string]any
+				if err := json.Unmarshal([]byte(got.Argument), &argument); err != nil || len(argument) != 2 || argument["Player"] != "override" || argument["Enabled"] != true {
+					t.Fatalf("compiled object argument = %q (%v)", got.Argument, err)
+				}
+			} else if got.Argument != tc.argument {
+				t.Fatalf("compiled string argument = %q", got.Argument)
+			}
+			rewrite := eff.HTTPRewrite.Request(httprewrite.Request{URL: "https://example.test/blocked"})
+			if rewrite.Local == nil || rewrite.Local.StatusCode != 200 {
+				t.Fatalf("unexpected rewrite = %+v", rewrite)
+			}
 		})
 	}
 }

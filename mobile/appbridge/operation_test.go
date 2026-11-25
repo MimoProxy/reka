@@ -200,6 +200,19 @@ unsupported = type=http-request
 	if !preview.Report.Partial || !slices.Equal(preview.Hostnames.Append, []string{"module.example.test"}) {
 		t.Fatalf("unexpected preview: %+v", preview)
 	}
+	const stash = "name: Example override\nhttp:\n  mitm: [stash.example.test]\n"
+	preview = appResult[profile.ModulePreviewResult](t, send("modulePreview", map[string]any{
+		"text": stash, "filename": "example.plugin", "format": "stash",
+	}))
+	if preview.Report.Format != model.ModuleFormatStash || !slices.Equal(preview.Hostnames.Append, []string{"stash.example.test"}) {
+		t.Fatalf("unexpected Stash preview: %+v", preview)
+	}
+	metadata = appResult[module.Metadata](t, send("moduleInspect", map[string]any{
+		"text": stash, "filename": "example.plugin", "format": "stash",
+	}))
+	if metadata.Name != "Example override" {
+		t.Fatalf("unexpected Stash metadata: %+v", metadata)
+	}
 	opts := profile.PrepareOptions{Modules: map[string]string{"example": moduleSnapshot}}
 	if err := profile.PrepareFileWithOptions(t.Context(), profileFile, profileSnapshot, dir, opts); err != nil {
 		t.Fatal(err)

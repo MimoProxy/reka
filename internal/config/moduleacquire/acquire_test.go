@@ -34,6 +34,61 @@ func acquireTestOptions(t *testing.T, handler http.HandlerFunc) Options {
 	})}}
 }
 
+func TestAcquireLoonAndStashScriptLocks(t *testing.T) {
+	const scriptURL = "https://example.com/filter.js"
+	const scriptBody = "$done();"
+	for _, tt := range []struct {
+		name, location, explicit, format, document string
+		interval                                   time.Duration
+	}{
+		{
+			name: "Loon URL extension", location: "/filter.plugin?download=true", format: model.ModuleFormatLoon,
+			document: "#!name=Example filter\n[Script]\nhttp-response example script-path=" + scriptURL + ", tag=Filter\n",
+			interval: 600 * time.Second,
+		},
+		{
+			name: "Stash explicit format", location: "/filter.plugin", explicit: model.ModuleFormatStash, format: model.ModuleFormatStash,
+			document: "name: Example filter\nhttp:\n  script:\n    - {match: example, name: filter, type: response}\n" +
+				"script-providers:\n  filter: {url: " + scriptURL + ", interval: 300}\n",
+			interval: 300 * time.Second,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := acquireTestOptions(t, func(w http.ResponseWriter, req *http.Request) {
+				switch req.URL.RequestURI() {
+				case tt.location:
+					fmt.Fprint(w, tt.document)
+				case "/filter.js":
+					fmt.Fprint(w, scriptBody)
+				default:
+					t.Errorf("unexpected resource request %q", req.URL.RequestURI())
+					http.NotFound(w, req)
+				}
+			})
+			def := model.Module{ID: "filter", URL: "https://example.com" + tt.location, Format: tt.explicit, Interval: 600}
+			got, err := Acquire(t.Context(), def, opts)
+			if err != nil || got.Snapshot.Module.Format != tt.format || got.Metadata.Name != "Example filter" ||
+				got.Snapshot.Lock.Root != resource.Hash([]byte(tt.document)) || len(got.Snapshot.Lock.Resources) != 1 {
+				t.Fatalf("module acquisition: %+v, error %v", got, err)
+			}
+			lock := got.Snapshot.Lock.Resources[0]
+			entry := got.Entries[EntryKey(lock)]
+			if lock.Kind != "script" || lock.Request != resource.Hash([]byte(scriptURL)) ||
+				lock.Hash != resource.Hash([]byte(scriptBody)) || entry.Next.Sub(entry.Checked) != tt.interval {
+				t.Fatalf("script lock: %+v, entry %+v", lock, entry)
+			}
+			src := model.Source{ID: def.ID, Module: &got.Snapshot.Module, Lock: &got.Snapshot.Lock}
+			if !Matches(def, src) {
+				t.Fatal("snapshot should match the acquisition declaration")
+			}
+			def.Format = model.ModuleFormatSurge
+			if Matches(def, src) {
+				t.Fatal("snapshot should require reacquisition when the explicit format changes")
+			}
+		})
+	}
+}
+
 func TestAcquireScriptLimits(t *testing.T) {
 	var root strings.Builder
 	root.WriteString("[Script]\n")

@@ -16,6 +16,8 @@ type ModuleInput struct {
 	Text      *string           `json:"text,omitempty"`
 	File      string            `json:"file,omitempty"`
 	Snapshot  string            `json:"snapshot,omitempty"`
+	Format    string            `json:"format,omitempty"`
+	Filename  string            `json:"filename,omitempty"`
 	Arguments map[string]string `json:"arguments,omitempty"`
 }
 
@@ -63,7 +65,7 @@ func InspectModule(ctx context.Context, input ModuleInput) (module.Metadata, err
 	if err != nil {
 		return module.Metadata{}, err
 	}
-	metadata, _ := module.Inspect(text, opts.Arguments)
+	metadata, _ := module.InspectWithOptions(text, opts)
 	if err := ctx.Err(); err != nil {
 		return module.Metadata{}, err
 	}
@@ -74,21 +76,35 @@ func readModuleInput(ctx context.Context, input ModuleInput) ([]byte, module.Opt
 	if err := ctx.Err(); err != nil {
 		return nil, module.Options{}, err
 	}
-	opts := module.Options{Arguments: input.Arguments}
+	opts := module.Options{Format: input.Format, Arguments: input.Arguments}
+	if input.Format != "" && !model.ValidModuleFormat(input.Format) {
+		return nil, opts, &subscription.Error{Code: "module_format_invalid"}
+	}
 	switch {
 	case input.Text != nil && input.File == "" && input.Snapshot == "":
 		if len(*input.Text) > model.MaxDocumentSize {
 			return nil, opts, &subscription.Error{Code: "module_text_too_large"}
 		}
-		return []byte(*input.Text), opts, nil
+		text := []byte(*input.Text)
+		if opts.Format == "" {
+			opts.Format = module.DetectFormat(input.Filename, text)
+		}
+		return text, opts, nil
 	case input.Text == nil && input.File != "" && input.Snapshot == "":
 		text, err := moduleacquire.ReadFile(input.File, model.MaxDocumentSize)
+		if err == nil && opts.Format == "" {
+			opts.Format = module.DetectFormat(input.File, text)
+		}
 		return text, opts, err
 	case input.Text == nil && input.File == "" && input.Snapshot != "":
 		snapshot, err := LoadModuleSnapshot(input.Snapshot)
 		if err != nil {
 			return nil, opts, err
 		}
+		if opts.Format != "" && opts.Format != snapshot.Source.Module.Format {
+			return nil, opts, &subscription.Error{Code: "module_snapshot_mismatch"}
+		}
+		opts.Format = snapshot.Source.Module.Format
 		opts.ID, opts.ResourceForKind = snapshot.Source.ID, snapshot.resourceResolver()
 		if opts.Arguments == nil {
 			opts.Arguments = snapshot.Arguments

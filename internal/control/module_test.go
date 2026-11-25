@@ -40,8 +40,10 @@ func TestModuleAPI(t *testing.T) {
 	if err := client.Call("GetCapabilities", nil, &caps); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(caps.SourceFormats, "surge-module") {
-		t.Fatalf("module source format missing from capabilities: %v", caps.SourceFormats)
+	for _, format := range []string{"surge-module", "loon-module", "stash-module"} {
+		if !slices.Contains(caps.SourceFormats, format) {
+			t.Fatalf("%s missing from capabilities: %v", format, caps.SourceFormats)
+		}
 	}
 	for _, method := range []string{
 		"AddModule", "RemoveModule", "SetModuleEnabled", "SetModuleArguments",
@@ -58,7 +60,8 @@ func TestModuleAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	preview, err := client.PreviewModule(api.PreviewModuleRequest{Data: data, Arguments: map[string]string{"TARGET": "REJECT"}})
-	if err != nil || !preview.CanApply || preview.Rules.Imported != 1 || len(preview.Arguments) != 1 || preview.Arguments[0].Value != "REJECT" {
+	if err != nil || preview.Format != model.ModuleFormatSurge || !preview.CanApply || preview.Rules.Imported != 1 ||
+		len(preview.Arguments) != 1 || preview.Arguments[0].Value != "REJECT" {
 		t.Fatalf("preview: %+v %v", preview, err)
 	}
 	preview, err = client.PreviewModule(api.PreviewModuleRequest{Data: data + "[Script]\n" +
@@ -70,6 +73,22 @@ func TestModuleAPI(t *testing.T) {
 	if script.ID == "" || script.Name != "modify" || script.Type != "http-response" || script.Pattern != "example" || !script.RequiresBody ||
 		!script.BinaryBodyMode || script.MaxSize == nil || *script.MaxSize != 0 || script.Timeout != 9 || script.Engine != "jsc" || script.Locked || script.Hash != "" {
 		t.Fatalf("unlocked script metadata: %+v", script)
+	}
+	const loon = "#!name=Example plugin\n[Rule]\nDOMAIN,ads.example.com,DIRECT\n"
+	for _, tc := range []struct {
+		req    api.PreviewModuleRequest
+		format string
+	}{
+		{api.PreviewModuleRequest{Data: loon, Filename: "example.plugin"}, model.ModuleFormatLoon},
+		{api.PreviewModuleRequest{Data: "rules: ['DOMAIN,ads.example.com,DIRECT']", Filename: "example.plugin", Format: model.ModuleFormatStash}, model.ModuleFormatStash},
+	} {
+		preview, err := client.PreviewModule(tc.req)
+		if err != nil || preview.Format != tc.format || !preview.CanApply || preview.Rules.Imported != 1 {
+			t.Fatalf("%s preview: %+v %v", tc.format, preview, err)
+		}
+	}
+	if _, err := client.PreviewModule(api.PreviewModuleRequest{Data: data, Format: "unknown"}); err == nil {
+		t.Fatal("preview accepted an invalid explicit format")
 	}
 	modules, err := client.ListModules()
 	if err != nil || len(modules) != 0 {
@@ -92,7 +111,7 @@ func TestModuleAPI(t *testing.T) {
 		Module: model.Module{ID: "example", File: path}, BaseRevision: cfg.Revision, Position: &position,
 	}))
 	modules, err = client.ListModules()
-	if err != nil || len(modules) != 1 || !modules[0].Enabled || modules[0].SourceType != "file" ||
+	if err != nil || len(modules) != 1 || !modules[0].Enabled || modules[0].SourceType != "file" || modules[0].Format != model.ModuleFormatSurge ||
 		modules[0].Name != "Example rules" || len(modules[0].Arguments) != 1 || modules[0].Status.RootHash == "" ||
 		modules[0].Report == nil || modules[0].Report.Rules.Imported != 1 {
 		t.Fatalf("list: %+v %v", modules, err)
@@ -153,12 +172,26 @@ waitForRefresh:
 			t.Fatal("refresh event missing")
 		}
 	}
-	assertCommit(client.RemoveModule(api.RemoveModuleRequest{ModuleID: "example", BaseRevision: status.Revision}))
+	revision = assertCommit(client.RemoveModule(api.RemoveModuleRequest{ModuleID: "example", BaseRevision: status.Revision}))
 	modules, err = client.ListModules()
 	if err != nil || len(modules) != 0 {
 		t.Fatalf("remove: %+v %v", modules, err)
 	}
 	if _, err := client.GetModuleReport(api.GetModuleReportRequest{ModuleID: "example"}); err == nil {
 		t.Fatal("removed module still has a report")
+	}
+	if err := os.WriteFile(path, []byte(loon), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertCommit(client.AddModule(api.AddModuleRequest{
+		Module: model.Module{ID: "example", File: path, Format: model.ModuleFormatLoon}, BaseRevision: revision,
+	}))
+	modules, err = client.ListModules()
+	if err != nil || len(modules) != 1 || modules[0].Format != model.ModuleFormatLoon || modules[0].Name != "Example plugin" {
+		t.Fatalf("Loon list: %+v %v", modules, err)
+	}
+	reply, err = client.GetModuleReport(api.GetModuleReportRequest{ModuleID: "example"})
+	if err != nil || reply.Format != model.ModuleFormatLoon || reply.Rules.Imported != 1 {
+		t.Fatalf("Loon report: %+v %v", reply, err)
 	}
 }

@@ -1,4 +1,4 @@
-// Package moduleacquire downloads Surge module snapshots without scheduling or
+// Package moduleacquire downloads module snapshots without scheduling or
 // publishing a configuration revision.
 package moduleacquire
 
@@ -66,10 +66,9 @@ func EntryKey(lock model.ResourceLock) string {
 	return lock.ID
 }
 
-// Matches reports whether a source pins the declared location.
+// Matches reports whether a source pins the declared location and format.
 func Matches(def model.Module, src model.Source) bool {
-	return src.Module != nil && src.Module.Format == model.ModuleFormatSurge && src.Lock != nil &&
-		src.Module.Request == def.RequestHash() && resource.ValidHash(src.Lock.Root)
+	return def.MatchesSnapshot(src.Module) && src.Lock != nil && resource.ValidHash(src.Lock.Root)
 }
 
 // Acquire fetches the root and referenced resources using the
@@ -107,6 +106,7 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 	}
 	fetcher := subscription.Fetcher{Client: opts.Client, Blobs: opts.Blobs, MaxBytes: model.MaxDocumentSize, MaxBundleBytes: MaxBundleSize}
 	batch := fetcher.Batch(validated, opts.Force)
+	location := def.File
 	var body []byte
 	var err error
 	if def.File != "" {
@@ -120,13 +120,21 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 			url, err = opts.ResolveURL(url)
 		}
 		if err == nil {
+			location = url
 			body, err = batch.Fetch(ctx, "root", "module", "", url, nil, interval)
 		}
 	}
 	if err != nil {
 		return Result{}, err
 	}
-	meta, refs := module.Inspect(body, def.Arguments, interval)
+	format := def.Format
+	if format == "" {
+		format = module.DetectFormat(location, body)
+	}
+	if format == "" {
+		format = model.ModuleFormatSurge
+	}
+	meta, refs := module.InspectWithOptions(body, module.Options{Format: format, Arguments: def.Arguments, ModuleInterval: interval})
 	if len(refs.MapLocal) > model.MaxModuleResources {
 		return Result{}, &subscription.Error{Code: "too_many_module_resources"}
 	}
@@ -206,7 +214,7 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 	}
 	snapshot := Snapshot{
 		ID:     def.ID,
-		Module: model.ModuleSnapshot{Format: model.ModuleFormatSurge, Request: def.RequestHash(), Name: meta.Name, Desc: meta.Desc},
+		Module: model.ModuleSnapshot{Format: format, Request: def.RequestHash(), Name: meta.Name, Desc: meta.Desc},
 		Lock:   model.SourceLock{Root: batch.Entries["root"].Hash, Resources: locks},
 	}
 	return Result{Snapshot: snapshot, Metadata: meta, Entries: batch.Entries, Next: next, ScriptErrors: scriptErrors}, nil

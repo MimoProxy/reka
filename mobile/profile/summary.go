@@ -18,6 +18,7 @@ type ModuleSummary struct {
 	Enabled   bool                     `json:"enabled"`
 	Origin    string                   `json:"origin"`
 	Shadowed  bool                     `json:"shadowed,omitempty"`
+	Format    string                   `json:"format,omitempty"`
 	Name      string                   `json:"name,omitempty"`
 	Desc      string                   `json:"desc,omitempty"`
 	Arguments []module.Argument        `json:"arguments,omitempty"`
@@ -63,12 +64,12 @@ func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Prof
 		}
 	}
 	for _, def := range profile.Modules {
-		entry := ModuleSummary{ID: def.ID, Enabled: def.IsEnabled(), Origin: "profile"}
+		entry := ModuleSummary{ID: def.ID, Enabled: def.IsEnabled(), Origin: "profile", Format: def.Format}
 		if slices.Contains(b.DeviceModules, def.ID) {
 			entry.Origin = "device"
 		}
 		if report, ok := eff.Modules[def.ID]; ok {
-			entry.Name, entry.Desc, entry.Arguments = report.Name, report.Desc, report.Arguments
+			entry.Format, entry.Name, entry.Desc, entry.Arguments = report.Format, report.Name, report.Desc, report.Arguments
 			entry.Report = &api.ModuleReportSummary{Partial: report.Partial, CanApply: report.CanApply,
 				Rules: report.Rules, Rewrites: report.Rewrites, Hostnames: report.Hostnames}
 			entry.Hostnames = hostsByModule[def.ID]
@@ -77,15 +78,18 @@ func (b *Bundle) describePreparation(eff *compile.Effective, profile *model.Prof
 				entry.Hostnames = b.moduleHostnames(def)
 			}
 		} else if path := options.Modules[def.ID]; path != "" {
-			if snapshot, err := LoadModuleSnapshot(path); err == nil && snapshot.Source.ID == def.ID && snapshot.Source.Module.Request == def.RequestHash() {
-				meta, _ := module.Inspect(snapshot.Resources[snapshot.Source.Lock.Root], def.Arguments)
-				entry.Name, entry.Desc, entry.Arguments = meta.Name, meta.Desc, meta.Arguments
+			if snapshot, err := LoadModuleSnapshot(path); err == nil && snapshot.matches(def) {
+				meta, _ := module.InspectWithOptions(snapshot.readRoot(), module.Options{
+					Format: snapshot.Source.Module.Format, Arguments: def.Arguments,
+				})
+				entry.Format, entry.Name, entry.Desc, entry.Arguments = snapshot.Source.Module.Format, meta.Name, meta.Desc, meta.Arguments
 			}
 		} else if options.Modules == nil && (entry.Origin == "profile" || options.DeviceModules == nil) {
 			for _, previous := range b.Summary.Modules {
 				if previous.ID == def.ID && !previous.Enabled && !previous.Shadowed &&
-					(previous.Origin == entry.Origin || previous.Origin == "" && entry.Origin == "profile") {
-					entry.Name, entry.Desc, entry.Arguments = previous.Name, previous.Desc, previous.Arguments
+					(previous.Origin == entry.Origin || previous.Origin == "" && entry.Origin == "profile") &&
+					(def.Format == "" || previous.Format == def.Format) {
+					entry.Format, entry.Name, entry.Desc, entry.Arguments = previous.Format, previous.Name, previous.Desc, previous.Arguments
 					break
 				}
 			}
@@ -118,7 +122,9 @@ func (b *Bundle) moduleHostnames(def model.Module) []string {
 		if json.Unmarshal(value, &entry) != nil || entry.ID != def.ID || entry.Module == nil || entry.Lock == nil {
 			continue
 		}
-		converted, _ := module.Convert(b.Resources[entry.Lock.Root], module.Options{ID: def.ID, Arguments: def.Arguments})
+		converted, _ := module.Convert(b.Resources[entry.Lock.Root], module.Options{
+			ID: def.ID, Format: entry.Module.Format, Arguments: def.Arguments,
+		})
 		var hostnames []string
 		for _, list := range [][]module.Hostname{converted.InsertHostnames, converted.AppendHostnames} {
 			for _, hostname := range list {

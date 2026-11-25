@@ -224,13 +224,16 @@ func TestPrepareDeviceModuleRequiresMatchingSnapshotOnlyWhenEnabled(t *testing.T
 	def, path := acquireDeviceModuleFixture(t)
 	moved := def
 	moved.URL += ".new"
+	changedFormat := def
+	changedFormat.Format = model.ModuleFormatLoon
 	for _, tc := range []struct {
 		name, message string
 		module        model.Module
 		paths         map[string]string
 	}{
 		{name: "missing", message: "snapshot is missing", module: def},
-		{name: "moved", message: "declared ID or location", module: moved, paths: map[string]string{def.ID: path}},
+		{name: "moved", message: "declared ID, location, or format", module: moved, paths: map[string]string{def.ID: path}},
+		{name: "changed format", message: "declared ID, location, or format", module: changedFormat, paths: map[string]string{def.ID: path}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := prepare(t.Context(), []byte(clashSourceFixture), &preparer{options: PrepareOptions{

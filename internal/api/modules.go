@@ -41,6 +41,8 @@ type GetModuleReportRequest struct {
 
 type PreviewModuleRequest struct {
 	Data      string            `json:"data"`
+	Format    string            `json:"format,omitempty"`
+	Filename  string            `json:"filename,omitempty"`
 	Arguments map[string]string `json:"arguments,omitempty"`
 }
 
@@ -76,6 +78,7 @@ type ModuleInfo struct {
 	ID         string               `json:"id"`
 	Enabled    bool                 `json:"enabled"`
 	SourceType string               `json:"source_type"`
+	Format     string               `json:"format,omitempty"`
 	Name       string               `json:"name,omitempty"`
 	Desc       string               `json:"desc,omitempty"`
 	Arguments  []module.Argument    `json:"arguments,omitempty"`

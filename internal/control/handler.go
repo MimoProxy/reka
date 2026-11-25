@@ -769,7 +769,7 @@ func capabilities(svc *service.Service) Capabilities {
 	return Capabilities{NetworkModes: modes, TUNStacks: stacks, SniffProtocols: []string{"http", "tls", "quic"}, ProcessModes: []string{"off", "rule", "always"},
 		DHCPDNS: platform.DHCPDNSSupported(), ConditionalSniff: true,
 		ConfigurationLayers: []string{"default", "source", "profile", "overlay", "local"},
-		SourceFormats:       []string{"native", "clash", "links", "surge-module"},
+		SourceFormats:       []string{"native", "clash", "links", "surge-module", "loon-module", "stash-module"},
 		ImportSupport:       importer.SupportMatrix(),
 		APIVersion:          APIVersion,
 		SchemaVersion:       model.SchemaVersion,

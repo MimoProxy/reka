@@ -28,7 +28,7 @@ func validateModuleSnapshot(src model.Source, node *yaml.Node) error {
 			return fmt.Errorf("module source cannot define %s", key)
 		}
 	}
-	if src.Module.Format != model.ModuleFormatSurge || !resource.ValidHash(src.Module.Request) {
+	if !model.ValidModuleFormat(src.Module.Format) || !resource.ValidHash(src.Module.Request) {
 		return errors.New("invalid module format or request identity")
 	}
 	if src.Lock == nil || !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > model.MaxModuleResources+model.MaxModuleScripts {
@@ -124,8 +124,8 @@ func (c *compiler) convertModules(sources map[string]model.Source, targets map[s
 		}
 		path := c.modulePaths[def.ID]
 		src := sources[def.ID]
-		if src.Module == nil || src.Module.Request != def.RequestHash() {
-			c.errorf(model.DocProfile, path, "module.download", "module has not been downloaded or its location has changed; refresh the module")
+		if !def.MatchesSnapshot(src.Module) {
+			c.errorf(model.DocProfile, path, "module.download", "module snapshot is missing or the location or format has changed. Refresh the module")
 			continue
 		}
 		if c.opts.ReadResource == nil {
@@ -142,7 +142,7 @@ func (c *compiler) convertModules(sources map[string]model.Source, targets map[s
 			locked[moduleResourceKey{entry.Kind, entry.Request}] = entry.Hash
 		}
 		result, report := module.Convert(text, module.Options{
-			ID: def.ID, Arguments: def.Arguments, Resolve: policies.resolve,
+			ID: def.ID, Format: src.Module.Format, Arguments: def.Arguments, Resolve: policies.resolve,
 			ResourceForKind: func(kind, url string) (string, bool) {
 				hash, ok := locked[moduleResourceKey{kind, resource.Hash([]byte(url))}]
 				return hash, ok

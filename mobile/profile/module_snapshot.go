@@ -51,7 +51,7 @@ func LoadModuleSnapshot(path string) (*ModuleSnapshot, error) {
 func (s *ModuleSnapshot) valid() bool {
 	source := s.Source
 	if s.Version != moduleSnapshotVersion || source.ID == "" ||
-		source.Module.Format != model.ModuleFormatSurge || !resource.ValidHash(source.Module.Request) ||
+		!model.ValidModuleFormat(source.Module.Format) || !resource.ValidHash(source.Module.Request) ||
 		len(source.Lock.Resources) > model.MaxModuleResources+model.MaxModuleScripts ||
 		len(s.ScriptErrors) > model.MaxModuleScripts {
 		return false
@@ -94,6 +94,14 @@ func (s *ModuleSnapshot) valid() bool {
 		}
 	}
 	return true
+}
+
+func (s *ModuleSnapshot) source() model.Source {
+	return model.Source{ID: s.Source.ID, Module: &s.Source.Module, Lock: &s.Source.Lock}
+}
+
+func (s *ModuleSnapshot) matches(def model.Module) bool {
+	return s.Source.ID == def.ID && moduleacquire.Matches(def, s.source())
 }
 
 func (s *ModuleSnapshot) readRoot() []byte {

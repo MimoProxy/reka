@@ -71,8 +71,8 @@ func New(store secret.Store) *Bridge {
 
 type request struct {
 	Action string `json:"action"`
+	Format string `json:"format,omitempty"` // Shared by CA export and module inspection or preview.
 	api.ImportMITMCARequest
-	api.ExportMITMCARequest
 	profile.ModuleAcquireRequest
 	profile.ModulePreviewRequest
 	ModuleID string `json:"moduleId"`
@@ -177,8 +177,10 @@ func (b *Bridge) dispatch(ctx context.Context, req request) (any, error) {
 	case "moduleAcquire":
 		return profile.AcquireModule(ctx, req.ModuleAcquireRequest, profile.ModuleAcquireOptions{Secrets: b.store}), nil
 	case "moduleInspect":
+		req.ModuleInput.Format = req.Format
 		return profile.InspectModule(ctx, req.ModuleInput)
 	case "modulePreview":
+		req.ModuleInput.Format = req.Format
 		return profile.PreviewModule(ctx, req.ModulePreviewRequest, b.store)
 	case "moduleReport":
 		return profile.ModuleReport(ctx, req.Snapshot, req.ModuleID, b.store)

@@ -27,7 +27,7 @@ const usage = `usage: rekactl [-c address | -state-root dir] [-json] command [ar
 configuration
   get [profile|local|sources|overlay|effective] [-reveal]   print the active configuration
   subscription list|set ID URL|refresh ID|pause ID|resume ID|remove ID
-  module add ID URL | add ID -file PATH       download and install a Surge module
+  module add ID URL | add ID -file PATH       download and install a Surge, Loon, or Stash module
   module remove|enable|disable|refresh|report ID
   module set-arguments ID [-argument NAME=VALUE]... | list | preview FILE
   resource list|add KIND ID URL [options]|refresh KIND ID

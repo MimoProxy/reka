@@ -7,6 +7,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/resource"
+	scriptapi "github.com/MimoProxy/reka/internal/script"
 )
 
 // Script is a validated script definition. Hash is the locked source reference.
@@ -21,6 +22,7 @@ type Script struct {
 	MaxSize        int64  `json:"max-size"`
 	Timeout        int    `json:"timeout"` // Seconds.
 	Argument       string `json:"argument,omitempty"`
+	ArgumentType   string `json:"argument-type,omitempty"`
 	Engine         string `json:"engine"`
 	Format         string `json:"format"`
 	Hash           string `json:"hash,omitempty"`
@@ -83,7 +85,8 @@ func (c *compiler) compileScript(def model.Script, path string) Script {
 		ID: def.ID, Name: valueOr(def.Name, ""), Type: def.Type, Pattern: valueOr(def.Pattern, ""),
 		RequiresBody: valueOr(def.RequiresBody, false), BinaryBodyMode: valueOr(def.BinaryBodyMode, false),
 		Timeout: valueOr(def.Timeout, model.DefaultScriptTimeout), Argument: valueOr(def.Argument, ""),
-		Engine: valueOr(def.Engine, "auto"), Format: valueOr(def.Format, "surge"), Hash: valueOr(def.Hash, ""),
+		ArgumentType: valueOr(def.ArgumentType, ""),
+		Engine:       valueOr(def.Engine, "auto"), Format: valueOr(def.Format, "surge"), Hash: valueOr(def.Hash, ""),
 	}
 	switch script.Type {
 	case "http-request", "http-response":
@@ -114,10 +117,17 @@ func (c *compiler) compileScript(def model.Script, path string) Script {
 	default:
 		c.errorf(doc, path+"/engine", "script.engine", "engine must be auto, jsc or webview")
 	}
-	switch script.Format {
-	case "surge", "loon", "stash":
-	default:
+	if !model.ValidModuleFormat(script.Format) {
 		c.errorf(doc, path+"/format", "script.format", "format must be surge, loon or stash")
+	}
+	switch valueOr(def.ArgumentType, "string") {
+	case "string":
+	case "object":
+		if _, err := scriptapi.ParseArgumentObject(def.Argument); err != nil {
+			c.errorf(doc, path+"/argument", "script.argument", "%v", err)
+		}
+	default:
+		c.errorf(doc, path+"/argument-type", "script.argument-type", "argument-type must be string or object")
 	}
 	if def.Download != nil {
 		script.Path = def.Download.URL

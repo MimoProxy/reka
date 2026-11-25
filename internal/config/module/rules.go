@@ -10,6 +10,12 @@ import (
 )
 
 func convertRule(raw, line string, resolve func(string) (string, bool)) (model.Rule, outcome) {
+	return convertRuleWithTarget(raw, line, func(policy string) (string, bool, string) {
+		return ruleTarget(policy, resolve)
+	})
+}
+
+func convertRuleWithTarget(raw, line string, targetFor func(string) (string, bool, string)) (model.Rule, outcome) {
 	var rule model.Rule
 	kind, payload, ok := strings.Cut(line, ",")
 	kind = strings.ToUpper(strings.TrimSpace(kind))
@@ -62,7 +68,7 @@ func convertRule(raw, line string, resolve func(string) (string, bool)) (model.R
 	if issue.skips() {
 		return rule, issue
 	}
-	target, approximate, failure := ruleTarget(args[1], resolve)
+	target, approximate, failure := targetFor(args[1])
 	if failure != "" {
 		return rule, failed("module.rule-policy", failure)
 	}
@@ -262,4 +268,4 @@ func regexRule(kind string) bool {
 	return kind == "DOMAIN-REGEX" || kind == "PROCESS-NAME-REGEX" || kind == "PROCESS-PATH-REGEX"
 }
 
-func badRule() outcome { return unsupported("module.rule-syntax", "invalid Surge rule syntax") }
+func badRule() outcome { return unsupported("module.rule-syntax", "invalid module rule syntax") }

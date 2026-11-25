@@ -223,8 +223,8 @@ func (b *Bundle) bindSources(ctx context.Context, profile *model.Profile, option
 		if err != nil {
 			return moduleSnapshotError(def.ID, "module snapshot is unreadable or invalid; acquire the module again")
 		}
-		if snapshot.Source.ID != def.ID || snapshot.Source.Module.Request != def.RequestHash() {
-			return moduleSnapshotError(def.ID, "module snapshot does not match the declared ID or location; acquire the module again")
+		if !snapshot.matches(def) {
+			return moduleSnapshotError(def.ID, "module snapshot does not match the declared ID, location, or format. Acquire the module again.")
 		}
 		entry, err := json.Marshal(snapshot.Source)
 		if err != nil {

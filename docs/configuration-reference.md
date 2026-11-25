@@ -497,7 +497,7 @@ traffic-budgets:
 
 ## 11. MITM 与 HTTP 重写
 
-在 profile 的 `modules` 列表中可声明 Surge 模块，将锁定快照中的规则、重写、脚本和 MITM 主机名合成到有效配置。参数和启停随 profile 保存，下载由模块刷新完成。 [Surge 模块](modules.md)
+在 profile 的 `modules` 列表中可声明 Surge、Loon 和 Stash 模块，将锁定快照中的规则、重写、脚本和 MITM 主机名合成到有效配置。格式、参数和启停随 profile 保存，下载由模块刷新完成。 [模块文档](modules.md)
 
 MITM 对选中的入站 HTTPS 连接终结 TLS，再通过选定的出站建立新的 TLS 连接并转发 HTTP 请求。客户端需将 MITM CA 安装到自己的信任库。客户端 TLS 最低为 1.2，客户端和上游均使用 HTTP/1.1。
 
@@ -599,6 +599,7 @@ URL 重写改变目标主机时，内核用该连接所属配置的路由为请�
 | `max-size` | 整数，单位为字节 | iOS 默认值和硬上限均为 512 KiB。其他平台默认 10 MiB，硬上限 32 MiB。`0` 和 `-1` 使用硬上限，正数与硬上限取较小值。需要正文时，传输体或解码后的正文超过限额会跳过脚本 |
 | `timeout` | 整数，1–3600 秒，默认 5 秒 | 脚本运行时限 |
 | `argument` | 可选字符串 | 非空值原样传给脚本，省略或空字符串时 `$argument` 为 `undefined` |
+| `argument-type` | `string` 或 `object`，默认 `string` | 使用 `object` 时，`argument` 必须是 JSON 对象文本，脚本从 `$argument` 读取解析后的对象 |
 | `engine` | `auto`（默认）、`jsc`、`webview` | 保留兼容设置。桌面平台与 Android 使用 goja，iOS 暂停执行脚本 |
 | `format` | `surge`（默认）、`loon`、`stash` | 请求脚本的无参 `$done()` 在 `surge` 中放行，在 `loon` 和 `stash` 中中断连接。响应脚本的无参 `$done()` 均放行 |
 | `hash` | SHA-256 字符串 | HTTP 脚本必填，引用非空且不超过 2 MiB 的已入库源码 |

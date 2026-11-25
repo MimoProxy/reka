@@ -34,6 +34,7 @@ type ModuleAcquireOptions struct {
 type ModuleAcquireResult struct {
 	Status       string                      `json:"status"` // updated, not-modified, or failed
 	ErrorCode    string                      `json:"errorCode,omitempty"`
+	Format       string                      `json:"format,omitempty"`
 	Metadata     *module.Metadata            `json:"metadata,omitempty"`
 	Hostnames    *ModuleHostnames            `json:"hostnames,omitempty"`
 	Added        []string                    `json:"added,omitempty"`
@@ -98,8 +99,8 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 		}
 		return "", &subscription.Error{Code: "credentials_unavailable"}
 	}
-	if old != nil && old.Source.Module.Request == req.Module.RequestHash() {
-		download.Previous = model.Source{ID: old.Source.ID, Module: &old.Source.Module, Lock: &old.Source.Lock}
+	if old != nil && old.matches(req.Module) {
+		download.Previous = old.source()
 		download.PreviousEntries = old.Entries
 		if old.Interval == req.Module.Interval && maps.Equal(old.Arguments, req.Module.Arguments) {
 			download.PreviousScriptErrors = old.ScriptErrors
@@ -134,7 +135,7 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 	}
 	hosts := snapshot.hostnames()
 	result := ModuleAcquireResult{
-		Status: "updated", Metadata: &acquired.Metadata, Hostnames: &hosts, NextCheckMS: snapshot.NextCheckMS,
+		Status: "updated", Format: snapshot.Source.Module.Format, Metadata: &acquired.Metadata, Hostnames: &hosts, NextCheckMS: snapshot.NextCheckMS,
 		ScriptErrors: snapshot.ScriptErrors,
 	}
 	var previous ModuleHostnames
@@ -160,7 +161,7 @@ func AcquireModule(ctx context.Context, req ModuleAcquireRequest, opts ModuleAcq
 
 func (s *ModuleSnapshot) hostnames() ModuleHostnames {
 	result, _ := module.Convert(s.readRoot(), module.Options{
-		ID: s.Source.ID, Arguments: s.Arguments, ResourceForKind: s.resourceResolver(),
+		ID: s.Source.ID, Format: s.Source.Module.Format, Arguments: s.Arguments, ResourceForKind: s.resourceResolver(),
 	})
 	return moduleHostnames(result)
 }

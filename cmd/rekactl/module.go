@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -34,7 +35,11 @@ func cmdModule(args []string) error {
 				if !m.Enabled {
 					enabled = "disabled"
 				}
-				fmt.Printf("%s (%s, %s): %s", m.ID, m.SourceType, enabled, m.Status.State)
+				fmt.Printf("%s (%s, %s", m.ID, m.SourceType, enabled)
+				if m.Format != "" {
+					fmt.Printf(", %s", m.Format)
+				}
+				fmt.Printf("): %s", m.Status.State)
 				if m.Status.ErrorCode != "" {
 					fmt.Printf(" (%s)", m.Status.ErrorCode)
 				}
@@ -82,19 +87,24 @@ func cmdModule(args []string) error {
 		return showModuleReport("GetModuleReport", api.GetModuleReportRequest{ModuleID: args[0]})
 	case "preview":
 		fs := flag.NewFlagSet("module preview", flag.ExitOnError)
+		format := fs.String("format", "", "module format (surge, loon, or stash)")
 		arguments := moduleArguments(fs)
 		parse(fs, args)
 		if fs.NArg() != 1 {
-			return errors.New("usage: module preview FILE [-argument NAME=VALUE]...")
+			return errors.New("usage: module preview FILE [-format FORMAT] [-argument NAME=VALUE]...")
 		}
+		filename := fs.Arg(0)
 		f := os.Stdin
-		if fs.Arg(0) != "-" {
+		if filename != "-" {
 			var err error
-			f, err = os.Open(fs.Arg(0))
+			f, err = os.Open(filename)
 			if err != nil {
 				return err
 			}
 			defer f.Close()
+			filename = filepath.Base(filename)
+		} else {
+			filename = ""
 		}
 		data, err := io.ReadAll(io.LimitReader(f, model.MaxDocumentSize+1))
 		if err != nil {
@@ -103,7 +113,9 @@ func cmdModule(args []string) error {
 		if len(data) > model.MaxDocumentSize {
 			return errors.New("module exceeds the document size limit")
 		}
-		return showModuleReport("PreviewModule", api.PreviewModuleRequest{Data: string(data), Arguments: arguments})
+		return showModuleReport("PreviewModule", api.PreviewModuleRequest{
+			Data: string(data), Format: *format, Filename: filename, Arguments: arguments,
+		})
 	case "add", "remove", "enable", "disable", "set-arguments":
 		return editModule(action, args)
 	default:
@@ -118,6 +130,7 @@ func editModule(action string, args []string) error {
 	var disabled *bool
 	if action == "add" {
 		fs.StringVar(&spec.File, "file", "", "absolute path on the kernel host")
+		fs.StringVar(&spec.Format, "format", "", "module format (surge, loon, or stash)")
 		fs.IntVar(&spec.Interval, "interval", 0, "refresh interval in seconds")
 		disabled = fs.Bool("disabled", false, "add without enabling")
 		fs.Func("position", "zero-based insertion index", func(s string) error {
@@ -137,7 +150,7 @@ func editModule(action string, args []string) error {
 		if spec.File == "" && fs.NArg() == 2 {
 			spec.URL = fs.Arg(1)
 		} else if spec.File == "" || fs.NArg() != 1 {
-			return errors.New("usage: module add ID URL | module add ID -file PATH [-interval N] [-disabled] [-position N] [-argument NAME=VALUE]...")
+			return errors.New("usage: module add ID URL | module add ID -file PATH [-format FORMAT] [-interval N] [-disabled] [-position N] [-argument NAME=VALUE]...")
 		}
 		if *disabled {
 			enabled := false
@@ -196,8 +209,8 @@ func showModuleReport(method string, params any) error {
 		if report.Desc != "" {
 			fmt.Printf("%q\n", report.Desc)
 		}
-		fmt.Printf("rules %d/%d, rewrites %d/%d, hostnames %d/%d, scripts %d/%d; partial: %t, can apply: %t\n",
-			report.Rules.Imported, report.Rules.Total, report.Rewrites.Imported, report.Rewrites.Total,
+		fmt.Printf("format %s, rules %d/%d, rewrites %d/%d, hostnames %d/%d, scripts %d/%d; partial: %t, can apply: %t\n",
+			report.Format, report.Rules.Imported, report.Rules.Total, report.Rewrites.Imported, report.Rewrites.Total,
 			report.Hostnames.Imported, report.Hostnames.Total, report.Scripts.Imported, report.Scripts.Total, report.Partial, report.CanApply)
 		printModuleScripts(report.ScriptItems)
 		for _, arg := range report.Arguments {

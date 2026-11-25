@@ -126,9 +126,9 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `SetModuleEnabled` | `module_id`、`enabled`、`base_revision` | 提交结果 |
 | `SetModuleArguments` | `module_id`、`arguments`、`base_revision` | 提交结果 |
 | `RefreshModule` | `module_id`，可选 `wait: false` | 模块刷新状态 |
-| `ListModules` | 无 | 模块、参数声明、刷新状态和报告摘要，不含 URL 或路径 |
+| `ListModules` | 无 | 模块格式、参数声明、刷新状态和报告摘要，不含 URL 或路径 |
 | `GetModuleReport` | `module_id` | 完整模块转换报告 |
-| `PreviewModule` | `data`，可选 `arguments` | 转换报告 |
+| `PreviewModule` | `data`，可选 `format`、`filename`、`arguments` | 转换报告 |
 | `SetSecret` | `name`、`value`，可选 `apply: true` | `name`、`ref`，可选 `apply` 提交结果 |
 | `DeleteSecret` | `name` | `deleted` 名称 |
 | `ListSecrets` | 无 | `names` 数组，不含值 |
@@ -363,13 +363,13 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 状态含 source_id、state（如 pending/paused/refreshing/current/stale/failed）、stale，以及可选 last_attempt、last_success、next_attempt、error_code、revision、root_hash、fallback_resources，不包含 URL/header 凭据。失败保留之前有效快照。资源限额、下载路由和文件 provider 用法见[订阅文档](subscriptions.md)。
 
-### Surge 模块
+### 模块
 
-`GetCapabilities.source_formats` 包含 `surge-module` 时，可用 `AddModule` 安装 Surge 模块。请求中的 `module` 接受 `id`、`url` 或绝对 `file`、可选的 `enabled`、`interval` 和 `arguments`。`position` 是从零开始的列表索引，省略时追加。安装成功时同一事务保存模块定义和锁定快照。所有模块修改方法都要检查提交结果的 `state`。
+`GetCapabilities.source_formats` 以 `surge-module`、`loon-module` 和 `stash-module` 表示支持的模块格式。`AddModule` 请求中的 `module` 接受 `id`、`url` 或绝对 `file`、可选的 `format`、`enabled`、`interval` 和 `arguments`。`format` 可填 `surge`、`loon` 或 `stash`，省略时自动判别。`position` 是从零开始的列表索引，省略时追加。安装成功时同一事务保存模块定义和锁定快照。所有模块修改方法都要检查提交结果的 `state`。
 
-`SetModuleArguments` 替换完整的参数覆盖映射。传入空对象可恢复模块默认值。`PreviewModule.data` 接收原始模块文本，使用当前策略表，且不下载资源或写配置。远程 Map Local 和脚本在预览中会提示缺少锁定资源。`GetModuleReport` 返回当前生效模块的逐行转换结果，包含 `scripts` 计数和 `script_items`。`ListModules` 的报告摘要也包含这两个字段。
+`SetModuleArguments` 替换完整的参数覆盖映射。传入空对象可恢复模块默认值。`PreviewModule.data` 接收原始模块文本，使用当前策略表，且不下载资源或写配置。可通过 `format` 指定解析器，或通过 `filename` 提供自动判别所用的文件名。远程 Map Local 和脚本在预览中会提示缺少锁定资源。`GetModuleReport` 返回当前生效模块的逐行转换结果，包含 `format`、`scripts` 计数和 `script_items`。`ListModules` 也返回格式、脚本计数和脚本条目摘要。
 
-`script_items` 列出可转换脚本的 `id`、`name`、`type`、`pattern`、`requires_body`、`binary_body_mode`、可选 `max_size`（字节）、`timeout`（秒）、`engine`、`locked` 和锁定时的 `hash`。省略 `max_size` 表示使用平台默认值。`RefreshModule` 的 `wait` 和状态字段沿用订阅刷新结构，以 `module_id` 标识模块。脚本下载失败时，模块状态可附带 `script_errors`，每项包含 URL 的 SHA-256 `request` 和错误 `code`。单个脚本下载失败时，模块的其他条目可以正常生效。 [Surge 模块](modules.md)
+`script_items` 列出可转换脚本的 `id`、`name`、`type`、`pattern`、`requires_body`、`binary_body_mode`、可选 `max_size`（字节）、`timeout`（秒）、`engine`、`locked` 和锁定时的 `hash`。省略 `max_size` 表示使用平台默认值。`RefreshModule` 的 `wait` 和状态字段沿用订阅刷新结构，以 `module_id` 标识模块。脚本下载失败时，模块状态可附带 `script_errors`，每项包含 URL 的 SHA-256 `request` 和错误 `code`。单个脚本下载失败时，模块的其他条目可以正常生效。 [模块文档](modules.md)
 
 ## 7. Secret 管理
 

@@ -132,6 +132,29 @@ func TestRunJobAndBinaryDone(t *testing.T) {
 	}
 }
 
+func TestJobEncodesArgumentObject(t *testing.T) {
+	const object = `{"player":"Example","enabled":true}`
+	argument := object
+	job := newJob()
+	job.Script.Argument = &argument
+	job.Script.ArgumentObject = true
+	metadata, _, err := marshalJob(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Argument json.RawMessage `json:"argument"`
+	}
+	if err := json.Unmarshal(metadata, &wire); err != nil {
+		t.Fatal(err)
+	}
+	assertJSON(t, wire.Argument, object)
+	argument = `[]`
+	if _, _, err := marshalJob(job); err == nil {
+		t.Fatal("non-object argument was accepted")
+	}
+}
+
 func TestRunRequestResponse(t *testing.T) {
 	host := &fakeHost{}
 	b := New(host, Options{})

@@ -35,6 +35,10 @@ func (c *converter) script(line int, text string) outcome {
 	if issue.skips() {
 		return issue
 	}
+	return c.addScript(line, script, ref)
+}
+
+func (c *converter) addScript(line int, script model.Script, ref ScriptReference) outcome {
 	// Identify the declaration before pinning source bytes so overlays keep working
 	// across script updates.
 	script.ID = c.id("s", struct {
@@ -70,6 +74,16 @@ func parseScript(text string) (model.Script, ScriptReference, outcome) {
 	if !ok {
 		return script, ref, unsupported("module.script-syntax", "expected unique comma-separated script settings")
 	}
+	return parseScriptFields(name, model.ModuleFormatSurge, fields)
+}
+
+// Loon's legacy script documentation specifies a 10-second HTTP script default.
+// https://nsloon.app/en/docs/Script/
+const loonScriptTimeout = 10
+
+func parseScriptFields(name, format string, fields []scriptSetting) (model.Script, ScriptReference, outcome) {
+	var script model.Script
+	var ref ScriptReference
 	for _, field := range fields {
 		if field.key == "type" {
 			script.Type = strings.ToLower(field.value)
@@ -80,10 +94,13 @@ func parseScript(text string) (model.Script, ScriptReference, outcome) {
 		return script, ref, unsupported("module.script-type", "only http-request and http-response script types are supported")
 	}
 	script.Name = ptr(name)
-	script.Format = ptr(model.ModuleFormatSurge)
+	script.Format = ptr(format)
 	script.RequiresBody = ptr(false)
 	script.BinaryBodyMode = ptr(false)
 	script.Timeout = ptr(model.DefaultScriptTimeout)
+	if format == model.ModuleFormatLoon {
+		script.Timeout = ptr(loonScriptTimeout)
+	}
 	script.Engine = ptr("auto")
 	for _, field := range fields {
 		value := field.value
@@ -162,6 +179,10 @@ func parseScriptBool(value string) (bool, bool) {
 }
 
 func parseScriptSettings(settings string) ([]scriptSetting, bool) {
+	return parseScriptSettingsWithSeparator(settings, nextSetting, nil)
+}
+
+func parseScriptSettingsWithSeparator(settings string, separatorPattern *regexp.Regexp, recordQuote func(string)) ([]scriptSetting, bool) {
 	var fields []scriptSetting
 	seen := make(map[string]bool)
 	for settings = strings.TrimSpace(settings); settings != ""; settings = strings.TrimSpace(settings) {
@@ -175,13 +196,16 @@ func parseScriptSettings(settings string) ([]scriptSetting, bool) {
 		}
 		value := strings.TrimSpace(settings[separator+1:])
 		if strings.HasPrefix(value, `"`) {
+			if recordQuote != nil {
+				recordQuote(key)
+			}
 			var ok bool
-			value, settings, ok = quotedSetting(value)
+			value, settings, ok = quotedSetting(value, separatorPattern)
 			if !ok {
 				return nil, false
 			}
 		} else {
-			value, settings = unquotedSetting(value)
+			value, settings = unquotedSetting(value, separatorPattern)
 		}
 		fields = append(fields, scriptSetting{key, value})
 		seen[key] = true
@@ -196,9 +220,9 @@ func parseScriptSettings(settings string) ([]scriptSetting, bool) {
 var nextSetting = regexp.MustCompile(`^\s*(?:$|,\s*[A-Za-z][A-Za-z0-9-]*\s*=)`)
 
 // unquotedSetting reads a bare value.
-func unquotedSetting(s string) (value, rest string) {
+func unquotedSetting(s string, separatorPattern *regexp.Regexp) (value, rest string) {
 	for i := 0; i < len(s); i++ {
-		if s[i] == ',' && nextSetting.MatchString(s[i:]) {
+		if s[i] == ',' && separatorPattern.MatchString(s[i:]) {
 			return strings.TrimSpace(s[:i]), s[i+1:]
 		}
 	}
@@ -206,14 +230,14 @@ func unquotedSetting(s string) (value, rest string) {
 }
 
 // quotedSetting reads a double-quoted value. A backslash escapes a quote.
-func quotedSetting(s string) (value, rest string, ok bool) {
+func quotedSetting(s string, separatorPattern *regexp.Regexp) (value, rest string, ok bool) {
 	var out strings.Builder
 	for i := 1; i < len(s); i++ {
 		switch {
 		case s[i] == '\\' && i+1 < len(s) && s[i+1] == '"':
 			out.WriteByte('"')
 			i++
-		case s[i] == '"' && nextSetting.MatchString(s[i+1:]):
+		case s[i] == '"' && separatorPattern.MatchString(s[i+1:]):
 			rest = strings.TrimSpace(s[i+1:])
 			return out.String(), strings.TrimPrefix(rest, ","), true
 		default:

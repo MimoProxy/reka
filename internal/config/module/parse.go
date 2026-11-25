@@ -24,9 +24,7 @@ func Inspect(text []byte, arguments map[string]string, moduleInterval ...int) (M
 	if len(moduleInterval) > 0 && moduleInterval[0] > 0 {
 		interval = moduleInterval[0]
 	}
-	var refs ResourceReferences
-	mapLocalSeen := make(map[string]bool)
-	scriptIndices := make(map[string]int)
+	collector := newReferenceCollector(interval)
 	metadata, _ := scan(text, arguments, func(_ int, section, _, expanded string, issue outcome) {
 		if issue.skips() || isSection(expanded) {
 			return
@@ -34,27 +32,52 @@ func Inspect(text []byte, arguments map[string]string, moduleInterval ...int) (M
 		switch section {
 		case "map local":
 			_, url, issue := parseMapLocal(expanded)
-			if !issue.skips() && url != "" && !mapLocalSeen[url] {
-				mapLocalSeen[url] = true
-				refs.MapLocal = append(refs.MapLocal, url)
+			if !issue.skips() {
+				collector.mapLocal(url)
 			}
 		case "script":
 			_, ref, issue := parseScript(expanded)
-			if issue.skips() {
-				return
+			if !issue.skips() {
+				collector.script(ref)
 			}
-			if ref.Interval == 0 {
-				ref.Interval = interval
-			}
-			if i, seen := scriptIndices[ref.URL]; seen {
-				refs.Scripts[i].Interval = min(refs.Scripts[i].Interval, ref.Interval)
-				return
-			}
-			scriptIndices[ref.URL] = len(refs.Scripts)
-			refs.Scripts = append(refs.Scripts, ref)
 		}
 	})
-	return metadata, refs
+	return metadata, collector.refs
+}
+
+type referenceCollector struct {
+	refs          ResourceReferences
+	mapLocalSeen  map[string]bool
+	scriptIndices map[string]int
+	interval      int
+}
+
+func newReferenceCollector(interval int) *referenceCollector {
+	if interval <= 0 {
+		interval = model.DefaultResourceInterval
+	}
+	return &referenceCollector{
+		mapLocalSeen: make(map[string]bool), scriptIndices: make(map[string]int), interval: interval,
+	}
+}
+
+func (c *referenceCollector) mapLocal(url string) {
+	if url != "" && !c.mapLocalSeen[url] {
+		c.mapLocalSeen[url] = true
+		c.refs.MapLocal = append(c.refs.MapLocal, url)
+	}
+}
+
+func (c *referenceCollector) script(ref ScriptReference) {
+	if ref.Interval == 0 {
+		ref.Interval = c.interval
+	}
+	if i, seen := c.scriptIndices[ref.URL]; seen {
+		c.refs.Scripts[i].Interval = min(c.refs.Scripts[i].Interval, ref.Interval)
+		return
+	}
+	c.scriptIndices[ref.URL] = len(c.refs.Scripts)
+	c.refs.Scripts = append(c.refs.Scripts, ref)
 }
 
 func scan(text []byte, supplied map[string]string, visit func(int, string, string, string, outcome)) (Metadata, model.Diagnostics) {
@@ -102,6 +125,22 @@ func scan(text []byte, supplied map[string]string, visit func(int, string, strin
 		}
 	}
 
+	walkModuleLines(input, func(text string, remaining *int) outcome {
+		return metadata.apply(text, values, remaining)
+	}, func(_ string, text string, remaining *int) (string, outcome) {
+		return substitute(text, values, remaining)
+	}, func(line int, section, raw, expanded string, issue outcome, _ *int) {
+		visit(line, section, raw, expanded, issue)
+	})
+	return metadata, diagnostics
+}
+
+func walkModuleLines(
+	input string,
+	applyMetadata func(string, *int) outcome,
+	expandLine func(string, string, *int) (string, outcome),
+	visit func(int, string, string, string, outcome, *int),
+) {
 	line, section, inHeader := 0, "", true
 	remaining := model.MaxDocumentSize
 	for raw := range strings.Lines(input) {
@@ -109,8 +148,8 @@ func scan(text []byte, supplied map[string]string, visit func(int, string, strin
 		raw = strings.TrimRight(raw, "\r\n")
 		trimmed := strings.TrimSpace(raw)
 		if inHeader && strings.HasPrefix(trimmed, "#!") {
-			issue := metadata.apply(trimmed, values, &remaining)
-			visit(line, "metadata", raw, trimmed, issue)
+			issue := applyMetadata(trimmed, &remaining)
+			visit(line, "metadata", raw, trimmed, issue, &remaining)
 			if issue.status == Error {
 				break
 			}
@@ -119,9 +158,9 @@ func scan(text []byte, supplied map[string]string, visit func(int, string, strin
 		if isComment(trimmed) {
 			continue
 		}
-		expanded, issue := substitute(trimmed, values, &remaining)
+		expanded, issue := expandLine(section, trimmed, &remaining)
 		if issue.skips() {
-			visit(line, section, raw, expanded, issue)
+			visit(line, section, raw, expanded, issue, &remaining)
 			if issue.status == Error {
 				break
 			}
@@ -136,10 +175,12 @@ func scan(text []byte, supplied map[string]string, visit func(int, string, strin
 			if isSection(replaced) {
 				section = strings.ToLower(strings.TrimSpace(replaced[1 : len(replaced)-1]))
 			}
-			visit(line, section, raw, replaced, outcome{})
+			visit(line, section, raw, replaced, outcome{}, &remaining)
+			if remaining < 0 {
+				return
+			}
 		}
 	}
-	return metadata, diagnostics
 }
 
 func (m *Metadata) apply(text string, values map[string]string, remaining *int) outcome {
@@ -157,13 +198,21 @@ func (m *Metadata) apply(text string, values map[string]string, remaining *int) 
 		return outcome{}
 	case "requirement":
 		return ignored("module.requirement", "module requirements are ignored")
+	}
+	return m.applyInfo(key, value, func(value string) (string, outcome) {
+		return substitute(value, values, remaining)
+	})
+}
+
+func (m *Metadata) applyInfo(key, value string, expand func(string) (string, outcome)) outcome {
+	switch key {
 	case "name", "desc", "system", "category", "icon":
 	default:
 		// Authors, links, dates and app-specific keys do not affect behavior,
 		// so they do not make the import partial.
 		return outcome{Supported, "module.metadata", "metadata is informational only"}
 	}
-	value, issue := substitute(value, values, remaining)
+	value, issue := expand(value)
 	if issue.skips() {
 		return issue
 	}

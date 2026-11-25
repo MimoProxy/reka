@@ -204,16 +204,17 @@ func (s *Service) ListModules() ([]api.ModuleInfo, error) {
 	list := make([]api.ModuleInfo, 0, len(p.Modules))
 	for _, def := range p.Modules {
 		src := byID[def.ID]
-		info := api.ModuleInfo{ID: def.ID, Enabled: def.IsEnabled(), SourceType: "url", Status: m.moduleStatus(def, src, revision)}
+		info := api.ModuleInfo{ID: def.ID, Enabled: def.IsEnabled(), SourceType: "url", Format: def.Format, Status: m.moduleStatus(def, src, revision)}
 		if def.File != "" {
 			info.SourceType = "file"
 		}
-		if moduleacquire.Matches(def, src) {
-			info.Name, info.Desc = src.Module.Name, src.Module.Desc
+		matched := moduleacquire.Matches(def, src)
+		if matched {
+			info.Format, info.Name, info.Desc = src.Module.Format, src.Module.Name, src.Module.Desc
 		}
 		if eff != nil {
 			if report, ok := eff.Modules[def.ID]; ok {
-				info.Name, info.Desc, info.Arguments = report.Name, report.Desc, report.Arguments
+				info.Format, info.Name, info.Desc, info.Arguments = report.Format, report.Name, report.Desc, report.Arguments
 				info.Report = &api.ModuleReportSummary{Partial: report.Partial, CanApply: report.CanApply,
 					Rules: report.Rules, Rewrites: report.Rewrites, Hostnames: report.Hostnames,
 					Scripts: report.Scripts, ScriptItems: report.ScriptItems}
@@ -221,9 +222,9 @@ func (s *Service) ListModules() ([]api.ModuleInfo, error) {
 		}
 		// Disabled modules have no effective report, but their locked text can
 		// still provide argument declarations for editing.
-		if info.Report == nil && moduleacquire.Matches(def, src) {
+		if info.Report == nil && matched {
 			if body, err := m.blobs.Read(src.Lock.Root); err == nil {
-				meta, _ := module.Inspect(body, def.Arguments)
+				meta, _ := module.InspectWithOptions(body, module.Options{Format: info.Format, Arguments: def.Arguments})
 				info.Arguments = meta.Arguments
 			}
 		}
@@ -257,7 +258,7 @@ func (s *Service) GetModuleReport(id string) (module.Report, error) {
 				return module.Report{}, errf(CodeNotFound, "module refresh failed (%s); refresh the module", status.ErrorCode)
 			}
 		}
-		return module.Report{}, errf(CodeNotFound, "module has not been downloaded or its location changed; refresh the module")
+		return module.Report{}, errf(CodeNotFound, "refresh the module to download a snapshot for the declared location and format")
 	}
 	return module.Report{}, errf(CodeBlocked, "module has no report in the active configuration")
 }
@@ -266,14 +267,21 @@ func (s *Service) PreviewModule(req api.PreviewModuleRequest) (module.Report, er
 	if len(req.Data) > model.MaxDocumentSize {
 		return module.Report{}, errf(CodeBadRequest, "module text exceeds 16 MiB")
 	}
+	format := req.Format
+	text := []byte(req.Data)
+	if format == "" {
+		format = module.DetectFormat(req.Filename, text)
+	} else if !model.ValidModuleFormat(format) {
+		return module.Report{}, errf(CodeBadRequest, "module format must be surge, loon, or stash")
+	}
 	s.mu.Lock()
 	eff := s.eff
 	s.mu.Unlock()
-	opts := module.Options{Arguments: req.Arguments}
+	opts := module.Options{Format: format, Arguments: req.Arguments}
 	if eff != nil {
 		opts.Resolve = eff.ModulePolicyResolver()
 	}
-	_, report := module.Convert([]byte(req.Data), opts)
+	_, report := module.Convert(text, opts)
 	return report, nil
 }
 
@@ -287,7 +295,9 @@ func (s *Service) moduleResourcesLocked(def model.Module, src model.Source) bool
 	for _, entry := range src.Lock.Resources {
 		locked[resourceKey{entry.Kind, entry.Request}] = true
 	}
-	_, refs := module.Inspect(text, def.Arguments, def.Interval)
+	_, refs := module.InspectWithOptions(text, module.Options{
+		Format: src.Module.Format, Arguments: def.Arguments, ModuleInterval: def.Interval,
+	})
 	for _, url := range refs.MapLocal {
 		if !locked[resourceKey{"map-local", resource.Hash([]byte(url))}] {
 			return false

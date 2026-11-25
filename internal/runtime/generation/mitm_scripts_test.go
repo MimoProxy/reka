@@ -25,7 +25,7 @@ func TestMITMScriptTableOrder(t *testing.T) {
 		{ID: "unsupported", Type: request, Pattern: ".*"},
 		{ID: "non-http", Supported: true, Type: "event", Pattern: ".*"},
 		{ID: "bad-pattern", Supported: true, Type: request, Pattern: "("},
-		{ID: "response", Supported: true, Type: response, Pattern: "example[.]test"},
+		{ID: "response", Supported: true, Type: response, Pattern: "example[.]test", ArgumentType: "object", Argument: `{"enabled":true}`},
 		{ID: "first", Supported: true, Type: request, Pattern: "/path$", Argument: "sample", Name: "First",
 			Path: "https://scripts.test/sample.js", Hash: "hash", Format: "loon", RequiresBody: true,
 			Engine: "webview", BinaryBodyMode: true, Timeout: 4, MaxSize: 128},
@@ -49,7 +49,8 @@ func TestMITMScriptTableOrder(t *testing.T) {
 		got.id != "fallback" || got.spec.Name != "fallback" || got.spec.Path != "fallback" || got.spec.Argument != nil {
 		t.Fatalf("fallback request match = %+v", got)
 	}
-	if got := table.match(script.KindHTTPResponse, url); got == nil || got.id != "response" {
+	if got := table.match(script.KindHTTPResponse, url); got == nil || got.id != "response" || !got.spec.ArgumentObject ||
+		got.spec.Argument == nil || *got.spec.Argument != `{"enabled":true}` {
 		t.Fatalf("response match = %+v", got)
 	}
 	if got := table.match(script.KindHTTPRequest, "https://other.test/other"); got != nil {
