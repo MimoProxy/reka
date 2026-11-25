@@ -76,7 +76,7 @@ func (f *scriptWireFixture) apply(engine *Engine, revision uint64, extra string,
 	var profile strings.Builder
 	profile.WriteString(`schema-version: 1
 sniff: {enabled: true, protocols: [tls]}
-mitm: {hostnames: ['origin.test:0'], skip-server-cert-verify: true}
+mitm: {hostnames: ['origin.test:0'], h2: false, skip-server-cert-verify: true}
 `)
 	profile.WriteString(extra)
 	profile.WriteString("scripts:\n")

@@ -30,7 +30,7 @@ mitm:
 	if !e.MITMStatus().CALoaded {
 		t.Fatalf("MITM CA failed to load: %s", e.MITMStatus().CAError)
 	}
-	if status := e.MITMStatus(); status.H2 != "disabled" {
+	if status := e.MITMStatus(); status.H2 != "enabled" {
 		t.Fatalf("default HTTP/2 status = %q", status.H2)
 	}
 

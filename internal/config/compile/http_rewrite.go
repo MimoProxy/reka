@@ -30,6 +30,10 @@ type MITM struct {
 
 func (c *compiler) mitm(eff *Effective) {
 	eff.MITM.QUICBlock = true
+	// Surge defaults h2 to false. Reka turns it on: apps such as gRPC
+	// clients cannot use an HTTP/1.1-only MITM handshake and fall back
+	// slowly, and on-device tests kept HTTP/2 MITM within the iOS budget.
+	eff.MITM.H2 = true
 	settings := c.profile.MITM
 	if settings == nil {
 		settings = &model.MITM{}

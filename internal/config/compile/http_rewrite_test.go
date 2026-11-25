@@ -28,7 +28,7 @@ func TestMITMDefaultsAndLocalCA(t *testing.T) {
 			if diags.HasErrors() {
 				t.Fatal(diags)
 			}
-			if got := eff.MITM; got.Enabled != tc.enabled || got.CA != tc.ca || got.ScriptLog != tc.log || got.H2 || got.SkipServerCertVerify || !got.QUICBlock {
+			if got := eff.MITM; got.Enabled != tc.enabled || got.CA != tc.ca || got.ScriptLog != tc.log || !got.H2 || got.SkipServerCertVerify || !got.QUICBlock {
 				t.Fatalf("MITM = %+v", got)
 			}
 			if eff.HTTPRewrite != nil || eff.HTTPRewriteFingerprint != "" {

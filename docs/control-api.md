@@ -410,7 +410,7 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 `GetMITMStatus` 返回 `enabled`、`ca_loaded`、可选 `ca_error`、`h2`、`hostname_count`、`pinning_bypasses`、`connections_total`、`requests_total` 和 `scripts`。`enabled` 表示本机配置中的开关，`ca_loaded` 表示活动配置拥有可用的 CA。CA 状态随配置激活更新。
 
-`h2` 在配置启用 MITM HTTP/2 时为 `"enabled"`，省略该开关或设为 `false` 时为 `"disabled"`。
+`h2` 在 MITM HTTP/2 启用时为 `"enabled"`（省略该开关时默认启用），设为 `false` 时为 `"disabled"`。
 
 `pinning_bypasses` 的每项包含 `hostname`、`reason`、`expires_at`。列表跨配置代际生效，按主机名记录，保留至多 256 项。`connections_total` 从进入 MITM 转发时开始计数，包含后续握手失败的连接。`requests_total` 统计已解析的请求，包含本地响应。两个计数均从本次内核运行开始累计。
 

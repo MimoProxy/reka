@@ -23,7 +23,7 @@ func TestGetMITMStatus(t *testing.T) {
 	if err := json.Unmarshal(reply.Result, &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.H2 != "disabled" || status.Enabled || status.CALoaded || status.CAError != "" ||
+	if status.H2 != "enabled" || status.Enabled || status.CALoaded || status.CAError != "" ||
 		status.PinningBypasses == nil || len(status.PinningBypasses) != 0 || status.Connections != 0 || status.Requests != 0 {
 		t.Fatalf("initial MITM status = %+v", status)
 	}

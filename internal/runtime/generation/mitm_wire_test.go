@@ -50,7 +50,7 @@ func TestMITMGenerationLoopback(t *testing.T) {
 		profile := func(skipVerify bool, mark string) string {
 			return fmt.Sprintf(`schema-version: 1
 sniff: {enabled: true, protocols: [tls]}
-mitm: {hostnames: ['%s:0'], client-source-address: ['127.0.0.0/8'], skip-server-cert-verify: %t}
+mitm: {hostnames: ['%s:0'], h2: false, client-source-address: ['127.0.0.0/8'], skip-server-cert-verify: %t}
 dns:
   nameserver: ['127.0.0.1:9']
   use-hosts: true
@@ -159,7 +159,7 @@ map-local:
 		profile := func(host, source string) string {
 			return fmt.Sprintf(`schema-version: 1
 sniff: {enabled: true, protocols: [tls]}
-mitm: {hostnames: [%q], client-source-address: %s, skip-server-cert-verify: true}
+mitm: {hostnames: [%q], h2: false, client-source-address: %s, skip-server-cert-verify: true}
 rules: [{match: {all: true}, outbound: direct}]
 `, host+":0", source)
 		}
@@ -201,7 +201,7 @@ rules: [{match: {all: true}, outbound: direct}]
 		t.Cleanup(engine.Close)
 		const profile = `schema-version: 1
 sniff: {enabled: true, protocols: [tls]}
-mitm: {hostnames: ['origin.test:0'], skip-server-cert-verify: true}
+mitm: {hostnames: ['origin.test:0'], h2: false, skip-server-cert-verify: true}
 rules: [{match: {all: true}, outbound: direct}]
 `
 		listen := testnet.RetryAddr(t, func(listen netip.AddrPort) error {
