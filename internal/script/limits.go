@@ -17,8 +17,8 @@ const (
 	defaultMaxHTTPInFlight = 64
 	// defaultLogLineMax matches Surge's maximum log line size.
 	defaultLogLineMax = 512 << 10
-	// defaultStoreValueMax matches Surge's iOS limit on one persistent store value.
-	defaultStoreValueMax = 4 << 20
+	// DefaultStoreValueMax matches Surge's iOS limit on one persistent store value.
+	DefaultStoreValueMax = 4 << 20
 	// defaultCacheBytes is Reka's budget for roughly 3 MiB of source, based on
 	// measured compiled programs occupying about ten times as many bytes.
 	defaultCacheBytes = 32 << 20
@@ -70,7 +70,7 @@ func (l Limits) WithDefaults() Limits {
 		l.LogLineMax = defaultLogLineMax
 	}
 	if l.StoreValueMax <= 0 {
-		l.StoreValueMax = defaultStoreValueMax
+		l.StoreValueMax = DefaultStoreValueMax
 	}
 	if l.CacheBytes <= 0 {
 		l.CacheBytes = defaultCacheBytes

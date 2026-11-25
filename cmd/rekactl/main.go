@@ -45,10 +45,12 @@ configuration
 
 runtime
   status
+  mitm-status                               show MITM and script counters
   group-status                               observed automatic choices and health
   explain DESTINATION [-network tcp|udp] [-source ADDR] [-addr IP]... [-resolve] [-process NAME]
   connections
   timeline [CONNECTION-ID] [-epoch EPOCH]    inspect a flow or list recent connections
+  requests [-limit N] [-before CURSOR] [-query TEXT]   list HTTP requests and script results
   temp-rule add [-ttl 5m] RULE               route new connections with a rule that expires
   temp-rule list | remove ID
   arena [-url URL] [-rounds 3] OUTBOUND...   compare two or more nodes or groups
@@ -192,12 +194,16 @@ func run(args []string) error {
 		return nil
 	case "status":
 		return cmdStatus()
+	case "mitm-status":
+		return cmdMITMStatus(rest)
 	case "explain":
 		return cmdExplain(rest)
 	case "connections":
 		return cmdConnections()
 	case "timeline":
 		return cmdTimeline(rest)
+	case "requests":
+		return cmdRequests(rest)
 	case "temp-rule":
 		return cmdTemporaryRule(rest)
 	case "arena":
@@ -783,14 +789,14 @@ func cmdConnections() error {
 	}
 	sort.Slice(out.Connections, func(i, j int) bool { return out.Connections[i].ID < out.Connections[j].ID })
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNET\tDESTINATION\tOUTBOUND\tRULE\tGEN\tUP\tDOWN\tAGE")
+	fmt.Fprintln(w, "ID\tNET\tDESTINATION\tOUTBOUND\tRULE\tGEN\tUP\tDOWN\tAGE\tSCRIPTS")
 	for _, c := range out.Connections {
 		rule := c.RuleID
 		if rule == "" {
 			rule = c.Rule
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n", c.ID, c.Network, c.Destination, c.Outbound, rule,
-			c.Generation, c.Upload, c.Download, time.Since(c.Start).Round(time.Second))
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n", c.ID, c.Network, c.Destination, c.Outbound, rule,
+			c.Generation, c.Upload, c.Download, time.Since(c.Start).Round(time.Second), scriptStats(c.MITMScripts))
 	}
 	return w.Flush()
 }

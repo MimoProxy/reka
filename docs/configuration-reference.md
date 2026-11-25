@@ -503,12 +503,13 @@ MITM 对选中的入站 HTTPS 连接终结 TLS，再通过选定的出站建立�
 
 ### 11.1 MITM 设置
 
-`local.yaml` 的 `mitm` 只允许以下两个本机字段。profile、source 和 overlay 中设置这两个字段会报错。
+`local.yaml` 的 `mitm` 只允许以下本机字段。profile、source 和 overlay 中设置这些字段会报错。
 
 | `mitm` 字段 | 类型 / 默认值 | 含义及限制 |
 | --- | --- | --- |
 | `enabled` | 布尔，默认 `false` | 本机 MITM 开关。关闭时仍合成并校验其他 MITM 设置及重写规则 |
 | `ca` | 字符串，默认无 | `enabled: true` 时必填，唯一允许的值为 `secret://mitm/ca`。使用 CA 控制接口生成或导入证书后，重新激活配置以加载 CA。加载失败时，该代配置下的连接按原路由转发。 [CA 控制接口](control-api.md#mitm-ca) |
+| `script-log` | 布尔，默认 `false` | 启用脚本的 `console` 输出。内核以 debug 级别记录，来源为 `script`，带脚本 ID。查看输出时将日志级别设为 `debug` |
 
 profile 和 source 的 `mitm` 支持以下字段。
 
@@ -585,7 +586,7 @@ URL 重写改变目标主机时，内核用该连接所属配置的路由为请�
 
 ### 脚本 `scripts`
 
-`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。当前提供脚本的配置、导入和刷新，执行由后续版本接入。
+`scripts` 按重写资源的层级合成。覆盖层可用 `set` 修改脚本，用 `remove` 按 ID 移除脚本。例如，`/scripts/filters~1s-example` 指向模块 `filters` 的 `s-example` 条目。桌面平台与 Android 在 MITM HTTP/1.1 转发时执行脚本，请求与响应方向各取第一条匹配。iOS 仍合成及匹配脚本，记录 `unsupported` 后原样放行。 [脚本运行与执行顺序](modules.md#script-execution)
 
 | 字段 | 类型 / 默认值 | 含义及限制 |
 | --- | --- | --- |
@@ -595,11 +596,11 @@ URL 重写改变目标主机时，内核用该连接所属配置的路由为请�
 | `pattern` | RE2 正则 | HTTP 脚本必填，匹配完整 URL，编译时检查语法 |
 | `requires-body` | 布尔，默认 `false` | 是否向脚本提供消息体 |
 | `binary-body-mode` | 布尔，默认 `false` | 以字节传递消息体 |
-| `max-size` | 整数，单位为字节 | iOS 默认值和硬上限均为 512 KiB。其他平台默认 10 MiB，硬上限 32 MiB。`0` 和 `-1` 使用硬上限，正数与硬上限取较小值 |
+| `max-size` | 整数，单位为字节 | iOS 默认值和硬上限均为 512 KiB。其他平台默认 10 MiB，硬上限 32 MiB。`0` 和 `-1` 使用硬上限，正数与硬上限取较小值。需要正文时，传输体或解码后的正文超过限额会跳过脚本 |
 | `timeout` | 整数，1–3600 秒，默认 5 秒 | 脚本运行时限 |
-| `argument` | 可选字符串 | 原样传给脚本 |
-| `engine` | `auto`（默认）、`jsc`、`webview` | 桌面平台忽略此项，iOS 由客户端决定 |
-| `format` | `surge`（默认）、`loon`、`stash` | 无参数的 `$done()` 在 `surge` 中表示原样放行，在 `loon` 和 `stash` 中表示中断请求 |
+| `argument` | 可选字符串 | 非空值原样传给脚本，省略或空字符串时 `$argument` 为 `undefined` |
+| `engine` | `auto`（默认）、`jsc`、`webview` | 保留兼容设置。桌面平台与 Android 使用 goja，iOS 暂停执行脚本 |
+| `format` | `surge`（默认）、`loon`、`stash` | 请求脚本的无参 `$done()` 在 `surge` 中放行，在 `loon` 和 `stash` 中中断连接。响应脚本的无参 `$done()` 均放行 |
 | `hash` | SHA-256 字符串 | HTTP 脚本必填，引用非空且不超过 2 MiB 的已入库源码 |
 | `download` | 可选对象 | `url` 为不含内联凭据或片段的 HTTP(S) URL，或 secret 引用。`interval` 为 300–604800 秒，省略或设为 `0` 时使用 86400 秒。`automatic` 默认 `false` |
 | `file` | 可选绝对路径 | 手动刷新时从内核所在设备读取普通文件 |

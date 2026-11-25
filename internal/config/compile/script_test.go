@@ -52,7 +52,7 @@ func TestScriptDefaultsAndLimits(t *testing.T) {
 				t.Fatalf("script compile: %v", ds)
 			}
 			got := eff.Scripts[0]
-			if !got.Supported || got.Type != "http-request" || got.Pattern != scriptPattern || got.Hash != hash ||
+			if !got.Supported || got.Type != "http-request" || got.Pattern != scriptPattern || got.Hash != hash || got.Path != "sample" ||
 				got.MaxSize != tc.maxSize || got.Timeout != tc.timeout || got.Engine != tc.engine || got.Format != tc.format ||
 				got.RequiresBody || got.BinaryBodyMode || got.Origin.Layer != LayerProfile || got.Origin.Path != "/scripts/sample" {
 				t.Fatalf("script = %+v", got)
@@ -68,25 +68,59 @@ func TestScriptDefaultsAndLimits(t *testing.T) {
 			t.Fatal(ds)
 		}
 		got := eff.Scripts[0]
-		if !got.Supported || got.Type != "http-response" || got.Name != "Sample" || !got.RequiresBody || !got.BinaryBodyMode || got.Argument != " a=1,b=2 " {
+		if !got.Supported || got.Type != "http-response" || got.Name != "Sample" || !got.RequiresBody || !got.BinaryBodyMode || got.Argument != " a=1,b=2 " || got.Path != "secret://script-url" {
 			t.Fatalf("script = %+v", got)
 		}
 		serialized, err := json.Marshal(eff)
-		if err != nil || !strings.Contains(string(serialized), `"scripts":[{"id":"sample"`) || strings.Contains(string(serialized), "script source") {
+		if err != nil || !strings.Contains(string(serialized), `"scripts":[{"id":"sample"`) ||
+			strings.Contains(string(serialized), "script source") || strings.Contains(string(serialized), "secret://script-url") {
 			t.Fatalf("effective JSON = %s, err = %v", serialized, err)
 		}
 	})
 
 	t.Run("absolute file", func(t *testing.T) {
 		// Compilation validates the path without reading the original file.
-		path, err := json.Marshal(filepath.Join(t.TempDir(), "script.js"))
+		file := filepath.Join(t.TempDir(), "script.js")
+		path, err := json.Marshal(file)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ds := Compile(scriptProfile(fields+", file: "+string(path)), nil, opts); ds.HasErrors() {
+		eff, ds := Compile(scriptProfile(fields+", file: "+string(path)), nil, opts)
+		if ds.HasErrors() {
 			t.Fatal(ds)
 		}
+		if eff.Scripts[0].Path != file {
+			t.Fatalf("path = %q", eff.Scripts[0].Path)
+		}
 	})
+}
+
+func TestScriptSourceUsesLockedReader(t *testing.T) {
+	data := []byte(scriptSource)
+	hash := resource.Hash(data)
+	fields := fmt.Sprintf("id: sample, type: http-request, pattern: '%s', hash: %s", scriptPattern, hash)
+	var reads int
+	eff, ds := Compile(scriptProfile(fields), nil, Options{ReadResource: func(string) ([]byte, error) {
+		reads++
+		return data, nil
+	}})
+	if ds.HasErrors() || reads != 1 {
+		t.Fatalf("compile = %v, reads = %d", ds, reads)
+	}
+	if !keepScriptReader {
+		if _, err := eff.ScriptSource(hash); err == nil || reads != 1 {
+			t.Fatalf("source err = %v, reads = %d", err, reads)
+		}
+		return
+	}
+	got, err := eff.ScriptSource(hash)
+	if err != nil || string(got) != scriptSource || reads != 2 {
+		t.Fatalf("source = %q, err = %v, reads = %d", got, err, reads)
+	}
+	data = []byte("changed")
+	if _, err := eff.ScriptSource(hash); err == nil {
+		t.Fatal("loaded a script whose content no longer matches its locked hash")
+	}
 }
 
 func TestScriptFieldValidation(t *testing.T) {

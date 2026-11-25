@@ -13,8 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/mitm/ca"
+	"github.com/MimoProxy/reka/internal/script"
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	N "github.com/sagernet/sing/common/network"
@@ -32,6 +34,8 @@ type MITMRoute struct {
 	OnPinFailure         func(host, reason string)
 	OnConnection         func()
 	OnRequest            func()
+	MatchScript          func(kind script.Kind, rawURL string) *MITMScript
+	OnScript             func(run api.MITMScriptRun, executed bool)
 }
 
 func (b *Backend) relayMITM(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, originalDestination string, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {

@@ -346,6 +346,11 @@ func checkReply(q, m *D.Msg) error {
 // DNSListener answers DNS queries on one address over UDP and TCP.
 type DNSListener struct{ udp, tcp *D.Server }
 
+// Addr returns the bound address, including an automatically selected port.
+func (d *DNSListener) Addr() netip.AddrPort {
+	return d.tcp.Listener.Addr().(*net.TCPAddr).AddrPort()
+}
+
 // NewDNSListener serves exchange on address. UDP replies are truncated to
 // the client's EDNS size (512 bytes without EDNS, at most 4096).
 func NewDNSListener(address string, exchange func(context.Context, *D.Msg) (*D.Msg, error)) (*DNSListener, error) {

@@ -46,21 +46,22 @@ type Operation struct {
 }
 
 type ConnectionRow struct {
-	ID                   uint64   `json:"id"`
-	StartMS              int64    `json:"startMs"`
-	Destination          string   `json:"destination"`
-	Network              string   `json:"network"`
-	Protocol             string   `json:"protocol,omitempty"`
-	State                string   `json:"state,omitempty"`
-	Rule                 string   `json:"rule,omitempty"`
-	Groups               []string `json:"groups,omitempty"`
-	Outbound             string   `json:"outbound"`
-	Uploaded             int64    `json:"uploaded"`
-	Downloaded           int64    `json:"downloaded"`
-	MITM                 bool     `json:"mitm,omitempty"`
-	MITMRequests         uint64   `json:"mitmRequests,omitempty"`
-	MITMMatchedIDs       []string `json:"mitmMatchedIds,omitempty"`
-	MITMBodyPassthroughs uint64   `json:"mitmBodyPassthroughs,omitempty"`
+	ID                   uint64                `json:"id"`
+	StartMS              int64                 `json:"startMs"`
+	Destination          string                `json:"destination"`
+	Network              string                `json:"network"`
+	Protocol             string                `json:"protocol,omitempty"`
+	State                string                `json:"state,omitempty"`
+	Rule                 string                `json:"rule,omitempty"`
+	Groups               []string              `json:"groups,omitempty"`
+	Outbound             string                `json:"outbound"`
+	Uploaded             int64                 `json:"uploaded"`
+	Downloaded           int64                 `json:"downloaded"`
+	MITM                 bool                  `json:"mitm,omitempty"`
+	MITMRequests         uint64                `json:"mitmRequests,omitempty"`
+	MITMMatchedIDs       []string              `json:"mitmMatchedIds,omitempty"`
+	MITMBodyPassthroughs uint64                `json:"mitmBodyPassthroughs,omitempty"`
+	MITMScripts          []api.MITMScriptStats `json:"mitmScripts,omitempty"`
 }
 
 type Latency struct {
@@ -151,7 +152,7 @@ func (s *Session) connections() []ConnectionRow {
 				Destination: conn.Metadata.Destination.String(), Protocol: conn.Metadata.Protocol, State: conn.State,
 				Outbound: conn.Outbound, Uploaded: conn.Upload, Downloaded: conn.Download,
 				MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
-				MITMBodyPassthroughs: conn.MITMBodyPassthroughs,
+				MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
 			})
 		}
 		sortConnectionRows(rows)
@@ -200,7 +201,7 @@ func (s *Session) connections() []ConnectionRow {
 			Rule: history.Text(rule, 384), Groups: groups, Outbound: connectionDisplayName(conn.Outbound, conn.OutboundName),
 			Uploaded: conn.Upload, Downloaded: conn.Download,
 			MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
-			MITMBodyPassthroughs: conn.MITMBodyPassthroughs,
+			MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
 		})
 	}
 	sortConnectionRows(rows)

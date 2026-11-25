@@ -125,6 +125,14 @@ const tinyGIF = "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9
 // Request applies the first matching URL rule, request headers, the first
 // matching local resource, and request body rules in that order.
 func (s *Set) Request(req Request) RequestResult {
+	result := s.RequestBeforeBody(req)
+	s.ApplyRequestBody(&result, req.Body)
+	return result
+}
+
+// RequestBeforeBody applies URL and header rewrites and checks for a local
+// response. A relay can then size its buffer using the rewritten URL.
+func (s *Set) RequestBeforeBody(req Request) RequestResult {
 	result := RequestResult{URL: req.URL, Header: req.Header, Body: req.Body}
 	if s == nil {
 		return result
@@ -154,11 +162,24 @@ func (s *Set) Request(req Request) RequestResult {
 	if r := s.findMapRule(result.URL); r != nil {
 		result.MatchedIDs = append(result.MatchedIDs, r.id)
 		result.Local, result.ResourceError = r.response(s.opts.ReadResource)
-	} else {
-		result.Body = s.rewriteBody(requestPhase, result.URL, &header, result.Body, &result.MatchedIDs)
 	}
 	result.Header = header.value
 	return result
+}
+
+// ApplyRequestBody completes a request rewrite using a buffered body.
+func (s *Set) ApplyRequestBody(result *RequestResult, body []byte) {
+	if s == nil || result.Local != nil || result.Connection != "" || result.ResourceError != nil {
+		return
+	}
+	header := editedHeader{value: result.Header}
+	result.Body = s.rewriteBody(requestPhase, result.URL, &header, body, &result.MatchedIDs)
+	result.Header = header.value
+}
+
+// NeedsRewrittenRequestBody checks body rules after URL and local rewrites.
+func (s *Set) NeedsRewrittenRequestBody(url string) bool {
+	return s != nil && s.needsBody(requestPhase, url)
 }
 
 // Response applies response header rules before response body rules.

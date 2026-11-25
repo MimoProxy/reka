@@ -27,11 +27,11 @@ func cmdTimeline(args []string) error {
 		}
 		fmt.Println("History epoch", page.Epoch)
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tDESTINATION\tOUTBOUND\tCLOSED\tDURATION")
+		fmt.Fprintln(w, "ID\tDESTINATION\tOUTBOUND\tCLOSED\tDURATION\tSCRIPTS")
 		for _, row := range page.Rows {
 			var trace api.ConnectionTrace
 			if json.Unmarshal(row.Data, &trace) == nil {
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%dms\n", trace.ID, trace.Destination, trace.Outbound, trace.CloseReason, trace.DurationMS)
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%dms\t%s\n", trace.ID, trace.Destination, trace.Outbound, trace.CloseReason, trace.DurationMS, scriptStats(trace.MITMScripts))
 			}
 		}
 		return w.Flush()
@@ -49,6 +49,9 @@ func cmdTimeline(args []string) error {
 	}
 	trace := result.Trace
 	fmt.Printf("%d  %s  %s\n", trace.ID, trace.Network, trace.Destination)
+	if len(trace.MITMScripts) > 0 {
+		fmt.Println("MITM scripts", scriptStats(trace.MITMScripts))
+	}
 	for _, event := range result.Events {
 		fmt.Printf("%s  %-13s %s\n", event.At.Local().Format("15:04:05.000"), event.Stage, timelineEventDetail(event, trace))
 	}
@@ -69,13 +72,14 @@ func timelineEventDetail(event api.TimelineEvent, trace api.ConnectionTrace) str
 		return fmt.Sprintf("%s  ↑%d ↓%d bytes", trace.CloseReason, trace.Upload, trace.Download)
 	case "dns", "http":
 		var summary struct {
-			Name   string `json:"name"`
-			Type   string `json:"type"`
-			Host   string `json:"host"`
-			Method string `json:"method"`
+			Name    string              `json:"name"`
+			Type    string              `json:"type"`
+			Host    string              `json:"host"`
+			Method  string              `json:"method"`
+			Scripts []api.MITMScriptRun `json:"scripts"`
 		}
 		if json.Unmarshal(event.Data, &summary) == nil {
-			return strings.TrimSpace(summary.Type + summary.Method + " " + summary.Name + summary.Host)
+			return strings.TrimSpace(summary.Type + summary.Method + " " + summary.Name + summary.Host + " " + scriptRuns(summary.Scripts))
 		}
 	}
 	return ""

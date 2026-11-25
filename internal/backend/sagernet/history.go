@@ -263,6 +263,7 @@ func (a *connectionAttempt) activeInfo() (string, api.MITMConnectionInfo) {
 	defer a.mu.Unlock()
 	info := a.MITMConnectionInfo
 	info.MITMMatchedIDs = slices.Clone(info.MITMMatchedIDs)
+	info.MITMScripts = slices.Clone(info.MITMScripts)
 	if a.EndedAt.IsZero() {
 		if a.ReadyAt == nil {
 			return "connecting", info

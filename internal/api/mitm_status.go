@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // MITMStatus reports the active configuration and runtime counters.
 type MITMStatus struct {
@@ -12,10 +15,49 @@ type MITMStatus struct {
 	PinningBypasses []MITMBypassInfo `json:"pinning_bypasses"`
 	Connections     uint64           `json:"connections_total"`
 	Requests        uint64           `json:"requests_total"`
+	Scripts         MITMScriptStatus `json:"scripts"`
 }
 
 type MITMBypassInfo struct {
 	Hostname  string    `json:"hostname"`
 	Reason    string    `json:"reason"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// MITMScriptStatus reports the active table and engine-wide counters.
+type MITMScriptStatus struct {
+	Status               string `json:"status"`
+	Count                int    `json:"count"`
+	Runs                 uint64 `json:"runs"`
+	Modified             uint64 `json:"modified"`
+	Failed               uint64 `json:"failed"`
+	Timeouts             uint64 `json:"timeouts"`
+	Oversize             uint64 `json:"oversize"`
+	CircuitOpen          uint64 `json:"circuit_open"`
+	Notifications        uint64 `json:"notifications"`
+	NotificationsDropped uint64 `json:"notifications_dropped"`
+}
+
+type MITMScriptRun struct {
+	ID         string `json:"id"`
+	Phase      string `json:"phase"`
+	DurationMS int64  `json:"duration_ms"`
+	Result     string `json:"result"`
+	Error      string `json:"error,omitempty"`
+}
+
+type MITMScriptStats struct {
+	ID         string `json:"id"`
+	Count      uint64 `json:"count"`
+	LastResult string `json:"last_result"`
+}
+
+type ScriptNotification struct {
+	ScriptID string          `json:"script_id"`
+	Module   string          `json:"module,omitempty"`
+	Title    string          `json:"title"`
+	Subtitle string          `json:"subtitle"`
+	Body     string          `json:"body"`
+	Options  json.RawMessage `json:"options,omitempty"`
+	Time     time.Time       `json:"time"`
 }

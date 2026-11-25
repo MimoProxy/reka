@@ -16,9 +16,6 @@ import (
 	"github.com/dop251/goja"
 )
 
-// Same as Surge's default timeout for $httpClient requests.
-const defaultHTTPTimeout = 5 * time.Second
-
 type httpResult struct {
 	id       uint64
 	response *script.HTTPResponse
@@ -60,7 +57,7 @@ func (s *session) installHTTPClient() {
 func (s *session) httpRequest(method string, options goja.Value) *script.HTTPRequest {
 	req := &script.HTTPRequest{
 		Method:       method,
-		Timeout:      defaultHTTPTimeout,
+		Timeout:      script.DefaultHTTPRequestTimeout,
 		AutoRedirect: true,
 		AutoCookie:   true,
 	}
@@ -229,8 +226,10 @@ func (s *session) installNotification() {
 			}
 			// Use JSON data so options cannot retain script objects or the runtime.
 			if v, ok := call.Argument(3).(*goja.Object); ok {
-				if text, ok := s.tryJSONString(v); ok {
-					if err := json.Unmarshal([]byte(text), &n.Options); err != nil {
+				if text, ok := s.tryJSONString(v); ok && len(text) <= script.NotificationOptionsMax {
+					decoder := json.NewDecoder(strings.NewReader(text))
+					decoder.UseNumber()
+					if err := decoder.Decode(&n.Options); err != nil {
 						n.Options = nil
 					}
 				}

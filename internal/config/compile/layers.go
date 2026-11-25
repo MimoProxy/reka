@@ -631,7 +631,7 @@ func (c *compiler) layers(doc *model.Doc) {
 				continue
 			}
 		} else if kind == "mitm" {
-			if len(segs) > 1 && (segs[1] == "enabled" || segs[1] == "ca") {
+			if len(segs) > 1 && (segs[1] == "enabled" || segs[1] == "ca" || segs[1] == "script-log") {
 				addDiag(model.DocOverlay, path+"/path", "mitm.local-only", "mitm."+segs[1]+" is a machine-local setting and can only be set in local.yaml", opos)
 				continue
 			}

@@ -32,6 +32,7 @@ import (
 	"github.com/MimoProxy/reka/internal/policy"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime"
+	"github.com/MimoProxy/reka/internal/script"
 	"github.com/MimoProxy/reka/internal/subscription"
 	D "github.com/miekg/dns"
 	"io"
@@ -69,7 +70,9 @@ type EngineOptions struct {
 	// ObserveRoute runs synchronously, including for pre-match rejections.
 	ObserveRoute  func(RouteObservation)
 	PacketHistory *history.Store
-	mitmNow       func() time.Time
+	// ScriptEngine replaces the default HTTP script engine on supported platforms.
+	ScriptEngine func() script.Engine
+	mitmNow      func() time.Time
 }
 
 type RouteObservation struct {
@@ -98,6 +101,7 @@ type generation struct {
 	rulesMayDrop  bool
 	mitm          *mitmGeneration
 	mitmCAError   string
+	scripts       mitmScriptTable
 }
 
 // Engine turns effective configurations into running generations: it
@@ -105,30 +109,35 @@ type generation struct {
 // switches atomically. Commits are serialized by the caller (ConfigService)
 // and additionally by an internal lock.
 type Engine struct {
-	temporary         atomic.Pointer[temporaryRules]
-	temporarySequence uint64
-	sceneObservation  atomic.Pointer[sceneObservation]
-	packetInterface   atomic.Pointer[string]
-	packetNetworks    atomic.Pointer[[2]netip.Prefix]
-	sceneManual       atomic.Pointer[manualScene]
-	arenaRunning      atomic.Bool
-	history           *history.Store
-	probeOnce         sync.Once
-	probeSlots        chan struct{}
-	tunSerial         uint64
-	takeover          *platform.Takeover
-	networkErr        error
-	guard             *sagernet.SocketGuard
-	fake              *RD.FakePool
-	dnsListener       *sagernet.DNSListener
-	dnsAddress        string
-	opts              EngineOptions
-	packetFlowRealDNS atomic.Bool
-	backend           *sagernet.Backend
-	rt                *runtime.Runtime[*sagernet.Outbound]
-	mitmBypasses      mitmBypassTable
-	mitmConnections   atomic.Uint64
-	mitmRequests      atomic.Uint64
+	temporary           atomic.Pointer[temporaryRules]
+	temporarySequence   uint64
+	sceneObservation    atomic.Pointer[sceneObservation]
+	packetInterface     atomic.Pointer[string]
+	packetNetworks      atomic.Pointer[[2]netip.Prefix]
+	sceneManual         atomic.Pointer[manualScene]
+	arenaRunning        atomic.Bool
+	history             *history.Store
+	probeOnce           sync.Once
+	probeSlots          chan struct{}
+	tunSerial           uint64
+	takeover            *platform.Takeover
+	networkErr          error
+	guard               *sagernet.SocketGuard
+	fake                *RD.FakePool
+	dnsListener         *sagernet.DNSListener
+	dnsAddress          string
+	opts                EngineOptions
+	packetFlowRealDNS   atomic.Bool
+	backend             *sagernet.Backend
+	rt                  *runtime.Runtime[*sagernet.Outbound]
+	mitmBypasses        mitmBypassTable
+	mitmConnections     atomic.Uint64
+	mitmRequests        atomic.Uint64
+	scriptHost          *script.Host
+	scriptStore         *scriptStore
+	scriptNotifications *scriptNotifications
+	scriptRuns          mitmScriptCounters
+	scriptClashPort     atomic.Uint32
 
 	mu        sync.Mutex
 	listeners map[string]*listener
@@ -154,6 +163,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		opts.mitmNow = time.Now
 	}
 	e := &Engine{opts: opts, listeners: map[string]*listener{}, mitmBypasses: mitmBypassTable{now: opts.mitmNow}}
+	e.initScripts()
 	if opts.HostPacketFlow {
 		// Keep the pool within the iOS Packet Tunnel memory budget.
 		e.fake = RD.NewFakePool(2048)
@@ -660,7 +670,8 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	for _, l := range eff.Listeners {
 		g.inUDP[l.ID] = l.UDP
 	}
-	g.loadMITM(previousGeneration, p.outbounds)
+	g.scripts = newMITMScriptTable(eff.Scripts, e.scriptLogger())
+	g.loadMITM(previousGeneration, p.outbounds, e.scriptHost != nil)
 	genNo, err := e.rt.CommitValue(p.outbounds, g)
 	if err != nil {
 		g.mitm.release()
@@ -1439,6 +1450,11 @@ func (e *Engine) Close() {
 	e.rt.Close()
 	e.backend.Close()
 	e.fake.Close()
+	if e.scriptHost != nil {
+		e.scriptHost.Close()
+		e.scriptHost.Purge()
+		e.scriptStore.close()
+	}
 }
 
 // ListenerAddr returns where a listener is bound (for tests and status).

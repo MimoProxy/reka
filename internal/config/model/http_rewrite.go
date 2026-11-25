@@ -2,8 +2,9 @@ package model
 
 // LocalMITM controls whether this machine can decrypt HTTPS traffic.
 type LocalMITM struct {
-	Enabled bool   `yaml:"enabled"`
-	CA      string `yaml:"ca"`
+	Enabled   bool   `yaml:"enabled"`
+	CA        string `yaml:"ca"`
+	ScriptLog bool   `yaml:"script-log"`
 }
 
 // MITM contains the traffic selection settings shared by profiles and sources.
