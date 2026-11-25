@@ -74,6 +74,14 @@ type PacketFlowStats struct {
 	DNSOverflow uint64 `json:"dnsOverflow"`
 }
 
+// Active returns the number of TCP and UDP flows currently admitted.
+func (p *PacketFlow) Active() (tcp, udp int) {
+	h := p.handler
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.tcp.flows), len(h.udp.flows)
+}
+
 func (p *PacketFlow) Stats() PacketFlowStats {
 	h := p.handler
 	h.mu.Lock()

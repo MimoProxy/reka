@@ -130,6 +130,7 @@ func Start(node Node) (*Session, error) {
 		return nil, err
 	}
 	s.backend, s.outbound, s.tunnel = backend, outbound, tunnel
+	setProfileFlows(tunnel.Active)
 	s.captureDefaultLogger()
 	s.logger.Info("Packet tunnel started", "mode", "node", "mtu", s.mtu, "method", node.Method)
 	return s, nil
@@ -198,6 +199,7 @@ func (s *Session) Traffic() (upload, download uint64) {
 func (s *Session) Close() {
 	s.close.Do(func() {
 		if s.tunnel != nil {
+			setProfileFlows(nil)
 			upload, download := s.Traffic()
 			connections, _ := s.Counts()
 			s.logger.Info("Packet tunnel stopping", "uptime", time.Since(s.started).Round(time.Second),

@@ -5,6 +5,8 @@ package packettunnel
 import (
 	"bytes"
 	"encoding/json"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,13 +81,27 @@ func TestRuntimeProfile(t *testing.T) {
 			TotalAlloc uint64 `json:"totalAlloc"`
 			Sys        uint64 `json:"sys"`
 		}
-		GOMAXPROCS int `json:"gomaxprocs"`
+		GOMAXPROCS int                  `json:"gomaxprocs"`
+		MemRate    int                  `json:"memProfileRate"`
+		Timeline   []map[string]float64 `json:"timeline"`
+		Goroutines string               `json:"goroutines"`
 	}
 	if err := json.Unmarshal(readProfilePart(t, ProfileRuntime), &stats); err != nil {
 		t.Fatal(err)
 	}
 	if stats.End.Sys == 0 || stats.End.TotalAlloc < stats.Start.TotalAlloc || stats.GOMAXPROCS < 1 {
 		t.Fatalf("unexpected runtime stats %+v", stats)
+	}
+	if stats.MemRate != runtime.MemProfileRate || !strings.Contains(stats.Goroutines, "goroutine profile:") {
+		t.Fatalf("memory profile rate %d, goroutines %q", stats.MemRate, stats.Goroutines)
+	}
+	if len(stats.Timeline) < 2 {
+		t.Fatalf("got %d memory samples", len(stats.Timeline))
+	}
+	for _, sample := range stats.Timeline {
+		if sample["total"] == 0 || sample["heapObjects"] == 0 || sample["goroutines"] == 0 || sample["memoryLimit"] == 0 {
+			t.Fatalf("incomplete memory sample %v", sample)
+		}
 	}
 	if _, err := readRuntimeProfile("heap", 0); err == nil {
 		t.Fatal("read an unknown part")

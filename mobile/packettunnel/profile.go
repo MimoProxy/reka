@@ -118,6 +118,7 @@ func StartProfile(snapshot []byte, controls profile.Controls, trace bool) (*Sess
 		return nil, errors.New("could not attach profile packet flow")
 	}
 	s.tunnel = tunnel
+	setProfileFlows(tunnel.Active)
 	s.captureDefaultLogger()
 	s.profile.mu.Lock()
 	summary := s.profile.summary
