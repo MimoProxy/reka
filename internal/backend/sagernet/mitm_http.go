@@ -370,7 +370,11 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			WroteRequest: func(info httptrace.WroteRequestInfo) { uploadDone <- info.Err },
 		})
 	}
-	res, err := upstream.transport.RoundTrip(request.WithContext(ctx))
+	transport := upstream.roundTripper(request)
+	if transport != upstream.h2Transport {
+		request.GetBody = nil
+	}
+	res, err := transport.RoundTrip(request.WithContext(ctx))
 	if err != nil {
 		localError(http.StatusBadGateway, "HTTP upstream request failed")
 		return

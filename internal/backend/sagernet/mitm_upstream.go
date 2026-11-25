@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,17 +17,29 @@ const (
 	mitmHTTPIdleTimeout       = 30 * time.Second
 	mitmTLSHandshakeTimeout   = 10 * time.Second
 	mitmExpectContinueTimeout = time.Second
-	// sing-box's common/networkquality HTTP transport keeps one idle
-	// connection per host for sequential requests.
-	mitmIdleUpstreams = 1
+	// An HTTP/2 client multiplexes requests that the HTTP/1.1 upstream
+	// spreads over connections. sing-box and mihomo have no MITM equivalent;
+	// keep as many idle as browsers open per host. Busy connections are not
+	// capped, so a long-lived request never blocks others.
+	mitmHTTP1Upstreams = 6
+	// One HTTP/2 connection carries all gRPC streams, as in sing-box's
+	// common/networkquality HTTP transport for sequential requests.
+	mitmH2IdleUpstreams = 1
 )
 
-// mitmUpstream owns a transport's sockets until the client connection ends.
-// A rewritten authority gets a separate transport that lives for that request.
+// mitmUpstream owns its transports' sockets until the client connection
+// ends. A rewritten authority gets a separate upstream that lives for that
+// request.
+//
+// Requests go to the origin over HTTP/1.1, even when the client speaks
+// HTTP/2: some CDNs reject an app's requests when net/http's HTTP/2 client
+// relays them, since its frames differ from the app's own. Requests that
+// need HTTP/2, such as gRPC, use h2Transport when HTTP/2 is enabled.
 type mitmUpstream struct {
-	transport *http.Transport
-	route     Route
-	cancel    context.CancelFunc
+	transport   *http.Transport
+	h2Transport *http.Transport
+	route       Route
+	cancel      context.CancelFunc
 
 	mu     sync.Mutex
 	closed bool
@@ -37,20 +50,28 @@ type mitmUpstream struct {
 func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundContext, host string, skipVerify, h2 bool, attempt *connectionAttempt) *mitmUpstream {
 	owner, cancel := context.WithCancel(ctx)
 	upstream := &mitmUpstream{route: route, cancel: cancel}
-	tlsConfig := &tls.Config{
-		ServerName: host, InsecureSkipVerify: skipVerify, MinVersion: tls.VersionTLS12, NextProtos: mitmTLSNextProtos(h2),
+	upstream.transport = upstream.newTransport(owner, metadata, host, skipVerify, false, attempt)
+	if h2 {
+		upstream.h2Transport = upstream.newTransport(owner, metadata, host, skipVerify, true, attempt)
 	}
+	return upstream
+}
+
+func (u *mitmUpstream) newTransport(owner context.Context, metadata adapter.InboundContext, host string, skipVerify, h2 bool, attempt *connectionAttempt) *http.Transport {
+	nextProtos := mitmTLSNextProtos(h2)
 	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return upstream.dial(ctx, owner, metadata, attempt)
+		return u.dial(ctx, owner, metadata, attempt)
 	}
-	upstream.transport = &http.Transport{
-		Protocols:              mitmHTTPProtocols(h2),
-		TLSClientConfig:        tlsConfig,
+	transport := &http.Transport{
+		Protocols: mitmHTTPProtocols(h2),
+		TLSClientConfig: &tls.Config{
+			ServerName: host, InsecureSkipVerify: skipVerify, MinVersion: tls.VersionTLS12, NextProtos: nextProtos,
+		},
 		TLSHandshakeTimeout:    mitmTLSHandshakeTimeout,
 		ExpectContinueTimeout:  mitmExpectContinueTimeout,
 		IdleConnTimeout:        mitmHTTPIdleTimeout,
-		MaxIdleConns:           mitmIdleUpstreams,
-		MaxIdleConnsPerHost:    mitmIdleUpstreams,
+		MaxIdleConns:           mitmHTTP1Upstreams,
+		MaxIdleConnsPerHost:    mitmHTTP1Upstreams,
 		MaxResponseHeaderBytes: relayHTTPMaxHeaderBytes,
 		DisableCompression:     true,
 		DialContext:            dial,
@@ -59,27 +80,43 @@ func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundC
 			if err != nil {
 				return nil, err
 			}
-			tlsConn := tls.Client(conn, tlsConfig.Clone())
 			// net/http leaves the handshake timeout to a custom TLS dialer.
 			handshakeCtx, cancelHandshake := context.WithTimeout(ctx, mitmTLSHandshakeTimeout)
 			defer cancelHandshake()
 			started := time.Now()
-			err = tlsConn.HandshakeContext(handshakeCtx)
+			tlsConn, err := mitmUpstreamTLSHandshake(handshakeCtx, conn, host, skipVerify, nextProtos)
 			observeMITMUpstreamTLS(ctx, time.Since(started))
 			if err != nil {
 				_ = conn.Close()
 				return nil, err
 			}
 			if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
-				return &mitmH2ClientConn{Conn: tlsConn}, nil
+				return &mitmH2ClientConn{mitmTLSConn: tlsConn}, nil
 			}
 			return tlsConn, nil
 		},
 	}
 	if h2 {
-		upstream.transport.HTTP2 = mitmHTTP2Config()
+		transport.MaxIdleConns = mitmH2IdleUpstreams
+		transport.MaxIdleConnsPerHost = mitmH2IdleUpstreams
+		transport.HTTP2 = mitmHTTP2Config()
 	}
-	return upstream
+	return transport
+}
+
+// roundTripper picks the transport for request: HTTP/2 for gRPC and for
+// requests with trailers, which HTTP/1.1 origins rarely accept.
+func (u *mitmUpstream) roundTripper(request *http.Request) *http.Transport {
+	if u.h2Transport != nil && mitmRequestNeedsH2(request) {
+		return u.h2Transport
+	}
+	return u.transport
+}
+
+func mitmRequestNeedsH2(request *http.Request) bool {
+	contentType := strings.ToLower(request.Header.Get("Content-Type"))
+	return strings.HasPrefix(contentType, "application/grpc") && !strings.HasPrefix(contentType, "application/grpc-web") ||
+		len(request.Trailer) != 0
 }
 
 func (u *mitmUpstream) dial(ctx, owner context.Context, metadata adapter.InboundContext, attempt *connectionAttempt) (net.Conn, error) {
@@ -135,6 +172,9 @@ func (u *mitmUpstream) close() {
 		_ = conn.Close()
 	}
 	u.transport.CloseIdleConnections()
+	if u.h2Transport != nil {
+		u.h2Transport.CloseIdleConnections()
+	}
 	u.dials.Wait()
 }
 

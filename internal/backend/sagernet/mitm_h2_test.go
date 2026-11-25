@@ -152,6 +152,15 @@ func (f *mitmH2Fixture) request(t *testing.T, method, path string, body io.Reade
 	return req
 }
 
+// h2Request is a request the relay sends over HTTP/2 to an HTTP/2 origin:
+// other requests use HTTP/1.1 upstream.
+func (f *mitmH2Fixture) h2Request(t *testing.T, method, path string, body io.Reader) *http.Request {
+	t.Helper()
+	req := f.request(t, method, path, body)
+	req.Header.Set("Content-Type", "application/grpc")
+	return req
+}
+
 func (f *mitmH2Fixture) response(t *testing.T, req *http.Request) (*http.Response, string) {
 	t.Helper()
 	res, err := f.client.RoundTrip(req)
@@ -305,19 +314,29 @@ func TestMITMHTTP2UpstreamProtocolOrder(t *testing.T) {
 	}, true, true, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, r.Proto)
 	})
-	for _, test := range []struct{ path, originProtocol string }{
-		{"/", "HTTP/2.0"},
-		{"/alternate", "HTTP/1.1"},
-		{"/", "HTTP/2.0"},
-		{"/alternate", "HTTP/1.1"},
+	// Only gRPC uses HTTP/2 upstream, and only where the origin offers it.
+	for _, test := range []struct {
+		path           string
+		grpc           bool
+		originProtocol string
+	}{
+		{"/", false, "HTTP/1.1"},
+		{"/", true, "HTTP/2.0"},
+		{"/alternate", true, "HTTP/1.1"},
+		{"/", false, "HTTP/1.1"},
+		{"/alternate", false, "HTTP/1.1"},
 	} {
-		res, body := f.response(t, f.request(t, http.MethodGet, test.path, nil))
+		req := f.request(t, http.MethodGet, test.path, nil)
+		if test.grpc {
+			req = f.h2Request(t, http.MethodGet, test.path, nil)
+		}
+		res, body := f.response(t, req)
 		if res.StatusCode != http.StatusOK || res.ProtoMajor != 2 || body != test.originProtocol {
-			t.Fatalf("%s: status %d, protocol %s, origin protocol %q", test.path, res.StatusCode, res.Proto, body)
+			t.Fatalf("%s (gRPC %v): status %d, protocol %s, origin protocol %q", test.path, test.grpc, res.StatusCode, res.Proto, body)
 		}
 	}
 	live := f.live(t)
-	want := []string{"h2", "http/1.1"}
+	want := []string{"http/1.1", "h2"}
 	if !slices.Equal(live.MITMUpstreamProtocols, want) {
 		t.Fatalf("live upstream protocols = %v, want %v", live.MITMUpstreamProtocols, want)
 	}
@@ -540,7 +559,7 @@ func TestMITMHTTP2ConcurrentStreams(t *testing.T) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, "before:"+index)
 	})
-	if res, _ := f.response(t, f.request(t, http.MethodGet, "/warmup", nil)); res.StatusCode != http.StatusOK {
+	if res, _ := f.response(t, f.h2Request(t, http.MethodGet, "/warmup", nil)); res.StatusCode != http.StatusOK {
 		t.Fatalf("warmup status = %d", res.StatusCode)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), mitmH2TestTimeout)
@@ -554,6 +573,8 @@ func TestMITMHTTP2ConcurrentStreams(t *testing.T) {
 				results <- err
 				return
 			}
+			// Only gRPC shares one HTTP/2 upstream connection.
+			req.Header.Set("Content-Type", "application/grpc")
 			res, err := f.client.RoundTrip(req)
 			if err != nil {
 				results <- err

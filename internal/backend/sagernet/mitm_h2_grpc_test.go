@@ -272,7 +272,7 @@ func TestMITMHTTP2GRPCCancellation(t *testing.T) {
 	case <-req.Context().Done():
 		t.Fatal("upstream request was not canceled")
 	}
-	res, body := f.response(t, f.request(t, http.MethodGet, "/health", nil))
+	res, body := f.response(t, f.h2Request(t, http.MethodGet, "/health", nil))
 	if res.StatusCode != http.StatusOK || body != "healthy" || f.dials.Load() != 1 {
 		t.Fatalf("status after cancel = %d, body = %q, origin dials = %d", res.StatusCode, body, f.dials.Load())
 	}

@@ -196,22 +196,22 @@ func TestMITMHTTP2UpstreamResetKeepsOtherStreams(t *testing.T) {
 			_, _ = io.WriteString(w, "healthy")
 		}
 	})
-	res, err := fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/reset-before-headers", nil))
+	res, err := fixture.client.RoundTrip(fixture.h2Request(t, http.MethodGet, "/reset-before-headers", nil))
 	assertMITMH2WireReply(t, res, err, http.StatusBadGateway, "HTTP upstream request failed\n")
-	res, err = fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/script-abort", nil))
+	res, err = fixture.client.RoundTrip(fixture.h2Request(t, http.MethodGet, "/script-abort", nil))
 	if res != nil {
 		res.Body.Close()
 		t.Fatalf("response script abort returned HTTP status %d", res.StatusCode)
 	}
 	assertMITMH2StreamReset(t, err)
 
-	res, err = fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/reset-after-headers", nil))
+	res, err = fixture.client.RoundTrip(fixture.h2Request(t, http.MethodGet, "/reset-after-headers", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	assertMITMH2PartialReply(t, res)
-	healthy, err := fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/healthy", nil))
+	healthy, err := fixture.client.RoundTrip(fixture.h2Request(t, http.MethodGet, "/healthy", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestMITMHTTP2UpstreamResetKeepsOtherStreams(t *testing.T) {
 	assertMITMH2StreamReset(t, err)
 	close(finishHealthy)
 	assertMITMH2WireReply(t, healthy, nil, http.StatusOK, " healthy")
-	healthy, err = fixture.client.RoundTrip(fixture.request(t, http.MethodGet, "/healthy-again", nil))
+	healthy, err = fixture.client.RoundTrip(fixture.h2Request(t, http.MethodGet, "/healthy-again", nil))
 	assertMITMH2WireReply(t, healthy, err, http.StatusOK, "healthy")
 	if dials := fixture.dials.Load(); dials != 1 {
 		t.Fatalf("upstream dials = %d, want a single multiplexed connection", dials)
@@ -602,6 +602,8 @@ func mitmH2WireRoundTrip(ctx context.Context, client *http.ClientConn, host, pat
 	if err != nil {
 		return nil, err
 	}
+	// The relay uses its HTTP/2 upstream for gRPC.
+	request.Header.Set("Content-Type", "application/grpc")
 	return client.RoundTrip(request)
 }
 

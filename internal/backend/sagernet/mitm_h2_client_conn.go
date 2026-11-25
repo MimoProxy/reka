@@ -1,7 +1,6 @@
 package sagernet
 
 import (
-	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"sync"
@@ -19,7 +18,7 @@ const mitmH2MaxFrameSize = 16 * 1024
 // ConnectionState method net/http uses to activate HTTP/2 after a custom
 // TLS dial.
 type mitmH2ClientConn struct {
-	*tls.Conn
+	mitmTLSConn
 	readMu sync.Mutex
 	frames mitmH2ServerFrameReader
 }
@@ -27,7 +26,7 @@ type mitmH2ClientConn struct {
 func (c *mitmH2ClientConn) Read(p []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
-	return c.frames.read(c.Conn, p)
+	return c.frames.read(c.mitmTLSConn, p)
 }
 
 // Close mirrors net/http's HTTP/2 client, which closes the socket under a
@@ -36,7 +35,7 @@ func (c *mitmH2ClientConn) Read(p []byte) (int, error) {
 func (c *mitmH2ClientConn) Close() error {
 	force := time.AfterFunc(mitmH2ForceCloseDelay, func() { _ = c.NetConn().Close() })
 	defer force.Stop()
-	return c.Conn.Close()
+	return c.mitmTLSConn.Close()
 }
 
 // Match the delay in net/http's HTTP/2 client closeConn.
