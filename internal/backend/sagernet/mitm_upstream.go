@@ -34,15 +34,13 @@ type mitmUpstream struct {
 	conns  map[*mitmUpstreamConn]struct{}
 }
 
-func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundContext, host string, skipVerify bool, attempt *connectionAttempt) *mitmUpstream {
+func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundContext, host string, skipVerify, h2 bool, attempt *connectionAttempt) *mitmUpstream {
 	owner, cancel := context.WithCancel(ctx)
 	upstream := &mitmUpstream{route: route, cancel: cancel}
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
 	upstream.transport = &http.Transport{
-		Protocols: protocols,
+		Protocols: mitmHTTPProtocols(h2),
 		TLSClientConfig: &tls.Config{
-			ServerName: host, InsecureSkipVerify: skipVerify, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"},
+			ServerName: host, InsecureSkipVerify: skipVerify, MinVersion: tls.VersionTLS12, NextProtos: mitmTLSNextProtos(h2),
 		},
 		TLSHandshakeTimeout:    mitmTLSHandshakeTimeout,
 		ExpectContinueTimeout:  mitmExpectContinueTimeout,
@@ -89,6 +87,9 @@ func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundC
 			return conn, nil
 		},
 	}
+	if h2 {
+		upstream.transport.HTTP2 = mitmHTTP2Config()
+	}
 	return upstream
 }
 
@@ -102,6 +103,7 @@ func (u *mitmUpstream) close() {
 	u.mu.Unlock()
 
 	u.cancel()
+	// Close tracked sockets even if HTTP/2 streams are still active.
 	for _, conn := range conns {
 		_ = conn.Close()
 	}

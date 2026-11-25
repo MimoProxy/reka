@@ -115,7 +115,10 @@ func TestConnectionRowsSortByStartThenID(t *testing.T) {
 func TestConnectionRowJSON(t *testing.T) {
 	rows := []ConnectionRow{
 		{State: "connecting"},
-		{State: "active", Protocol: "quic", MITM: true, MITMRequests: 2, MITMMatchedIDs: []string{"rewrite"}, MITMBodyPassthroughs: 1},
+		{
+			State: "active", Protocol: "quic", MITM: true, MITMRequests: 2, MITMMatchedIDs: []string{"rewrite"}, MITMBodyPassthroughs: 1,
+			MITMClientProtocol: "h2", MITMUpstreamProtocols: []string{"http/1.1", "h2"},
+		},
 	}
 	data, err := json.Marshal(rows)
 	if err != nil {
@@ -131,6 +134,7 @@ func TestConnectionRowJSON(t *testing.T) {
 	}
 	for field, want := range map[string]string{
 		"mitm": "true", "mitmRequests": "2", "mitmMatchedIds": `["rewrite"]`, "mitmBodyPassthroughs": "1",
+		"mitmClientProtocol": `"h2"`, "mitmUpstreamProtocols": `["http/1.1","h2"]`,
 	} {
 		if fields[0][field] != nil || string(fields[1][field]) != want {
 			t.Errorf("unexpected %s in connection rows: %s", field, data)

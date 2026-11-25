@@ -158,6 +158,25 @@ func bindRequestConnection(ctx context.Context, attempt *connectionAttempt) {
 	}
 }
 
+func observeMITMUpstreamProtocol(ctx context.Context, attempt *connectionAttempt) context.Context {
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			// Record the connection selected for a request even when the
+			// upstream closes or resets the stream before sending headers.
+			conn, ok := info.Conn.(*tls.Conn)
+			if !ok {
+				return
+			}
+			switch conn.ConnectionState().NegotiatedProtocol {
+			case "h2":
+				attempt.recordMITMUpstreamProtocol("h2")
+			case "http/1.1", "":
+				attempt.recordMITMUpstreamProtocol("http/1.1")
+			}
+		},
+	})
+}
+
 func observeRequestLookup(ctx context.Context, lookup LookupFunc) LookupFunc {
 	obs, _ := ctx.Value(requestHistoryKey{}).(*requestObservation)
 	if obs == nil || lookup == nil {

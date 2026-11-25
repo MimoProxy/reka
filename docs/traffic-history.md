@@ -9,7 +9,7 @@ Mimo Reka 的「连接」页提供连接历史和请求记录，「规则与 DNS
 | 连接 | TCP 与 UDP 流，包括规则拒绝、拨号失败、正常结束和主动关闭。原始目标、路由改写后的目标和可确认的实际拨号地址分别记录。 |
 | DNS | Reka 解析器处理的 TUN 劫持、DNS 监听、原生 API 与内核解析。区分 Hosts、Fake IP、过滤、上游、新鲜缓存、乐观缓存、合并查询和后台刷新。 |
 | HTTP 请求 | HTTP 和 mixed 入站中已解析的转发请求，包括同一客户端连接上的多次请求。CONNECT 隧道和 WebSocket 升级仍在连接记录中查看。 |
-| HTTPS 请求 | 本机 HTTPS 调试会话处理的 HTTP/1.1 或 HTTP/2 请求，以及 TCP 转发中匹配 MITM 配置的 HTTP/1.1 请求。普通 TLS 透传和 HTTP/3 提供连接层信息。 |
+| HTTPS 请求 | 本机 HTTPS 调试会话处理的 HTTP/1.1 或 HTTP/2 请求，以及 TCP 转发中匹配 MITM 配置的 HTTP/1.1 或 HTTP/2 请求。普通 TLS 透传和 HTTP/3 提供连接层信息。 |
 
 DNS 历史记录查询名、RR 类型、客户端、来源、作用域、耗时、响应码及带 TTL 的答案。上游获胜者记录真实出口和协议，使用 fallback、合并等状态可单独筛选。合并请求和后台刷新分别以 `upstream_query_id`、`parent_id` 关联。连接或请求缺少测量值时，相应字段留空。HTTPS 的 `tls_ms` 是调试器到源站的 TLS 阶段，`dial_ms` 测量 Reka 的实际出站建立过程，可包含本地解析时间。
 

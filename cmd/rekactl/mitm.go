@@ -37,6 +37,17 @@ func cmdMITMStatus(args []string) error {
 	return nil
 }
 
+func mitmProtocols(info api.MITMConnectionInfo) string {
+	var protocols []string
+	if info.MITMClientProtocol != "" {
+		protocols = append(protocols, "client="+info.MITMClientProtocol)
+	}
+	if len(info.MITMUpstreamProtocols) != 0 {
+		protocols = append(protocols, "upstream="+strings.Join(info.MITMUpstreamProtocols, ","))
+	}
+	return strings.Join(protocols, " ")
+}
+
 func cmdRequests(args []string) error {
 	fs := flag.NewFlagSet("requests", flag.ExitOnError)
 	limit := fs.Int("limit", 20, "recent requests to list")

@@ -109,6 +109,7 @@ func TestMITMScriptBodyBuffer(t *testing.T) {
 	}}
 	stream := io.NopCloser(strings.NewReader(source))
 	buffer, err := handler.bufferBody(stream, -1, true, match)
+	defer buffer.releaseBudget()
 	if err != nil || !buffer.exceeds(handler.route.MaxBodySize) || buffer.data != nil {
 		t.Fatalf("oversize buffer = %+v, error %v", buffer, err)
 	}
@@ -132,6 +133,7 @@ func TestMITMScriptBodyBuffer(t *testing.T) {
 	}
 	request.Header.Set("Content-Encoding", "gzip")
 	buffer, err = handler.bufferBody(request.Body, request.ContentLength, false, match)
+	defer buffer.releaseBudget()
 	if err != nil || buffer.exceeds(match.MaxSize) {
 		t.Fatalf("compressed buffer = %+v, error %v", buffer, err)
 	}

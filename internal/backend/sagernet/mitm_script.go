@@ -299,11 +299,14 @@ func replaceMITMBodyHeaders(header http.Header, length int) {
 func setMITMRequestBody(request *http.Request, data []byte) {
 	request.ContentLength = int64(len(data))
 	request.TransferEncoding = nil
-	request.GetBody = nil
-	request.Body = http.NoBody
-	if len(data) != 0 {
-		request.Body = io.NopCloser(bytes.NewReader(data))
+	empty := len(data) == 0 && len(request.Trailer) == 0
+	request.GetBody = func() (io.ReadCloser, error) {
+		if empty {
+			return http.NoBody, nil
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
+	request.Body, _ = request.GetBody()
 }
 
 func appendMITMScriptStats(stats []api.MITMScriptStats, runs []api.MITMScriptRun) []api.MITMScriptStats {

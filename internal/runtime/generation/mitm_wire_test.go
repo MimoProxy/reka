@@ -20,6 +20,7 @@ import (
 	"github.com/MimoProxy/reka/internal/mitm/ca"
 	"github.com/MimoProxy/reka/internal/secret"
 	"github.com/MimoProxy/reka/internal/testnet"
+	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
@@ -49,7 +50,7 @@ func TestMITMGenerationLoopback(t *testing.T) {
 		profile := func(skipVerify bool, mark string) string {
 			return fmt.Sprintf(`schema-version: 1
 sniff: {enabled: true, protocols: [tls]}
-mitm: {hostnames: ['%s:0'], client-source-address: ['127.0.0.0/8'], h2: true, skip-server-cert-verify: %t}
+mitm: {hostnames: ['%s:0'], client-source-address: ['127.0.0.0/8'], skip-server-cert-verify: %t}
 dns:
   nameserver: ['127.0.0.1:9']
   use-hosts: true
@@ -105,6 +106,51 @@ map-local:
 		}
 		old.check(t, "/generation", http.StatusOK, "old generation")
 		old.check(t, "/verify", http.StatusBadGateway, "")
+	})
+
+	t.Run("h2", func(t *testing.T) {
+		engine := NewEngine(EngineOptions{})
+		t.Cleanup(engine.Close)
+		profile := `schema-version: 1
+sniff: {enabled: true, protocols: [tls]}
+mitm: {hostnames: ['` + mitmWireHost + `:0'], h2: true, skip-server-cert-verify: true}
+rules: [{match: {all: true}, outbound: direct}]
+map-local:
+  - {id: h2-mark, match: '^https://origin[.]test:[0-9]+/h2$', data-type: text, data: 'over h2'}
+`
+		listen := testnet.RetryAddr(t, func(listen netip.AddrPort) error {
+			return mitmWireApply(t, engine, store, listen, profile, true, 1)
+		})
+		client, err := mitmWireConnect(t, listen, target, roots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := client.conn.ConnectionState().NegotiatedProtocol; got != "h2" {
+			t.Fatalf("MITM ALPN = %q", got)
+		}
+		h2, err := (&http2.Transport{}).NewClientConn(client.conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{"/h2", "/verify"} {
+			req, err := http.NewRequest(http.MethodGet, "https://"+client.host+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := h2.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(res.Body)
+			_ = res.Body.Close()
+			want := map[string]string{"/h2": "over h2", "/verify": "original"}[path]
+			if res.StatusCode != http.StatusOK || res.ProtoMajor != 2 || string(body) != want {
+				t.Fatalf("%s over h2 = %d %s %q", path, res.StatusCode, res.Proto, body)
+			}
+		}
+		if status := engine.MITMStatus(); status.H2 != "enabled" {
+			t.Fatalf("MITM h2 status = %q", status.H2)
+		}
 	})
 
 	t.Run("pass through", func(t *testing.T) {

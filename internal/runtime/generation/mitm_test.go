@@ -30,6 +30,9 @@ mitm:
 	if !e.MITMStatus().CALoaded {
 		t.Fatalf("MITM CA failed to load: %s", e.MITMStatus().CAError)
 	}
+	if status := e.MITMStatus(); status.H2 != "disabled" {
+		t.Fatalf("default HTTP/2 status = %q", status.H2)
+	}
 
 	fakeIP, err := e.fake.Allocate(gen, "allow.test", netip.MustParsePrefix("198.18.0.0/15"))
 	if err != nil {
@@ -95,7 +98,7 @@ func TestMITMIssuerLifetime(t *testing.T) {
 	store := newMITMTestStore(t)
 	activateMITMTestConfig(t, e, store, profile, 1)
 	if status := e.MITMStatus(); !status.Enabled || status.CALoaded || status.CAError == "" ||
-		status.HostnameCount != 1 || status.H2 != "not supported yet" {
+		status.HostnameCount != 1 || status.H2 != "enabled" {
 		t.Fatalf("status with missing CA = %+v", status)
 	}
 
@@ -109,6 +112,9 @@ func TestMITMIssuerLifetime(t *testing.T) {
 	}
 	if rt.MITM == nil || rt.MITM.Issuer != previous.mitm.issuer.Issuer {
 		t.Fatal("matching route did not receive its generation's issuer")
+	}
+	if !rt.MITM.H2 {
+		t.Fatal("matching route did not receive its generation's HTTP/2 setting")
 	}
 	leaf, err := rt.MITM.Issuer.Certificate("origin.test")
 	if err != nil {

@@ -143,6 +143,7 @@ func TestPacketTunnelHistoryPreservesMITMFields(t *testing.T) {
 			ID: id, Start: start,
 			MITMConnectionInfo: api.MITMConnectionInfo{
 				MITM: true, MITMRequests: 2, MITMMatchedIDs: []string{"rewrite"}, MITMBodyPassthroughs: 1,
+				MITMClientProtocol: "h2", MITMUpstreamProtocols: []string{"http/1.1", "h2"},
 			},
 		},
 		EndedAt: start.Add(time.Second),
@@ -186,6 +187,7 @@ func TestPacketTunnelHistoryPreservesMITMFields(t *testing.T) {
 	}
 	connectionFields := map[string]string{
 		"mitm": "true", "mitm_requests": "2", "mitm_matched_ids": `["rewrite"]`, "mitm_body_passthroughs": "1",
+		"mitm_client_protocol": `"h2"`, "mitm_upstream_protocols": `["http/1.1","h2"]`,
 	}
 	assertFields(connections.Rows[0].Data, connectionFields)
 	requests := run(Operation{Action: "requestHistory"}).(history.Page)
