@@ -96,11 +96,13 @@ func (b *Backend) relayUDP(ctx context.Context, r *router, conn N.PacketConn, me
 }
 
 func (s *udpSession) run() {
+	// The destination is picked per packet, so this read needs no headroom.
+	readPacket := udpPacketReader(s.conn, N.ReadWaitOptions{})
 	var err error
 	for {
-		buffer := buf.NewPacket()
+		var buffer *buf.Buffer
 		var dest M.Socksaddr
-		dest, err = s.conn.ReadPacket(buffer)
+		buffer, dest, err = readPacket()
 		if err != nil {
 			buffer.Release()
 			break
@@ -113,6 +115,22 @@ func (s *udpSession) run() {
 		f.send(buffer)
 	}
 	s.close(err)
+}
+
+func udpPacketReader(conn N.PacketReader, options N.ReadWaitOptions) func() (*buf.Buffer, M.Socksaddr, error) {
+	if waiter, ok := bufio.CreatePacketReadWaiter(conn); ok {
+		// Packet waiters can copy into the requested headroom after waiting.
+		waiter.InitializeReadWaiter(options)
+		return waiter.WaitReadPacket
+	}
+	return func() (*buf.Buffer, M.Socksaddr, error) {
+		b := options.NewPacketBuffer()
+		addr, err := conn.ReadPacket(b)
+		if err == nil {
+			options.PostReturn(b)
+		}
+		return b, addr, err
+	}
 }
 
 func (s *udpSession) close(err error) {
@@ -408,16 +426,14 @@ func (f *udpFlow) receive() {
 	if f.receiveDone != nil {
 		defer close(f.receiveDone)
 	}
-	opts := N.NewReadWaitOptions(f.remote, f.s.conn)
+	readPacket := udpPacketReader(f.remote, N.NewReadWaitOptions(f.remote, f.s.conn))
 	for {
-		b := opts.NewPacketBuffer()
-		src, err := f.remote.ReadPacket(b)
+		b, src, err := readPacket()
 		if err != nil {
 			b.Release()
 			f.closeWithReason(connectionReason(err, "error"), "relay")
 			return
 		}
-		opts.PostReturn(b)
 		f.touch()
 		n := int64(b.Len())
 		if !src.IsValid() || f.rt.Destination != nil {

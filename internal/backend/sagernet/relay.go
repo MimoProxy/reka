@@ -13,6 +13,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -171,31 +172,66 @@ func copyHalf(source, destination net.Conn, moved *rateCounter, finish func(erro
 	finish(err)
 }
 
-// A multiplexed writer may return on session close before its asynchronous
-// sender stops referencing the last write. Keep a private, unpooled buffer for
-// each direction: on error it remains owned by the sender until it is done,
-// instead of being returned to a shared read-wait pool and reused by a relay.
-// The size follows sing's relay buffer: 32 KiB, or 16 KiB in with_low_memory
-// builds, which sing-box uses for its iOS library.
+// copyOwned waits for data before borrowing a buffer when the reader supports
+// it. Readers that need a copy or cannot wait use a private buffer.
 func copyOwned(destination io.Writer, source io.Reader, moved *rateCounter, totals ...*atomic.Uint64) error {
-	buffer := make([]byte, buf.BufferSize)
+	var (
+		waiter   N.ReadWaiter
+		needCopy bool
+		private  []byte
+	)
 	for {
-		n, readErr := source.Read(buffer)
-		if n > 0 {
-			written, err := destination.Write(buffer[:n])
+		// A reader such as sniffReplayConn can expose its waiter after a
+		// fallback read drains its prefix.
+		if waiter == nil && !needCopy {
+			if candidate, ok := bufio.CreateReadWaiter(source); ok {
+				// Plain Write needs no headroom. The default size is buf.BufferSize.
+				needCopy = candidate.InitializeReadWaiter(N.ReadWaitOptions{})
+				if !needCopy {
+					waiter = candidate
+					private = nil
+				}
+			}
+		}
+		var (
+			buffer  *buf.Buffer
+			data    []byte
+			readErr error
+		)
+		if waiter != nil {
+			buffer, readErr = waiter.WaitReadBuffer()
+			if buffer != nil {
+				data = buffer.Bytes()
+			}
+		} else {
+			if private == nil {
+				private = make([]byte, buf.BufferSize)
+			}
+			var n int
+			n, readErr = source.Read(private)
+			if n > 0 {
+				data = private[:n]
+			}
+		}
+		if len(data) > 0 {
+			written, err := destination.Write(data)
 			moved.Add(int64(written))
 			if written > 0 {
 				for _, total := range totals {
 					total.Add(uint64(written))
 				}
 			}
+			// On an error or short write a multiplexed sender may still
+			// reference data after Write returns. Let GC reclaim the buffer
+			// once those references are gone to prevent reuse by another relay.
 			if err != nil {
 				return err
 			}
-			if written != n {
+			if written != len(data) {
 				return io.ErrShortWrite
 			}
 		}
+		buffer.Release()
 		if readErr != nil {
 			if readErr == io.EOF {
 				return nil

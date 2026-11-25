@@ -25,8 +25,43 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
 	"github.com/sagernet/sing-box/adapter"
 	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
+
+func TestPacketFlowConnWaiterTouchesOnData(t *testing.T) {
+	const payload = "stream data"
+	flow := new(admittedPacketFlow)
+	source := &packetFlowConn{
+		Conn: &relayWaitTestConn{input: relayWaitTestInput("", payload)},
+		flow: flow,
+	}
+	waiter, ok := bufio.CreateReadWaiter(source)
+	if !ok || waiter.InitializeReadWaiter(N.ReadWaitOptions{}) {
+		t.Fatal("packet flow did not expose a usable read waiter")
+	}
+
+	empty, err := waiter.WaitReadBuffer()
+	defer empty.Release()
+	if err != nil || empty == nil || !empty.IsEmpty() || flow.last.Load() != 0 {
+		t.Fatalf("empty read buffer = %v, read error = %v, last activity = %d", empty, err, flow.last.Load())
+	}
+
+	buffer, err := waiter.WaitReadBuffer()
+	defer buffer.Release()
+	if err != nil || buffer == nil || string(buffer.Bytes()) != payload {
+		t.Fatalf("waiter did not return the payload: %v", err)
+	}
+	if flow.last.Load() == 0 {
+		t.Fatal("reading data through the waiter did not touch the flow")
+	}
+
+	flow.last.Store(1)
+	if b, err := waiter.WaitReadBuffer(); b != nil || err != io.EOF || flow.last.Load() != 1 {
+		t.Fatalf("after EOF, buffer = %v, read error = %v, last activity = %d", b, err, flow.last.Load())
+	}
+}
 
 func TestPacketFlowEvictsOldestIdle(t *testing.T) {
 	for _, network := range []string{"tcp", "udp"} {

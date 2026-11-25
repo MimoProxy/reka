@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
 	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -316,12 +317,54 @@ func (c *packetFlowConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func (c *packetFlowConn) CreateReadWaiter() (N.ReadWaiter, bool) {
+	waiter, ok := bufio.CreateReadWaiter(c.Conn)
+	if !ok {
+		return nil, false
+	}
+	return &packetFlowReadWaiter{ReadWaiter: waiter, flow: c.flow}, true
+}
+
+type packetFlowReadWaiter struct {
+	N.ReadWaiter
+	flow *admittedPacketFlow
+}
+
+func (w *packetFlowReadWaiter) WaitReadBuffer() (*buf.Buffer, error) {
+	buffer, err := w.ReadWaiter.WaitReadBuffer()
+	if buffer != nil && buffer.Len() > 0 {
+		w.flow.touch()
+	}
+	return buffer, err
+}
+
 type packetFlowPacketConn struct {
 	N.PacketConn
 	flow *admittedPacketFlow
 }
 
 func (c *packetFlowPacketConn) Upstream() any { return c.PacketConn }
+
+func (c *packetFlowPacketConn) CreateReadWaiter() (N.PacketReadWaiter, bool) {
+	waiter, ok := bufio.CreatePacketReadWaiter(c.PacketConn)
+	if !ok {
+		return nil, false
+	}
+	return &packetFlowPacketReadWaiter{PacketReadWaiter: waiter, flow: c.flow}, true
+}
+
+type packetFlowPacketReadWaiter struct {
+	N.PacketReadWaiter
+	flow *admittedPacketFlow
+}
+
+func (w *packetFlowPacketReadWaiter) WaitReadPacket() (*buf.Buffer, M.Socksaddr, error) {
+	b, source, err := w.PacketReadWaiter.WaitReadPacket()
+	if err == nil {
+		w.flow.touch()
+	}
+	return b, source, err
+}
 
 func (c *packetFlowPacketConn) ReadPacket(b *buf.Buffer) (M.Socksaddr, error) {
 	source, err := c.PacketConn.ReadPacket(b)
