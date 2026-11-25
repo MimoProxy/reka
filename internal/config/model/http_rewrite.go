@@ -38,8 +38,8 @@ type BodyRewrite struct {
 	ID      string            `yaml:"id"`
 	Phase   string            `yaml:"phase"`
 	Match   string            `yaml:"match"`
-	Replace []BodyReplacement `yaml:"replace"`
-	JQ      *string           `yaml:"jq"`
+	Replace []BodyReplacement `yaml:"replace,omitempty"`
+	JQ      *string           `yaml:"jq,omitempty"`
 }
 
 type BodyReplacement struct {
