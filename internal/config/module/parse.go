@@ -352,8 +352,12 @@ func word(s string, assignment bool) (value, rest string, ok bool) {
 		return "", "", false
 	}
 	if s[0] == '"' || s[0] == '\'' {
-		value, rest, ok = quoted(s)
-		return value, rest, ok && (rest == "" || startsSpace(rest))
+		if value, rest, ok = quoted(s); ok && (rest == "" || startsSpace(rest)) {
+			return value, rest, true
+		}
+		// Surge splits arguments on whitespace. A quote that does not
+		// enclose the whole token is literal, as in a body rewrite pattern
+		// such as "key":\{.+\}.
 	}
 	for i, r := range s {
 		if unicode.IsSpace(r) {
