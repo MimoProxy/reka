@@ -571,63 +571,6 @@ def lazy_tls_publication(source):
 MODULES['github.com/sagernet/sing'][1]['common/tls/listener.go'] = ('db3287682b4be62be1d1982acceb102a12bd10bf019bfe4c7a411bc952f581ba', lazy_tls_publication)
 
 
-def h2_reservation_lock(source):
-    # Backport golang/net 8d10596 (Go issue 80680), BSD-3-Clause. Reserve
-    # synchronously invokes stateHook, so neither call may hold cc.mu.
-    source = replace(source, 'err := func() error {\n\t\tcc.mu.Lock()', 'haveReservation, err := func() (bool, error) {\n\t\tcc.mu.Lock()')
-    source = replace(source, '''\t\t\treturn errClientConnUnusable
-\t\t}
-\t\tcc.roundTrips++
-\t\tif cc.reserved > 0 {
-\t\t\t// We've already reserved a concurrency slot for this request.
-\t\t\tcc.reserved--
-\t\t} else if cc.cc.Reserve() != nil {
-\t\t\t// We don't seem to have an available concurrency slot,
-\t\t\t// so bump the pending count (requests waiting for a slot).
-\t\t\tcc.pending++
-\t\t}''', '''\t\t\treturn false, errClientConnUnusable
-\t\t}''')
-    source = replace(source, '''\t\tcc.starting++
-\t\treturn nil
-\t}()
-\tif err != nil {
-\t\treturn nil, err
-\t}
-\tresp, err := cc.cc.RoundTrip(req)''', '''\t\tcc.starting++
-        cc.roundTrips++
-        if cc.reserved == 0 { return false, nil }
-        cc.reserved--
-        return true, nil
-    }()
-    if err != nil { return nil, err }
-    if !haveReservation && cc.cc.Reserve() != nil {
-        cc.mu.Lock()
-        cc.pending++
-        cc.mu.Unlock()
-    }
-    resp, err := cc.cc.RoundTrip(req)''')
-    return replace(source, '''\tcc.mu.Lock()
-\tdefer cc.mu.Unlock()
-\tif cc.doNotReuse {
-\t\treturn false
-\t}
-\tif err := cc.cc.Reserve(); err != nil {
-\t\treturn false
-\t}
-\tcc.reserved++
-\treturn true''', '''if err := cc.cc.Reserve(); err != nil { return false }
-    reserved := true
-    cc.mu.Lock()
-    if cc.doNotReuse { reserved = false } else { cc.reserved++ }
-    cc.mu.Unlock()
-    if !reserved { cc.cc.Release() }
-    return reserved''')
-
-MODULES['golang.org/x/net'] = ('v0.57.0', {
-    'http2/transport_wrap.go': ('f3ec26dd40aac3b81b6b75ac4603214d7e37d461c4ec43c189063ab202d26f89', h2_reservation_lock),
-})
-
-
 def hopping_distinct_port(source):
     source = replace(source, '\t\tports:       ports,', '\t\tports:       ports,\n\t\tportIndex: -1,')
     return replace(source, '\tc.portIndex = rand.Intn(len(c.ports))', '''// A hop must change the destination when alternatives exist. Duplicate
