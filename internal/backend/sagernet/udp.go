@@ -47,6 +47,8 @@ type udpSession struct {
 	flows    map[M.Socksaddr]*udpFlow
 	rejected map[M.Socksaddr]time.Time
 	closed   bool
+	// reaper closes idle flows; a timer holds no goroutine between checks.
+	reaper *time.Timer
 }
 
 type udpFlow struct {
@@ -91,7 +93,7 @@ func (b *Backend) relayUDP(ctx context.Context, r *router, conn N.PacketConn, me
 		cancel()
 		return
 	}
-	go s.reap()
+	s.startReaper()
 	go s.run()
 }
 
@@ -511,26 +513,42 @@ func (f *udpFlow) closeWithReason(reason, stage string) {
 }
 
 // reap closes flows that have been idle for the UDP timeout.
+func (s *udpSession) startReaper() {
+	interval := s.b.udpTimeout / 4
+	if interval <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.reaper = time.AfterFunc(interval, s.reap)
+	s.mu.Unlock()
+	context.AfterFunc(s.ctx, func() {
+		s.mu.Lock()
+		s.reaper.Stop()
+		s.mu.Unlock()
+	})
+}
+
 func (s *udpSession) reap() {
 	timeout := s.b.udpTimeout
-	tick := time.NewTicker(timeout / 4)
-	defer tick.Stop()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case now := <-tick.C:
-			s.mu.Lock()
-			var idle []*udpFlow
-			for _, f := range s.flows {
-				if now.Sub(time.Unix(0, f.last.Load())) >= timeout {
-					idle = append(idle, f)
-				}
-			}
-			s.mu.Unlock()
-			for _, f := range idle {
-				f.closeWithReason("idle_timeout", "")
-			}
+	now := time.Now()
+	s.mu.Lock()
+	if s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	var idle []*udpFlow
+	for _, f := range s.flows {
+		if now.Sub(time.Unix(0, f.last.Load())) >= timeout {
+			idle = append(idle, f)
 		}
 	}
+	s.mu.Unlock()
+	for _, f := range idle {
+		f.closeWithReason("idle_timeout", "")
+	}
+	s.mu.Lock()
+	if s.ctx.Err() == nil {
+		s.reaper.Reset(timeout / 4)
+	}
+	s.mu.Unlock()
 }
