@@ -92,6 +92,9 @@ func (c scriptHTTPClient) Do(ctx context.Context, input *script.HTTPRequest) (*s
 		},
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: input.Insecure},
 		DisableKeepAlives: true,
+		// A custom dialer turns off HTTP/2 unless forced. Surge negotiates
+		// HTTP/2, and gRPC scripts replay requests through $httpClient.
+		ForceAttemptHTTP2: true,
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport}
@@ -116,8 +119,12 @@ func (c scriptHTTPClient) Do(ctx context.Context, input *script.HTTPRequest) (*s
 	if len(body) > compile.ScriptDefaultMaxSize {
 		return nil, errors.New("HTTP client response body exceeds size limit")
 	}
+	// HTTP/2 names are lowercase on the wire and in Surge, as for MITM scripts.
 	var headers []script.HeaderField
 	for name, values := range res.Header {
+		if res.ProtoMajor == 2 {
+			name = strings.ToLower(name)
+		}
 		for _, value := range values {
 			headers = append(headers, script.HeaderField{Name: name, Value: value})
 		}

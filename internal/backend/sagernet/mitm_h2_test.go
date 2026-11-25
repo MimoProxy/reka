@@ -412,14 +412,14 @@ func TestMITMHTTP2RewritesAndScripts(t *testing.T) {
 			return &MITMScript{ID: string(kind), RequiresBody: true, MaxSize: 256, Run: func(_ context.Context, in *script.Input) (script.Result, error) {
 				if kind == script.KindHTTPRequest {
 					if string(in.Request.Body) != "request rewritten" ||
-						!slices.Contains(in.Request.Headers, script.HeaderField{Name: "X-Rewrite", Value: "request"}) ||
-						!slices.Contains(in.Request.Headers, script.HeaderField{Name: "Host", Value: "virtual-origin.test"}) {
+						!slices.Contains(in.Request.Headers, script.HeaderField{Name: "x-rewrite", Value: "request"}) ||
+						!slices.Contains(in.Request.Headers, script.HeaderField{Name: "host", Value: "virtual-origin.test"}) {
 						return script.Result{}, fmt.Errorf("unexpected request script input %+v", in.Request)
 					}
 					return script.Result{Action: script.ActionModify, BodySet: true, Body: []byte("request scripted")}, nil
 				}
 				if string(in.Response.Body) != "response rewritten" ||
-					!slices.Contains(in.Response.Headers, script.HeaderField{Name: "X-Rewrite", Value: "response"}) {
+					!slices.Contains(in.Response.Headers, script.HeaderField{Name: "x-rewrite", Value: "response"}) {
 					return script.Result{}, fmt.Errorf("unexpected response script input %+v", in.Response)
 				}
 				return script.Result{

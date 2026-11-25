@@ -529,3 +529,25 @@ $done({response: {body: next}});`, scriptStoreValueMax+1)
 	apply(restored, 1, "restored-store")
 	query(f.connect(t), "5")
 }
+
+func TestGenericScriptHTTPClientNegotiatesHTTP2(t *testing.T) {
+	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Bili-Status-Code", "0")
+		_, _ = io.WriteString(w, r.Proto)
+	}))
+	remote.EnableHTTP2 = true
+	remote.StartTLS()
+	t.Cleanup(remote.Close)
+	engine := NewEngine(EngineOptions{})
+	t.Cleanup(engine.Close)
+	source := fmt.Sprintf(`
+$httpClient.get({url: %q, insecure: true, policy: "DIRECT"}, (error, response, body) => {
+  if (error) throw Error(error);
+  $done({content: body + " " + response.headers["bili-status-code"]});
+});`, remote.URL+"/h2")
+	activateScriptTestProfile(t, engine, 1, source, false, compile.Script{ID: "widget", Type: "generic", Supported: true})
+	run, err := engine.RunScript(t.Context(), "widget", nil, true)
+	if err != nil || run.Result != "done" || string(run.Value) != `{"content":"HTTP/2.0 0"}` {
+		t.Fatalf("HTTP/2 client run = %+v, %v", run, err)
+	}
+}

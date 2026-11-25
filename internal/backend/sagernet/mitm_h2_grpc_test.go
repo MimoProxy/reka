@@ -347,3 +347,70 @@ func TestMITMHTTP2OversizeResponseStreams(t *testing.T) {
 		t.Fatal("oversized script run was not recorded")
 	}
 }
+
+// Scripts written for Surge read HTTP/2 fields by their lowercase wire names,
+// for example $request.headers.te or $response.headers["grpc-status"].
+func TestMITMScriptHeaderNamesFollowProtocol(t *testing.T) {
+	host := script.NewHost(gojaengine.New(), script.Limits{}, script.Environment{})
+	t.Cleanup(host.Close)
+	program := &script.Script{
+		Kind: script.KindHTTPResponse,
+		Source: `
+			const names = headers => Object.keys(headers).sort().join(",");
+			$done({headers: {
+				"Content-Type": "application/grpc",
+				"X-Request-Names": names($request.headers),
+				"X-Response-Names": names($response.headers),
+				"X-Request-TE": $response.headers["x-request-te"] || $response.headers["X-Request-Te"],
+			}});
+		`,
+	}
+	requestProgram := &script.Script{
+		Kind:   script.KindHTTPRequest,
+		Source: `$done({headers: {...$request.headers, "X-Request-TE": String($request.headers.te ?? $request.headers.Te)}});`,
+	}
+	for _, tt := range []struct {
+		clientH2, originH2     bool
+		requestNames, response string
+	}{
+		{true, true, "accept-encoding,content-length,content-type,host,te,user-agent,x-request-te", "bili-status-code,content-length,content-type,date,x-request-te"},
+		{true, false, "accept-encoding,content-length,content-type,host,te,user-agent,x-request-te", "Bili-Status-Code,Content-Type,Date,X-Request-Te"},
+		{false, true, "Accept-Encoding,Content-Length,Content-Type,Host,Te,User-Agent,X-Request-Te", "bili-status-code,content-length,content-type,date,x-request-te"},
+	} {
+		t.Run(strconv.FormatBool(tt.clientH2)+"/"+strconv.FormatBool(tt.originH2), func(t *testing.T) {
+			f := newMITMH2Fixture(t, &MITMRoute{
+				H2: true, MatchScript: func(kind script.Kind, url string) *MITMScript {
+					if kind == script.KindHTTPRequest {
+						return &MITMScript{ID: "request-te", Run: func(ctx context.Context, input *script.Input) (script.Result, error) {
+							return host.Run(ctx, requestProgram, input, script.Services{})
+						}}
+					}
+					return &MITMScript{ID: "names", Run: func(ctx context.Context, input *script.Input) (script.Result, error) {
+						return host.Run(ctx, program, input, script.Services{})
+					}}
+				},
+			}, tt.clientH2, tt.originH2, func(w http.ResponseWriter, r *http.Request) {
+				grpcTestTrailers(w)
+				w.Header().Set("Bili-Status-Code", "0")
+				w.Header().Set("X-Request-TE", r.Header.Get("X-Request-TE"))
+				if r.Header.Get("TE") != "trailers" {
+					t.Errorf("origin TE = %q", r.Header.Get("TE"))
+				}
+				_, _ = w.Write(grpcTestFrame("pong"))
+				grpcTestComplete(w, "0", "")
+			})
+			req := newGRPCTestRequest(t, f, "/names", bytes.NewReader(grpcTestFrame("ping")))
+			req.Header.Set("User-Agent", "test")
+			res, _ := f.response(t, req)
+			if got := res.Header.Get("X-Request-Names"); got != tt.requestNames {
+				t.Errorf("request header names = %q, want %q", got, tt.requestNames)
+			}
+			if got := res.Header.Get("X-Request-TE"); got != "trailers" {
+				t.Errorf("request script TE = %q", got)
+			}
+			if got := res.Header.Get("X-Response-Names"); got != tt.response {
+				t.Errorf("response header names = %q, want %q", got, tt.response)
+			}
+		})
+	}
+}

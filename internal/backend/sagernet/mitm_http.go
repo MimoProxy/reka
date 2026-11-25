@@ -258,7 +258,8 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reroute := rewritten.HostChanged
 	var local *httprewrite.Response
 	var abort bool
-	requestInput := mitmScriptInput{id: obs.summary.ID, request: request}
+	teTrailers := httpguts.HeaderValuesContainsToken(r.Header.Values("TE"), "trailers")
+	requestInput := mitmScriptInput{id: obs.summary.ID, request: request, teTrailers: teTrailers}
 	scriptOversize := s.runScript(r.Context(), requestScript, requestInput, requestBuffer, &stats, func(result script.Result) error {
 		switch result.Action {
 		case script.ActionModify:
@@ -434,7 +435,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		length = int64(len(response.Body))
 	}
 	responseBuffer.data = response.Body
-	responseInput := mitmScriptInput{id: obs.summary.ID, request: request, response: &response}
+	responseInput := mitmScriptInput{id: obs.summary.ID, request: request, response: &response, responseH2: res.ProtoMajor == 2, teTrailers: teTrailers}
 	scriptOversize = s.runScript(r.Context(), responseScript, responseInput, responseBuffer, &stats, func(result script.Result) error {
 		switch result.Action {
 		case script.ActionModify:

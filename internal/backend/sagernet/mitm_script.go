@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
@@ -45,6 +46,11 @@ type mitmScriptInput struct {
 	id       uint64
 	request  *http.Request
 	response *httprewrite.Response
+	// responseH2 reports that the upstream response arrived over HTTP/2.
+	responseH2 bool
+	// teTrailers reports that the client sent "TE: trailers". It is a hop
+	// header, so request carries it only once it is restored for the origin.
+	teTrailers bool
 }
 
 // runScript returns whether the hit exceeded the body limit. The caller
@@ -120,14 +126,19 @@ func (v mitmScriptInput) scriptInput(match *MITMScript, buffer mitmBufferedBody)
 		}
 	}
 	req := v.request
+	requestH2 := req.ProtoMajor == 2
+	headers := mitmScriptHeaders(req.Header, requestH2)
+	if v.teTrailers && len(req.Header.Values("TE")) == 0 {
+		headers = append(headers, mitmScriptHeader("Te", "trailers", requestH2))
+	}
 	input := &script.Input{Request: script.Request{
 		ID: strconv.FormatUint(v.id, 10), Method: req.Method, URL: req.URL.String(),
-		Headers: append(mitmScriptHeaders(req.Header), script.HeaderField{Name: "Host", Value: req.Host}),
+		Headers: append(headers, mitmScriptHeader("Host", req.Host, requestH2)),
 	}}
 	if v.response == nil {
 		input.Request.Body = body
 	} else {
-		input.Response = &script.Response{Status: v.response.StatusCode, Headers: mitmScriptHeaders(v.response.Header), Body: body}
+		input.Response = &script.Response{Status: v.response.StatusCode, Headers: mitmScriptHeaders(v.response.Header, v.responseH2), Body: body}
 	}
 	return input, nil
 }
@@ -170,14 +181,25 @@ func mitmScriptReachedEngine(err error) bool {
 		errors.Is(err, script.ErrMemoryExceeded) || errors.As(err, &scriptErr)
 }
 
-func mitmScriptHeaders(header http.Header) []script.HeaderField {
+// mitmScriptHeaders spells HTTP/2 field names in lowercase, as they are on
+// the wire and as Surge passes them to scripts. Scripts written for Surge
+// read names such as headers["user-agent"] directly. HTTP/1 names keep the
+// canonical form net/http stores.
+func mitmScriptHeaders(header http.Header, h2 bool) []script.HeaderField {
 	fields := make([]script.HeaderField, 0, len(header))
 	for _, name := range slices.Sorted(maps.Keys(header)) {
 		for _, value := range header[name] {
-			fields = append(fields, script.HeaderField{Name: name, Value: value})
+			fields = append(fields, mitmScriptHeader(name, value, h2))
 		}
 	}
 	return fields
+}
+
+func mitmScriptHeader(name, value string, h2 bool) script.HeaderField {
+	if h2 {
+		name = strings.ToLower(name)
+	}
+	return script.HeaderField{Name: name, Value: value}
 }
 
 func readMITMScriptHeaders(fields []script.HeaderField) (http.Header, error) {
