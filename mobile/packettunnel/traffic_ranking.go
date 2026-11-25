@@ -72,6 +72,8 @@ type trafficRanking struct {
 	sinceMS   int64
 	hosts     trafficTable
 	outbounds trafficTable
+	flows     trafficFlowTable
+	routes    trafficFlowTable
 	baseline  map[uint64]TrafficTotals
 }
 
@@ -80,22 +82,36 @@ func (r *trafficRanking) recordClosed(conn sagernet.ConnInfo) {
 	delete(r.baseline, conn.ID)
 	r.hosts.evictSmallest(maxTrafficHosts)
 	r.outbounds.evictSmallest(maxTrafficOutbounds)
+	r.flows.evictSmallest(maxTrafficFlows)
+	r.routes.evictSmallest(maxTrafficRoutes)
 }
 
 func (r *trafficRanking) record(conn sagernet.ConnInfo) {
+	if row, ok := r.connectionTraffic(conn); ok {
+		r.recordHostAndOutbound(conn, row)
+		r.flows.add(row)
+		r.routes.add(row.route())
+	}
+}
+
+func (r *trafficRanking) connectionTraffic(conn sagernet.ConnInfo) (TrafficFlowRow, bool) {
 	totals := TrafficTotals{Uploaded: uint64(conn.Upload), Downloaded: uint64(conn.Download), Connections: 1}
 	if base, ok := r.baseline[conn.ID]; ok {
 		totals.Uploaded -= base.Uploaded
 		totals.Downloaded -= base.Downloaded
 		// A connection spanning a reset counts once it carries new traffic.
 		if totals.Uploaded == 0 && totals.Downloaded == 0 {
-			return
+			return TrafficFlowRow{}, false
 		}
 	}
 	host, policy, node := trafficLabels(conn)
-	r.hosts.add(trafficEntry{TrafficRow: TrafficRow{Name: host, TrafficTotals: totals}}, maxTrafficHostName)
+	return TrafficFlowRow{Host: host, Policy: policy, Node: node, TrafficTotals: totals}, true
+}
+
+func (r *trafficRanking) recordHostAndOutbound(conn sagernet.ConnInfo, row TrafficFlowRow) {
+	r.hosts.add(trafficEntry{TrafficRow: TrafficRow{Name: row.Host, TrafficTotals: row.TrafficTotals}}, maxTrafficHostName)
 	r.outbounds.add(trafficEntry{
-		TrafficRow: TrafficRow{Name: policy, Node: node, TrafficTotals: totals},
+		TrafficRow: TrafficRow{Name: row.Policy, Node: row.Node, TrafficTotals: row.TrafficTotals},
 		startMS:    conn.Start.UnixMilli(), lastID: conn.ID,
 	}, maxTrafficOutboundName)
 }
@@ -131,17 +147,20 @@ func trafficLabels(conn sagernet.ConnInfo) (host, policy, node string) {
 	return host, policy, node
 }
 
+func trafficNameKey(name string, limit int) string {
+	if len(name) <= limit {
+		return name
+	}
+	// Keep distinct names separate even when their displayed prefixes match.
+	digest := sha256.Sum256([]byte(name))
+	return name[:limit] + string(digest[:])
+}
+
 func (t *trafficTable) add(current trafficEntry, nameLimit int) {
 	if t.rows == nil {
 		t.rows = make(map[string]trafficEntry)
 	}
-	key := current.Name
-	longName := len(key) > nameLimit
-	if longName {
-		// Keep distinct names separate even when their displayed prefixes match.
-		digest := sha256.Sum256([]byte(key))
-		key = key[:nameLimit] + string(digest[:])
-	}
+	key := trafficNameKey(current.Name, nameLimit)
 	entry, exists := t.rows[key]
 	if !exists {
 		entry.Name = strings.Clone(history.Text(current.Name, nameLimit))
@@ -154,7 +173,7 @@ func (t *trafficTable) add(current trafficEntry, nameLimit int) {
 			entry.Node = strings.Clone(node)
 		}
 	}
-	if !longName {
+	if len(current.Name) <= nameLimit {
 		key = entry.Name
 	}
 	t.rows[key] = entry
@@ -209,7 +228,11 @@ func (t *trafficTable) top(capacity, limit int) []TrafficRow {
 // hundred rows in each list then fit in the bridge's 128 KiB response buffer
 // even with a node label on every outbound and full-width counters.
 func rankingJSONName(name string) string {
-	remaining := 128 - 2
+	return rankingJSONNameWithin(name, 128)
+}
+
+func rankingJSONNameWithin(name string, budget int) string {
+	remaining := budget - 2
 	for i, r := range name {
 		size := utf8.RuneLen(r)
 		switch {
@@ -245,7 +268,9 @@ func (s *Session) trafficRanking(limit int) TrafficRanking {
 		snapshot.hosts.rows = maps.Clone(snapshot.hosts.rows)
 		snapshot.outbounds.rows = maps.Clone(snapshot.outbounds.rows)
 		for _, conn := range active {
-			snapshot.record(conn)
+			if row, ok := snapshot.connectionTraffic(conn); ok {
+				snapshot.recordHostAndOutbound(conn, row)
+			}
 		}
 	})
 	hosts := snapshot.hosts.top(maxTrafficHosts, limit)

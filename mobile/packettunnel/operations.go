@@ -98,6 +98,8 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return s.connections(), nil
 	case "trafficRanking":
 		return s.trafficRanking(op.Limit), nil
+	case "trafficFlows":
+		return s.trafficFlows(op.Limit), nil
 	case "resetTrafficRanking":
 		s.resetTrafficRanking()
 		return true, nil
