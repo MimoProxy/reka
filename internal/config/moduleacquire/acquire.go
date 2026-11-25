@@ -105,6 +105,7 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 		interval = model.DefaultResourceInterval
 	}
 	fetcher := subscription.Fetcher{Client: opts.Client, Blobs: opts.Blobs, MaxBytes: model.MaxDocumentSize, MaxBundleBytes: MaxBundleSize}
+	fetcher.UserAgent = moduleUserAgent(def.Format, def.URL)
 	batch := fetcher.Batch(validated, opts.Force)
 	location := def.File
 	var body []byte
@@ -134,6 +135,7 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 	if format == "" {
 		format = model.ModuleFormatSurge
 	}
+	fetcher.UserAgent = moduleUserAgent(format, location)
 	meta, refs := module.InspectWithOptions(body, module.Options{Format: format, Arguments: def.Arguments, ModuleInterval: interval})
 	if len(refs.MapLocal) > model.MaxModuleResources {
 		return Result{}, &subscription.Error{Code: "too_many_module_resources"}

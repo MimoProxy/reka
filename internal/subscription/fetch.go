@@ -94,8 +94,14 @@ func HTTPClientWithControl(control func(string, string, syscall.RawConn) error, 
 			return failure("redirect_scheme")
 		}
 		if !strings.EqualFold(req.URL.Scheme+"://"+req.URL.Host, via[0].URL.Scheme+"://"+via[0].URL.Host) {
+			// Drop credentials on a cross-origin redirect but keep the
+			// user agent: hosts that check it often redirect to a CDN.
+			agent := via[0].Header.Get("User-Agent")
+			if agent == "" {
+				agent = "Reka/dev"
+			}
 			req.Header = make(http.Header)
-			req.Header.Set("User-Agent", "Reka/dev")
+			req.Header.Set("User-Agent", agent)
 			req.URL.User = nil
 		}
 		return nil
@@ -120,6 +126,9 @@ type Fetcher struct {
 	ValidateBody   func([]byte) error
 	MaxBytes       int
 	MaxBundleBytes int
+	// UserAgent replaces the default user agent for requests without one. It
+	// is not part of the request digest, so changing it keeps cached entries.
+	UserAgent string
 }
 type Batch struct {
 	f        *Fetcher
@@ -190,7 +199,11 @@ func (b *Batch) Fetch(ctx context.Context, id, kind, name, raw string, headers h
 			req.Header = make(http.Header)
 		}
 		if req.Header.Get("User-Agent") == "" {
-			req.Header.Set("User-Agent", "Reka/dev")
+			agent := b.f.UserAgent
+			if agent == "" {
+				agent = "Reka/dev"
+			}
+			req.Header.Set("User-Agent", agent)
 		}
 		if len(cached) > 0 {
 			if old.ETag != "" {
