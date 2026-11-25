@@ -67,7 +67,9 @@ func TestScriptStoreFlush(t *testing.T) {
 		}
 	}
 	path := filepath.Join(root, "scripts", "store.json")
-	deadline := time.Now().Add(3 * scriptStoreFlushDelay)
+	// The atomic write syncs to disk, which can take seconds on a busy CI
+	// runner. Polling ends as soon as the file appears.
+	deadline := time.Now().Add(scriptStoreFlushDelay + 10*time.Second)
 	for {
 		if raw, err := os.ReadFile(path); err == nil {
 			var disk map[string]string
