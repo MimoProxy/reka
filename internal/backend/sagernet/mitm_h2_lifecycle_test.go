@@ -12,11 +12,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/script"
 	"github.com/sagernet/sing-box/adapter"
@@ -238,11 +239,11 @@ func TestMITMHTTP2UpstreamGoAwayReplaysBufferedRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	const payload = "rewritten upload"
-	client, served := mitmH2FrameProxy(t, &MITMRoute{Rewrite: set, MaxBodySize: 64},
+	fixture, served := mitmH2FrameProxy(t, &MITMRoute{Rewrite: set, MaxBodySize: 64}, mitmH2FrameConfig{},
 		func(origin *mitmH2FrameOrigin) error {
-			_, body, err := origin.nextRequest()
-			if err != nil || body != payload {
-				return fmt.Errorf("original upstream request body = %q, %v", body, err)
+			request, err := origin.nextRequest()
+			if err != nil || request.body != payload {
+				return fmt.Errorf("original upstream request body = %q, %v", request.body, err)
 			}
 			// Last stream ID zero tells the transport this request never ran,
 			// even though the test peer received its complete upload.
@@ -252,18 +253,95 @@ func TestMITMHTTP2UpstreamGoAwayReplaysBufferedRequest(t *testing.T) {
 			return origin.writer.Flush()
 		},
 		func(origin *mitmH2FrameOrigin) error {
-			id, body, err := origin.nextRequest()
-			if err != nil || body != payload {
-				return fmt.Errorf("retried upstream request body = %q, %v", body, err)
+			request, err := origin.nextRequest()
+			if err != nil || request.body != payload {
+				return fmt.Errorf("retried upstream request body = %q, %v", request.body, err)
 			}
-			return origin.reply(id, body, true)
+			return origin.reply(request.id, request.body, true)
 		},
 	)
 	ctx, cancel := context.WithTimeout(t.Context(), mitmH2WireTimeout)
 	defer cancel()
-	res, err := mitmH2WireRoundTrip(ctx, client, mitmH2TestHost, "/retry", strings.NewReader("original upload"))
+	res, err := mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/retry", strings.NewReader("original upload"))
 	assertMITMH2WireReply(t, res, err, http.StatusOK, payload)
 	assertMITMH2OriginDone(t, ctx, served, 2)
+}
+
+func TestMITMHTTP2UpstreamCapsStreamingDataFrames(t *testing.T) {
+	const (
+		chunkSize = 100 << 10
+		window    = 1 << 20
+		frameCap  = 16 << 10
+	)
+	chunks := []string{strings.Repeat("a", chunkSize), strings.Repeat("b", chunkSize), strings.Repeat("c", chunkSize)}
+	payload := strings.Join(chunks, "")
+	config := mitmH2FrameConfig{
+		settings: []http2.Setting{
+			{ID: http2.SettingMaxFrameSize, Val: 1 << 20},
+			{ID: http2.SettingInitialWindowSize, Val: window},
+		},
+		connectionWindowIncrement: window,
+	}
+	fixture, served := mitmH2FrameProxy(t, &MITMRoute{}, config, func(origin *mitmH2FrameOrigin) error {
+		ready, err := origin.nextRequest()
+		if err != nil {
+			return err
+		}
+		if err := origin.reply(ready.id, "ready", true); err != nil {
+			return err
+		}
+		upload, err := origin.nextRequest()
+		if err != nil {
+			return err
+		}
+		if upload.hasContentLength {
+			return errors.New("streaming request unexpectedly declared Content-Length")
+		}
+		if upload.maxDataFrameSize > frameCap {
+			return fmt.Errorf("largest upstream DATA frame payload = %d bytes, want at most %d", upload.maxDataFrameSize, frameCap)
+		}
+		if upload.body != payload {
+			return fmt.Errorf("upstream upload differs from the %d-byte payload: received %d bytes", len(payload), len(upload.body))
+		}
+		return origin.reply(upload.id, "received", true)
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), mitmH2WireTimeout)
+	defer cancel()
+	// The first reply confirms the upstream client processed SETTINGS before
+	// the upload begins on the reused connection.
+	res, err := mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/ready", nil)
+	assertMITMH2WireReply(t, res, err, http.StatusOK, "ready")
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	go func() {
+		defer writer.Close()
+		for _, chunk := range chunks {
+			if _, err := io.WriteString(writer, chunk); err != nil {
+				return
+			}
+		}
+	}()
+	res, err = mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/upload", reader)
+	if res != nil {
+		defer res.Body.Close()
+	}
+	assertMITMH2OriginDone(t, ctx, served, 1)
+	assertMITMH2WireReply(t, res, err, http.StatusOK, "received")
+	if dials := fixture.dials.Load(); dials != 1 {
+		t.Fatalf("upstream dials = %d, want one reused connection", dials)
+	}
+	live := fixture.live(t)
+	if live.MITMClientProtocol != "h2" || !slices.Equal(live.MITMUpstreamProtocols, []string{"h2"}) {
+		t.Fatalf("live MITM diagnostics = %+v", live.MITMConnectionInfo)
+	}
+	for _, row := range fixture.requestHistory(t, 2) {
+		if row.ConnectionID != live.ID || row.UpstreamHTTP != "HTTP/2.0" {
+			t.Fatalf("request history = %+v", row)
+		}
+		if row.Path == "/ready" && row.TLSMS == nil {
+			t.Fatalf("first upstream request did not record TLS handshake timing: %+v", row)
+		}
+	}
 }
 
 func TestMITMHTTP2UpstreamGoAwayAcceptedStream(t *testing.T) {
@@ -283,13 +361,13 @@ func TestMITMHTTP2UpstreamGoAwayAcceptedStream(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), mitmH2WireTimeout)
 			defer cancel()
 			finish := make(chan struct{})
-			client, served := mitmH2FrameProxy(t, &MITMRoute{Rewrite: set}, func(origin *mitmH2FrameOrigin) error {
-				id, _, err := origin.nextRequest()
+			fixture, served := mitmH2FrameProxy(t, &MITMRoute{Rewrite: set}, mitmH2FrameConfig{}, func(origin *mitmH2FrameOrigin) error {
+				request, err := origin.nextRequest()
 				if err != nil {
 					return err
 				}
 				if started {
-					if err := origin.reply(id, "partial", false); err != nil {
+					if err := origin.reply(request.id, "partial", false); err != nil {
 						return err
 					}
 					select {
@@ -298,20 +376,20 @@ func TestMITMHTTP2UpstreamGoAwayAcceptedStream(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				if err := origin.fr.WriteGoAway(id, http2.ErrCodeNo, nil); err != nil {
+				if err := origin.fr.WriteGoAway(request.id, http2.ErrCodeNo, nil); err != nil {
 					return err
 				}
 				// Closing the connection leaves this accepted stream incomplete.
 				return origin.writer.Flush()
 			})
-			res, err := mitmH2WireRoundTrip(ctx, client, mitmH2TestHost, "/origin", nil)
+			res, err := mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/origin", nil)
 			if started {
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer res.Body.Close()
 				assertMITMH2PartialReply(t, res)
-				local, err := mitmH2WireRoundTrip(ctx, client, mitmH2TestHost, "/local", nil)
+				local, err := mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/local", nil)
 				assertMITMH2WireReply(t, local, err, http.StatusOK, "healthy")
 				close(finish)
 				_, err = io.ReadAll(res.Body)
@@ -320,7 +398,7 @@ func TestMITMHTTP2UpstreamGoAwayAcceptedStream(t *testing.T) {
 				assertMITMH2WireReply(t, res, err, http.StatusBadGateway, "HTTPS upstream request failed\n")
 			}
 			assertMITMH2OriginDone(t, ctx, served, 1)
-			local, err := mitmH2WireRoundTrip(ctx, client, mitmH2TestHost, "/local", nil)
+			local, err := mitmH2WireRoundTrip(ctx, fixture.client, mitmH2TestHost, "/local", nil)
 			assertMITMH2WireReply(t, local, err, http.StatusOK, "healthy")
 		})
 	}
@@ -339,13 +417,19 @@ func assertMITMH2PartialReply(t *testing.T, res *http.Response) {
 }
 
 type mitmH2FrameOrigin struct {
-	fr     *http2.Framer
-	writer *bufio.Writer
+	fr          *http2.Framer
+	writer      *bufio.Writer
+	settingsAck bool
 }
 
-// The raw origin speaks just enough HTTP/2 to select a GOAWAY last stream ID
-// deterministically. The relay still handshakes and uses net/http on both hops.
-func mitmH2FrameProxy(t *testing.T, route *MITMRoute, sessions ...func(*mitmH2FrameOrigin) error) (*http.ClientConn, <-chan error) {
+type mitmH2FrameConfig struct {
+	settings                  []http2.Setting
+	connectionWindowIncrement uint32
+}
+
+// The raw origin controls its HTTP/2 SETTINGS and GOAWAY last stream ID.
+// The relay still handshakes and uses net/http on both hops.
+func mitmH2FrameProxy(t *testing.T, route *MITMRoute, config mitmH2FrameConfig, sessions ...func(*mitmH2FrameOrigin) error) (*mitmH2Fixture, <-chan error) {
 	t.Helper()
 	clientIssuer, roots := mitmRelayTestIssuer(t, "Client wire test CA")
 	originIssuer, _ := mitmRelayTestIssuer(t, "Origin wire test CA")
@@ -354,14 +438,14 @@ func mitmH2FrameProxy(t *testing.T, route *MITMRoute, sessions ...func(*mitmH2Fr
 		t.Fatal(err)
 	}
 	route.Host, route.Issuer, route.H2, route.SkipServerCertVerify = mitmH2TestHost, clientIssuer, true, true
-	backend := New(Options{Logger: testLogger(t)})
-	t.Cleanup(func() { _ = backend.Close() })
+	fixture := &mitmH2Fixture{records: history.New(), done: make(chan struct{})}
+	fixture.backend = New(Options{History: fixture.records, Logger: testLogger(t)})
+	t.Cleanup(func() { _ = fixture.backend.Close() })
 	client, inbound := connectionEventPipe(t)
 	served := make(chan error, len(sessions))
-	var dialCount atomic.Int32
 	out := &Outbound{tag: "origin", typ: "direct", out: mitmRelayTestOutbound{
 		dial: func(_ context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
-			i := int(dialCount.Add(1)) - 1
+			i := int(fixture.dials.Add(1)) - 1
 			if i >= len(sessions) {
 				return nil, errors.New("unexpected upstream dial")
 			}
@@ -370,28 +454,24 @@ func mitmH2FrameProxy(t *testing.T, route *MITMRoute, sessions ...func(*mitmH2Fr
 			go func() {
 				defer peer.Close()
 				server := tls.Server(peer, &tls.Config{Certificates: []tls.Certificate{*originCert}, NextProtos: []string{"h2"}})
-				served <- serveMITMH2Frames(server, sessions[i])
+				served <- serveMITMH2Frames(server, config, sessions[i])
 			}()
-			return remote, nil
+			return &mitmH2OriginConn{Conn: remote, closed: &fixture.closed}, nil
 		},
 	}}
-	backend.SetRoute(func(context.Context, Metadata) Route { return Route{Outbound: out, MITM: route} })
-	done := make(chan struct{})
-	go backend.router.RouteConnectionEx(t.Context(), inbound, adapter.InboundContext{
+	fixture.backend.SetRoute(func(context.Context, Metadata) Route { return Route{Outbound: out, MITM: route} })
+	go fixture.backend.router.RouteConnectionEx(t.Context(), inbound, adapter.InboundContext{
 		Inbound: "test", InboundType: "mixed", Destination: M.ParseSocksaddr(mitmH2TestHost + ":443"),
-	}, func(error) { close(done) })
+	}, func(error) { close(fixture.done) })
 	t.Cleanup(func() {
 		_ = client.Close()
-		select {
-		case <-done:
-		case <-time.After(mitmH2WireTimeout):
-			t.Error("MITM wire client did not finish")
-		}
+		fixture.waitClosed(t)
 	})
-	return mitmH2WireClient(t, client, mitmH2TestHost, roots), served
+	fixture.client = mitmH2WireClient(t, client, mitmH2TestHost, roots)
+	return fixture, served
 }
 
-func serveMITMH2Frames(server *tls.Conn, session func(*mitmH2FrameOrigin) error) error {
+func serveMITMH2Frames(server *tls.Conn, config mitmH2FrameConfig, session func(*mitmH2FrameOrigin) error) error {
 	preface := make([]byte, len(http2.ClientPreface))
 	if _, err := io.ReadFull(server, preface); err != nil {
 		return err
@@ -409,11 +489,16 @@ func serveMITMH2Frames(server *tls.Conn, session func(*mitmH2FrameOrigin) error)
 	if settings, ok := frame.(*http2.SettingsFrame); !ok || settings.IsAck() {
 		return fmt.Errorf("first upstream frame = %T, want SETTINGS", frame)
 	}
-	if err := fr.WriteSettings(); err != nil {
+	if err := fr.WriteSettings(config.settings...); err != nil {
 		return err
 	}
 	if err := fr.WriteSettingsAck(); err != nil {
 		return err
+	}
+	if config.connectionWindowIncrement != 0 {
+		if err := fr.WriteWindowUpdate(0, config.connectionWindowIncrement); err != nil {
+			return err
+		}
 	}
 	if err := writer.Flush(); err != nil {
 		return err
@@ -421,32 +506,46 @@ func serveMITMH2Frames(server *tls.Conn, session func(*mitmH2FrameOrigin) error)
 	return session(&mitmH2FrameOrigin{fr: fr, writer: writer})
 }
 
-func (o *mitmH2FrameOrigin) nextRequest() (uint32, string, error) {
-	var streamID uint32
-	var settingsAck bool
+type mitmH2FrameRequest struct {
+	id               uint32
+	body             string
+	hasContentLength bool
+	maxDataFrameSize uint32
+}
+
+func (o *mitmH2FrameOrigin) nextRequest() (mitmH2FrameRequest, error) {
+	var request mitmH2FrameRequest
+	var ended bool
 	var body strings.Builder
 	// Drain the SETTINGS ACK before writing. net.Pipe has no socket
 	// buffer and the client's frame reader may be blocked writing its ACK.
-	for streamID == 0 || !settingsAck {
+	for !ended || !o.settingsAck {
 		frame, err := o.fr.ReadFrame()
 		if err != nil {
-			return 0, "", err
+			return mitmH2FrameRequest{}, err
 		}
 		switch frame := frame.(type) {
 		case *http2.SettingsFrame:
-			settingsAck = frame.IsAck()
+			o.settingsAck = o.settingsAck || frame.IsAck()
 		case *http2.MetaHeadersFrame:
+			for _, field := range frame.RegularFields() {
+				if field.Name == "content-length" {
+					request.hasContentLength = true
+				}
+			}
 			if frame.StreamEnded() {
-				streamID = frame.StreamID
+				request.id, ended = frame.StreamID, true
 			}
 		case *http2.DataFrame:
+			request.maxDataFrameSize = max(request.maxDataFrameSize, frame.Header().Length)
 			body.Write(frame.Data())
 			if frame.StreamEnded() {
-				streamID = frame.StreamID
+				request.id, ended = frame.StreamID, true
 			}
 		}
 	}
-	return streamID, body.String(), nil
+	request.body = body.String()
+	return request, nil
 }
 
 func (o *mitmH2FrameOrigin) reply(id uint32, body string, end bool) error {

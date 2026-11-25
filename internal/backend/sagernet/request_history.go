@@ -63,6 +63,7 @@ type requestObservation struct {
 	up        atomic.Int64
 	down      atomic.Int64
 	tlsStart  time.Time
+	mitmTLS   bool
 	detail    *requestDetail
 	upBody    *observedBody
 	downBody  *observedBody
@@ -120,7 +121,7 @@ func (b *Backend) beginRequest(ctx context.Context, req *http.Request, tag, clie
 		},
 		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
 			obs.mu.Lock()
-			if !obs.tlsStart.IsZero() {
+			if !obs.mitmTLS && !obs.tlsStart.IsZero() {
 				elapsed := time.Since(obs.tlsStart).Milliseconds()
 				obs.summary.TLSMS = &elapsed
 			}
@@ -163,7 +164,7 @@ func observeMITMUpstreamProtocol(ctx context.Context, attempt *connectionAttempt
 		GotConn: func(info httptrace.GotConnInfo) {
 			// Record the connection selected for a request even when the
 			// upstream closes or resets the stream before sending headers.
-			conn, ok := info.Conn.(*tls.Conn)
+			conn, ok := info.Conn.(interface{ ConnectionState() tls.ConnectionState })
 			if !ok {
 				return
 			}
@@ -175,6 +176,17 @@ func observeMITMUpstreamProtocol(ctx context.Context, attempt *connectionAttempt
 			}
 		},
 	})
+}
+
+func observeMITMUpstreamTLS(ctx context.Context, duration time.Duration) {
+	if obs, _ := ctx.Value(requestHistoryKey{}).(*requestObservation); obs != nil {
+		// net/http also traces a handshake on the already negotiated connection.
+		elapsed := duration.Milliseconds()
+		obs.mu.Lock()
+		obs.mitmTLS = true
+		obs.summary.TLSMS = &elapsed
+		obs.mu.Unlock()
+	}
 }
 
 func observeRequestLookup(ctx context.Context, lookup LookupFunc) LookupFunc {

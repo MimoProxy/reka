@@ -67,7 +67,7 @@ func newMITMH2Origin(t *testing.T, h2 bool, handler http.HandlerFunc) mitmRelayT
 			}
 			// Return the in-memory origin socket before TLS so the relay
 			// still constructs the origin TLS client and negotiates ALPN.
-			return conn.(*tls.Conn).NetConn(), nil
+			return conn.(interface{ NetConn() net.Conn }).NetConn(), nil
 		},
 	}
 }

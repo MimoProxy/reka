@@ -37,11 +37,15 @@ type mitmUpstream struct {
 func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundContext, host string, skipVerify, h2 bool, attempt *connectionAttempt) *mitmUpstream {
 	owner, cancel := context.WithCancel(ctx)
 	upstream := &mitmUpstream{route: route, cancel: cancel}
+	tlsConfig := &tls.Config{
+		ServerName: host, InsecureSkipVerify: skipVerify, MinVersion: tls.VersionTLS12, NextProtos: mitmTLSNextProtos(h2),
+	}
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return upstream.dial(ctx, owner, metadata, attempt)
+	}
 	upstream.transport = &http.Transport{
-		Protocols: mitmHTTPProtocols(h2),
-		TLSClientConfig: &tls.Config{
-			ServerName: host, InsecureSkipVerify: skipVerify, MinVersion: tls.VersionTLS12, NextProtos: mitmTLSNextProtos(h2),
-		},
+		Protocols:              mitmHTTPProtocols(h2),
+		TLSClientConfig:        tlsConfig,
 		TLSHandshakeTimeout:    mitmTLSHandshakeTimeout,
 		ExpectContinueTimeout:  mitmExpectContinueTimeout,
 		IdleConnTimeout:        mitmHTTPIdleTimeout,
@@ -49,48 +53,71 @@ func newMITMUpstream(ctx context.Context, route Route, metadata adapter.InboundC
 		MaxIdleConnsPerHost:    mitmIdleUpstreams,
 		MaxResponseHeaderBytes: relayHTTPMaxHeaderBytes,
 		DisableCompression:     true,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			upstream.mu.Lock()
-			if upstream.closed {
-				upstream.mu.Unlock()
-				return nil, net.ErrClosed
-			}
-			upstream.dials.Add(1)
-			upstream.mu.Unlock()
-			defer upstream.dials.Done()
-
-			// net/http can detach a speculative dial from RoundTrip's
-			// cancellation. Tie it to the client or rerouted request too.
-			ctx, cancelDial := context.WithCancel(ctx)
-			stopCancel := context.AfterFunc(owner, cancelDial)
-			releaseDialContext := func() {
-				stopCancel()
-				cancelDial()
-			}
-			remote, err := dialTCP(tcpRouteContext(ctx, route, metadata), route.Outbound, metadata.Destination, attempt)
+		DialContext:            dial,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dial(ctx, network, addr)
 			if err != nil {
-				releaseDialContext()
 				return nil, err
 			}
-			conn := &mitmUpstreamConn{Conn: remote, owner: upstream, releaseDialContext: releaseDialContext}
-			upstream.mu.Lock()
-			if upstream.closed {
-				upstream.mu.Unlock()
+			tlsConn := tls.Client(conn, tlsConfig.Clone())
+			// net/http leaves the handshake timeout to a custom TLS dialer.
+			handshakeCtx, cancelHandshake := context.WithTimeout(ctx, mitmTLSHandshakeTimeout)
+			defer cancelHandshake()
+			started := time.Now()
+			err = tlsConn.HandshakeContext(handshakeCtx)
+			observeMITMUpstreamTLS(ctx, time.Since(started))
+			if err != nil {
 				_ = conn.Close()
-				return nil, net.ErrClosed
+				return nil, err
 			}
-			if upstream.conns == nil {
-				upstream.conns = make(map[*mitmUpstreamConn]struct{})
+			if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+				return &mitmH2ClientConn{Conn: tlsConn}, nil
 			}
-			upstream.conns[conn] = struct{}{}
-			upstream.mu.Unlock()
-			return conn, nil
+			return tlsConn, nil
 		},
 	}
 	if h2 {
 		upstream.transport.HTTP2 = mitmHTTP2Config()
 	}
 	return upstream
+}
+
+func (u *mitmUpstream) dial(ctx, owner context.Context, metadata adapter.InboundContext, attempt *connectionAttempt) (net.Conn, error) {
+	u.mu.Lock()
+	if u.closed {
+		u.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+	u.dials.Add(1)
+	u.mu.Unlock()
+	defer u.dials.Done()
+
+	// net/http can detach a speculative dial from RoundTrip's
+	// cancellation. Tie it to the client or rerouted request too.
+	ctx, cancelDial := context.WithCancel(ctx)
+	stopCancel := context.AfterFunc(owner, cancelDial)
+	releaseDialContext := func() {
+		stopCancel()
+		cancelDial()
+	}
+	remote, err := dialTCP(tcpRouteContext(ctx, u.route, metadata), u.route.Outbound, metadata.Destination, attempt)
+	if err != nil {
+		releaseDialContext()
+		return nil, err
+	}
+	conn := &mitmUpstreamConn{Conn: remote, owner: u, releaseDialContext: releaseDialContext}
+	u.mu.Lock()
+	if u.closed {
+		u.mu.Unlock()
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
+	if u.conns == nil {
+		u.conns = make(map[*mitmUpstreamConn]struct{})
+	}
+	u.conns[conn] = struct{}{}
+	u.mu.Unlock()
+	return conn, nil
 }
 
 func (u *mitmUpstream) close() {

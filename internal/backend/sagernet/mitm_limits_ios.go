@@ -13,9 +13,9 @@ func mitmHTTP2Config() *http.HTTP2Config {
 	// Use smaller limits than Go's defaults within the Packet Tunnel Go
 	// memory budget (about 28 MiB). On an iPhone, two minutes of real app
 	// traffic through gRPC and video MITM modules peaked at 32.5 MiB with
-	// HTTP/2 and 32.0 MiB without it, so these limits add little. Go's
-	// HTTP/2 client still allocates a write buffer of up to 512 KiB for
-	// each upstream request body without a declared length.
+	// HTTP/2 and 32.0 MiB without it, so these limits add little. The upstream
+	// connection wrapper caps the peer's frame size at 16 KiB to bound Go's
+	// HTTP/2 write buffer for request bodies without a declared length.
 	// The inbound server caps concurrent streams. The upstream transport
 	// cannot set its own stream count, so it honors the peer's limit without
 	// opening extra connections when that limit is reached.
