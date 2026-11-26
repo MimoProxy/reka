@@ -330,6 +330,19 @@ func (s *Service) resolve(ctx context.Context, q *D.Msg, scope string, outcome *
 	case "proxy":
 		servers = s.cfg.Proxy
 		if len(servers) == 0 {
+			// Without proxy-server-nameserver, resolve proxy servers with the
+			// main nameservers and nameserver-policy, as mihomo does.
+			servers = directServers(s.cfg.Nameservers)
+			for _, p := range s.cfg.Policies {
+				if s.Match(p.Pattern, domain, netip.Addr{}) {
+					if direct := directServers(p.Servers); len(direct) > 0 {
+						servers = direct
+					}
+					break
+				}
+			}
+		}
+		if len(servers) == 0 {
 			servers = s.cfg.Bootstrap
 		}
 		if len(servers) == 0 {
@@ -539,4 +552,16 @@ func (s *Service) resolveHost(domain string, typ uint16) (*Host, string, error) 
 		return found, "", nil
 	}
 	return nil, "", errors.New("hosts alias depth exceeded")
+}
+
+// directServers drops nameservers that are reached through an outbound. A
+// proxy server lookup through another proxy could depend on itself.
+func directServers(servers []string) []string {
+	var direct []string
+	for _, raw := range servers {
+		if ep, err := ParseEndpoint(raw); err == nil && (ep.Via == "" || ep.Via == "direct") {
+			direct = append(direct, raw)
+		}
+	}
+	return direct
 }

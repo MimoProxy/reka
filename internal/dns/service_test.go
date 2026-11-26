@@ -164,3 +164,33 @@ func TestFakeIPAnswersServiceBindingsLocally(t *testing.T) {
 		})
 	}
 }
+
+func TestProxyScopeWithoutProxyNameserversFollowsNameserverPolicy(t *testing.T) {
+	echo := func(_ context.Context, ep Endpoint, q *D.Msg, _ func(context.Context, string) ([]netip.Addr, error)) (*D.Msg, error) {
+		return answer(q, ep.Host), nil
+	}
+	for _, tc := range []struct {
+		name   string
+		cfg    Config
+		domain string
+		want   string
+	}{
+		{"policy", Config{Nameservers: []string{"192.0.2.1"}, Bootstrap: []string{"192.0.2.2"},
+			Policies: []Policy{{ID: "node", Pattern: "node.test", Servers: []string{"192.0.2.5"}}}}, "node.test", "192.0.2.5"},
+		{"nameserver", Config{Nameservers: []string{"192.0.2.1"}, Bootstrap: []string{"192.0.2.2"},
+			Policies: []Policy{{ID: "node", Pattern: "node.test", Servers: []string{"192.0.2.5"}}}}, "other.test", "192.0.2.1"},
+		{"explicit proxy nameserver", Config{Nameservers: []string{"192.0.2.1"}, Proxy: []string{"192.0.2.3"},
+			Policies: []Policy{{ID: "node", Pattern: "node.test", Servers: []string{"192.0.2.5"}}}}, "node.test", "192.0.2.3"},
+		{"routed policy skipped", Config{Nameservers: []string{"192.0.2.1"},
+			Policies: []Policy{{ID: "node", Pattern: "node.test", Servers: []string{"192.0.2.5#relay"}}}}, "node.test", "192.0.2.1"},
+		{"routed nameserver skipped", Config{Nameservers: []string{"192.0.2.1#relay"}, Bootstrap: []string{"192.0.2.2"}}, "node.test", "192.0.2.2"},
+		{"explicitly direct", Config{Nameservers: []string{"192.0.2.1#direct"}, Bootstrap: []string{"192.0.2.2"}}, "node.test", "192.0.2.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ips, err := service(t, tc.cfg, echo).Lookup(context.Background(), tc.domain, "proxy")
+			if err != nil || len(ips) == 0 || ips[0].String() != tc.want {
+				t.Fatalf("got %v, %v, want %s", ips, err, tc.want)
+			}
+		})
+	}
+}
