@@ -15,12 +15,14 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-// Destination is where a connection wants to go. Exactly one of Domain or
-// Addr is set.
+// Destination is where a connection wants to go. While matching rules, a DNS
+// mapping can supply a domain alongside the original IP.
 type Destination struct {
 	Domain string
 	Addr   netip.Addr
 	Port   uint16
+	// DNSMapped identifies a domain recovered from a client DNS answer for Addr.
+	DNSMapped bool `json:"-"`
 }
 
 func (d Destination) String() string {

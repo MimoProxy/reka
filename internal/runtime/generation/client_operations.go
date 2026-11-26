@@ -218,7 +218,7 @@ func (e *Engine) QueryDNS(ctx context.Context, request api.DNSQueryRequest) (api
 	defer release()
 	q := new(D.Msg)
 	q.SetQuestion(D.Fqdn(request.Name), qtype)
-	response, err := resolver.Exchange(history.WithDNSOrigin(ctx, history.DNSOrigin{Kind: "control"}), q, request.Scope, request.Fake)
+	response, err := resolver.ExchangeResolver(history.WithDNSOrigin(ctx, history.DNSOrigin{Kind: "control"}), q, request.Scope, request.Fake)
 	if err != nil {
 		return result, err
 	}

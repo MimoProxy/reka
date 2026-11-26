@@ -185,10 +185,10 @@ func (g *generation) mitmAvailable() bool {
 }
 
 func httpHostHint(md sagernet.Metadata) string {
-	// The destination can already carry a domain from fake IP or an
-	// explicit proxy target. A sniffed hint covers address-only connections.
+	// A DNS answer for a shared address cannot authorize interception.
+	// Keep using the observed Host or SNI on real IP connections.
 	host := md.Destination.Domain
-	if host == "" {
+	if host == "" || md.Destination.DNSMapped {
 		host = md.SniffedDomain
 	}
 	return strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")

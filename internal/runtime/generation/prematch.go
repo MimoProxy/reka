@@ -36,6 +36,10 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 		}
 	}
 
+	packetMD := md
+	if md.Destination.Domain == "" && inputAddress.IsValid() {
+		md.Destination.Domain, md.Destination.DNSMapped = e.hostMapping.Lookup(inputAddress)
+	}
 	action := sagernet.PreMatchReject
 	dec := router.Decision{RuleIndex: -1, LookupRule: -1, Outbound: model.OutboundReject}
 	var rejectReason string
@@ -43,11 +47,11 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 	if md.Network != "udp" || e.inboundAllowsUDP(g, md) {
 		ctx := context.Background()
 		opts := router.PreMatchOptions{Overrides: state.temporary, At: state.at}
-		if md.Destination.Domain == "" {
-			sniff := flowSniffOptions(ctx, g.eff, md, state.scene)
-			if e.flowMaySniff(g, md, state, sniff) {
-				// Sniffing can replace a hint already supplied by the caller.
-				if md.SniffedDomain != "" {
+		if packetMD.Destination.Domain == "" {
+			sniff := flowSniffOptions(ctx, g.eff, packetMD, state.scene)
+			if e.flowMaySniff(g, packetMD, state, sniff) {
+				// Sniffing can supersede either a DNS mapping or an earlier hint.
+				if routeMD.Domain != "" {
 					return sagernet.PreMatchVerdict{}
 				}
 				opts.DomainPending = true

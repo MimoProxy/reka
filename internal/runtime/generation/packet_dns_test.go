@@ -69,3 +69,64 @@ rules: [{match: {all: true}, outbound: node}]
 		t.Fatal("wrong DNS scope", normal.Load(), proxy.Load())
 	}
 }
+
+func TestMappedPacketDestinationByOutbound(t *testing.T) {
+	const dnsProfile = `schema-version: 1
+dns:
+  nameserver: [192.0.2.53]
+  use-hosts: true
+  hosts: [{id: mapped.test, addresses: [%s]}]
+`
+	e := NewEngine(EngineOptions{HostPacketFlow: true})
+	t.Cleanup(e.Close)
+	original := netip.MustParseAddr("192.0.2.20")
+	pinFlowApply(t, e, fmt.Sprintf(dnsProfile, original), "", 1)
+	if _, err := e.ExchangeDNS(t.Context(), new(D.Msg).SetQuestion("mapped.test.", D.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+	// The new DNS answer differs. IP-only encodings must keep the address
+	// that was returned to the client before the reload.
+	base := fmt.Sprintf(dnsProfile, "192.0.2.21")
+	const packet = ", uuid: b831381d-6324-4d53-ad4f-8cda48b30811, packet-encoding: packetaddr"
+	for i, tc := range []struct {
+		name, outbound string
+		wantDomain     bool
+	}{
+		{"SOCKS", "socks", true},
+		{"VLESS packetaddr", "vless" + packet, false},
+		{"VMess packetaddr", "vmess" + packet, false},
+		{"multiplexed UDP", "vless" + packet + ", multiplex: {enabled: true}", true},
+		{"native UDP with multiplexed TCP", "vless" + packet + ", multiplex: {enabled: true, only-tcp: true}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := base + fmt.Sprintf(`outbounds: [{id: relay, server: 192.0.2.42, port: 8443, type: %s}]
+rules:
+  - {match: {domain: observed.test}, outbound: relay}
+  - {match: {all: true}, outbound: reject}
+`, tc.outbound)
+			pinFlowApply(t, e, profile, "", uint64(i+2))
+			md := sagernet.Metadata{
+				Network: "udp", InboundType: "tun", SniffedDomain: "observed.test",
+				Destination: sagernet.Destination{Addr: original, Port: 8443},
+			}
+			rt := e.route(t.Context(), md)
+			if rt.Release != nil {
+				defer rt.Release()
+			}
+			if rt.Outbound == nil || rt.Outbound.Tag() != "relay" {
+				t.Fatalf("sniffed domain did not select relay: %+v", rt.Info)
+			}
+			got := md.Destination
+			if rt.Destination != nil {
+				got = *rt.Destination
+			}
+			want := sagernet.Destination{Addr: original, Port: md.Destination.Port}
+			if tc.wantDomain {
+				want = sagernet.Destination{Domain: "mapped.test", Port: md.Destination.Port}
+			}
+			if got != want {
+				t.Fatalf("outbound destination = %+v, want %+v", got, want)
+			}
+		})
+	}
+}

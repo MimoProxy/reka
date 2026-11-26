@@ -124,7 +124,7 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 	pool := sagernet.NewDNSPool()
 	dhcp := new(sagernet.DHCPDNS)
 	resetIdle := func() { pool.ResetIdle(); dhcp.Reset() }
-	resolver, err = RD.New(*cfg, RD.Options{History: e.history, Generation: sequence, Pool: e.fake, Match: match, Retire: pool.Retire, ResetIdle: resetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
+	resolver, err = RD.New(*cfg, RD.Options{History: e.history, Generation: sequence, Pool: e.fake, Mapping: e.hostMapping, Match: match, Retire: pool.Retire, ResetIdle: resetIdle, Background: func(ctx context.Context) (context.Context, func(), error) {
 		retained, release, active, err := e.retainCurrentDNS(ctx)
 		if err == nil && active != resolver {
 			release()

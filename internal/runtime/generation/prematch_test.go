@@ -219,6 +219,41 @@ rules:
 	checkPreMatchAgainstRoute(t, e, observations, md, sagernet.PreMatchDrop, "reject-drop", "")
 }
 
+func TestPreMatchWithRealDNSMappingAndSniffedDomain(t *testing.T) {
+	const profile = `schema-version: 1
+dns:
+  nameserver: [192.0.2.53]
+  use-hosts: true
+  hosts: [{id: mapped.test, addresses: [192.0.2.20]}]
+`
+	const rejectMapped = `rules:
+  - {match: {domain: observed.test}, outbound: direct}
+  - {match: {domain: mapped.test}, outbound: reject}
+  - {match: {all: true}, outbound: direct}
+`
+	e, observations := preMatchTestEngine(t, EngineOptions{HostPacketFlow: true})
+	pinFlowApply(t, e, profile+`sniff: {enabled: false}
+outbounds: [{id: relay, type: socks, server: 192.0.2.45, port: 1080}]
+rules:
+  - {match: {domain: mapped.test}, outbound: relay}
+  - {match: {all: true}, outbound: reject}
+`, "", 1)
+	if _, err := e.ExchangeDNS(t.Context(), new(D.Msg).SetQuestion("mapped.test.", D.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+	md := preMatchTestMetadata("tcp", 443)
+	checkPreMatchAgainstRoute(t, e, observations, md, sagernet.PreMatchContinue, "relay", "")
+	pinFlowApply(t, e, profile+rejectMapped+"sniff: {enabled: false}\n", "", 2)
+	info := checkPreMatchAgainstRoute(t, e, observations, md, sagernet.PreMatchReject, "", "")
+	if info.DestinationDomain != "mapped.test" {
+		t.Fatalf("pre-match destination domain = %q", info.DestinationDomain)
+	}
+	pinFlowApply(t, e, profile+rejectMapped+"sniff: {enabled: true}\n", "", 3)
+	checkPreMatchAgainstRoute(t, e, observations, md, sagernet.PreMatchContinue, "", "")
+	md.SniffedDomain = "observed.test"
+	checkPreMatchAgainstRoute(t, e, observations, md, sagernet.PreMatchContinue, "direct", "")
+}
+
 func TestPreMatchUsesObservedPoliciesWithoutAdvancingRoundRobin(t *testing.T) {
 	e, observations := preMatchTestEngine(t, EngineOptions{HostPacketFlow: true})
 	eff, diagnostics := compile.Compile([]byte(`schema-version: 1

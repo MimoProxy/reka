@@ -26,6 +26,7 @@ const (
 	eventUDPFirst
 	eventSniffed
 	eventFakeIP
+	eventDNSMapping // A real address recovered from a client DNS answer.
 	eventRuleLookup
 	eventDNS
 	eventRuleAddr
@@ -48,6 +49,7 @@ var connectionEventKinds = [...]string{
 	eventUDPFirst:   "udp_first",
 	eventSniffed:    "sniffed",
 	eventFakeIP:     "fakeip",
+	eventDNSMapping: "dns_mapping",
 	eventRuleLookup: "rule_lookup",
 	eventDNS:        "dns",
 	eventRuleAddr:   "rule_addr",

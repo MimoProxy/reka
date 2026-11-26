@@ -98,7 +98,7 @@ type generation struct {
 	eff                *compile.Effective
 	router             *router.Router
 	outUDP             map[string]bool
-	packetAddr         map[string]bool
+	packetAddr         map[string]bool // packetaddr outbounds, with true for multiplexed UDP
 	inUDP              map[string]bool
 	packetFlowNames    map[string]string
 	unfixedLoadBalance map[string]bool
@@ -133,6 +133,7 @@ type Engine struct {
 	networkErr           error
 	guard                *sagernet.SocketGuard
 	fake                 *RD.FakePool
+	hostMapping          *RD.HostMapping
 	dnsListener          *sagernet.DNSListener
 	dnsAddress           string
 	opts                 EngineOptions
@@ -176,6 +177,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		opts.mitmNow = time.Now
 	}
 	e := &Engine{opts: opts, listeners: map[string]*listener{}, mitmBypasses: mitmBypassTable{now: opts.mitmNow}}
+	e.hostMapping = RD.NewHostMapping()
 	e.initScripts()
 	if opts.HostPacketFlow {
 		// Keep the pool within the iOS Packet Tunnel memory budget.
@@ -564,7 +566,9 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 			if resolver == nil {
 				return nil, errors.New("automatic ECH requires configured proxy-server DNS")
 			}
-			return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
+			return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) {
+				return resolver.ExchangeResolver(ctx, q, "proxy", false)
+			})
 		}
 		if proxy, ok := spec.(sagernet.ProxySpec); ok {
 			if proxy.Type == model.OutboundWireGuard {
@@ -729,7 +733,9 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
-		g.packetAddr[o.ID] = o.Type == "vless" && o.PacketEncoding == "packetaddr"
+		if (o.Type == model.OutboundVLESS || o.Type == "vmess") && o.PacketEncoding == "packetaddr" {
+			g.packetAddr[o.ID] = o.Multiplex != nil && o.Multiplex.Enabled && !o.Multiplex.OnlyTCP
+		}
 		if o.Type == "reject-drop" {
 			if g.dropOutbounds == nil {
 				g.dropOutbounds = make(map[string]bool)
@@ -1028,7 +1034,9 @@ func (l *lookupEnv) ProcessInfo(ctx context.Context) (router.ProcessInfo, bool) 
 
 func routerMetadata(md sagernet.Metadata) router.Metadata {
 	domain := md.Destination.Domain
-	if domain == "" {
+	// On a real IP connection the observed Host or SNI takes precedence
+	// over a DNS answer that other domains may share.
+	if domain == "" || md.Destination.DNSMapped && md.SniffedDomain != "" {
 		domain = md.SniffedDomain
 	}
 	return router.Metadata{
@@ -1135,7 +1143,20 @@ func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sag
 	return o, ok, ""
 }
 
-func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState, allowMITM bool) sagernet.Route {
+// mappedDialDestination returns a domain override only for protocols that can
+// send it to the peer. A nil override keeps the client's original IP.
+func mappedDialDestination(dst sagernet.Destination, outboundType string, ipOnlyPacket bool) *sagernet.Destination {
+	switch outboundType {
+	case model.OutboundDirect, model.OutboundReject, "reject-drop", model.OutboundWireGuard, model.OutboundTailscale:
+		return nil
+	}
+	if ipOnlyPacket {
+		return nil
+	}
+	return &sagernet.Destination{Domain: dst.Domain, Port: dst.Port}
+}
+
+func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acquire snapshotAcquirer, fixed *runtime.Snapshot[*sagernet.Outbound], state routingState, inboundFlow bool) sagernet.Route {
 	inputAddress := md.Destination.Addr
 	var fakeRelease func()
 	if md.Destination.Addr.IsValid() {
@@ -1153,6 +1174,10 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 					observe(RouteObservation{Address: inputAddress, Failure: fakeIPUnavailable})
 				}
 				return sagernet.Route{Scope: active.historyScope}
+			}
+			// Rewrites and script fetches supply their own explicit destination.
+			if inboundFlow && md.Destination.Domain == "" {
+				md.Destination.Domain, md.Destination.DNSMapped = e.hostMapping.Lookup(inputAddress)
 			}
 		}
 	}
@@ -1179,7 +1204,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			state = e.routingState(g)
 		}
 		routeCtx := ctx
-		if !allowMITM {
+		if !inboundFlow {
 			routeCtx = sniffSnapshotContext(routeCtx, s)
 		}
 		if md.Network == "udp" && !e.inboundAllowsUDP(g, md) {
@@ -1211,7 +1236,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			return nil, false
 		}
 		o, ok, reason := flowOutbound(g, s.Resources, md, dec)
-		if ok && allowMITM && o.Type() != "reject-drop" {
+		if ok && inboundFlow && o.Type() != "reject-drop" {
 			mitm = e.newMITMRoute(s, state, md)
 		}
 		rejectReason = reason
@@ -1266,7 +1291,11 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	if !env.processOff && env.procDone && env.procOK {
 		result.Owner = sagernet.ProcessInfo{PID: env.owner.PID, Path: env.owner.Path, UID: env.owner.UID, UIDKnown: env.owner.UIDKnown}
 	}
-	if md.Network == "udp" && md.Destination.Domain != "" && g.packetAddr[dec.Outbound] {
+	muxUDP, packetAddr := g.packetAddr[dec.Outbound]
+	packetAddr = packetAddr && md.Network == "udp"
+	if md.Destination.DNSMapped {
+		result.Destination = mappedDialDestination(md.Destination, out.Type(), packetAddr && !muxUDP)
+	} else if packetAddr && out.Type() == model.OutboundVLESS && md.Destination.Domain != "" {
 		env.observeLookup = false
 		addresses, err := env.Resolve(ctx, md.Destination.Domain)
 		if err != nil || len(addresses) == 0 {
@@ -1309,6 +1338,7 @@ func (g *generation) flowInfo(genNo uint64, md sagernet.Metadata, dec router.Dec
 	info := &FlowInfo{
 		Generation: genNo, RuleIndex: dec.RuleIndex, Chain: dec.Chain, Outbound: dec.Outbound,
 		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
+		DNSMapped:    md.Destination.DNSMapped,
 		NetworkScene: scene, RejectReason: rejectReason,
 	}
 	if dec.Temporary {

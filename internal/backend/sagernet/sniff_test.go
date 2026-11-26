@@ -254,7 +254,10 @@ func TestSniffHTTPConnectAndOptInDestinationOverride(t *testing.T) {
 	b.SetPrepareFlow(func(context.Context, Metadata) PreparedFlow {
 		return PreparedFlow{Sniff: SniffOptions{Enabled: true, OverrideDestination: true, Timeout: time.Second}, Route: func(ctx context.Context, md Metadata) Route {
 			observed <- md
-			return Fixed(direct)(ctx, md)
+			rt := Fixed(direct)(ctx, md)
+			// The sniff override also wins when routing supplied a DNS-mapped target.
+			rt.Destination = &Destination{Domain: "mapped.test", Port: md.Destination.Port}
+			return rt
 		}}
 	})
 	var inbound *Inbound

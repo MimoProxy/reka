@@ -113,6 +113,9 @@ func (a *connectionAttempt) setRoute(rt Route, originalAddr netip.Addr) {
 	}
 	if a.DestinationDomain != "" && originalAddr.IsValid() {
 		event := connectionEvent{kind: eventFakeIP, name: a.DestinationDomain, addr: originalAddr.String()}
+		if a.DNSMapped {
+			event.kind = eventDNSMapping
+		}
 		if lookup != nil {
 			// The mapped domain was recovered before the timed rule lookup.
 			a.appendEventAtLocked(lookup.StartedAt, event)
