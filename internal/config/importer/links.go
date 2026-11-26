@@ -33,6 +33,14 @@ func firstContentLine(s string) string {
 }
 func detectFormat(s string) string {
 	trimmed := strings.TrimSpace(s)
+	for raw := range strings.SplitSeq(strings.TrimPrefix(trimmed, "\ufeff"), "\n") {
+		if line := wireGuardConfContent(raw); line != "" {
+			if strings.EqualFold(line, "[Interface]") {
+				return "wireguard"
+			}
+			break
+		}
+	}
 	if isLink(firstContentLine(trimmed)) {
 		return "links"
 	}

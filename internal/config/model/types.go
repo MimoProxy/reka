@@ -44,10 +44,21 @@ type LocalSettings struct {
 	Routing        *Routing          `yaml:"routing"`
 	Sniff          *Sniff            `yaml:"sniff"`
 	Network        *platform.Network `yaml:"network"`
+	Link           *Link             `yaml:"link"`
 	SchemaVersion  int               `yaml:"schema-version"`
 	Listeners      []Listener        `yaml:"listeners"`
 	Log            *Log              `yaml:"log"`
 	Control        *Control          `yaml:"control"`
+}
+
+// Link configures device-local routes to remote networks.
+type Link struct {
+	WireGuard []WireGuardLink `yaml:"wireguard"`
+}
+
+type WireGuardLink struct {
+	Outbound string   `yaml:"outbound"`
+	Routes   []string `yaml:"routes"`
 }
 
 // Outbound types.

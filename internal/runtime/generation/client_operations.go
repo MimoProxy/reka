@@ -13,6 +13,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime"
@@ -276,7 +277,10 @@ func (e *Engine) RulesPage(offset, limit int) api.RulesPage {
 		if rule.Kind == router.KindMatch {
 			kind = "MATCH"
 		}
-		page.Rules = append(page.Rules, api.RuleView{Index: i, ID: rule.ID, Type: kind, Payload: strings.Join(rule.Values, ","), Outbound: rule.Target, Description: rule.String()})
+		page.Rules = append(page.Rules, api.RuleView{
+			Index: i, ID: rule.ID, Type: kind, Payload: strings.Join(rule.Values, ","), Outbound: rule.Target,
+			Description: compile.DescribeRoutingRule(rule), Context: compile.LocalRuleSource(rule.ID),
+		})
 	}
 	return page
 }
