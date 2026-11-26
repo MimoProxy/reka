@@ -54,11 +54,22 @@ type LocalSettings struct {
 // Link configures device-local routes to remote networks.
 type Link struct {
 	WireGuard []WireGuardLink `yaml:"wireguard"`
+	Tailscale []TailscaleLink `yaml:"tailscale"`
 }
 
 type WireGuardLink struct {
 	Outbound string   `yaml:"outbound"`
 	Routes   []string `yaml:"routes"`
+}
+
+type TailscaleLink struct {
+	ID           string   `yaml:"id"`
+	ControlURL   string   `yaml:"control-url"`
+	AuthKey      string   `yaml:"auth-key"`
+	Hostname     string   `yaml:"hostname"`
+	Ephemeral    bool     `yaml:"ephemeral"`
+	AcceptRoutes *bool    `yaml:"accept-routes"`
+	Routes       []string `yaml:"routes"`
 }
 
 // Outbound types.
@@ -72,6 +83,7 @@ const (
 	OutboundSSR         = "ssr"
 	OutboundVLESS       = "vless"
 	OutboundWireGuard   = "wireguard"
+	OutboundTailscale   = "tailscale"
 )
 
 // Outbound is one proxy node or built-in action. Which fields apply depends

@@ -35,6 +35,9 @@ func IsSensitive(path string) bool {
 	if len(segs) == 4 && segs[0] == "outbounds" && segs[2] == "protocol" {
 		return segs[3] == "private-key" || segs[3] == "private-key-passphrase" || segs[3] == "pre-shared-key" || segs[3] == "auth-base64" || segs[3] == "protocol-param"
 	}
+	if len(segs) == 4 && segs[0] == "link" && segs[1] == "tailscale" {
+		return segs[3] == "auth-key"
+	}
 	return len(segs) == 4 && segs[0] == "scripts" && segs[2] == "download" && segs[3] == "url"
 }
 
@@ -53,7 +56,7 @@ func unalias(n *yaml.Node) *yaml.Node {
 	return n
 }
 
-// sensitiveNodes calls fn for each inline credential scalar in a profile.
+// sensitiveNodes calls fn for each inline credential scalar in a document.
 func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	var nested func(*yaml.Node, string)
 	nested = func(n *yaml.Node, prefix string) {
@@ -183,6 +186,18 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 	}
 	if v, err := child(root, "listeners", false, 0); err == nil {
 		nested(v, "/listeners")
+	}
+	if link, err := child(root, "link", false, 0); err == nil {
+		if tailscale, err := child(link, "tailscale", false, 0); err == nil && unalias(tailscale).Kind == yaml.SequenceNode {
+			for i, item := range unalias(tailscale).Content {
+				if key, err := child(item, "auth-key", false, 0); err == nil {
+					key = unalias(key)
+					if key.Kind == yaml.ScalarNode && !strings.HasPrefix(key.Value, SecretPrefix) {
+						fn(JoinPath("/link/tailscale", ElementSegment(item, i), "auth-key"), key)
+					}
+				}
+			}
+		}
 	}
 	var groupSecrets func(*yaml.Node, string)
 	groupSecrets = func(n *yaml.Node, prefix string) {
@@ -382,7 +397,7 @@ func credentialURL(v string, dns bool) bool {
 	return false
 }
 
-// MaskSecrets replaces inline credentials in a profile with Mask and
+// MaskSecrets replaces inline credentials in a document with Mask and
 // reports how many were replaced.
 func (d *Doc) MaskSecrets() int {
 	n := 0

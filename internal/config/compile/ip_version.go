@@ -35,7 +35,7 @@ func (e *Effective) WithIPVersion(ipVersion string) (*Effective, error) {
 	for i := range eff.Outbounds {
 		out := &eff.Outbounds[i]
 		switch out.Type {
-		case model.OutboundReject, "pass", "reject-drop":
+		case model.OutboundReject, model.OutboundTailscale, "pass", "reject-drop":
 			continue
 		}
 		var dialer model.Dialer

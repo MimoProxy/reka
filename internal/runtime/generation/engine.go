@@ -74,8 +74,12 @@ type EngineOptions struct {
 	ScriptEngine func() script.Engine
 	// ScriptStateDir overrides StateRoot for persistent script storage.
 	ScriptStateDir string
-	mitmNow        func() time.Time
-	scriptClock    *scriptSchedulerClock
+	// TailscaleStateDir overrides StateRoot/tailscale for the Tailscale node
+	// state. Without either, a configured Tailscale link reports an error.
+	TailscaleStateDir string
+	mitmNow           func() time.Time
+	scriptClock       *scriptSchedulerClock
+	newTailscaleNode  tailscaleNodeFactory
 }
 
 type RouteObservation struct {
@@ -132,6 +136,7 @@ type Engine struct {
 	dnsListener          *sagernet.DNSListener
 	dnsAddress           string
 	opts                 EngineOptions
+	tailscale            atomic.Pointer[tailscaleLink]
 	packetFlowRealDNS    atomic.Bool
 	backend              *sagernet.Backend
 	rt                   *runtime.Runtime[*sagernet.Outbound]
@@ -197,6 +202,9 @@ func NewEngine(opts EngineOptions) *Engine {
 		return active.historyScope
 	}
 	e.backend = sagernet.New(opts.Backend)
+	if e.opts.newTailscaleNode == nil {
+		e.opts.newTailscaleNode = e.backend.NewTailscaleNode
+	}
 	e.guard.OnInterfaceChanged = e.backend.NotifyEndpointNetworkChanged
 	if opts.StateRoot != "" {
 		hooks := platform.NetworkHooks{Settings: platform.NativeSettings{}, SettingsFor: platform.SystemSettings, Bypass: e.guard.Set, StartTUN: func(c platform.TUNConfig) (io.Closer, string, error) {
@@ -331,14 +339,23 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 		case fingerprintOf(gen, o.ID) == o.Fingerprint:
 			p.Outbounds = append(p.Outbounds, ResourceChange{ID: o.ID, Action: ActionKeep})
 		default:
-			p.Outbounds = append(p.Outbounds, ResourceChange{ID: o.ID, Action: ActionReplace, Connections: old.Active(),
-				Note: "new connections use a new instance; the old one drains"})
+			note := "new connections use a new instance; the old one drains"
+			if o.Type == model.OutboundTailscale {
+				note = "restarts the Tailscale node and disconnects its flows"
+				p.Interrupts = true
+			}
+			p.Outbounds = append(p.Outbounds, ResourceChange{ID: o.ID, Action: ActionReplace, Connections: old.Active(), Note: note})
 			p.Draining++
 		}
 	}
 	for id, old := range snap.Resources {
 		if !keepIDs[id] {
-			p.Outbounds = append(p.Outbounds, ResourceChange{ID: id, Action: ActionRemove, Connections: old.Active()})
+			change := ResourceChange{ID: id, Action: ActionRemove, Connections: old.Active()}
+			if old.Type() == model.OutboundTailscale {
+				change.Note = "stops the Tailscale node and disconnects its flows"
+				p.Interrupts = true
+			}
+			p.Outbounds = append(p.Outbounds, change)
 			p.Draining++
 		}
 	}
@@ -447,6 +464,7 @@ type Prepared struct {
 	dnsBound    bool
 	eff         *compile.Effective
 	plan        Plan
+	tailscale   *tailscaleLink
 	outbounds   map[string]*sagernet.Outbound
 	created     []*sagernet.Outbound
 	// bound are new listeners already accepting connections (bind-first).
@@ -510,12 +528,24 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 	if goruntime.GOOS == "android" && eff.Network.Mode == "tun" && p.plan.NetworkChanged && e.opts.TUNFD <= 0 {
 		return fail(&PrepareError{Path: "/network", Err: errors.New("host must supply a freshly established VpnService fd through reconfigureVPN")})
 	}
+	link, err := e.prepareTailscale(eff)
+	if err != nil {
+		return fail(&PrepareError{Path: "/link/tailscale", Err: err})
+	}
+	p.tailscale = link
 	for _, o := range eff.Outbounds {
 		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
 		}
-		if old, ok := snap.Resources[o.ID]; ok && fingerprintOf(gen, o.ID) == o.Fingerprint {
+		if old, ok := snap.Resources[o.ID]; ok && fingerprintOf(gen, o.ID) == o.Fingerprint &&
+			(o.Tailscale == nil || link == e.tailscale.Load()) {
 			p.outbounds[o.ID] = old
+			continue
+		}
+		if o.Tailscale != nil {
+			out := e.backend.NewTailscaleOutbound(o.ID, link)
+			p.created = append(p.created, out)
+			p.outbounds[o.ID] = out
 			continue
 		}
 		spec := specFor(o)
@@ -815,6 +845,7 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	if len(errs) > 0 {
 		return genNo, &ActivateError{Err: errors.Join(errs...), Degraded: degraded}
 	}
+	e.replaceTailscale(p.tailscale)
 	if rules := e.temporary.Load(); rules != nil && rules.profile != profileID {
 		e.temporary.Store(nil)
 	}
@@ -1488,6 +1519,7 @@ func (e *Engine) Close() {
 		l.in.Close()
 	}
 	e.listeners = nil
+	e.replaceTailscale(nil)
 	e.mu.Unlock()
 	e.backgroundScripts.workers.Wait()
 	e.backend.CloseConnections(nil)

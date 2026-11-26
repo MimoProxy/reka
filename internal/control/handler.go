@@ -119,7 +119,7 @@ var Methods = []string{
 	"ExportProfileArchive", "GetProfileState", "SwitchProfile", "GetProfileSwitchOperation", "InstallProfile", "DeleteInactiveProfile",
 	"GetProcessTraffic", "ExportManifest", "ReadResource",
 	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
-	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetConfiguration", "ValidateConfiguration",
+	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetTailscaleStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
 	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
@@ -552,6 +552,8 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 		return svc.Engine().HTTPSDebugStatus(), nil
 	case "GetMITMStatus":
 		return svc.Engine().MITMStatus(), nil
+	case "GetTailscaleStatus":
+		return svc.Engine().TailscaleStatus(), nil
 	case "ListScripts":
 		return svc.Engine().ListScripts(), nil
 	case "RunScript":

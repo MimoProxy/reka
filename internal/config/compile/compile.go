@@ -81,6 +81,7 @@ type Origin struct {
 // changes whenever anything that affects the instance changes, including
 // a resolved secret; equal fingerprints mean the instance can be reused.
 type Outbound struct {
+	Tailscale         *Tailscale                 `json:"-"`
 	Plugin            *model.SSPlugin            `json:"-"`
 	Encryption        string                     `json:"-"`
 	UDPOverTCP        bool                       `json:"udp-over-tcp,omitempty"`
@@ -369,9 +370,13 @@ func (c *compiler) compose() *Effective {
 	}
 
 	c.outbounds(eff)
+	if c.local.Link != nil {
+		c.override(eff, "/link")
+	}
+	tailscaleRules := c.tailscaleLink(eff)
 	c.groups(eff)
 	c.detours(eff)
-	linkRules := c.wireGuardLinkRules(eff)
+	linkRules := append(c.wireGuardLinkRules(eff), tailscaleRules...)
 	c.rules(eff, linkRules)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
@@ -488,29 +493,33 @@ var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 var shortIDRE = regexp.MustCompile(`^[0-9a-fA-F]{0,16}$`)
 
 func (c *compiler) resolveSecret(path, v string) string {
+	return c.resolveDocumentSecret(model.DocProfile, path, v)
+}
+
+func (c *compiler) resolveDocumentSecret(doc, path, v string) string {
 	name, ok := secret.ParseRef(v)
 	if !ok {
 		return v
 	}
 	if secret.Reserved(name) {
-		c.errorf(model.DocProfile, path, "secret.reserved", "secret %q is reserved", name)
+		c.errorf(doc, path, "secret.reserved", "secret %q is reserved", name)
 		return ""
 	}
 	if err := secret.ValidName(name); err != nil {
-		c.errorf(model.DocProfile, path, "secret.name", "%v", err)
+		c.errorf(doc, path, "secret.name", "%v", err)
 		return ""
 	}
 	if c.opts.Secrets == nil {
-		c.errorf(model.DocProfile, path, "secret.unavailable", "no secret store to resolve %s", v)
+		c.errorf(doc, path, "secret.unavailable", "no secret store to resolve %s", v)
 		return ""
 	}
 	val, err := c.opts.Secrets.Get(name)
 	if errors.Is(err, secret.ErrNotFound) {
-		c.errorf(model.DocProfile, path, "secret.missing", "secret %q is not stored", name)
+		c.errorf(doc, path, "secret.missing", "secret %q is not stored", name)
 		return ""
 	}
 	if err != nil {
-		c.errorf(model.DocProfile, path, "secret.unavailable", "read secret %q: %v", name, err)
+		c.errorf(doc, path, "secret.unavailable", "read secret %q: %v", name, err)
 		return ""
 	}
 	return val
@@ -722,6 +731,9 @@ func (c *compiler) outbounds(eff *Effective) {
 }
 
 func outboundFingerprint(identity Outbound) string {
+	if identity.Tailscale != nil {
+		return fingerprint(identity.Tailscale, identity.Tailscale.AuthKey)
+	}
 	identity.Name = "" // display metadata must not rebuild a live outbound
 	identity.Fingerprint = ""
 	if identity.Multiplex != nil {
@@ -858,7 +870,7 @@ func (c *compiler) groups(eff *Effective) {
 				if !o.Builtin && !slices.Contains(members, o.ID) {
 					if c.scopedIDs[g.ID] {
 						owner, _, _ := strings.Cut(g.ID, "/")
-						if !strings.HasPrefix(o.ID, owner+"/") {
+						if o.Tailscale != nil || !strings.HasPrefix(o.ID, owner+"/") {
 							continue
 						}
 					}

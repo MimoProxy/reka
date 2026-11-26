@@ -18,7 +18,11 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TAGS = 'with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal'
+TAGS = (
+    'with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal,'
+    'ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,'
+    'ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,ts_omit_peerapiserver'
+)
 LDFLAGS = '-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid='
 TARGETS = ['darwin/arm64', 'darwin/amd64', 'windows/amd64', 'windows/arm64', 'linux/amd64', 'linux/arm64']
 

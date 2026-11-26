@@ -99,6 +99,9 @@ type Controls struct {
 	FakeIPState string `json:"fakeIPState,omitempty"`
 	// ScriptState is the App Group directory used by the script store.
 	ScriptState string `json:"scriptState,omitempty"`
+	// TailscaleState is the App Group directory for Tailscale node state.
+	// Without it, a configured Tailscale link reports an error.
+	TailscaleState string `json:"tailscaleState,omitempty"`
 	// LogFile is where an extension session appends its log as JSON lines,
 	// so the log outlives the extension process.
 	LogFile string `json:"logFile,omitempty"`
