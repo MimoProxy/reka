@@ -846,6 +846,17 @@ MODULES['go4.org/netipx'] = ('v0.0.0-20231129151722-fdeea329fbba', {
 })
 
 
+def vmess_client_close(source):
+    # Close may run while the first Read installs the response reader. That
+    # reader only wraps the connection Close already closes, so leave it out
+    # instead of reading the field from another goroutine.
+    return replace(source, 'return common.Close(\n\t\tc.Conn,\n\t\tc.reader,\n\t)', 'return common.Close(c.Conn)')
+
+
+MODULES['github.com/sagernet/sing-vmess'][1]['client.go'] = (
+    '5faad873130c009c19b46c8b8bfec2ddc0703332d70d417f343b2f5b542d01bd', vmess_client_close)
+
+
 def anytls_stream_close_error(source):
     # The session receive loop closes streams while callers still use them.
     # Publish the close error atomically; behaviour is otherwise unchanged.
