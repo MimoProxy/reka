@@ -14,14 +14,21 @@ const (
 	maxTailscaleRoutes         = 64
 )
 
-// Tailscale holds the settings that determine the identity of the local node.
+// Tailscale contains the local node identity and its current routing preferences.
 type Tailscale struct {
-	ID           string
-	ControlURL   string
-	AuthKey      string `json:"-"`
-	Hostname     string
-	Ephemeral    bool
-	AcceptRoutes bool
+	TailscaleIdentity
+	AcceptRoutes           bool
+	ExitNode               string
+	ExitNodeAllowLANAccess bool
+}
+
+// TailscaleIdentity holds the settings that require a new node when changed.
+type TailscaleIdentity struct {
+	ID         string
+	ControlURL string
+	AuthKey    string `json:"-"`
+	Hostname   string
+	Ephemeral  bool
 }
 
 func (c *compiler) tailscaleLink(eff *Effective) []router.RuleSpec {
@@ -70,10 +77,23 @@ func (c *compiler) tailscaleLink(eff *Effective) []router.RuleSpec {
 		return nil
 	}
 	out := Outbound{ID: id, Type: model.OutboundTailscale, UDP: true, Tailscale: &Tailscale{
-		ID: entry.ID, ControlURL: entry.ControlURL, AuthKey: authKey, Hostname: entry.Hostname,
-		Ephemeral: entry.Ephemeral, AcceptRoutes: entry.AcceptRoutes == nil || *entry.AcceptRoutes,
+		TailscaleIdentity: TailscaleIdentity{
+			ID: entry.ID, ControlURL: entry.ControlURL, AuthKey: authKey,
+			Hostname: entry.Hostname, Ephemeral: entry.Ephemeral,
+		},
+		AcceptRoutes:           entry.AcceptRoutes == nil || *entry.AcceptRoutes,
+		ExitNode:               entry.ExitNode,
+		ExitNodeAllowLANAccess: entry.ExitNodeAllowLANAccess,
 	}}
 	out.Fingerprint = outboundFingerprint(out)
+	// Each reference and any detours using it must follow a change of node
+	// identity. Live preference changes keep the same outbound handles.
+	for i := range eff.Outbounds {
+		ref := &eff.Outbounds[i]
+		if ref.Type == model.OutboundTailscale {
+			ref.Fingerprint = fingerprint(ref.Fingerprint, out.Fingerprint)
+		}
+	}
 	eff.Outbounds = append(eff.Outbounds, out)
 	pos := c.lpos[base]
 	eff.setOrigin(model.JoinPath("/outbounds", id), Origin{

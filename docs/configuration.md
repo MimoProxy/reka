@@ -309,16 +309,44 @@ In `rule` mode, connections to IP addresses in `10.0.0.0/24` use `home-wg` befor
        outbound: direct
    ```
 
-5. Apply the configuration and call `GetTailscaleStatus`. Open `auth-url` when the state is `needs-login` and sign in to the same tailnet as the subnet router. Alternatively, save a Tailscale authentication key with `SetSecret` and reference it as `auth-key: secret://tailscale/home/auth-key` in the local entry.
+5. Apply the configuration and call `GetTailscaleStatus`. Open `auth-url` when the state is `needs-login` and sign in to the same tailnet as the subnet router. A host application can also store a device credential under `link/` and set `auth-key: secret://link/tailscale/home/auth-key` in the local entry.
 6. Once the state is `running`, try a known home service from another network. The example listener is available to applications configured to use the local HTTP or SOCKS proxy. With [TUN enabled](#7-系统代理与-tun), captured traffic follows the same subnet rule.
 
    ```sh
    curl --proxy http://127.0.0.1:17890 http://10.0.0.20:8080/
    ```
 
-An iOS Packet Tunnel host must supply `EngineOptions.StateRoot` to activate the link. The current adapter needs that host update.
+Reka routes the tailnet IPv4 and IPv6 address ranges to `tailscale/home`. Use IP addresses or configure Reka DNS to resolve your internal names. The device retains the node state when you remove the local entry. The iOS Packet Tunnel host supplies the Tailscale state directory through its session controls. [Field reference](configuration-reference.md#linktailscale)
 
-Reka also routes tailnet IPv4 and IPv6 address ranges to `tailscale/home`. You can use that outbound ID in rules and groups. Reka accepts one Tailscale entry, uses the configured prefixes for automatic routing, and retains the node's state when the entry is removed. Use IP addresses or your own DNS setup. MagicDNS and exit nodes are unsupported. [Field reference](configuration-reference.md#linktailscale), [status API](control-api.md#gettailscalestatus)
+### Route a domain through a Tailscale exit node
+
+This example routes `example.com` through the tailnet exit and sends other public traffic directly. Add the reference and its routing rule to `profile.yaml`.
+
+```yaml
+schema-version: 1
+outbounds:
+  - id: ts
+    name: Tailscale
+    type: tailscale
+rules:
+  - id: example-via-exit
+    match: {domain: [example.com]}
+    outbound: ts
+  - id: final
+    match: {all: true}
+    outbound: direct
+```
+
+On the exit peer, advertise an exit node and approve it in the Tailscale admin console. On the Reka device, configure the local node in `local.yaml`, or add the exit setting to your existing entry.
+
+```yaml
+link:
+  tailscale:
+    - id: home
+      exit-node: auto
+```
+
+Sign in on the Reka device. Once exactly one online peer offers an approved exit route, `GetTailscaleStatus.exit-node` names that peer. If several peers qualify, set `exit-node` to the intended peer's hostname, MagicDNS name or Tailscale IP. The local setting applies to every Tailscale reference on the device. To make the route selectable, put `ts` in a group's `members` and point the rule at that group. On devices without a local node the profile loads with a warning, and requests routed to `ts` fail immediately. [Status API](control-api.md#gettailscalestatus)
 
 ### 手动切换与自动选择
 

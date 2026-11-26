@@ -95,7 +95,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertExtended(n, path)
 		return
 	}
-	nativeType := map[string]string{"ss": "shadowsocks", "ssr": model.OutboundSSR, "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH, "mieru": model.OutboundMieru}[typ]
+	nativeType := map[string]string{"ss": "shadowsocks", "ssr": model.OutboundSSR, "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH, "mieru": model.OutboundMieru, "tailscale": model.OutboundTailscale}[typ]
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	if nativeType == "" {
@@ -104,6 +104,22 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
 	switch typ {
+	case model.OutboundTailscale:
+		out["udp"] = r.boolean("udp", false)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i].Value
+			switch key {
+			case "name", "type", "udp":
+			case "auth-key", "control-url", "state-dir", "hostname", "ephemeral", "accept-routes", "exit-node", "exit-node-allow-lan-access":
+				field := model.JoinPath(path, key)
+				c.report.Ignored = append(c.report.Ignored, field)
+				c.diag(n.Content[i+1], field, "import.ignored-field", "ignored device setting: configure the Tailscale node on this device", false)
+			default:
+				r.fail(key, "import.unsupported-field", "unsupported field for a Tailscale reference")
+			}
+		}
+		c.addOutbound(&r, out, &binding)
+		return
 	case model.OutboundSSR:
 		c.convertSSR(&r, out)
 		c.addOutbound(&r, out, &binding)

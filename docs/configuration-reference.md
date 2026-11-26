@@ -81,6 +81,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `tuic` | `server`、`port`、`uuid`、`password` | **必须有** `tls`；`protocol` 配置拥塞控制等 |
 | `snell` | `server`、`port`、`password`（PSK） | **必须有** `protocol.version: 5` 或 `6`；不接受顶层 `tls` |
 | `wireguard` | `server`, `port`, `protocol` | Single-peer userspace tunnel for outbound TCP and UDP. See [WireGuard](#wireguard). |
+| `tailscale` | `id`, `type`, optional `name` and `udp` | Reference to the device's embedded node. UDP defaults to `true`. See [Tailscale](#linktailscale). |
 
 HTTP / SOCKS 的 `username`、`password` 必须成对设置。HTTP 节点配置了用户名密码时，它们优先于自定义 `Proxy-Authorization`。UUID 必须是合法 UUID，不是任意字符串。
 
@@ -579,7 +580,9 @@ If a configured subnet overlaps the current network, disable the entry manually 
 
 ### `link.tailscale`
 
-Set `link.tailscale` in `local.yaml` to add an embedded Tailscale node for outbound TCP and UDP. The list accepts one entry. Its outbound ID is `tailscale/<id>` and can be used in profile rules and group members. A profile reference requires the matching local entry.
+Set `link.tailscale` in `local.yaml` to run one embedded Tailscale node on this device. Reka generates the outbound ID `tailscale/<id>` when that local entry exists. A profile, subscription or module can also declare a portable outbound such as `{id: ts, name: Tailscale, type: tailscale}` and use its ID in rules and groups. All references share the device's node, login and exit selection.
+
+A native `type: tailscale` outbound accepts only `id`, `name`, `type` and `udp`. Set `udp: false` to disable UDP for that reference. If the device has no local entry, the reference still compiles with a warning. Its dials and probes fail immediately until a local node is configured and running. Manual and automatic groups can include the reference and probe it like any other member.
 
 ```yaml
 link:
@@ -597,15 +600,21 @@ link:
 | `hostname` | Optional name advertised to the tailnet. |
 | `ephemeral` | Defaults to `false`. Set to `true` to register an ephemeral node. |
 | `accept-routes` | Defaults to `true`. Allows the node to use advertised subnet routes approved by the control server. |
+| `exit-node` | Omit or set to `""` to disable. Set to `auto` or identify a peer by hostname, full MagicDNS name or Tailscale IP. |
+| `exit-node-allow-lan-access` | Sets Tailscale's preference for access to the local LAN while using an exit node. Defaults to `false`. |
 | `routes` | Optional local matching prefixes for approved subnets. Supply up to 64 IPv4 or IPv6 CIDRs. Default routes and prefixes that overlap loopback, link-local, or multicast ranges are prohibited. |
 
-Reka adds `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, and any configured `routes` to the local routing rules. These rules use `no-resolve` to match available destination IPs. In `rule` mode they run after `link.wireguard` and before profile rules. In `global` mode they also take precedence over the global target. In `direct` mode they are inactive. Advertised routes must be listed here to receive automatic rules.
+Reka evaluates the exit selection when the control server supplies or updates the network map. In `auto` mode exactly one online peer must offer an approved exit route. With zero or multiple candidates, Reka clears the selection and reports the reason in `GetTailscaleStatus.exit-node-error`. Changes to `accept-routes`, `exit-node` and `exit-node-allow-lan-access` take effect on the running node. Switching profiles or adding and removing references preserves the node's login.
+
+Reka adds `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, and any configured `routes` to the local routing rules. These rules use `no-resolve` to match available destination IPs. In `rule` mode they run after `link.wireguard` and before profile rules. In `global` mode they also take precedence over the global target. In `direct` mode they are inactive. Advertised routes must be listed here to receive automatic rules. Enabling an exit node adds no default rule. To send public traffic through the exit, select the Tailscale outbound in a rule or group.
+
+The outbound reaches tailnet addresses and approved subnet routes accepted by the local node. An active exit supplies the route for other public destinations. If Tailscale has no route to a destination IP, the dial fails immediately. Destination hostnames use Reka's normal DNS configuration. A MagicDNS name in `exit-node` identifies a peer from the network map and does not enable MagicDNS resolution for application traffic.
 
 Route explanations identify the generated rules as `@link-tailscale-addresses-<id>` and, when `routes` is set, `@link-tailscale-routes-<id>`. Both point to `/link/tailscale/<id>` in `local.yaml`.
 
 The node starts when the configuration takes effect. Use `GetTailscaleStatus` to check login and peer connectivity. State is stored in `<StateRoot>/tailscale/<id>`, or in `<TailscaleStateDir>/<id>` when the host sets `EngineOptions.TailscaleStateDir`. The state is retained when the entry is removed. On iOS, the Packet Tunnel passes `tailscaleState` from the session controls; probe sessions never start a node. Without a state directory, the link reports an error and its outbound rejects new flows while the rest of the configuration keeps working.
 
-Unsupported features include dynamic route generation, MagicDNS, exit nodes, route advertisement, Tailscale SSH, and Taildrop. Unsolicited TCP and UDP from peers are rejected. [Complete home network example](configuration.md#access-a-home-network-through-tailscale), [status API](control-api.md#gettailscalestatus)
+Unsupported features include dynamic generation of subnet rules, MagicDNS resolution, route advertisement, Tailscale SSH, and Taildrop. Unsolicited TCP and UDP from peers are rejected. [Home subnet example](configuration.md#access-a-home-network-through-tailscale), [exit node example](configuration.md#route-a-domain-through-a-tailscale-exit-node), [status API](control-api.md#gettailscalestatus)
 
 ### 10.1 网络场景
 

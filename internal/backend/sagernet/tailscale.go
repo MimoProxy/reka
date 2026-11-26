@@ -2,6 +2,7 @@ package sagernet
 
 import (
 	"context"
+	"errors"
 	"net"
 
 	"github.com/MimoProxy/reka/internal/api"
@@ -13,14 +14,26 @@ import (
 
 const tailscaleType = "tailscale"
 
+var errTailscaleUDPDisabled = errors.New("Tailscale UDP is disabled for this outbound")
+
 type TailscaleOptions struct {
+	TailscaleIdentity
+	TailscalePreferences
+}
+
+type TailscaleIdentity struct {
 	StateDirectory string
 	ControlURL     string
 	AuthKey        string
 	Hostname       string
 	Ephemeral      bool
-	AcceptRoutes   bool
 	HostPacketFlow bool
+}
+
+type TailscalePreferences struct {
+	AcceptRoutes           bool
+	ExitNode               string
+	ExitNodeAllowLANAccess bool
 }
 
 type TailscaleDialer interface {
@@ -30,22 +43,43 @@ type TailscaleDialer interface {
 
 type TailscaleNode interface {
 	TailscaleDialer
+	SetPreferences(TailscalePreferences) error
 	Status() api.TailscaleStatus
 	Close() error
 }
 
 type tailscaleOutbound struct {
 	outbound.Adapter
-	TailscaleDialer
+	dialer TailscaleDialer
+	udp    bool
 }
 
 // NewTailscaleOutbound gives the generation a lease on a borrowed dialer.
 // The engine owns the node and its shutdown independently of that lease.
-func (b *Backend) NewTailscaleOutbound(tag string, dialer TailscaleDialer) *Outbound {
+func (b *Backend) NewTailscaleOutbound(tag string, dialer TailscaleDialer, udp bool) *Outbound {
 	scope := adapter.NewScope(b.ctx, b.componentLogger("outbound", tailscaleType, tag))
+	networks := []string{N.NetworkTCP}
+	if udp {
+		networks = append(networks, N.NetworkUDP)
+	}
 	out := &tailscaleOutbound{
-		Adapter:         outbound.NewAdapter(tailscaleType, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
-		TailscaleDialer: dialer,
+		Adapter: outbound.NewAdapter(tailscaleType, tag, networks, nil),
+		dialer:  dialer,
+		udp:     udp,
 	}
 	return scopedOutbound(tag, tailscaleType, out, scope)
+}
+
+func (o *tailscaleOutbound) DialContext(ctx context.Context, network string, dst M.Socksaddr) (net.Conn, error) {
+	if !o.udp && N.NetworkName(network) == N.NetworkUDP {
+		return nil, errTailscaleUDPDisabled
+	}
+	return o.dialer.DialContext(ctx, network, dst)
+}
+
+func (o *tailscaleOutbound) ListenPacket(ctx context.Context, dst M.Socksaddr) (net.PacketConn, error) {
+	if !o.udp {
+		return nil, errTailscaleUDPDisabled
+	}
+	return o.dialer.ListenPacket(ctx, dst)
 }

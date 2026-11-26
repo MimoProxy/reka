@@ -29,17 +29,26 @@ type Options struct {
 }
 
 type Result struct {
-	Rules           []model.Rule
-	HTTPRewrites    []model.HTTPRewrite
-	HeaderRewrites  []model.HeaderRewrite
-	BodyRewrites    []model.BodyRewrite
-	MapLocal        []model.MapLocal
-	Scripts         []model.Script
-	MITM            model.MITM
-	InsertHostnames []Hostname
-	AppendHostnames []Hostname
-	ItemLines       map[string]int
-	MITMLines       map[string]int
+	TailscaleReferences []TailscaleReference
+	Rules               []model.Rule
+	HTTPRewrites        []model.HTTPRewrite
+	HeaderRewrites      []model.HeaderRewrite
+	BodyRewrites        []model.BodyRewrite
+	MapLocal            []model.MapLocal
+	Scripts             []model.Script
+	MITM                model.MITM
+	InsertHostnames     []Hostname
+	AppendHostnames     []Hostname
+	ItemLines           map[string]int
+	MITMLines           map[string]int
+}
+
+// TailscaleReference is a module's name for the device-local Tailscale node.
+type TailscaleReference struct {
+	ID   string `yaml:"id"`
+	Name string `yaml:"name,omitempty"`
+	UDP  *bool  `yaml:"udp,omitempty"`
+	Line int    `yaml:"-"`
 }
 
 type Hostname struct {

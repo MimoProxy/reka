@@ -34,14 +34,21 @@ type tailscaleLinkState struct {
 	err   string
 }
 
-func (e *Engine) prepareTailscale(eff *compile.Effective) (*tailscaleLink, error) {
-	var link *tailscaleLink
+// The desired preferences are staged separately so Prepare and Abort cannot
+// change a node borrowed by the active generation.
+type preparedTailscale struct {
+	link  *tailscaleLink
+	prefs sagernet.TailscalePreferences
+}
+
+func (e *Engine) prepareTailscale(eff *compile.Effective) (preparedTailscale, error) {
+	var next preparedTailscale
 	for _, o := range eff.Outbounds {
 		if o.Tailscale == nil {
 			continue
 		}
-		if link != nil {
-			return nil, errors.New("only one Tailscale link is supported")
+		if next.link != nil {
+			return preparedTailscale{}, errors.New("only one Tailscale link is supported")
 		}
 		cfg := o.Tailscale
 		// A missing state directory fails only this link: the node reports
@@ -54,30 +61,44 @@ func (e *Engine) prepareTailscale(eff *compile.Effective) (*tailscaleLink, error
 		if stateRoot != "" {
 			stateDirectory = filepath.Join(stateRoot, cfg.ID)
 		}
-		opts := sagernet.TailscaleOptions{
+		identity := sagernet.TailscaleIdentity{
 			StateDirectory: stateDirectory,
 			ControlURL:     cfg.ControlURL,
 			AuthKey:        cfg.AuthKey,
 			Hostname:       cfg.Hostname,
 			Ephemeral:      cfg.Ephemeral,
-			AcceptRoutes:   cfg.AcceptRoutes,
 			HostPacketFlow: e.opts.HostPacketFlow,
 		}
-		if active := e.tailscale.Load(); active != nil && active.tag == o.ID && active.opts == opts {
-			link = active
+		next.prefs = sagernet.TailscalePreferences{
+			AcceptRoutes:           cfg.AcceptRoutes,
+			ExitNode:               cfg.ExitNode,
+			ExitNodeAllowLANAccess: cfg.ExitNodeAllowLANAccess,
+		}
+		if active := e.tailscale.Load(); active != nil && active.tag == o.ID && active.opts.TailscaleIdentity == identity {
+			next.link = active
 		} else {
-			link = &tailscaleLink{id: cfg.ID, tag: o.ID, opts: opts}
-			link.live.Store(&tailscaleLinkState{state: api.TailscaleStarting})
+			next.link = &tailscaleLink{id: cfg.ID, tag: o.ID, opts: sagernet.TailscaleOptions{TailscaleIdentity: identity, TailscalePreferences: next.prefs}}
+			next.link.live.Store(&tailscaleLinkState{state: api.TailscaleStarting})
 		}
 	}
-	return link, nil
+	return next, nil
 }
 
 // replaceTailscale runs under the engine lock after activation succeeds.
 // The old node finishes shutting down before the next one starts.
-func (e *Engine) replaceTailscale(next *tailscaleLink) {
+func (e *Engine) replaceTailscale(prepared preparedTailscale) {
+	next := prepared.link
 	previous := e.tailscale.Load()
 	if next == previous {
+		if next != nil && next.opts.TailscalePreferences != prepared.prefs {
+			// Keep the desired prefs for retries after a startup failure.
+			next.opts.TailscalePreferences = prepared.prefs
+			if node := next.live.Load().node; node != nil {
+				if err := node.SetPreferences(prepared.prefs); err != nil {
+					e.tailscaleLogger().Warn("update Tailscale preferences", "outbound", next.tag, "err", next.safeError(err))
+				}
+			}
+		}
 		return
 	}
 	e.tailscale.Store(next)
@@ -136,6 +157,9 @@ func (l *tailscaleLink) safeError(err error) string {
 }
 
 func (l *tailscaleLink) node() (sagernet.TailscaleNode, error) {
+	if l == nil {
+		return nil, errors.New("Tailscale is not configured on this device")
+	}
 	state := l.live.Load()
 	if state.node != nil {
 		return state.node, nil

@@ -455,6 +455,7 @@ var fieldsByType = map[string][]string{
 	"tuic":                    {"server", "port", "uuid", "password", "tls", "udp", "protocol"},
 	"snell":                   {"server", "port", "password", "udp", "protocol"},
 	model.OutboundWireGuard:   {"server", "port", "udp", "protocol"},
+	model.OutboundTailscale:   {"udp"},
 }
 
 var commonFields = []string{"id", "name", "type", "dialer", "multiplex"}
@@ -555,7 +556,9 @@ func (c *compiler) outbounds(eff *Effective) {
 			continue
 		}
 		for _, k := range c.present(base) {
-			if ob.Type == "hysteria" && k == "multiplex" {
+			if ob.Type == model.OutboundTailscale && (k == "dialer" || k == "multiplex") {
+				c.errorf(doc, base+"/"+k, "outbound.field", "field %q does not apply to Tailscale outbounds", k)
+			} else if ob.Type == "hysteria" && k == "multiplex" {
 				c.errorf(doc, base+"/multiplex", "outbound.field", "Hysteria multiplexes streams over QUIC and does not accept multiplex")
 			} else if ob.Type == "anytls" && k == "multiplex" {
 				c.errorf(doc, base+"/multiplex", "outbound.field", "AnyTLS manages its own sessions and does not accept multiplex")
@@ -573,6 +576,13 @@ func (c *compiler) outbounds(eff *Effective) {
 		}
 		if (ob.ID == model.OutboundDirect && ob.Type != model.OutboundDirect) || (ob.ID == model.OutboundReject && ob.Type != model.OutboundReject) {
 			c.errorf(doc, base+"/type", "outbound.builtin", "id %q is reserved for the built-in %s outbound", ob.ID, ob.ID)
+		}
+		if ob.Type == model.OutboundTailscale {
+			if c.local.Link == nil || len(c.local.Link.Tailscale) == 0 {
+				c.warnf(doc, base+"/type", "outbound.tailscale-unavailable", "Tailscale is not configured on this device; the node is unavailable")
+			}
+			eff.Outbounds = append(eff.Outbounds, Outbound{ID: ob.ID, Name: ob.Name, Type: ob.Type, UDP: ob.UDP == nil || *ob.UDP})
+			continue
 		}
 		out := Outbound{PacketEncoding: ob.PacketEncoding, Protocol: ob.Protocol, Transport: ob.Transport, Multiplex: ob.Multiplex, ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
 		if ob.Dialer != nil {
@@ -745,7 +755,7 @@ func (c *compiler) outbounds(eff *Effective) {
 
 func outboundFingerprint(identity Outbound) string {
 	if identity.Tailscale != nil {
-		return fingerprint(identity.Tailscale, identity.Tailscale.AuthKey)
+		return fingerprint(identity.Tailscale.TailscaleIdentity, identity.Tailscale.AuthKey)
 	}
 	identity.Name = "" // display metadata must not rebuild a live outbound
 	identity.Fingerprint = ""

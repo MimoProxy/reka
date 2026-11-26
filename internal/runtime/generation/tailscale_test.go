@@ -22,6 +22,7 @@ const tailscaleTestLocal = "link:\n  tailscale:\n    - id: home\n      auth-key:
 
 type fakeTailscaleNode struct {
 	status  api.TailscaleStatus
+	updates []sagernet.TailscalePreferences
 	onClose func()
 }
 
@@ -39,6 +40,11 @@ func (*fakeTailscaleNode) ListenPacket(context.Context, M.Socksaddr) (net.Packet
 }
 
 func (n *fakeTailscaleNode) Status() api.TailscaleStatus { return n.status }
+
+func (n *fakeTailscaleNode) SetPreferences(prefs sagernet.TailscalePreferences) error {
+	n.updates = append(n.updates, prefs)
+	return nil
+}
 
 func (n *fakeTailscaleNode) Close() error {
 	if n.onClose != nil {
@@ -176,6 +182,99 @@ func TestTailscaleNodeLifecycle(t *testing.T) {
 	}
 }
 
+func TestTailscaleReferencesShareNodeAndLivePreferences(t *testing.T) {
+	const first = "outbounds: [{id: a, type: tailscale}]\n"
+	const both = "outbounds: [{id: a, type: tailscale}, {id: b, type: tailscale}]\n"
+	node := &fakeTailscaleNode{status: api.TailscaleStatus{State: api.TailscaleRunning}}
+	starts := 0
+	e := NewEngine(EngineOptions{StateRoot: t.TempDir(), newTailscaleNode: func(string, sagernet.TailscaleOptions) (sagernet.TailscaleNode, error) {
+		starts++
+		return node, nil
+	}})
+	t.Cleanup(e.Close)
+	activateTailscaleTest(t, e, compileTailscaleTest(t, tailscaleTestLocal, first), 1)
+	a := e.OutboundInstance("a")
+	activateTailscaleTest(t, e, compileTailscaleTest(t, tailscaleTestLocal, both), 2)
+	for _, id := range []string{"a", "b", "tailscale/home"} {
+		conn, err := e.OutboundInstance(id).Dial(t.Context(), "tcp", "100.64.0.1:443")
+		if err != nil {
+			t.Fatalf("dial through %s: %v", id, err)
+		}
+		conn.Close()
+	}
+	if a != e.OutboundInstance("a") || starts != 1 || len(node.updates) != 0 {
+		t.Fatal("adding a reference changed the existing node or wrapper")
+	}
+	removed := compileTailscaleTest(t, tailscaleTestLocal, first)
+	if e.Plan(removed).Interrupts {
+		t.Fatal("removing a reference should leave other connections running")
+	}
+	activateTailscaleTest(t, e, removed, 3)
+
+	prefsLocal := tailscaleTestLocal + "      exit-node: auto\n      exit-node-allow-lan-access: true\n"
+	changed := compileTailscaleTest(t, prefsLocal, first)
+	p, err := e.Prepare(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Abort(p)
+	if len(node.updates) != 0 || e.Plan(changed).Interrupts {
+		t.Fatal("preferences were applied before activation or marked as a restart")
+	}
+	activateTailscaleTest(t, e, changed, 4)
+	activateTailscaleTest(t, e, compileTailscaleTest(t, prefsLocal+"      accept-routes: false\n", first), 5)
+	want := []sagernet.TailscalePreferences{
+		{AcceptRoutes: true, ExitNode: "auto", ExitNodeAllowLANAccess: true},
+		{AcceptRoutes: false, ExitNode: "auto", ExitNodeAllowLANAccess: true},
+	}
+	if starts != 1 || e.OutboundInstance("a") != a || !slices.Equal(node.updates, want) {
+		t.Fatalf("starts=%d, preference updates=%+v", starts, node.updates)
+	}
+}
+
+func TestTailscaleReferenceTracksLocalLinkAvailability(t *testing.T) {
+	const profile = "outbounds: [{id: ts, type: tailscale}]\n"
+	e := NewEngine(EngineOptions{newTailscaleNode: func(string, sagernet.TailscaleOptions) (sagernet.TailscaleNode, error) {
+		return &fakeTailscaleNode{status: api.TailscaleStatus{State: api.TailscaleRunning}}, nil
+	}})
+	t.Cleanup(e.Close)
+	without := compileTailscaleTest(t, "", profile)
+	checkUnavailable := func() {
+		t.Helper()
+		out := e.OutboundInstance("ts")
+		_, tcpErr := out.Dial(t.Context(), "tcp", "100.64.0.1:443")
+		pin, err := out.Pin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pin.Close()
+		_, udpErr := pin.ListenPacket(t.Context(), "100.64.0.1:53")
+		for _, err := range []error{tcpErr, udpErr} {
+			if err == nil || !strings.Contains(err.Error(), "not configured on this device") {
+				t.Fatalf("unconfigured reference returned %v", err)
+			}
+		}
+	}
+	activateTailscaleTest(t, e, without, 1)
+	checkUnavailable()
+	activateTailscaleTest(t, e, compileTailscaleTest(t, tailscaleTestLocal, profile), 2)
+	conn, err := e.OutboundInstance("ts").Dial(t.Context(), "tcp", "100.64.0.1:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	pinned, err := e.OutboundInstance("ts").Pin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	activateTailscaleTest(t, e, without, 3)
+	checkUnavailable()
+	if _, err := pinned.Dial(t.Context(), "tcp", "100.64.0.1:443"); err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("retired reference lost its association with the stopped link: %v", err)
+	}
+}
+
 func TestTailscaleFailedActivationKeepsNode(t *testing.T) {
 	var starts, closes int
 	tunError := errors.New("test TUN failed to start")
@@ -246,10 +345,15 @@ func TestTailscaleStatusNeedsLogin(t *testing.T) {
 		return &fakeTailscaleNode{status: api.TailscaleStatus{State: api.TailscaleNeedsLogin, AuthURL: authURL}}, nil
 	}})
 	t.Cleanup(e.Close)
-	activateTailscaleTest(t, e, compileTailscaleTest(t, tailscaleTestLocal, ""), 1)
+	const profile = "outbounds: [{id: ts, type: tailscale}]\ngroups: [{id: choice, type: select, members: [ts]}]\n"
+	activateTailscaleTest(t, e, compileTailscaleTest(t, tailscaleTestLocal, profile), 1)
 	status := e.TailscaleStatus()
 	if status.ID != "home" || status.State != api.TailscaleNeedsLogin || status.AuthURL != authURL {
 		t.Fatalf("unexpected status: %+v", status)
+	}
+	_, err := e.ProbeOutbound(t.Context(), api.ProbeRequest{Outbound: "choice", URL: "http://100.64.0.1/"})
+	if err == nil || !strings.Contains(err.Error(), "requires login") {
+		t.Fatalf("probe through a Tailscale group member returned %v", err)
 	}
 }
 

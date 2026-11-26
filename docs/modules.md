@@ -29,7 +29,7 @@ The corresponding entry in `sources.yaml` contains `id`, `module`, and `lock`. `
 
 Set `format` to `surge`, `loon`, or `stash` to choose the parser. Omit it for automatic detection. A recognized filename or URL path extension takes precedence over the document contents. The extensions are `.sgmodule` for Surge, `.plugin` and `.lpx` for Loon, and `.stoverride`, `.yaml` and `.yml` for Stash. Matching is case-insensitive and excludes URL query strings.
 
-For an unrecognized extension, Reka checks the first significant line after skipping a BOM and comments. A section heading or `#!` metadata indicates a line-based module. An `[Argument]` section, `#!loon_version`, Loon JSON or dictionary and array reject actions, or an `if ${url}` expression selects Loon. Other line-based modules use Surge. A top-level YAML mapping with `name`, `http`, `rules`, or `script-providers` selects Stash. Unidentified content uses the historical Surge default. Changing the explicit format to a different dialect requires a fresh snapshot.
+For an unrecognized extension, Reka checks the first significant line after skipping a BOM and comments. A section heading or `#!` metadata indicates a line-based module. An `[Argument]` section, `#!loon_version`, Loon JSON or dictionary and array reject actions, or an `if ${url}` expression selects Loon. Other line-based modules use Surge. A top-level YAML mapping with `name`, `http`, `rules`, `proxies`, or `script-providers` selects Stash. Unidentified content uses the historical Surge default. Changing the explicit format to a different dialect requires a fresh snapshot.
 
 ## Surge parameters and policy references
 
@@ -141,6 +141,7 @@ network-changed then script("https://example.test/changed.js") with tag="Changed
 | YAML path | Conversion |
 | --- | --- |
 | `name`, `desc`, `icon`, `category` | Display metadata. Other metadata keys are informational. |
+| `proxies` | A `type: tailscale` entry references the device’s Tailscale node. Supply an `id` or `name`, or both. The optional `udp` flag defaults to true. Other fields on a Tailscale reference produce an error. |
 | `rules` | Clash-style rule strings. Named `RULE-SET` entries can refer to existing native rule sets. `MATCH` and remote rule-set URLs are unsupported. |
 | `http.mitm` | Hostname strings, including exclusions with `-` and `%APPEND%` or `%INSERT%` prefixes. |
 | `http.url-rewrite` | `302`, `307`, `transparent`, and reject responses. `transparent` changes the URL directly. |
@@ -151,7 +152,9 @@ network-changed then script("https://example.test/changed.js") with tag="Changed
 | `cron.script` | Each entry selects a provider by `name` and becomes a `cron` script. `cron` is required, with five fields or six fields with seconds first. `argument` and `timeout` are optional. [Stash scheduled tasks](https://stash.wiki/en/script/scheduled-tasks) |
 | `tiles` | Each tile selects a provider by `name` and becomes a `generic` script. Stash runs tile scripts without a request and shows the object passed to `$done`, which matches an on-demand generic run. `argument` and `timeout` are converted. `interval`, `title`, `content`, `icon`, `backgroundColor`, `url`, and `collapsed` are display settings and are ignored. Reka does not refresh tiles on the `interval`. [Stash tiles](https://stash.wiki/en/script/tile) |
 
-The importer skips Stash arguments, provider-based body rewrites, and proxy, DNS, controller, and other local settings. A missing script provider is reported on the script entry. YAML parser errors prevent application, and report positions refer to the original YAML nodes, including folded rewrite strings. [Stash HTTP rewrites](https://stash.wiki/en/http-engine/rewrite)
+For example, a module with ID `office` can declare `proxies: [{id: ts, name: Tailnet, type: tailscale}]`. A rule inside the module can select `Tailnet` or `ts`. A profile rule or policy group selects `office/ts`. If the entry omits `id`, Reka uses its name when the name is a valid native ID and derives a stable ID otherwise.
+
+The importer skips other proxy types, proxy groups and providers, Stash arguments, provider-based body rewrites, DNS, controller, and other local settings. A missing script provider is reported on the script entry. YAML parser errors prevent application, and report positions refer to the original YAML nodes, including folded rewrite strings. [Stash HTTP rewrites](https://stash.wiki/en/http-engine/rewrite)
 
 ## Surge scripts
 

@@ -38,7 +38,7 @@ func DetectFormat(name string, text []byte) string {
 	if root, _ := model.ParseNode(model.DocSources, text); root != nil {
 		for i := 0; i < len(root.Content); i += 2 {
 			switch root.Content[i].Value {
-			case "name", "http", "rules", "script-providers":
+			case "name", "http", "rules", "script-providers", "proxies":
 				return model.ModuleFormatStash
 			}
 		}
