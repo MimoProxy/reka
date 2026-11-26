@@ -127,19 +127,19 @@ func TestProcessTrafficRealTCPUDPClosedTotals(t *testing.T) {
 	}
 	conn.Close()
 	b.CloseConnections(nil)
+	// Relays count bytes after each write returns, so a flow can be closed
+	// before its last reply is added. Wait for the totals, not only for the
+	// flows to end.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		rows, _ := b.ProcessTraffic(0, 100)
-		if len(rows) == 1 && rows[0].Active == 0 {
-			if rows[0].Upload != 4102 || rows[0].Download != 4102 || rows[0].Connections != 2 {
-				t.Fatal(rows)
-			}
+		if len(rows) == 1 && rows[0].Active == 0 && rows[0].Upload == 4102 && rows[0].Download == 4102 && rows[0].Connections == 2 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	rows, _ := b.ProcessTraffic(0, 100)
-	t.Fatal("connections did not close", rows)
+	t.Fatal("closed totals did not settle at 4102 bytes each way over 2 connections:", rows)
 }
 
 func TestDarwinProcessLookupRetainsActualPID(t *testing.T) {

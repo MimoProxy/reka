@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MimoProxy/reka/internal/packettunnellab"
 	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 	"github.com/MimoProxy/reka/mobile/profile"
@@ -230,11 +229,9 @@ func TestApplyIPVersionReplacesLargeProfile(t *testing.T) {
 }
 
 func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
-	peer, err := packettunnellab.Start(netip.MustParseAddr("127.0.0.1"), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer peer.Close()
+	// The node binds TCP and UDP on one port; let the helper retry a port
+	// that Windows reserves for UDP only.
+	peer := startPacketTestPeer(t)
 	session, err := Start(Node{
 		Server: netip.MustParseAddr(peer.Node.Server), Port: peer.Node.Port,
 		Method: peer.Node.Method, Password: peer.Node.Password,
@@ -307,9 +304,19 @@ func TestPacketFlowOverOneShadowsocksNode(t *testing.T) {
 	if !ok || record.A.String() != peer.Destination {
 		t.Fatal("unexpected DNS result")
 	}
-	upload, download := session.Traffic()
-	if upload < uint64(len(tcpData)+len(udpData)) || download < uint64(len(tcpData)+len(udpData)) {
-		t.Fatalf("missing tunnel traffic: upload %d download %d", upload, download)
+	// Relays count bytes after each write returns, so the echo can arrive
+	// before its upload is added.
+	want := uint64(len(tcpData) + len(udpData))
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		upload, download := session.Traffic()
+		if upload >= want && download >= want {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("missing tunnel traffic: upload %d download %d", upload, download)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
