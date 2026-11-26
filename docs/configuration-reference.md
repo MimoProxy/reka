@@ -562,7 +562,7 @@ link:
 | --- | --- |
 | `id` | Required resource ID. |
 | `control-url` | Optional HTTPS URL for the control server. The default uses Tailscale's control server. Set an HTTPS Headscale URL for a self-hosted control server. |
-| `auth-key` | Optional Tailscale authentication key. Supports `secret://` references and is masked in configuration previews and exports. Omit it to use browser login. Tailscale authentication environment variables such as `TS_AUTHKEY` cause a startup error when this field is omitted. |
+| `auth-key` | Optional Tailscale authentication key. Supports `secret://` references and is masked in configuration previews and exports. Names under `link/` are reserved for this field: profiles, subscriptions and modules cannot reference them, so a node cannot send the key to its own server. Omit it to use browser login. Tailscale authentication environment variables such as `TS_AUTHKEY` cause a startup error when this field is omitted. |
 | `hostname` | Optional name advertised to the tailnet. |
 | `ephemeral` | Defaults to `false`. Set to `true` to register an ephemeral node. |
 | `accept-routes` | Defaults to `true`. Allows the node to use advertised subnet routes approved by the control server. |

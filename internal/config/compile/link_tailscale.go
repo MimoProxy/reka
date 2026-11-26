@@ -52,7 +52,9 @@ func (c *compiler) tailscaleLink(eff *Effective) []router.RuleSpec {
 			c.errorf(doc, base+"/control-url", "link.tailscale.control-url", "expected an HTTPS control URL")
 		}
 	}
-	authKey := c.resolveDocumentSecret(doc, base+"/auth-key", entry.AuthKey)
+	// Link credentials are reserved everywhere else, so a subscription cannot
+	// send a stored auth key to its own server.
+	authKey := c.resolveLinkSecret(doc, base+"/auth-key", entry.AuthKey)
 	var routes []string
 	if len(entry.Routes) > maxTailscaleRoutes {
 		c.errorf(doc, base+"/routes", "link.tailscale.routes", "at most %d Tailscale link routes are allowed", maxTailscaleRoutes)

@@ -220,3 +220,29 @@ func TestTailscaleLinkSecretAndFingerprints(t *testing.T) {
 		t.Fatal("rotating the auth key must change only the outbound fingerprint")
 	}
 }
+
+func TestLinkSecretsStayLocal(t *testing.T) {
+	secrets := store(t)
+	if err := secrets.Set("link/tailscale/home/auth-key", "private-link-key"); err != nil {
+		t.Fatal(err)
+	}
+	local := tailscaleLinkLocal + "      auth-key: secret://link/tailscale/home/auth-key\n"
+	eff, ds := Compile([]byte("schema-version: 1\n"), []byte(local), Options{Secrets: secrets})
+	if eff == nil || ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if out, ok := eff.Outbound("tailscale/home"); !ok || out.Tailscale.AuthKey != "private-link-key" {
+		t.Fatal("local link settings could not read their auth key")
+	}
+	// A profile or subscription node must not send a link credential to its
+	// own server as a password.
+	profile := "schema-version: 1\noutbounds:\n  - {id: leak, type: trojan, server: example.com, port: 443, password: secret://link/tailscale/home/auth-key, tls: {}}\n"
+	_, ds = Compile([]byte(profile), nil, Options{Secrets: secrets})
+	found := false
+	for _, d := range ds {
+		found = found || d.Code == "secret.reserved"
+	}
+	if !found {
+		t.Fatalf("profile reference to a link credential was accepted: %v", ds)
+	}
+}
