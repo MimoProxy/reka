@@ -12,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/http"
+	"github.com/sagernet/sing-box/protocol/hysteria"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/snell"
@@ -115,10 +116,15 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		values["uuid"] = s.UUID
 	}
 	if s.Password != "" {
-		values["password"] = s.Password
+		if s.Type == "hysteria" {
+			values["auth_str"] = s.Password
+		} else {
+			values["password"] = s.Password
+		}
 	}
 	if s.TLS != nil {
 		t := s.TLS.build()
+		// For Hysteria v1, sing-quic supplies "hysteria" when ALPN is empty, as in mihomo.
 		if (s.Type == "hysteria2" || s.Type == "tuic") && len(t.ALPN) == 0 {
 			t.ALPN = []string{"h3"}
 		}
@@ -148,7 +154,7 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	}
 	ctx, carrierConfigured := configureTLSCarrierContext(baseContext, s.TLS)
 	ctx, configured := configureTLSContext(configureECHContext(ctx, s.TLS), s.TLS)
-	if s.Type == "hysteria2" && (s.UpBPS != nil || s.DownBPS != nil) {
+	if (s.Type == "hysteria" || s.Type == "hysteria2") && (s.UpBPS != nil || s.DownBPS != nil) {
 		bandwidthConfigured = &atomic.Bool{}
 		ctx = context.WithValue(ctx, "reka.hysteria.bandwidth.v1", func(up, down *uint64) {
 			if s.UpBPS != nil {
@@ -284,6 +290,12 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			return nil, err
 		}
 		return anytls.NewOutbound(ctx, b.router, logger, tag, o)
+	case "hysteria":
+		var o option.HysteriaOutboundOptions
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
+		}
+		return hysteria.NewOutbound(ctx, b.router, logger, tag, o)
 	case "hysteria2":
 		var o option.Hysteria2OutboundOptions
 		if err = json.Unmarshal(data, &o); err != nil {

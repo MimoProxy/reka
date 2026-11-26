@@ -505,7 +505,7 @@ func ipCheckServer(ctx context.Context, target compile.Outbound, network string,
 	if len(check.Addresses) == 0 {
 		return IPCheck{Status: ipCheckUnavailable, Error: "no address"}
 	}
-	if target.Type == "hysteria2" || target.Type == "tuic" || target.Type == model.OutboundWireGuard || target.Plugin != nil && target.Plugin.Type == "kcptun" {
+	if target.Type == "hysteria" || target.Type == "hysteria2" || target.Type == "tuic" || target.Type == model.OutboundWireGuard || target.Plugin != nil && target.Plugin.Type == "kcptun" {
 		check.Status, check.Error = ipCheckSkipped, "udp transport"
 		return check
 	}

@@ -442,6 +442,7 @@ var fieldsByType = map[string][]string{
 	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
 	"trojan":                  {"server", "port", "password", "tls", "udp", "transport", "multiplex"},
 	"anytls":                  {"server", "port", "password", "tls", "udp", "protocol"},
+	"hysteria":                {"server", "port", "password", "tls", "udp", "protocol"},
 	"hysteria2":               {"server", "port", "password", "tls", "udp", "protocol"},
 	"tuic":                    {"server", "port", "uuid", "password", "tls", "udp", "protocol"},
 	"snell":                   {"server", "port", "password", "udp", "protocol"},
@@ -532,7 +533,9 @@ func (c *compiler) outbounds(eff *Effective) {
 			continue
 		}
 		for _, k := range c.present(base) {
-			if ob.Type == "anytls" && k == "multiplex" {
+			if ob.Type == "hysteria" && k == "multiplex" {
+				c.errorf(doc, base+"/multiplex", "outbound.field", "Hysteria multiplexes streams over QUIC and does not accept multiplex")
+			} else if ob.Type == "anytls" && k == "multiplex" {
 				c.errorf(doc, base+"/multiplex", "outbound.field", "AnyTLS manages its own sessions and does not accept multiplex")
 			} else if !slices.Contains(allowed, k) && !slices.Contains(commonFields, k) {
 				c.errorf(doc, base+"/"+k, "outbound.field", "field %q does not apply to %s outbounds", k, ob.Type)
@@ -594,7 +597,8 @@ func (c *compiler) outbounds(eff *Effective) {
 			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
 				c.errorf(doc, base+"/server", "outbound.server", "server must be a host name or an IP address")
 			}
-			if (ob.Port < 1 || ob.Port > 65535) && !(ob.Type == "hysteria2" && ob.Port == 0 && ob.Protocol != nil && (len(ob.Protocol.ServerPorts) > 0 || realmEnabled)) {
+			hopping := (ob.Type == "hysteria" || ob.Type == "hysteria2") && ob.Protocol != nil && len(ob.Protocol.ServerPorts) > 0
+			if (ob.Port < 1 || ob.Port > 65535) && !(ob.Port == 0 && (hopping || realmEnabled)) {
 				c.errorf(doc, base+"/port", "outbound.port", "port must be between 1 and 65535")
 			}
 			out.Server, out.Port = strings.Trim(ob.Server, "[]"), uint16(ob.Port)

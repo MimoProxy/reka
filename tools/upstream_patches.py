@@ -467,8 +467,23 @@ def hysteria_response_serialization(source):
         source = replace(source, 'func (c *serverConn) ' + signature + ' {', 'func (c *serverConn) ' + signature + ' {\n c.writeAccess.Lock();defer c.writeAccess.Unlock()')
     return source
 
+
+def xplus_receive_buffer(source):
+    # QUIC supplies space for the plaintext datagram. XPlus also needs room
+    # for its wire salt when reading the underlying UDP packet.
+    for read in ('n, addr, err = c.PacketConn.ReadFrom', 'n, err = c.Conn.Read'):
+        source = replace(source, read + '(p)', '''packet := buf.NewSize(len(p) + xplusSaltLen)
+    defer packet.Release()
+    wire := packet.FreeBytes()
+    ''' + read + '(wire)')
+    source = replace(source, 'if err != nil {\n\t\treturn\n\t} else if n < xplusSaltLen {',
+                     'if n < xplusSaltLen {', 2)
+    source = replace(source, 'append(c.key, p[:xplusSaltLen]...)', 'append(c.key, wire[:xplusSaltLen]...)', 2)
+    return replace(source, 'p[i] = p[xplusSaltLen+i]', 'p[i] = wire[xplusSaltLen+i]', 2)
+
 MODULES['github.com/sagernet/sing-quic'] = ('v0.7.2-0.20261020082049-7e0a5869a5f4', {
 'hysteria2/service.go': ('8a8720cd5dbd4c58f6372b6b103d38575150a831c3d724b5a0ff3640d6a98b14',hysteria_response_serialization),
+'hysteria/xplus.go': ('73274e0ca3a9b5a026a08ab5b879f3c185e0d9b1f9fd6639ca8f418fee8db7ff', xplus_receive_buffer),
 })
 
 
@@ -492,6 +507,16 @@ def hysteria_exact_bandwidth(source):
  client,err:=hysteria2.NewClient(clientOptions)''')
 
 MODULES['github.com/sagernet/sing-box'][1]['protocol/hysteria2/outbound.go'] = ('25b9c083a39a7d47be9fac675a8672e68654179858f7589ae60398ece0c48d80',hysteria_exact_bandwidth)
+
+
+def hysteria_v1_exact_bandwidth(source):
+    new_client = 'client, err := hysteria.NewClient(hysteria.ClientOptions{'
+    return replace(source, new_client, '''if override, ok := ctx.Value("reka.hysteria.bandwidth.v1").(func(*uint64, *uint64)); ok {
+        override(&sendBps, &receiveBps)
+    }
+    ''' + new_client)
+
+MODULES['github.com/sagernet/sing-box'][1]['protocol/hysteria/outbound.go'] = ('7029c4d38d9ce0c63cbbb2e23b03d05c57c9369ae77948212aee0d6b32cc00dd', hysteria_v1_exact_bandwidth)
 
 
 def shadowtls_record_writes(source):
