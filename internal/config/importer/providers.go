@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"github.com/MimoProxy/reka/internal/policy"
@@ -576,7 +577,9 @@ func ImportProviders(req Request, payloads map[string][]byte) Result {
 		var source map[string]json.RawMessage
 		_ = json.Unmarshal(result.Source, &source)
 		var outbounds []map[string]any
-		_ = json.Unmarshal(source["outbounds"], &outbounds)
+		decoder := json.NewDecoder(bytes.NewReader(source["outbounds"]))
+		decoder.UseNumber() // Preserve exact integer bandwidths while restoring display names.
+		_ = decoder.Decode(&outbounds)
 		for _, out := range outbounds {
 			if original, ok := originals[out["name"].(string)]; ok {
 				out["name"] = original.name
@@ -615,7 +618,7 @@ func Import(req Request) Result {
 			if all {
 				result := ImportProviders(req, payloads)
 				if len(result.Source) > 0 {
-					var src object
+					var src map[string]json.RawMessage
 					_ = json.Unmarshal(result.Source, &src)
 					var defs []object
 					for _, p := range ps {
@@ -632,7 +635,7 @@ func Import(req Request) Result {
 						}
 						defs = append(defs, object{"id": p.ID, "name": p.Name, "entries": entries})
 					}
-					src["rule-sets"] = defs
+					src["rule-sets"], _ = json.Marshal(defs)
 					result.Source, _ = json.Marshal(src)
 				}
 				return result

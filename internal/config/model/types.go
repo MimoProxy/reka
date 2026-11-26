@@ -358,6 +358,11 @@ type Protocol struct {
 	Reserved            []uint8  `yaml:"reserved,omitempty" json:",omitempty"`
 	MTU                 int      `yaml:"mtu,omitempty" json:",omitempty"`
 
+	AuthBase64              string `yaml:"auth-base64,omitempty" json:",omitempty"`
+	StreamReceiveWindow     uint64 `yaml:"stream-receive-window,omitempty" json:",omitempty"`
+	ConnectionReceiveWindow uint64 `yaml:"connection-receive-window,omitempty" json:",omitempty"`
+	DisableMTUDiscovery     bool   `yaml:"disable-mtu-discovery,omitempty" json:",omitempty"`
+
 	Realm          *HysteriaRealm `yaml:"realm"`
 	UpBPS          *uint64        `yaml:"up-bps"`
 	DownBPS        *uint64        `yaml:"down-bps"`

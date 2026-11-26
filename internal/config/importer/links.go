@@ -119,7 +119,7 @@ func parseLink(raw string) (object, error) {
 		}
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.User == nil || u.Hostname() == "" {
+	if err != nil || u.Hostname() == "" || (u.User == nil && u.Scheme != "hysteria") {
 		return nil, fmt.Errorf("invalid link")
 	}
 	if u.Path != "" && u.Path != "/" {
@@ -250,6 +250,10 @@ func parseLink(raw string) (object, error) {
 			out["reality-opts"] = reality
 		} else if query.Get("pbk") != "" || query.Get("sid") != "" || query.Get("support-x25519mlkem768") != "" {
 			return nil, fmt.Errorf("REALITY parameters need security=reality")
+		}
+	case "hysteria":
+		if err := parseHysteriaLink(out, query); err != nil {
+			return nil, err
 		}
 	case "trojan", "hysteria2", "hy2", "tuic":
 		if err := parseSecureLink(u, out, query); err != nil {

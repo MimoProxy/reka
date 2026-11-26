@@ -848,7 +848,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 		return true
 	}
 	switch o.Type {
-	case "http", "socks", "vmess", "trojan", "anytls", "hysteria2", "tuic", "snell", model.OutboundSSR, model.OutboundWireGuard:
+	case "http", "socks", "vmess", "trojan", "anytls", "hysteria", "hysteria2", "tuic", "snell", model.OutboundSSR, model.OutboundWireGuard:
 		return true
 	case "vless":
 		return o.TLS == nil || o.TLS.Reality == nil
@@ -876,9 +876,9 @@ func specFor(o compile.Outbound) any {
 	if usesUpstreamOutbound(o) {
 		var up, down *uint64
 		var realm *sagernet.RealmSpec
-		if p := o.Protocol; p != nil && o.Type == "hysteria2" {
+		if p := o.Protocol; p != nil && (o.Type == "hysteria" || o.Type == "hysteria2") {
 			up, down = p.UpBPS, p.DownBPS
-			if r := p.Realm; r != nil && r.Enabled {
+			if r := p.Realm; o.Type == "hysteria2" && r != nil && r.Enabled {
 				realm = &sagernet.RealmSpec{ServerURL: r.ServerURL, Token: r.Token, RealmID: r.RealmID, STUNServers: r.STUNServers}
 				if t := r.TLS; t != nil {
 					realm.TLS = &sagernet.TLSSpec{ServerName: t.ServerName, Insecure: t.Insecure, ALPN: t.ALPN, CertificatePin: t.CertificatePin, VerifyName: t.VerifyName, Certificate: t.Certificate, PrivateKey: t.PrivateKey}
@@ -1585,20 +1585,37 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 				values["security"] = p.Security
 			}
 			values["alter_id"] = p.AlterID
-		case "hysteria2":
+		case "hysteria", "hysteria2":
+			values["up_mbps"], values["down_mbps"] = p.UpMbps, p.DownMbps
 			if len(p.ServerPorts) > 0 {
 				values["server_ports"] = p.ServerPorts
 				interval := p.HopInterval
 				if interval == 0 {
-					interval = 30
+					interval = 30 // sing-quic hysteria.defaultHopInterval
 				} else if interval < 5 {
 					interval = 5
 				}
-				maximum := max(p.HopIntervalMax, interval)
-				values["hop_interval"], values["hop_interval_max"] = fmt.Sprintf("%ds", interval), fmt.Sprintf("%ds", maximum)
+				values["hop_interval"] = fmt.Sprintf("%ds", interval)
+				if o.Type == "hysteria2" {
+					values["hop_interval_max"] = fmt.Sprintf("%ds", max(p.HopIntervalMax, interval))
+				}
 			}
-			values["up_mbps"], values["down_mbps"] = p.UpMbps, p.DownMbps
-			if p.Obfs != nil {
+			if o.Type == "hysteria" {
+				if p.AuthBase64 != "" {
+					values["auth"] = p.AuthBase64
+				}
+				if p.Obfs != nil {
+					values["obfs"] = p.Obfs.Password
+				}
+				// sing-box MemoryBytes accepts the full uint64 range with an explicit byte unit.
+				if p.StreamReceiveWindow > 0 {
+					values["stream_receive_window"] = fmt.Sprintf("%dB", p.StreamReceiveWindow)
+				}
+				if p.ConnectionReceiveWindow > 0 {
+					values["connection_receive_window"] = fmt.Sprintf("%dB", p.ConnectionReceiveWindow)
+				}
+				values["disable_path_mtu_discovery"] = p.DisableMTUDiscovery
+			} else if p.Obfs != nil {
 				values["obfs"] = map[string]any{"type": p.Obfs.Type, "password": p.Obfs.Password, "min_packet_size": p.Obfs.MinPacketSize, "max_packet_size": p.Obfs.MaxPacketSize}
 			}
 		case "tuic":

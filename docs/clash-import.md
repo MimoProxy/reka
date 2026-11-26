@@ -52,6 +52,14 @@ Partial mode can change routing: unavailable rules are absent and unsupported me
 
 `-apply` first plans, then commits the normalized snapshot through ConfigService. Repeating an import under the same source ID replaces that source only. Other sources and profile/overlay/local documents remain intact. The usual base-version, plan-hash, operation-ID, preparation and recovery guarantees apply. Import does not automatically rewrite profile references or enable imported rules/DNS. Activate a source DNS explicitly with `dns: {from: airport, listen: "127.0.0.1:5353"}`; imported remote listen addresses are ignored.
 
+## Hysteria v1 nodes
+
+`type: hysteria` accepts a UDP transport and always enables TLS. UDP forwarding defaults to on and can be disabled with `udp: false`. An empty `sni` uses the server address. Omitted ALPN defaults to `hysteria`. The usual certificate pin, verification name, client certificate and ECH options apply. The import report lists `ca`, `ca-str` and `client-fingerprint` as ignored, matching mihomo.
+
+Supply both `up` and `down`. Unitless integers mean Mbps. Rates such as `500 Kbps` and `62501 Bps` retain their byte-per-second precision. A nonzero integer `up-speed` or `down-speed` overrides that direction in Mbps. Each effective rate must reach 16384 bytes/s. Standard Base64 `auth` takes precedence over the string `auth-str`. The `obfs` string supplies the XPlus password.
+
+`obfs-protocol` overrides `protocol`. Both accept the UDP transport. A `ports` list enables hopping at a single integer `hop-interval` in seconds, defaulting to 10. The `recv-window` field sets the connection window. As in mihomo, `recv-window-conn` sets the stream window only when `recv-window` is nonzero. Setting `disable-mtu-discovery: true` disables QUIC path MTU discovery. Both `fast-open` values are accepted because sing-quic sends the TCP request with the first write. Underscore spellings such as `auth_str` work for Hysteria nodes. Using both spellings of the same key is an error.
+
 ## WireGuard nodes
 
 Clash YAML accepts a `wireguard` proxy with a single peer. Put the endpoint, public key and peer options at the top level or in one `peers` entry. The local `private-key`, `ip` and `ipv6` belong to the node. Import preserves explicit prefix lengths and appends `/32` to bare IPv4 addresses and `/128` to bare IPv6 addresses.
@@ -94,13 +102,15 @@ Select groups retain supported members in original order. Unsupported group type
 ./bin/rekactl import -source links -format links -apply links.txt
 ```
 
-Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Hysteria2/`hy2` and TUIC v5 URLs. For these formats, unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Hysteria v1, Hysteria2/`hy2` and TUIC v5 URLs. For these formats, unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
 
 ShadowsocksR (`type: ssr`) requires `cipher`, `password`, `obfs` and `protocol` in Clash YAML. Optional `obfs-param` and `protocol-param` are passed to their respective layers. Previews mask `password` and `protocol-param`. UDP defaults to off. The importer rejects `tfo: true` and `smux`.
 
 An `ssr://` link encodes `host:port:protocol:cipher:obfs:base64password/?query` in URL-safe base64. The `/?` separator is required even for an empty query. The password and the first `remarks`, `obfsparam` and `protoparam` values use unpadded URL-safe base64. Without remarks, Reka uses `ssr@host:port` as the name. Following mihomo, the link enables native UDP and ignores other query fields, including `group`, `udpport` and `uot`. The colon-delimited link format excludes IPv6 literals. A Clash YAML entry can specify an IPv6 server.
 
 AnyTLS links accept `sni`, `insecure=1` and the `hpkp` certificate pin, and enable UDP. In Clash YAML, `type: anytls` defaults UDP to off and uses `server` when `sni` is empty. AnyTLS manages its own TCP sessions. The importer rejects `smux`, `disable-reuse: true` and `tfo: true`.
+
+A Hysteria v1 link can be as short as `hysteria://proxy.example:443?upmbps=5&downmbps=20#Home`. The fragment names the node. The `auth` query parameter carries a plain authentication string. Use `peer` for SNI, `obfs` for XPlus, comma-separated `alpn`, `protocol=udp`, and `insecure` for the certificate verification flag. The `up` and `down` parameters take precedence over `upmbps` and `downmbps`.
 
 ## API
 

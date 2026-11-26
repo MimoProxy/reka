@@ -146,7 +146,17 @@ func (p *providerTransform) apply(nodes []*yaml.Node) ([]*yaml.Node, error) {
 			}
 			seen[name] = true
 			n := copyNode(node)
+			hysteria := text(get(n, "type")) == "hysteria"
 			for key, value := range p.values {
+				if hysteria {
+					// Update the payload's spelling so an override cannot create a duplicate alias.
+					for i := 0; i+1 < len(n.Content); i += 2 {
+						if sourceKey := n.Content[i].Value; strings.ReplaceAll(sourceKey, "_", "-") == key {
+							key = sourceKey
+							break
+						}
+					}
+				}
 				putField(n, key, copyNode(value))
 			}
 			for _, replace := range p.names {

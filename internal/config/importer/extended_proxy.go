@@ -16,12 +16,11 @@ func (r *proxyReader) number(key string, def int) int {
 	if get(r.n, key).Tag == "!!int" {
 		base = 0
 	}
-	value, err := strconv.ParseInt(r.str(key), base, 64)
-	v := int(value)
+	value, err := strconv.ParseInt(r.str(key), base, strconv.IntSize)
 	if err != nil {
 		r.fail(key, "import.type", "expected an integer")
 	}
-	return v
+	return int(value)
 }
 func (c *converter) convertExtended(n *yaml.Node, path string) {
 	r := proxyReader{c: c, n: n, path: path}
@@ -35,11 +34,12 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	port := 0
 	realmEnabled := nativeType == "hysteria2" && text(get(get(n, "realm-opts"), "enable")) == "true"
-	if !realmEnabled && (nativeType != "hysteria2" || empty(get(n, "ports")) || (!empty(get(n, "port")) && text(get(n, "port")) != "0")) {
+	hasPortList := (nativeType == "hysteria" || nativeType == "hysteria2") && !empty(get(n, "ports"))
+	if !realmEnabled && (!hasPortList || (!empty(get(n, "port")) && text(get(n, "port")) != "0")) {
 		port = r.port()
 	}
 	server := r.str("server")
-	out := object{"id": id, "name": name, "type": nativeType, "server": server, "port": port, "udp": r.boolean("udp", false)}
+	out := object{"id": id, "name": name, "type": nativeType, "server": server, "port": port, "udp": r.boolean("udp", nativeType == "hysteria")}
 	allowed := map[string]bool{}
 	permit := func(keys ...string) {
 		for _, k := range keys {
@@ -47,7 +47,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		}
 	}
 	permit("name", "type", "server", "port", "udp", "sni", "skip-cert-verify", "client-fingerprint", "alpn")
-	if nativeType != "anytls" {
+	if nativeType != "anytls" && nativeType != "hysteria" {
 		permit("tls", "servername")
 	}
 	p := object{}
@@ -84,20 +84,16 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		if get(n, "min-idle-session") != nil {
 			p["min-idle-session"] = r.number("min-idle-session", 0)
 		}
-		if v := get(n, "disable-reuse"); v != nil && empty(v) {
-			r.fail("disable-reuse", "import.type", "expected true or false")
-		} else if r.boolean("disable-reuse", false) {
+		if r.optionalBool("disable-reuse") {
 			r.fail("disable-reuse", "import.unsupported-field", "disabling AnyTLS session reuse is unsupported")
 		}
+	case "hysteria":
+		permit("auth", "auth-str", "up", "down", "up-speed", "down-speed", "protocol", "obfs-protocol", "obfs", "ports", "hop-interval", "recv-window", "recv-window-conn", "disable-mtu-discovery", "fast-open", "ca", "ca-str", "tls")
+		r.hysteria(out, p)
 	case "hysteria2":
 		permit("password", "up", "down", "obfs", "obfs-password", "ports", "hop-interval", "realm-opts", "obfs-min-packet-size", "obfs-max-packet-size")
 		if ports := r.str("ports"); ports != "" {
-			ranges, err := model.PortHops(ports)
-			if err != nil {
-				r.fail("ports", "import.ports", err.Error())
-			} else {
-				p["server-ports"] = ranges
-			}
+			r.hysteriaPorts(ports, p)
 			lo, hi, err := model.HopSeconds(r.str("hop-interval"))
 			if err != nil {
 				r.fail("hop-interval", "import.ports", err.Error())
@@ -166,7 +162,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 			r.fail(key, "import.unsupported-field", "unsupported protocol option")
 		}
 	}
-	tlsEnabled := nativeType == "anytls" || r.boolean("tls", nativeType == "trojan" || nativeType == "hysteria2" || nativeType == "tuic")
+	tlsEnabled := nativeType == "anytls" || nativeType == "hysteria" || r.boolean("tls", nativeType == "trojan" || nativeType == "hysteria2" || nativeType == "tuic")
 	if nativeType == "vmess" && r.str("network") == "h2" {
 		tlsEnabled = true
 	}
@@ -176,10 +172,10 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	if tlsEnabled && nativeType != "snell" {
 		tls := object{}
 		var sni string
-		if nativeType == "anytls" {
+		if nativeType == "anytls" || nativeType == "hysteria" {
 			sni = r.str("sni")
 			if sni == "" {
-				// mihomo defaults the AnyTLS server name to the node address.
+				// mihomo defaults the server name to the node address for these protocols.
 				sni = server
 			}
 		} else {
@@ -192,7 +188,10 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 			tls["server-name"] = sni
 		}
 		tls["insecure"] = r.boolean("skip-cert-verify", false)
-		if fp := r.str("client-fingerprint"); fp != "" {
+		if fp := r.str("client-fingerprint"); fp != "" && nativeType == "hysteria" {
+			// mihomo's Hysteria option has no ClientHello preset and ignores the key.
+			c.diag(get(n, "client-fingerprint"), path+"/client-fingerprint", "import.ignored-field", "Hysteria uses QUIC and has no ClientHello preset", false)
+		} else if fp != "" {
 			tls["fingerprint"] = fp
 		}
 		if v := get(n, "alpn"); v != nil {
@@ -212,7 +211,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		}
 	}
 	c.convertTLSExtras(&r, nativeType, out)
-	if nativeType != "anytls" {
+	if nativeType != "anytls" && nativeType != "hysteria" {
 		c.convertTransport(&r, out)
 		c.convertMultiplex(&r, out)
 	}
