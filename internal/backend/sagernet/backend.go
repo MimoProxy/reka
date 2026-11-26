@@ -60,6 +60,14 @@ type Options struct {
 	// FindProcess enables looking up the process that owns a connection,
 	// where the platform supports it.
 	FindProcess bool
+	// SystemResolver looks up server names with the operating system's
+	// resolver instead of the Go resolver, which reads resolv.conf. A macOS
+	// packet tunnel points resolv.conf at the tunnel's own DNS address, which
+	// the provider's sockets bypass, so the Go resolver times out there. The
+	// system resolver sends the provider's lookups over the physical network,
+	// as sing-box's local DNS transport does on Darwin. Protect does not
+	// apply to these lookups.
+	SystemResolver bool
 }
 
 const defaultHalfCloseTimeout = 2 * time.Second
@@ -141,13 +149,7 @@ func New(opts Options) *Backend {
 	}
 	b.protect = protect
 	service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: protect})
-	b.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-		d := &net.Dialer{}
-		if protect != nil {
-			d.Control = protect
-		}
-		return d.DialContext(ctx, network, address)
-	}}
+	b.resolver = newResolver(opts.SystemResolver, protect)
 	service.MustRegister[adapter.DNSRouter](ctx, &dnsRouter{resolver: b.resolver})
 	service.MustRegister[adapter.DNSTransportManager](ctx, &dnsTransportManager{})
 	service.MustRegister[adapter.Router](ctx, b.router)
@@ -550,3 +552,16 @@ func (b *Backend) adoptInbound(tag, typ string, in adapter.Inbound, logger log.C
 }
 
 func (b *Backend) Resolver() *net.Resolver { return b.resolver }
+
+func newResolver(system bool, protect control.Func) *net.Resolver {
+	if system {
+		return &net.Resolver{}
+	}
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		d := &net.Dialer{}
+		if protect != nil {
+			d.Control = protect
+		}
+		return d.DialContext(ctx, network, address)
+	}}
+}
