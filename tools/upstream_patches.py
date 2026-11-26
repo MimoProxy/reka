@@ -844,3 +844,31 @@ MODULES['github.com/sagernet/sing'][1]['common/domain/matcher.go'] = (
 MODULES['go4.org/netipx'] = ('v0.0.0-20231129151722-fdeea329fbba', {
     'ipset.go': ('01d0a58880b95e75f0b8e90e076eb9b56697bf9c9d075c030d422f2aafacd659', walk_ip_ranges),
 })
+
+
+def anytls_stream_close_error(source):
+    # The session receive loop closes streams while callers still use them.
+    # Publish the close error atomically; behaviour is otherwise unchanged.
+    source = replace(source, '\t"sync"\n', '\t"sync"\n\t"sync/atomic"\n')
+    source = replace(source, '\tdieErr  error\n', '\tdieErr  atomic.Pointer[error]\n')
+    source = replace(source, '// newStream initiates', '''func (s *Stream) closeError() error {
+	if err := s.dieErr.Load(); err != nil {
+		return *err
+	}
+	return nil
+}
+
+// newStream initiates''')
+    source = replace(source, '\tif n == 0 && s.dieErr != nil {\n\t\terr = s.dieErr\n\t}', '\tif dieErr := s.closeError(); n == 0 && dieErr != nil {\n\t\terr = dieErr\n\t}')
+    source = replace(source, '\tif s.dieErr != nil {\n\t\treturn 0, s.dieErr\n\t}', '\tif dieErr := s.closeError(); dieErr != nil {\n\t\treturn 0, dieErr\n\t}')
+    source = replace(source, '\t\ts.dieErr = net.ErrClosed\n', '\t\tdieErr := net.ErrClosed\n\t\ts.dieErr.Store(&dieErr)\n')
+    source = replace(source, '\t\ts.dieErr = err\n', '\t\ts.dieErr.Store(&err)\n')
+    source = replace(source, '\t\treturn s.dieErr\n', '\t\treturn s.closeError()\n')
+    if 's.dieErr != nil' in source or 's.dieErr =' in source:
+        raise RuntimeError('AnyTLS stream close error patch is incomplete')
+    return source
+
+
+MODULES['github.com/anytls/sing-anytls'] = ('v0.0.11', {
+    'session/stream.go': ('1f7ebfeb99ab5b0857d007dfedf664a667ef513aa3c95637ee58e86569a972d3', anytls_stream_close_error),
+})

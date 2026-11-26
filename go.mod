@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/andybalholm/brotli v1.1.0
+	github.com/anytls/sing-anytls v0.0.11
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/dop251/goja v0.0.0-20261122185237-35fdc4b88e39
 	github.com/dop251/goja_nodejs v0.0.0-20260918173711-b481721df8a2
@@ -39,7 +40,6 @@ require (
 
 require (
 	github.com/ajg/form v1.5.1 // indirect
-	github.com/anytls/sing-anytls v0.0.11 // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/database64128/netx-go v0.1.1 // indirect
