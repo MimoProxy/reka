@@ -1,4 +1,4 @@
-//go:build ios && cgo && with_gvisor
+//go:build darwin && cgo && with_gvisor
 
 package main
 
@@ -45,34 +45,7 @@ import (
 	"github.com/MimoProxy/reka/internal/script"
 	"github.com/MimoProxy/reka/mobile/packettunnel"
 	"github.com/MimoProxy/reka/mobile/scriptbridge"
-	"github.com/sagernet/sing/common/memory"
 )
-
-// Reka defines these script footprint thresholds for its iOS extension.
-const (
-	// A run starts only when the footprint plus its estimated cost stays
-	// within the 38 MiB script budget. A fixed 28 MiB cutoff skipped every
-	// run once real app traffic held the extension at 24-28 MiB, although
-	// most runs add little memory. 38 MiB keeps 12 MiB below the 50 MiB
-	// Network Extension limit, enough for a 10 MiB run spike the estimate
-	// misses.
-	scriptSkipAbove = 38 << 20
-	// On device, JSC runs with JSON or protobuf bodies up to 512 KiB added
-	// 0.2-1.2 MiB, a large bundle about 1.2 MiB more, and a CryptoJS script
-	// up to 10 MiB (about 19 times the body). Reused WebView runs added under
-	// 1 MiB at 512 KiB, mostly the base64 copy. A 2 MiB base plus 8 times the
-	// body covers all but the CryptoJS case, which the post-run discard
-	// check still catches.
-	scriptRunBaseCost    = 2 << 20
-	scriptRunCostPerByte = 8
-	// Reka discards results and purges host caches above the same 38 MiB,
-	// well before the memory guard resets connections at 45 MiB.
-	scriptDiscardAbove = 38 << 20
-)
-
-func scriptRunCost(bodyBytes int) uint64 {
-	return scriptRunBaseCost + scriptRunCostPerByte*uint64(bodyBytes)
-}
 
 type scriptCallbacks struct {
 	start  C.RekaScriptStart
@@ -85,9 +58,7 @@ type scriptCallbacks struct {
 var (
 	scriptRegistrationMu sync.Mutex
 	scriptHostCallbacks  atomic.Pointer[scriptCallbacks]
-	processScriptBridge  = scriptbridge.New(iosScriptHost{}, scriptbridge.Options{
-		Footprint: memory.Total, SkipAbove: scriptSkipAbove, RunCost: scriptRunCost, DiscardAbove: scriptDiscardAbove,
-	})
+	processScriptBridge  = scriptbridge.New(iosScriptHost{}, scriptOptions)
 )
 
 // RekaGoSetScriptHost registers the Swift callbacks before starting the tunnel.
