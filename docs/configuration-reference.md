@@ -546,6 +546,36 @@ The list accepts up to 64 entries and each outbound may appear once. In `rule` m
 
 If a configured subnet overlaps the current network, disable the entry manually while connected to that network. [Complete home network example](configuration.md#access-a-home-network-through-wireguard)
 
+### `link.tailscale`
+
+Set `link.tailscale` in `local.yaml` to add an embedded Tailscale node for outbound TCP and UDP. The list accepts one entry. Its outbound ID is `tailscale/<id>` and can be used in profile rules and group members. A profile reference requires the matching local entry.
+
+```yaml
+link:
+  tailscale:
+    - id: home
+      hostname: reka-client
+      routes: [10.0.0.0/24]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Required resource ID. |
+| `control-url` | Optional HTTPS URL for the control server. The default uses Tailscale's control server. Set an HTTPS Headscale URL for a self-hosted control server. |
+| `auth-key` | Optional Tailscale authentication key. Supports `secret://` references and is masked in configuration previews and exports. Omit it to use browser login. Tailscale authentication environment variables such as `TS_AUTHKEY` cause a startup error when this field is omitted. |
+| `hostname` | Optional name advertised to the tailnet. |
+| `ephemeral` | Defaults to `false`. Set to `true` to register an ephemeral node. |
+| `accept-routes` | Defaults to `true`. Allows the node to use advertised subnet routes approved by the control server. |
+| `routes` | Optional local matching prefixes for approved subnets. Supply up to 64 IPv4 or IPv6 CIDRs. Default routes and prefixes that overlap loopback, link-local, or multicast ranges are prohibited. |
+
+Reka adds `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, and any configured `routes` to the local routing rules. These rules use `no-resolve` to match available destination IPs. In `rule` mode they run after `link.wireguard` and before profile rules. In `global` mode they also take precedence over the global target. In `direct` mode they are inactive. Advertised routes must be listed here to receive automatic rules.
+
+Route explanations identify the generated rules as `@link-tailscale-addresses-<id>` and, when `routes` is set, `@link-tailscale-routes-<id>`. Both point to `/link/tailscale/<id>` in `local.yaml`.
+
+The node starts when the configuration takes effect. Use `GetTailscaleStatus` to check login and peer connectivity. State is stored in `<StateRoot>/tailscale/<id>`, or in `<TailscaleStateDir>/<id>` when the host sets `EngineOptions.TailscaleStateDir`. The state is retained when the entry is removed. On iOS, the Packet Tunnel passes `tailscaleState` from the session controls; probe sessions never start a node. Without a state directory, the link reports an error and its outbound rejects new flows while the rest of the configuration keeps working.
+
+Unsupported features include dynamic route generation, MagicDNS, exit nodes, route advertisement, Tailscale SSH, and Taildrop. Unsolicited TCP and UDP from peers are rejected. [Complete home network example](configuration.md#access-a-home-network-through-tailscale), [status API](control-api.md#gettailscalestatus)
+
 ### 10.1 网络场景
 
 在 `local.yaml` 定义场景。自动模式按列表顺序选择第一个匹配项，`interface` 匹配默认路由网卡名，`ip-cidr` 匹配其任一地址。两项同时配置时须同时满足。启用 TUN 且指定 `bind-interface` 时检查该网卡。仅指定 `id` 的场景可手动选择。

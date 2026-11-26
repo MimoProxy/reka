@@ -169,6 +169,11 @@ func openProfileSession(snapshot []byte, controls profile.Controls, trace, probe
 	if runtime.GOOS == "ios" {
 		opts.Resolver = net.DefaultResolver
 	}
+	// Probe sessions run in the app while the VPN is off. They must not start
+	// a Tailscale node that shares state with the extension.
+	if !probeOnly {
+		opts.TailscaleStateDir = controls.TailscaleState
+	}
 	p := &profileSession{
 		base: base, summary: profile.Describe(base), sets: collectRuleSets(base.Router.Rules()),
 		retainScripts: retainScripts, readScriptSource: readScriptSource,
