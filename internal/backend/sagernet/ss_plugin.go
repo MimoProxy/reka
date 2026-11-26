@@ -348,9 +348,43 @@ type pluginSessionConn struct {
 
 func (c *pluginSessionConn) Close() error { return c.session.Close() }
 
+// pluginChunkConn adapts v2ray-plugin's mux (Mux.Cool) framing to callers
+// that read and write arbitrary sizes. Writes are split into frames the
+// plugin accepts. The mux reader reads each frame header into the caller's
+// buffer, so a Read with less room than a header that lands on a frame
+// boundary would fail with io.ErrShortBuffer; such reads go through a
+// scratch buffer instead. Shadowsocks reads chunk lengths with exact-size
+// io.ReadFull calls, which hit this when a frame ends inside one.
 type pluginChunkConn struct {
 	net.Conn
 	mu sync.Mutex
+
+	readMu  sync.Mutex
+	pending []byte
+	scratch [pluginMuxScratchSize]byte
+}
+
+const (
+	// Frame length, session ID, status and option of a mux frame.
+	pluginMuxHeaderSize  = 6
+	pluginMuxScratchSize = 512
+)
+
+func (c *pluginChunkConn) Read(p []byte) (int, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if len(c.pending) > 0 {
+		n := copy(p, c.pending)
+		c.pending = c.pending[n:]
+		return n, nil
+	}
+	if len(p) == 0 || len(p) >= pluginMuxHeaderSize {
+		return c.Conn.Read(p)
+	}
+	n, err := c.Conn.Read(c.scratch[:])
+	copied := copy(p, c.scratch[:n])
+	c.pending = c.scratch[copied:n]
+	return copied, err
 }
 
 func (c *pluginChunkConn) Write(p []byte) (int, error) {
