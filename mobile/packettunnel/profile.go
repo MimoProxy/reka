@@ -44,6 +44,8 @@ type ProfileStatus struct {
 	Mode      string `json:"mode"`
 	BlockQUIC string `json:"blockQuic,omitempty"`
 	IPVersion string `json:"ipVersion,omitempty"`
+	// ProcessMode is the effective process mode: off, rule or always.
+	ProcessMode string `json:"processMode,omitempty"`
 	// LANProxy is the address the LAN proxy listens on, and LANProxyError
 	// why a requested one could not be opened.
 	LANProxy      string        `json:"lanProxy,omitempty"`
@@ -294,7 +296,8 @@ func (s *Session) ApplyControls(controls profile.Controls) error {
 	err := p.publish(p.base, p.summary, controls)
 	if err == nil {
 		s.logger.Info("Routing updated", "mode", controls.Mode, "global", controls.Global,
-			"blockQuic", controls.BlockQUIC, "ipVersion", controls.IPVersion, "selections", len(controls.Selections))
+			"blockQuic", controls.BlockQUIC, "ipVersion", controls.IPVersion,
+			"processMode", controls.ProcessMode, "selections", len(controls.Selections))
 	} else {
 		s.logger.Warn("Routing could not be updated", "mode", controls.Mode, "err", err)
 	}
@@ -359,10 +362,11 @@ func (s *Session) ProfileStatus() (*ProfileStatus, error) {
 	}
 	eff, _ := p.engine.Effective()
 	status := &ProfileStatus{
-		Mode:      eff.Routing.Mode,
-		BlockQUIC: eff.Routing.BlockQUIC,
-		IPVersion: eff.IPVersionOverride,
-		Groups:    make([]GroupStatus, 0, len(eff.Groups)),
+		Mode:        eff.Routing.Mode,
+		BlockQUIC:   eff.Routing.BlockQUIC,
+		IPVersion:   eff.IPVersionOverride,
+		ProcessMode: eff.Process.Mode,
+		Groups:      make([]GroupStatus, 0, len(eff.Groups)),
 
 		LANProxyError: p.lanProxyError,
 	}
