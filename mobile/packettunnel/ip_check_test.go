@@ -25,6 +25,10 @@ import (
 	quic "github.com/sagernet/quic-go"
 )
 
+// ipCheckSuccessTimeoutMS is the product default IP check budget, used by
+// tests whose probes are all expected to succeed.
+const ipCheckSuccessTimeoutMS = 5000
+
 func TestIPCheckLocalOnly(t *testing.T) {
 	snapshot := prepareSnapshot(t, `
 schema-version: 1
@@ -133,7 +137,9 @@ dns: {ipv6: true, enhanced-mode: fake-ip, nameserver: [system]}
 	op := Operation{
 		Action: "ipCheck", Member: "choice", URL4: server4.URL, URL6: server6.URL,
 		Local4: []string{ipCheckTestListener(t, "tcp4", "127.0.0.1:0")}, Local6: []string{ipCheckTestListener(t, "tcp6", "[::1]:0")},
-		LocalQUIC: []string{quicTarget}, NodeQUIC: []string{quicTarget}, TimeoutMS: 2000,
+		// The product's 5 s budget: these probes all succeed, and slow
+		// runners have needed more than 2 s for the HTTP and QUIC handshakes.
+		LocalQUIC: []string{quicTarget}, NodeQUIC: []string{quicTarget}, TimeoutMS: ipCheckSuccessTimeoutMS,
 	}
 	result := runIPCheck(t, session, op)
 	if result.DNSMode != "fake-ip" || result.IPVersion != "ipv4" {
@@ -199,7 +205,7 @@ groups: [{id: choice, type: select, members: [relay]}]
 	result := runIPCheck(t, session, Operation{
 		Action: "ipCheck", Member: "choice", URL4: "http://127.0.0.1:1", URL6: "http://127.0.0.1:1",
 		Local4: []string{"127.0.0.1:1"}, Local6: []string{"[::1]:1"},
-		LocalQUIC: []string{quicTarget.String()}, NodeQUIC: []string{nodeTarget.String()}, TimeoutMS: 2000,
+		LocalQUIC: []string{quicTarget.String()}, NodeQUIC: []string{nodeTarget.String()}, TimeoutMS: ipCheckSuccessTimeoutMS,
 	})
 	if result.QUIC.Node == nil {
 		t.Fatal("missing selected node's QUIC check")
