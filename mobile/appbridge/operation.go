@@ -24,6 +24,9 @@
 //     profileSnapshot, and returns report and hostnames.
 //   - moduleReport takes snapshot (a prepared profile) and moduleId and
 //     returns module.Report.
+//   - wireguardConfImport takes config (wg-quick text) and returns outbound,
+//     one native WireGuard outbound with its credentials, plus warnings for
+//     ignored fields in diagnostics.
 package appbridge
 
 import (
@@ -36,6 +39,7 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
+	"github.com/MimoProxy/reka/internal/config/importer"
 	"github.com/MimoProxy/reka/internal/config/model"
 	"github.com/MimoProxy/reka/internal/mitm/caops"
 	"github.com/MimoProxy/reka/internal/secret"
@@ -76,6 +80,25 @@ type request struct {
 	profile.ModuleAcquireRequest
 	profile.ModulePreviewRequest
 	ModuleID string `json:"moduleId"`
+	Config   string `json:"config,omitempty"`
+}
+
+type wireGuardConfResult struct {
+	Outbound    json.RawMessage   `json:"outbound"`
+	Diagnostics model.Diagnostics `json:"diagnostics,omitempty"`
+}
+
+// importWireGuardConf converts wg-quick text with the importer that profile
+// preparation uses, so the app and the kernel parse it the same way.
+func importWireGuardConf(text string) (any, error) {
+	result := importer.Import(importer.Request{SourceID: "wireguard", Format: "wireguard", Data: text})
+	var source struct {
+		Outbounds []json.RawMessage `json:"outbounds"`
+	}
+	if !result.Report.CanApply || json.Unmarshal(result.Source, &source) != nil || len(source.Outbounds) != 1 {
+		return nil, &profile.ValidationError{Message: "invalid WireGuard configuration", Diagnostics: result.Report.Diagnostics}
+	}
+	return wireGuardConfResult{Outbound: source.Outbounds[0], Diagnostics: result.Report.Diagnostics}, nil
 }
 
 type operationError struct {
@@ -186,6 +209,8 @@ func (b *Bridge) dispatch(ctx context.Context, req request) (any, error) {
 		return profile.ModuleReport(ctx, req.Snapshot, req.ModuleID, b.store)
 	case "mitmCAGenerate", "mitmCAImport", "mitmCAStatus", "mitmCAExport", "mitmCADelete", "mitmCATrustProbe":
 		return b.caOperation(ctx, req)
+	case "wireguardConfImport":
+		return importWireGuardConf(req.Config)
 	default:
 		return nil, &api.Error{Code: api.CodeUnknownMethod, Message: "unknown app operation"}
 	}

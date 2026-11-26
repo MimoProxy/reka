@@ -257,3 +257,39 @@ func assertAppError(t *testing.T, data []byte, code string) {
 		t.Fatalf("expected %q error, got %s", code, data)
 	}
 }
+
+func TestAppWireGuardConfImport(t *testing.T) {
+	bridge := New(nil)
+	send := func(config string) []byte {
+		t.Helper()
+		input, err := json.Marshal(map[string]any{"action": "wireguardConfImport", "config": config})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return appReply(t, bridge, input)
+	}
+	const key = "YNXtAzepDqRv9H52osJVDQnznT5AN1PFhIH5yT7ExHU="
+	reply := send("# Name = Home\n[Interface]\nPrivateKey = " + key + "\nAddress = 10.8.0.2\nDNS = 10.0.0.1\n\n" +
+		"[Peer]\nPublicKey = " + key + "\nAllowedIPs = 10.0.0.0/24\nEndpoint = home.example.com:51820\n")
+	var result struct {
+		Outbound struct {
+			Name     string         `json:"name"`
+			Type     string         `json:"type"`
+			Server   string         `json:"server"`
+			Port     int            `json:"port"`
+			Protocol map[string]any `json:"protocol"`
+		} `json:"outbound"`
+		Diagnostics []struct {
+			Code string `json:"code"`
+		} `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(reply, &result); err != nil {
+		t.Fatal(err)
+	}
+	out := result.Outbound
+	if out.Name != "Home" || out.Type != "wireguard" || out.Server != "home.example.com" || out.Port != 51820 ||
+		out.Protocol["private-key"] != key || len(result.Diagnostics) == 0 || result.Diagnostics[0].Code != "import.ignored-field" {
+		t.Fatalf("unexpected import: %s", reply)
+	}
+	assertAppError(t, send("[Interface]\nPrivateKey = "+key+"\n"), "invalid")
+}

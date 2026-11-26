@@ -35,6 +35,7 @@ type PrepareOptions struct {
 	ForceProviders    bool                               `json:"forceProviders"`
 	Scenes            []SceneDefinition                  `json:"scenes"`
 	MITM              *LocalMITM                         `json:"mitm,omitempty"`
+	Link              *LocalLink                         `json:"link,omitempty"`
 	RebindSnapshot    string                             `json:"rebindSnapshot"`
 	GeodataSources    map[string]string                  `json:"geodataSources,omitempty"`
 	Overlay           json.RawMessage                    `json:"overlay,omitempty"` // Overlay document for a new preparation.
@@ -66,24 +67,85 @@ type LocalMITM struct {
 	Enabled bool `json:"enabled"`
 }
 
-func localSettings(scenes []SceneDefinition, mitm *LocalMITM) (json.RawMessage, error) {
+// LocalLink is the device's own routes to remote networks. Credentials stay
+// in the secret store; only their names reach the profile snapshot.
+type LocalLink struct {
+	WireGuard []LocalWireGuardLink `json:"wireguard,omitempty"`
+	Tailscale *LocalTailscale      `json:"tailscale,omitempty"`
+}
+
+// LocalWireGuardLink routes Routes, or the outbound's allowed IPs when Routes
+// is nil, to a WireGuard outbound.
+type LocalWireGuardLink struct {
+	Outbound string   `json:"outbound"`
+	Routes   []string `json:"routes,omitempty"`
+}
+
+// LocalTailscale runs the device's Tailscale node. AuthKeySecret names the
+// secret holding the auth key; without it the node uses interactive login.
+type LocalTailscale struct {
+	ID            string   `json:"id"`
+	ControlURL    string   `json:"controlURL,omitempty"`
+	AuthKeySecret string   `json:"authKeySecret,omitempty"`
+	Hostname      string   `json:"hostname,omitempty"`
+	Ephemeral     bool     `json:"ephemeral,omitempty"`
+	AcceptRoutes  *bool    `json:"acceptRoutes,omitempty"`
+	Routes        []string `json:"routes,omitempty"`
+}
+
+func localSettings(scenes []SceneDefinition, mitm *LocalMITM, link *LocalLink) (json.RawMessage, error) {
 	if len(scenes) > 32 {
 		return nil, errors.New("at most 32 network scenes are supported")
 	}
-	if len(scenes) == 0 && mitm == nil {
+	if link != nil && len(link.WireGuard) == 0 && link.Tailscale == nil {
+		link = nil
+	}
+	if len(scenes) == 0 && mitm == nil && link == nil {
 		return nil, nil
 	}
 	type mitmSettings struct {
 		Enabled bool   `json:"enabled"`
 		CA      string `json:"ca"`
 	}
+	type tailscaleSettings struct {
+		ID           string   `json:"id"`
+		ControlURL   string   `json:"control-url,omitempty"`
+		AuthKey      string   `json:"auth-key,omitempty"`
+		Hostname     string   `json:"hostname,omitempty"`
+		Ephemeral    bool     `json:"ephemeral,omitempty"`
+		AcceptRoutes *bool    `json:"accept-routes,omitempty"`
+		Routes       []string `json:"routes,omitempty"`
+	}
+	type linkSettings struct {
+		WireGuard []LocalWireGuardLink `json:"wireguard,omitempty"`
+		Tailscale []tailscaleSettings  `json:"tailscale,omitempty"`
+	}
 	document := struct {
 		Version int               `json:"schema-version"`
 		Scenes  []SceneDefinition `json:"network-scenes,omitempty"`
 		MITM    *mitmSettings     `json:"mitm,omitempty"`
+		Link    *linkSettings     `json:"link,omitempty"`
 	}{Version: model.SchemaVersion, Scenes: scenes}
 	if mitm != nil {
 		document.MITM = &mitmSettings{Enabled: mitm.Enabled, CA: secret.Ref(ca.SecretName)}
+	}
+	if link != nil {
+		document.Link = &linkSettings{WireGuard: link.WireGuard}
+		if ts := link.Tailscale; ts != nil {
+			settings := tailscaleSettings{
+				ID: ts.ID, ControlURL: ts.ControlURL, Hostname: ts.Hostname,
+				Ephemeral: ts.Ephemeral, AcceptRoutes: ts.AcceptRoutes, Routes: ts.Routes,
+			}
+			if ts.AuthKeySecret != "" {
+				// Only link credentials, which profiles and subscriptions
+				// cannot reference, may hold the auth key.
+				if err := secret.ValidName(ts.AuthKeySecret); err != nil || !strings.HasPrefix(ts.AuthKeySecret, secret.LinkPrefix) {
+					return nil, errors.New("invalid Tailscale auth key secret name")
+				}
+				settings.AuthKey = secret.Ref(ts.AuthKeySecret)
+			}
+			document.Link.Tailscale = []tailscaleSettings{settings}
+		}
 	}
 	return json.Marshal(document)
 }
@@ -320,7 +382,7 @@ func prepare(ctx context.Context, raw []byte, p *preparer) (*Bundle, error) {
 		return nil, errors.New("could not encode profile")
 	}
 	bundle.Profile = data
-	bundle.Local, err = localSettings(p.options.Scenes, p.options.MITM)
+	bundle.Local, err = localSettings(p.options.Scenes, p.options.MITM, p.options.Link)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +473,7 @@ func rebind(ctx context.Context, path string, options PrepareOptions, read func(
 		}
 	}
 	bundle.restoreOmittedResources(read)
-	bundle.Local, err = localSettings(options.Scenes, options.MITM)
+	bundle.Local, err = localSettings(options.Scenes, options.MITM, options.Link)
 	if err != nil {
 		return nil, err
 	}
