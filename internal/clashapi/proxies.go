@@ -51,7 +51,7 @@ type projection struct {
 var proxyTypes = map[string]string{
 	"direct": "Direct", "reject": "Reject", "reject-drop": "RejectDrop", "pass": "Pass",
 	"http": "Http", "socks": "Socks5", "shadowsocks": "Shadowsocks", "vmess": "Vmess",
-	"vless": "Vless", "trojan": "Trojan", "hysteria2": "Hysteria2", "tuic": "Tuic", "snell": "Snell",
+	"vless": "Vless", "trojan": "Trojan", "hysteria2": "Hysteria2", "tuic": "Tuic", "snell": "Snell", "wireguard": "WireGuard",
 	"select": "Selector", "url-test": "URLTest", "fallback": "Fallback", "load-balance": "LoadBalance",
 }
 

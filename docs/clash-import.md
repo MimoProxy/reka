@@ -52,6 +52,14 @@ Partial mode can change routing: unavailable rules are absent and unsupported me
 
 `-apply` first plans, then commits the normalized snapshot through ConfigService. Repeating an import under the same source ID replaces that source only. Other sources and profile/overlay/local documents remain intact. The usual base-version, plan-hash, operation-ID, preparation and recovery guarantees apply. Import does not automatically rewrite profile references or enable imported rules/DNS. Activate a source DNS explicitly with `dns: {from: airport, listen: "127.0.0.1:5353"}`; imported remote listen addresses are ignored.
 
+## WireGuard nodes
+
+Clash YAML accepts a `wireguard` proxy with a single peer. Put the endpoint, public key and peer options at the top level or in one `peers` entry. The local `private-key`, `ip` and `ipv6` belong to the node. Import preserves explicit prefix lengths and appends `/32` to bare IPv4 addresses and `/128` to bare IPv6 addresses.
+
+The importer carries over `pre-shared-key`, `allowed-ips`, `persistent-keepalive`, `mtu`, and `udp`. Clash nodes default to `udp: false` when the field is absent. WARP `reserved` accepts a byte list or a standard base64 string. Reka also accepts decimal bytes separated by commas. All three forms produce the same native byte list.
+
+Multiple peers and `amnezia-wg-option` make a node unavailable with a diagnostic. Reka ignores `remote-dns-resolve`, `dns`, `refresh-server-ip-interval`, `workers` and `ip-stack` with field warnings. Imported nodes use the [native WireGuard defaults and outbound-only behavior](configuration-reference.md#wireguard).
+
 ## Stable identities and metadata
 
 Names are matched exactly, including Unicode, whitespace and slashes. The importer generates portable IDs `p-<96-bit SHA-256 prefix>` for nodes and `g-<prefix>` for groups from their original names. Reordering, server changes and credential rotation keep the ID; renaming produces a new one. Duplicate names across nodes/groups and reserved DIRECT/REJECT names are errors. Native source namespacing still adds `source/`.

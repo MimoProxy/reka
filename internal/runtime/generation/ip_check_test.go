@@ -150,6 +150,8 @@ func TestIPCheckServerAddressFamily(t *testing.T) {
 			status: ipCheckUnavailable, reason: "no address"},
 		{name: "tuic address only", family: "ip4", target: compile.Outbound{Type: "tuic", Server: "192.0.2.1"},
 			status: ipCheckSkipped, reason: "udp transport", addresses: []string{"192.0.2.1"}},
+		{name: "wireguard peer", family: "ip4", target: compile.Outbound{Type: "wireguard", Server: "peer.test"}, lookup: true, answers: ips,
+			status: ipCheckSkipped, reason: "udp transport", addresses: []string{"192.0.2.1"}},
 		{name: "kcptun address only", family: "ip4", target: compile.Outbound{Type: "shadowsocks", Server: "192.0.2.1", Plugin: &model.SSPlugin{Type: "kcptun"}},
 			status: ipCheckSkipped, reason: "udp transport", addresses: []string{"192.0.2.1"}},
 		{name: "dialer proxy", family: "ip4", target: compile.Outbound{Server: "proxy.test", Dialer: &model.Dialer{Proxy: "parent"}},

@@ -1,6 +1,7 @@
 package sagernet
 
 import (
+	"context"
 	"errors"
 	"net"
 	"runtime"
@@ -11,18 +12,23 @@ import (
 	"github.com/MimoProxy/reka/internal/platform"
 	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
+	"github.com/sagernet/sing/common/x/list"
 )
 
 // SocketGuard resolves the current physical interface for each NEW socket.
 // Interface changes never reset existing proxy connections or generations.
 type SocketGuard struct {
-	mu      sync.RWMutex
-	enabled bool
-	bind    string
-	finder  *control.DefaultInterfaceFinder
-	netMon  tun.NetworkUpdateMonitor
-	ifMon   tun.DefaultInterfaceMonitor
-	protect func(int) error
+	// OnInterfaceChanged runs when the desktop monitor observes a new
+	// physical default interface. Set it before starting the guard.
+	OnInterfaceChanged func(context.Context)
+	interfaceCallback  *list.Element[tun.DefaultInterfaceUpdateCallback]
+	mu                 sync.RWMutex
+	enabled            bool
+	bind               string
+	finder             *control.DefaultInterfaceFinder
+	netMon             tun.NetworkUpdateMonitor
+	ifMon              tun.DefaultInterfaceMonitor
+	protect            func(int) error
 }
 
 func NewSocketGuard(protect func(int) error) *SocketGuard {
@@ -73,6 +79,13 @@ func (g *SocketGuard) startMonitor() error {
 	}
 	g.netMon = n
 	g.ifMon = m
+	if notify := g.OnInterfaceChanged; notify != nil {
+		g.interfaceCallback = m.RegisterCallback(func(iface *control.Interface, _ int) {
+			if iface != nil && !vpnInterface(iface.Name) {
+				notify(context.Background())
+			}
+		})
+	}
 	return nil
 }
 
@@ -118,18 +131,30 @@ func (g *SocketGuard) Control(network, address string, c syscall.RawConn) error 
 	if name == "" {
 		return errors.New("no physical default interface; refusing an unbound TUN outbound")
 	}
-	lower := strings.ToLower(name)
-	for _, prefix := range []string{"utun", "tun", "tap", "tailscale", "wireguard", "reka"} {
-		if strings.HasPrefix(lower, prefix) {
-			return errors.New("default interface belongs to a VPN; select a physical bind-interface explicitly")
-		}
+	if vpnInterface(name) {
+		return errors.New("default interface belongs to a VPN; select a physical bind-interface explicitly")
 	}
 	return control.BindToInterface(g.finder, name, -1)(network, address, c)
 }
+
+func vpnInterface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"utun", "tun", "tap", "tailscale", "wireguard", "reka"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *SocketGuard) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.ifMon != nil {
+		if g.interfaceCallback != nil {
+			g.ifMon.UnregisterCallback(g.interfaceCallback)
+			g.interfaceCallback = nil
+		}
 		g.ifMon.Close()
 		g.ifMon = nil
 	}

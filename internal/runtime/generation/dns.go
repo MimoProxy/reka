@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
+	"github.com/MimoProxy/reka/internal/config/model"
 	RD "github.com/MimoProxy/reka/internal/dns"
 	"github.com/MimoProxy/reka/internal/router"
 	D "github.com/miekg/dns"
@@ -14,6 +15,36 @@ import (
 )
 
 var dnsSequence atomic.Uint64
+
+// Most proxies resolve only their own server locally. WireGuard resolves the
+// inner destination on each flow and resolves its peer separately at handshake.
+func outboundLookupScope(typ, directScope string) string {
+	switch typ {
+	case model.OutboundDirect:
+		return directScope
+	case model.OutboundWireGuard:
+		return "normal"
+	default:
+		return "proxy"
+	}
+}
+
+var errDNSDisabled = errors.New("DNS disabled")
+
+func (e *Engine) lookupEndpointPeer(ctx context.Context, name string) ([]netip.Addr, error) {
+	// A handshake can outlive the flow that triggered it. Capture the current
+	// DNS generation for this lookup, including across DNS-only reloads.
+	ctx, release, resolver, err := e.retainCurrentDNS(ctx)
+	if errors.Is(err, errDNSDisabled) {
+		return e.backend.Resolver().LookupNetIP(ctx, "ip", name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	// Proxy-server resolvers are validated to use direct transport.
+	return resolver.Lookup(ctx, name, "proxy")
+}
 
 func (e *Engine) prepareDNS(p *Prepared) error {
 	cfg := p.eff.DNS
@@ -49,6 +80,8 @@ func (e *Engine) prepareDNS(p *Prepared) error {
 		if p.policies != nil {
 			p.policies.MarkUsed(id)
 		}
+		// The transport has already bootstrapped the DNS endpoint to an IP.
+		// Additional proxy-server lookups must use a direct resolver here.
 		ctx = sagernet.WithLookup(ctx, func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return resolver.Lookup(ctx, host, "proxy")
 		})
@@ -162,7 +195,7 @@ func (e *Engine) retainCurrentDNS(ctx context.Context) (context.Context, func(),
 	for ctx.Err() == nil {
 		snapshot, g := e.current()
 		if g.dns == nil {
-			return ctx, func() {}, nil, errors.New("DNS disabled")
+			return ctx, func() {}, nil, errDNSDisabled
 		}
 		pins := map[*sagernet.Outbound]*sagernet.PinnedOutbound{}
 		valid := true

@@ -75,6 +75,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `hysteria2` | `server`、`port`、`password` | **必须有** `tls`；`protocol` 配置带宽、混淆、跳端口、Realm |
 | `tuic` | `server`、`port`、`uuid`、`password` | **必须有** `tls`；`protocol` 配置拥塞控制等 |
 | `snell` | `server`、`port`、`password`（PSK） | **必须有** `protocol.version: 5` 或 `6`；不接受顶层 `tls` |
+| `wireguard` | `server`, `port`, `protocol` | Single-peer userspace tunnel for outbound TCP and UDP. See [WireGuard](#wireguard). |
 
 HTTP / SOCKS 的 `username`、`password` 必须成对设置。HTTP 节点配置了用户名密码时，它们优先于自定义 `Proxy-Authorization`。UUID 必须是合法 UUID，不是任意字符串。
 
@@ -169,6 +170,27 @@ HY2 gecko 写作 `{type: gecko, password: ..., min-packet-size: 512, max-packet-
 | `tls` | 控制服务独立 TLS；支持 SNI、ALPN、pin、verify-name 和客户端 PEM，不支持 TCP fingerprint、ECH、REALITY |
 
 Realm 的 `tls` 验证控制服务，节点顶层 `tls` 验证最终 QUIC peer，两者独立。
+
+#### WireGuard
+
+Set `server` and `port` to the peer's UDP endpoint. Set the following fields under `protocol`.
+
+| Field | Meaning and default |
+| --- | --- |
+| `private-key` | Required local private key. Accepts a `secret://` reference. |
+| `public-key` | Required peer public key. |
+| `pre-shared-key` | Optional shared key. Accepts a `secret://` reference. |
+| `address` | One or more local IPv4 or IPv6 interface addresses in CIDR notation. Keep the assigned host address, for example `10.8.0.2/24`. |
+| `allowed-ips` | Peer prefixes. Omitting this field selects `[0.0.0.0/0, "::/0"]`. An explicit list must contain at least one prefix. |
+| `persistent-keepalive` | Interval in seconds, 0–65535. The default of 0 disables keepalives. A configured interval takes effect when the endpoint starts. |
+| `reserved` | Three byte values from 0 to 255 for peers such as WARP. Omit or use `[]` for the WireGuard default of three zero bytes. |
+| `mtu` | Tunnel MTU in bytes, 576–65535. Omitting it or setting it to 0 uses the sing-box default of 1408. |
+
+Keys use standard base64 and must decode to exactly 32 bytes. Reka routes flows to this outbound using the usual rules and groups. To reach a private subnet, include it in the peer's `allowed-ips` and select the outbound for that subnet. The top-level `udp` flag defaults to true and controls UDP traffic inside the tunnel. The peer connection always uses UDP.
+
+Reka resolves the peer hostname through its proxy-server DNS configuration, or through its protected system resolver when Reka DNS is disabled. Hostnames for destinations inside the tunnel follow the normal DNS policy, including `nameserver-policy` entries for private domains.
+
+Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivity probe starts the endpoint. Unused nodes hold no WireGuard sockets or userspace network stacks. Reka rejects peer-initiated TCP and UDP connections and ignores inbound DNS hijack requests. WireGuard accepts no TLS, transport, multiplex, or proxy detour configuration. AmneziaWG is unsupported.
 
 ### 3.5 `transport`
 

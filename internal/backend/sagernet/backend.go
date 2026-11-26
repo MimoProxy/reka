@@ -77,6 +77,8 @@ type Backend struct {
 	trafficDownload   atomic.Uint64
 	processInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)
 	protect           control.Func
+	endpointSockets   endpointSocketRegistry
+	endpointListeners endpointListeners
 	processLookup     func(context.Context, Metadata) (string, bool)
 	resolver          *net.Resolver
 	ctx               context.Context
@@ -194,7 +196,11 @@ func (b *Backend) componentLogger(kind, typ, tag string) log.ContextLogger {
 // start runs every upstream start stage for one component inside its own
 // scope, so closing that scope releases exactly what the component opened.
 func (b *Backend) start(name string, component any, logger log.ContextLogger) (*adapter.Scope, error) {
-	scope := adapter.NewScope(b.ctx, logger)
+	return startComponent(b.ctx, name, component, logger)
+}
+
+func startComponent(ctx context.Context, name string, component any, logger log.ContextLogger) (*adapter.Scope, error) {
+	scope := adapter.NewScope(ctx, logger)
 	if lc, ok := component.(adapter.Lifecycle); ok {
 		for _, stage := range adapter.ListStartStages {
 			if err := scope.Start(name, lc, stage); err != nil {
@@ -309,8 +315,8 @@ type RealitySpec struct {
 	X25519MLKEM768 bool
 }
 
-// NewOutbound creates and starts one outbound instance. spec is one of
-// DirectSpec, HTTPSpec, SOCKSSpec, ShadowsocksSpec or VLESSSpec.
+// NewOutbound creates one usable outbound. Endpoint-backed outbounds start
+// their network stack on the first dial or packet flow.
 func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	var (
 		typ        string
@@ -323,6 +329,14 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 	case ProxySpec:
 		dependency = s.Detour
 		typ = s.Type
+		if typ == "wireguard" {
+			var endpoint *Outbound
+			endpoint, err = b.newWireGuardOutbound(tag, s)
+			if err == nil {
+				return endpoint, nil
+			}
+			break
+		}
 		out, err = b.newProtocol(tag, s)
 	case DropSpec:
 		typ = "reject-drop"
@@ -428,7 +442,11 @@ func (b *Backend) adoptOutbound(tag, typ string, out adapter.Outbound) (*Outboun
 		common.Close(out)
 		return nil, err
 	}
-	return &Outbound{tag: tag, typ: typ, out: out, scope: scope, lease: lease.New()}, nil
+	return scopedOutbound(tag, typ, out, scope), nil
+}
+
+func scopedOutbound(tag, typ string, out adapter.Outbound, scope *adapter.Scope) *Outbound {
+	return &Outbound{tag: tag, typ: typ, out: out, scope: scope, lease: lease.New()}
 }
 
 func (t *TLSSpec) build() *option.OutboundTLSOptions {

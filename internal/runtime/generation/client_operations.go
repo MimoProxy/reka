@@ -129,12 +129,8 @@ func (g *generation) probeLookupContext(ctx context.Context, out *sagernet.Outbo
 	if g.dns == nil {
 		return ctx
 	}
-	scope := "proxy"
-	if out.Type() == "direct" {
-		scope = "direct"
-	}
 	return sagernet.WithLookup(ctx, func(ctx context.Context, name string) ([]netip.Addr, error) {
-		return g.dns.Lookup(ctx, name, scope)
+		return g.dns.Lookup(ctx, name, outboundLookupScope(out.Type(), "direct"))
 	})
 }
 
@@ -248,6 +244,7 @@ func (e *Engine) FlushDNSCache() int {
 
 func (e *Engine) ResetNetwork() int {
 	snapshot, g := e.current()
+	e.backend.NotifyEndpointNetworkChanged(context.Background())
 	cleared := 0
 	if g.dns != nil {
 		cleared = g.dns.NetworkChanged()
