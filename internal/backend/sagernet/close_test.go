@@ -160,21 +160,38 @@ func closeWrite(w io.ReadWriter) error {
 
 // finish stops writing and waits for the echo of everything sent. It
 // returns nil only if every byte came back intact.
+//
+// It does not wait for the echo's EOF. Outbounds that cannot half-close
+// end the relay once the reply has been idle for the half-close grace, and
+// how soon that comes says nothing about whether the stream survived.
 func (s *stream) finish() error {
 	defer s.conn.Close()
 	close(s.stop)
 	s.conn.SetDeadline(time.Now().Add(10 * time.Second))
 	werr := <-s.writeErr
-	rerr := <-s.readErr
-	switch {
-	case werr != nil:
+	if werr != nil {
 		return fmt.Errorf("write after %d bytes: %w", s.sent.Load(), werr)
-	case rerr != nil:
-		return fmt.Errorf("read after %d of %d bytes: %w", s.received.Load(), s.sent.Load(), rerr)
-	case s.received.Load() != s.sent.Load():
-		return fmt.Errorf("echoed %d of %d bytes", s.received.Load(), s.sent.Load())
 	}
-	return nil
+	sent := s.sent.Load()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case rerr := <-s.readErr:
+			if rerr != nil {
+				return fmt.Errorf("read after %d of %d bytes: %w", s.received.Load(), sent, rerr)
+			}
+			if received := s.received.Load(); received != sent {
+				return fmt.Errorf("echoed %d of %d bytes", received, sent)
+			}
+			return nil
+		case <-tick.C:
+			if s.received.Load() == sent {
+				// Every byte was compared before it was counted.
+				return nil
+			}
+		}
+	}
 }
 
 type closeCase struct {
@@ -193,7 +210,9 @@ type closeResult struct {
 
 func runReplaceAndClose(t *testing.T, c closeCase) closeResult {
 	t.Helper()
-	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: testHalfClose})
+	// The default grace: a stalled echo on a slow runner must not end a
+	// stream that cannot half-close while its reply is still in flight.
+	b := New(Options{Logger: testLogger(t), HalfCloseTimeout: defaultHalfCloseTimeout})
 	t.Cleanup(func() { b.Close() })
 	a := c.newOutbound(t, b, "A")
 	var current atomic.Pointer[Outbound]
