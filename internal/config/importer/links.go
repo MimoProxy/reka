@@ -137,6 +137,9 @@ func parseLink(raw string) (iter.Seq[object], error) {
 }
 
 func parseSingleLink(raw string) (object, error) {
+	if scheme, body, ok := strings.Cut(raw, "://"); ok && strings.EqualFold(scheme, "ssr") {
+		return parseSSRLink(body)
+	}
 	if strings.HasPrefix(raw, "vmess://") {
 		return parseVMessLink(raw)
 	}

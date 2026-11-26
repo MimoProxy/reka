@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"github.com/sagernet/sing-box/adapter"
 	MX "github.com/sagernet/sing-box/common/mux"
@@ -33,6 +34,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -466,5 +469,103 @@ func TestRealityTransportAndMux(t *testing.T) {
 				t.Fatal(err, string(got))
 			}
 		})
+	}
+}
+
+func TestSSRProtocolConstruction(t *testing.T) {
+	b := New(Options{Logger: testLogger(t)})
+	defer b.Close()
+	spec := ProxySpec{Type: "ssr", Server: "proxy.example", Port: 8388, Method: "aes-256-cfb", Password: "test-password"}
+	dst := M.ParseSocksaddr("target.example:53")
+	for _, tc := range []struct {
+		name, options string
+		udp           bool
+	}{
+		{"tcp", "{}", false},
+		{"udp", `{"obfs":"http_simple","obfs_param":"cdn.example","protocol":"auth_aes128_md5","protocol_param":"64:key","udp":true}`, true},
+		{"network", `{"network":["tcp","udp"]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := spec
+			opts.Options = json.RawMessage(tc.options)
+			out, err := b.NewOutbound("test", opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer out.Close()
+			if got := out.out.Network(); !slices.Contains(got, "tcp") || slices.Contains(got, "udp") != tc.udp || out.out.Type() != "ssr" {
+				t.Fatalf("unexpected adapter type %s or networks %v", out.out.Type(), got)
+			}
+			if !tc.udp {
+				if _, err := out.out.ListenPacket(context.Background(), dst); err == nil || !strings.Contains(err.Error(), "UDP is disabled") {
+					t.Fatalf("disabled UDP listen: %v", err)
+				}
+				if _, err := out.out.DialContext(context.Background(), "udp", dst); err == nil || !strings.Contains(err.Error(), "UDP is disabled") {
+					t.Fatalf("disabled UDP dial: %v", err)
+				}
+			}
+		})
+	}
+	for _, key := range []string{"tls", "transport", "multiplex", "plugin", "realm"} {
+		opts := spec
+		opts.Options, _ = json.Marshal(map[string]any{key: map[string]any{}})
+		if _, err := b.NewOutbound("test", opts); err == nil {
+			t.Fatalf("accepted %s option", key)
+		}
+	}
+	for _, set := range []func(*ProxySpec){
+		func(s *ProxySpec) { s.TLS = &TLSSpec{} },
+		func(s *ProxySpec) { s.Plugin = &SSPluginSpec{} },
+		func(s *ProxySpec) { s.Realm = &RealmSpec{} },
+	} {
+		opts := spec
+		set(&opts)
+		if _, err := b.NewOutbound("test", opts); err == nil {
+			t.Fatal("accepted incompatible scoped options")
+		}
+	}
+}
+
+func TestSSRDetourDialCancellation(t *testing.T) {
+	b := New(Options{Logger: testLogger(t)})
+	defer b.Close()
+	dialed := make(chan struct{})
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	out, err := b.NewOutbound("test", ProxySpec{
+		Type: "ssr", Server: "proxy.example", Port: 8388, Method: "none", Password: "password",
+		Detour: &DetourSpec{Dial: func(_ context.Context, network, address string) (net.Conn, error) {
+			if network != "tcp" || address != "proxy.example:8388" {
+				return nil, fmt.Errorf("unexpected dial to %s %s", network, address)
+			}
+			close(dialed)
+			return client, nil
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := out.out.DialContext(ctx, "tcp", M.ParseSocksaddr("target.example:80"))
+		done <- err
+	}()
+	select {
+	case <-dialed:
+	case <-ctx.Done():
+		t.Fatal("SSR did not use the detour")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("dial returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dial did not cancel while writing the destination")
 	}
 }

@@ -209,19 +209,28 @@ type endpointSocket struct {
 
 type endpointSocketRegistry struct {
 	mu     sync.Mutex
-	scopes map[*adapter.Scope]map[string]endpointSocket
+	scopes map[*adapter.Scope]map[endpointSocketKey]endpointSocket
+}
+
+type endpointSocketKey struct {
+	network string
+	fd      uintptr
 }
 
 func (b *Backend) endpointControl(scope *adapter.Scope) control.Func {
+	return b.registerEndpointControl(scope, false)
+}
+
+func (b *Backend) registerEndpointControl(scope *adapter.Scope, multiple bool) control.Func {
 	if b.protect == nil {
 		return nil
 	}
 	registry := &b.endpointSockets
 	registry.mu.Lock()
 	if registry.scopes == nil {
-		registry.scopes = make(map[*adapter.Scope]map[string]endpointSocket)
+		registry.scopes = make(map[*adapter.Scope]map[endpointSocketKey]endpointSocket)
 	}
-	registry.scopes[scope] = make(map[string]endpointSocket)
+	registry.scopes[scope] = make(map[endpointSocketKey]endpointSocket)
 	registry.mu.Unlock()
 	scope.Add(func() error {
 		registry.mu.Lock()
@@ -239,9 +248,21 @@ func (b *Backend) endpointControl(scope *adapter.Scope) control.Func {
 		if err := b.protect(network, address, conn); err != nil {
 			return err
 		}
-		// WireGuard's UDP bind owns one socket per address family. BindUpdate
-		// closes the old pair before creating its replacements.
-		sockets[network] = endpointSocket{address: address, conn: conn}
+		key := endpointSocketKey{network: network}
+		if multiple {
+			// Tailscale can hold multiple TCP and UDP sockets per family.
+			// Scrub closed descriptors so reconnects cannot grow the set.
+			for previous, socket := range sockets {
+				if errors.Is(socket.conn.Control(func(uintptr) {}), net.ErrClosed) {
+					delete(sockets, previous)
+				}
+			}
+			if err := conn.Control(func(fd uintptr) { key.fd = fd }); err != nil {
+				return err
+			}
+		}
+		// WireGuard closes its old socket for each family before rebinding.
+		sockets[key] = endpointSocket{address: address, conn: conn}
 		return nil
 	}
 }
@@ -253,10 +274,10 @@ func (b *Backend) ReprotectEndpointSockets() error {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	for _, sockets := range registry.scopes {
-		for network, socket := range sockets {
-			err := b.protect(network, socket.address, socket.conn)
+		for key, socket := range sockets {
+			err := b.protect(key.network, socket.address, socket.conn)
 			if errors.Is(err, net.ErrClosed) {
-				delete(sockets, network)
+				delete(sockets, key)
 			} else if err != nil {
 				return err
 			}

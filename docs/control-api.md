@@ -93,6 +93,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `Hello` | `versions: [1]`，可选 `client` | `version`、`server`、`schema_versions`、`epoch` |
 | `GetCapabilities` | 无 | API/schema 版本、方法列表、协议/规则/平台能力 |
 | `GetStatus` | 无 | 配置版本与运行时状态 |
+| `GetTailscaleStatus` | None | Local Tailscale node, login, and peer status |
 | `ProbeOutbound` | `outbound`、`url`，可选 `timeout_ms` | 显式节点/组的测速结果 |
 | `GetConnectionTimeline` | `id`，可选历史 `epoch` | 连接阶段和关联的 DNS、HTTP 摘要 |
 | `AddTemporaryRule` / `ListTemporaryRules` / `RemoveTemporaryRule` | `rule` 和可选 `ttl_seconds`，或 `id` | 临时分流规则 |
@@ -174,6 +175,18 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 ```
 
 `revision` 是持久配置版本，`runtime.generation` 是运行时代次，不保证相等。此处 listeners.action 表示监听协议类型（mixed/socks/http），与变更计划中的 action 含义不同。`runtime.network` 是实际系统接管状态，可额外有 `device`、`error`；配置里的 mode 只是意图。若有 `start_error`，说明已保存配置未正常启动，控制端仍可读取和修正配置。
+
+### GetTailscaleStatus
+
+Call `GetTailscaleStatus` with empty parameters over the same framed control connection as `GetStatus`.
+
+```json
+{"id":2,"method":"GetTailscaleStatus","params":{}}
+```
+
+The result reports `state` as `starting`, `needs-login`, `running`, `stopped`, or `error`. `stopped` also covers configurations without a Tailscale node. When configured, `id` identifies the local `link.tailscale` entry. `auth-url` is present only when login is required. Open it in a browser to authenticate the node. `last-error`, when present, describes the most recent error.
+
+`tailscale-ips` contains the node's Tailscale IP addresses. Each entry in `peers` includes `hostname`, `tailscale-ips`, and `online`. A known direct path has `direct-address`, and a known relay path has `derp-region`. Connection fields may be absent when there is no known active path. The status call is read-only. New connections to the outbound fail immediately until the node is running. [Tailscale configuration](configuration-reference.md#linktailscale)
 
 ### GetConfiguration
 

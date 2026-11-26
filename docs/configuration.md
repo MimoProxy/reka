@@ -277,6 +277,49 @@ For an imported `.conf`, enable the source in the profile with `imports: [{sourc
 
 In `rule` mode, connections to IP addresses in `10.0.0.0/24` use `home-wg` before the profile rules are evaluated. In `global` mode, the home route takes precedence over the global target. In `direct` mode, the home route is inactive. Reka matches available destination IPs with `no-resolve`. If you join a network that overlaps the configured home subnet, remove the entry or set `routes: []` while you are on that network. [Field reference](configuration-reference.md#linkwireguard)
 
+### Access a home network through Tailscale
+
+1. Install and sign in to the official Tailscale client on an always-on device connected to your home LAN. Enable IP forwarding on that device as required by its operating system, then advertise the home subnet.
+
+   ```sh
+   tailscale set --advertise-routes=10.0.0.0/24
+   ```
+
+2. Approve `10.0.0.0/24` for that device in the Tailscale admin console. Ensure the tailnet access policy allows the Reka node to reach the home subnet.
+3. Add the following entry to `local.yaml` on the device running Reka. The `routes` list gives Reka the destination prefixes to send through Tailscale.
+
+   ```yaml
+   link:
+     tailscale:
+       - id: home
+         hostname: reka-client
+         routes: [10.0.0.0/24]
+   listeners:
+     - id: mixed
+       type: mixed
+       listen: "127.0.0.1:17890"
+   ```
+
+4. Keep your normal profile rules. For example, this complete minimal profile sends other traffic directly when using `rule` mode.
+
+   ```yaml
+   schema-version: 1
+   rules:
+     - match: {all: true}
+       outbound: direct
+   ```
+
+5. Apply the configuration and call `GetTailscaleStatus`. Open `auth-url` when the state is `needs-login` and sign in to the same tailnet as the subnet router. Alternatively, save a Tailscale authentication key with `SetSecret` and reference it as `auth-key: secret://tailscale/home/auth-key` in the local entry.
+6. Once the state is `running`, try a known home service from another network. The example listener is available to applications configured to use the local HTTP or SOCKS proxy. With [TUN enabled](#7-系统代理与-tun), captured traffic follows the same subnet rule.
+
+   ```sh
+   curl --proxy http://127.0.0.1:17890 http://10.0.0.20:8080/
+   ```
+
+An iOS Packet Tunnel host must supply `EngineOptions.StateRoot` to activate the link. The current adapter needs that host update.
+
+Reka also routes tailnet IPv4 and IPv6 address ranges to `tailscale/home`. You can use that outbound ID in rules and groups. Reka accepts one Tailscale entry, uses the configured prefixes for automatic routing, and retains the node's state when the entry is removed. Use IP addresses or your own DNS setup. MagicDNS and exit nodes are unsupported. [Field reference](configuration-reference.md#linktailscale), [status API](control-api.md#gettailscalestatus)
+
 ### 手动切换与自动选择
 
 ```sh

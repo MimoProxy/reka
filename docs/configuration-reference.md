@@ -71,6 +71,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `ssh` | `server` 必填，`port` 默认 22，`username` 默认 `root` | 通过一条 SSH 会话转发 TCP 流。可配置 `dialer`，主机密钥与认证见 [SSH](#ssh) |
 | `mieru` | `server`、`username`、`password`、`protocol.transport`，以及一个端口或范围 | 支持 TCP 和 UDP 转发，配置见 [Mieru](#mieru) |
 | `shadowsocks` | `server`、`port`、`method`、`password` | `plugin`、`udp-over-tcp`、`udp-over-tcp-version`，见 3.8 |
+| `ssr` | `server`、`port`、`method`、`password` | 支持 TCP 和原生 UDP，拒绝 `tls`、`transport`、`multiplex`、`plugin` 和开启 `dialer.tfo` |
 | `vless` | `server`、`port`、`uuid` | `tls`、`flow`、`encryption`、`packet-encoding`、`transport` |
 | `vmess` | `server`、`port`、`uuid` | `tls`、`protocol`、`packet-encoding`、`transport` |
 | `trojan` | `server`、`port`、`password` | **必须有** `tls`；可用 `transport` |
@@ -84,6 +85,8 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 HTTP / SOCKS 的 `username`、`password` 必须成对设置。HTTP 节点配置了用户名密码时，它们优先于自定义 `Proxy-Authorization`。UUID 必须是合法 UUID，不是任意字符串。
 
 Shadowsocks 支持的 `method`：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm`、`2022-blake3-chacha20-poly1305`、`aes-128-gcm`、`aes-192-gcm`、`aes-256-gcm`、`chacha20-ietf-poly1305`、`xchacha20-ietf-poly1305`。2022 密码使用相应 Base64 密钥。
+
+ShadowsocksR 的 `method` 支持 `rc4-md5`、AES 的 128/192/256 位 CTR 和 CFB（如 `aes-192-ctr`、`aes-256-cfb`）、`chacha20`、`chacha20-ietf`、`xchacha20`，以及 `none` 或 `dummy`。名称不区分大小写。`none` 和 `dummy` 关闭流加密，仍需提供 `password` 供 SSR 派生密钥。
 
 ### 3.2 `tls`
 
@@ -138,6 +141,9 @@ VLESS encryption 的 MODE 为 `native`、`xorpub`、`random`；RTT 为 `1rtt`、
 
 | 协议 | 字段 | 类型、单位和可用值 |
 | --- | --- | --- |
+| SSR | `obfs` | 对象，省略时为 `plain`。`type` 接受 `plain`、`http_simple`、`http_post`、`random_head`、`tls1.2_ticket_auth`、`tls1.2_ticket_fastauth`。可选字符串 `param` 传给混淆层，混淆仅用于 TCP |
+| SSR | `protocol` | 默认 `origin`。其他可用值为 `auth_sha1_v4`、`auth_aes128_md5`、`auth_aes128_sha1`、`auth_chain_a`、`auth_chain_b` |
+| SSR | `protocol-param` | 可选字符串，例如认证协议使用的 `uid:key`。此字段与节点的 `password` 均支持 secret 引用，读回时掩码 |
 | VMess | `security` | 默认 `auto`；`auto`、`none`、`zero`、`aes-128-gcm`、`chacha20-poly1305` |
 | VMess | `alter-id` | 整数，0–65535，默认 0 |
 | HY2 | `up-bps`、`down-bps` | 精确**字节/秒**；可省略以使用自动带宽行为 |
@@ -302,7 +308,7 @@ Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivit
 | `statistic` | false；仅保留兼容元数据，Reka 始终报告自己的逐连接流量 |
 | `brutal` | `{enabled: true, up-bps: 1250000, down-bps: 2000000}`；单位字节/秒，两方向至少 65536 |
 
-通用 multiplex 不适用于 Hysteria v1、SSH、Mieru、AnyTLS、WireGuard、reject、pass 或 reject-drop。SSH、Mieru 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
+通用 multiplex 不适用于 Hysteria v1、SSH、Mieru、AnyTLS、SSR、WireGuard、reject、pass 或 reject-drop。SSH 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
 
 ### 3.8 Shadowsocks 的 UoT 与 `plugin`
 
@@ -570,6 +576,36 @@ link:
 The list accepts up to 64 entries and each outbound may appear once. In `rule` mode the generated `ip-cidr` rules precede the profile rules. In `global` mode they precede the global catch-all. `direct` mode bypasses them. The rules use `no-resolve` and match against available destination IP addresses. Their reserved IDs use `@link-wireguard-<index>`, and route explanations identify the corresponding `/link/wireguard/#<index>` entry in `local.yaml`.
 
 If a configured subnet overlaps the current network, disable the entry manually while connected to that network. [Complete home network example](configuration.md#access-a-home-network-through-wireguard)
+
+### `link.tailscale`
+
+Set `link.tailscale` in `local.yaml` to add an embedded Tailscale node for outbound TCP and UDP. The list accepts one entry. Its outbound ID is `tailscale/<id>` and can be used in profile rules and group members. A profile reference requires the matching local entry.
+
+```yaml
+link:
+  tailscale:
+    - id: home
+      hostname: reka-client
+      routes: [10.0.0.0/24]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Required resource ID. |
+| `control-url` | Optional HTTPS URL for the control server. The default uses Tailscale's control server. Set an HTTPS Headscale URL for a self-hosted control server. |
+| `auth-key` | Optional Tailscale authentication key. Supports `secret://` references and is masked in configuration previews and exports. Omit it to use browser login. Tailscale authentication environment variables such as `TS_AUTHKEY` cause a startup error when this field is omitted. |
+| `hostname` | Optional name advertised to the tailnet. |
+| `ephemeral` | Defaults to `false`. Set to `true` to register an ephemeral node. |
+| `accept-routes` | Defaults to `true`. Allows the node to use advertised subnet routes approved by the control server. |
+| `routes` | Optional local matching prefixes for approved subnets. Supply up to 64 IPv4 or IPv6 CIDRs. Default routes and prefixes that overlap loopback, link-local, or multicast ranges are prohibited. |
+
+Reka adds `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, and any configured `routes` to the local routing rules. These rules use `no-resolve` to match available destination IPs. In `rule` mode they run after `link.wireguard` and before profile rules. In `global` mode they also take precedence over the global target. In `direct` mode they are inactive. Advertised routes must be listed here to receive automatic rules.
+
+Route explanations identify the generated rules as `@link-tailscale-addresses-<id>` and, when `routes` is set, `@link-tailscale-routes-<id>`. Both point to `/link/tailscale/<id>` in `local.yaml`.
+
+The node starts when the configuration takes effect. Use `GetTailscaleStatus` to check login and peer connectivity. State is stored in `<StateRoot>/tailscale/<id>`, or in `<TailscaleStateDir>/<id>` when the host sets `EngineOptions.TailscaleStateDir`. The state is retained when the entry is removed. On iOS, the Packet Tunnel passes `tailscaleState` from the session controls; probe sessions never start a node. Without a state directory, the link reports an error and its outbound rejects new flows while the rest of the configuration keeps working.
+
+Unsupported features include dynamic route generation, MagicDNS, exit nodes, route advertisement, Tailscale SSH, and Taildrop. Unsolicited TCP and UDP from peers are rejected. [Complete home network example](configuration.md#access-a-home-network-through-tailscale), [status API](control-api.md#gettailscalestatus)
 
 ### 10.1 网络场景
 

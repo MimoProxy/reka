@@ -18,7 +18,7 @@ OUT=$ROOT/bin/android
 BUILD=$OUT/build
 rm -rf "$BUILD" && mkdir -p "$BUILD/classes" "$BUILD/apk/lib/arm64-v8a"
 
-TAGS=with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal
+TAGS=with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,ts_omit_peerapiserver
 OVERLAY=$(python3 "$ROOT/tools/build-overlay.py")
 HOST_TAG=$(ls "$NDK/toolchains/llvm/prebuilt" | head -1)
 CC="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android$MIN_API-clang"

@@ -95,7 +95,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertExtended(n, path)
 		return
 	}
-	nativeType := map[string]string{"ss": "shadowsocks", "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH, "mieru": model.OutboundMieru}[typ]
+	nativeType := map[string]string{"ss": "shadowsocks", "ssr": model.OutboundSSR, "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH, "mieru": model.OutboundMieru}[typ]
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	if nativeType == "" {
@@ -104,6 +104,10 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
 	switch typ {
+	case model.OutboundSSR:
+		c.convertSSR(&r, out)
+		c.addOutbound(&r, out, &binding)
+		return
 	case "mieru":
 		c.convertMieru(&r, out)
 		c.addOutbound(&r, out, &binding)

@@ -2,7 +2,8 @@
 # with_gvisor: sing-tun gVisor stack. with_utls: uTLS and REALITY client.
 # badlinkname, tfogo_checklinkname0 and -checklinkname=0: required by
 # upstream go:linkname usage, same as sing-box release builds.
-TAGS    ?= with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal
+# ts_omit_*: sing-box libbox's Tailscale exclusions plus Peer API.
+TAGS    ?= with_gvisor,with_utls,badlinkname,tfogo_checklinkname0,reka_minimal,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,ts_omit_peerapiserver
 # Desktop builds are pure Go. Android library builds will override this.
 export CGO_ENABLED ?= 0
 

@@ -12,6 +12,7 @@ import (
 )
 
 var protocolFields = map[string][]string{
+	model.OutboundSSR:       {"obfs", "protocol", "protocol-param"},
 	"vmess":                 {"security", "alter-id"},
 	"anytls":                {"idle-session-check-interval-seconds", "idle-session-timeout-seconds", "min-idle-session", "client-metadata"},
 	"hysteria":              {"auth-base64", "up-mbps", "down-mbps", "up-bps", "down-bps", "obfs", "server-ports", "hop-interval-seconds", "stream-receive-window", "connection-receive-window", "disable-mtu-discovery"},
@@ -33,6 +34,13 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 				fail("protocol/"+field, "option does not apply to protocol")
 			}
 		}
+		if _, present := c.ppos[base+"/protocol/obfs/param"]; present && ob.Type != model.OutboundSSR {
+			fail("protocol/obfs/param", "obfs param does not apply to this protocol")
+		}
+	}
+	if ob.Type == model.OutboundSSR {
+		c.ssr(base, ob, out)
+		return
 	}
 	if ob.Type == model.OutboundSSH {
 		c.ssh(base, ob.Protocol, out)

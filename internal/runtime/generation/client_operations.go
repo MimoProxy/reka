@@ -245,6 +245,7 @@ func (e *Engine) FlushDNSCache() int {
 
 func (e *Engine) ResetNetwork() int {
 	snapshot, g := e.current()
+	e.retryTailscale()
 	e.backend.NotifyEndpointNetworkChanged(context.Background())
 	cleared := 0
 	if g.dns != nil {
