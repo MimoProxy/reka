@@ -415,7 +415,7 @@ wait 默认为 false，尽快返回当前任务状态；true 等待同 source �
 
 `pkcs12` 使用标准 base64 编码，允许首尾空白和换行。已有 CA 时，生成或导入需显式传 `replace:true`，否则返回 `conflict`。未安装时，导出和删除返回 `not_found`。导出的 `data` 在 `pem` 格式下是证书文本，在 `der` 格式下是 DER 证书的 base64。所有回复都不包含 CA 私钥。
 
-`secret://mitm/ca` 是 `local.yaml` 的 `mitm.ca` 专用引用。`SetSecret` 和 `DeleteSecret` 拒绝 `mitm/` 下的名称。`ListSecrets` 仍可列出名称。生成、导入或删除后，重新应用配置以使 TCP 转发载入最新的 CA 状态。
+`secret://mitm/ca` 是 `local.yaml` 的 `mitm.ca` 专用引用。`SetSecret` 和 `DeleteSecret` 拒绝 `mitm/` 和 `link/` 下的名称。`link/` 下的凭据只能由 `local.yaml` 的 `link.tailscale[].auth-key` 引用，由宿主应用直接写入。`ListSecrets` 仍可列出名称。生成、导入或删除后，重新应用配置以使 TCP 转发载入最新的 CA 状态。
 
 <a id="mitm-status"></a>
 

@@ -497,11 +497,21 @@ func (c *compiler) resolveSecret(path, v string) string {
 }
 
 func (c *compiler) resolveDocumentSecret(doc, path, v string) string {
+	return c.resolveSecretRef(doc, path, v, false)
+}
+
+// resolveLinkSecret also accepts link credentials, but only from local.yaml:
+// a device's link settings never arrive with a profile or subscription.
+func (c *compiler) resolveLinkSecret(doc, path, v string) string {
+	return c.resolveSecretRef(doc, path, v, doc == model.DocLocal)
+}
+
+func (c *compiler) resolveSecretRef(doc, path, v string, allowLink bool) string {
 	name, ok := secret.ParseRef(v)
 	if !ok {
 		return v
 	}
-	if secret.Reserved(name) {
+	if secret.Reserved(name) && !(allowLink && strings.HasPrefix(name, secret.LinkPrefix)) {
 		c.errorf(doc, path, "secret.reserved", "secret %q is reserved", name)
 		return ""
 	}

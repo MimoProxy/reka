@@ -5,6 +5,7 @@ package packettunnel
 import (
 	"cmp"
 	"errors"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -131,6 +132,12 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		default:
 			return engine.GetScriptRuns(op.Target, op.Limit), nil
 		}
+	case "tailscaleStatus":
+		// Reports the link without starting a node, so it is safe to poll.
+		if s.profile == nil {
+			return api.TailscaleStatus{State: api.TailscaleStopped, TailscaleIPs: []netip.Addr{}, Peers: []api.TailscalePeer{}}, nil
+		}
+		return s.profile.engine.TailscaleStatus(), nil
 	case "probe":
 		return s.probe(op)
 	case "speedStart":
