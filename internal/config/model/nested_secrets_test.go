@@ -187,6 +187,32 @@ func TestSSHSecretsMaskAndRestore(t *testing.T) {
 	}
 }
 
+func TestMieruCredentialsMaskAndRestore(t *testing.T) {
+	const node = "{id: tunnel, type: mieru, username: private-user, password: private-password}"
+	for _, prefix := range []string{"/outbounds/tunnel", "/sources/feed/outbounds/tunnel"} {
+		if !IsSensitive(prefix+"/password") || !IsSensitive(prefix+"/username") {
+			t.Fatalf("Mieru credentials at %s must be sensitive", prefix)
+		}
+	}
+	for kind, input := range map[string]string{
+		DocProfile: "outbounds: [" + node + "]",
+		DocSources: "sources: [{id: feed, outbounds: [" + node + "]}]",
+		DocOverlay: "patches: [{op: set, path: /outbounds/tunnel/password, value: private-password}, {op: set, path: /outbounds/tunnel/username, value: private-user}]",
+	} {
+		base, ds := LoadDoc(kind, []byte(input))
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		masked, _ := LoadDoc(kind, []byte(input))
+		if masked.MaskSecrets() != 2 || strings.Contains(string(masked.Bytes()), "private-") {
+			t.Fatal("Mieru credentials leaked", kind)
+		}
+		if err := masked.UnmaskSecrets(base); err != nil || string(masked.Bytes()) != string(base.Bytes()) {
+			t.Fatal("Mieru credentials were not restored", kind, err)
+		}
+	}
+}
+
 func TestPluginNestedSecretsAcrossDocuments(t *testing.T) {
 	for _, tc := range []struct{ kind, input string }{
 		{DocProfile, `schema-version: 1

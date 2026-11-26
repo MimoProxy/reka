@@ -68,6 +68,7 @@ const (
 	OutboundHTTP        = "http"
 	OutboundSOCKS       = "socks"
 	OutboundSSH         = "ssh"
+	OutboundMieru       = "mieru"
 	OutboundShadowsocks = "shadowsocks"
 	OutboundVLESS       = "vless"
 	OutboundWireGuard   = "wireguard"
@@ -94,7 +95,7 @@ type Outbound struct {
 	// UDP enables UDP relay where the protocol supports it. Default true.
 	UDP *bool `yaml:"udp"`
 
-	Username string `yaml:"username"` // http, socks, ssh
+	Username string `yaml:"username"` // http, socks, ssh, mieru
 	Password string `yaml:"password"`
 	Method   string `yaml:"method"` // shadowsocks
 
@@ -363,6 +364,11 @@ type Protocol struct {
 	HostKeyAlgorithms    []string `yaml:"host-key-algorithms,omitempty" json:",omitempty"`
 	ClientVersion        string   `yaml:"client-version,omitempty" json:",omitempty"`
 	InsecureSkipHostKey  bool     `yaml:"insecure-skip-host-key,omitempty" json:",omitempty"`
+
+	Transport      string `yaml:"transport,omitempty" json:",omitempty"`
+	Multiplexing   string `yaml:"multiplexing,omitempty" json:",omitempty"`
+	HandshakeMode  string `yaml:"handshake-mode,omitempty" json:",omitempty"`
+	TrafficPattern string `yaml:"traffic-pattern,omitempty" json:",omitempty"`
 
 	AuthBase64              string `yaml:"auth-base64,omitempty" json:",omitempty"`
 	StreamReceiveWindow     uint64 `yaml:"stream-receive-window,omitempty" json:",omitempty"`

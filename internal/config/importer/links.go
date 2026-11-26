@@ -3,10 +3,13 @@ package importer
 import (
 	"encoding/base64"
 	"fmt"
+	"iter"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/MimoProxy/reka/internal/config/model"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -60,34 +63,48 @@ func (c *converter) links(data string) {
 		path string
 	}
 	entries := []entry{}
+	mieruNames := make(map[string]int)
+	expandedBytes := 0
 	for i, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		c.report.Nodes.Total++
 		path := fmt.Sprintf("/links/#%d", i)
 		at := &yaml.Node{Line: i + 1, Column: 1}
-		values, err := parseLink(line)
+		nodes, err := parseLink(line)
 		if err != nil {
+			c.report.Nodes.Total++
 			c.unsupported(at, path, "import.link", "invalid or unsupported share-link parameters")
 			continue
 		}
-		n := &yaml.Node{}
-		if err := n.Encode(values); err != nil {
-			c.unsupported(at, path, "import.link", "invalid share-link fields")
-			continue
-		}
-		var positions func(*yaml.Node)
-		positions = func(v *yaml.Node) {
-			v.Line, v.Column = i+1, 1
-			for _, ch := range v.Content {
-				positions(ch)
+		for values := range nodes {
+			c.report.Nodes.Total++
+			name, _ := values["name"].(string)
+			count, previousMieru := mieruNames[name]
+			if values["type"] == model.OutboundMieru || previousMieru {
+				// mihomo suffixes repeated share-link names with -01, -02, ...
+				for candidate := name; c.names[candidate] != ""; {
+					count++
+					candidate = fmt.Sprintf("%s-%02d", name, count)
+					values["name"] = candidate
+				}
+				mieruNames[name] = count
 			}
-		}
-		positions(n)
-		if c.register(n, "p", path) {
-			entries = append(entries, entry{n, path})
+			n := &yaml.Node{}
+			if err := n.Encode(values); err != nil {
+				c.unsupported(at, path, "import.link", "invalid share-link fields")
+				continue
+			}
+			expandedBytes += markLinkPosition(n, i+1)
+			// One Mieru URL can repeat a long profile or credential for every port.
+			if expandedBytes > model.MaxDocumentSize {
+				c.diag(at, path, "import.size", "expanded links exceed the document size limit", true)
+				return
+			}
+			if c.register(n, "p", path) {
+				entries = append(entries, entry{n, path})
+			}
 		}
 	}
 	if c.fatal {
@@ -97,7 +114,29 @@ func (c *converter) links(data string) {
 		c.convertProxy(e.node, e.path)
 	}
 }
-func parseLink(raw string) (object, error) {
+
+func markLinkPosition(n *yaml.Node, line int) int {
+	n.Line, n.Column = line, 1
+	size := len(n.Value)
+	for _, child := range n.Content {
+		size += markLinkPosition(child, line)
+	}
+	return size
+}
+
+func parseLink(raw string) (iter.Seq[object], error) {
+	scheme, _, _ := strings.Cut(raw, "://")
+	if strings.EqualFold(scheme, "mierus") {
+		return parseMieruLink(raw)
+	}
+	node, err := parseSingleLink(raw)
+	if err != nil {
+		return nil, err
+	}
+	return slices.Values([]object{node}), nil
+}
+
+func parseSingleLink(raw string) (object, error) {
 	if strings.HasPrefix(raw, "vmess://") {
 		return parseVMessLink(raw)
 	}

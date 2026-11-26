@@ -7,6 +7,7 @@ require (
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/dop251/goja v0.0.0-20261122185237-35fdc4b88e39
 	github.com/dop251/goja_nodejs v0.0.0-20260918173711-b481721df8a2
+	github.com/enfein/mieru/v3 v3.39.0
 	github.com/golang/snappy v1.0.0
 	github.com/itchyny/gojq v0.12.20
 	github.com/klauspost/compress v1.19.1

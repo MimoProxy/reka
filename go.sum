@@ -24,6 +24,8 @@ github.com/dop251/goja v0.0.0-20261122185237-35fdc4b88e39 h1:njdoK99Ob0Aa/s2LfWK
 github.com/dop251/goja v0.0.0-20261122185237-35fdc4b88e39/go.mod h1:L1yoLBco9M3b2Gdh1UZHg+BIePeAdV1bwknaLLxAgoc=
 github.com/dop251/goja_nodejs v0.0.0-20260918173711-b481721df8a2 h1:4cOnoHK48VXmDGOPp2h+u7sYZw/1Ou2JbHjTgU0DF0A=
 github.com/dop251/goja_nodejs v0.0.0-20260918173711-b481721df8a2/go.mod h1:Tb7Xxye4LX7cT3i8YLvmPMGCV92IOi4CDZvm/V8ylc0=
+github.com/enfein/mieru/v3 v3.39.0 h1:22WJN9i7I4FrY1cTAVp5KfKOFm4sWrXVOXhqf5fkdr8=
+github.com/enfein/mieru/v3 v3.39.0/go.mod h1:zJBUCsi5rxyvHM8fjFf+GLaEl4OEjjBXr1s5F6Qd3hM=
 github.com/florianl/go-nfqueue/v2 v2.1.0 h1:Fywt30TY/evxyDySpXjxQ1jsRW7nQbLpOhELqpr4068=
 github.com/florianl/go-nfqueue/v2 v2.1.0/go.mod h1:8PKUM5rYoVFO5IZV1bifx4/b0jHAglKkHXr9PRwzi4Y=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=

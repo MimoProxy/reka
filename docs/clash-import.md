@@ -60,6 +60,10 @@ Supply both `up` and `down`. Unitless integers mean Mbps. Rates such as `500 Kbp
 
 `obfs-protocol` overrides `protocol`. Both accept the UDP transport. A `ports` list enables hopping at a single integer `hop-interval` in seconds, defaulting to 10. The `recv-window` field sets the connection window. As in mihomo, `recv-window-conn` sets the stream window only when `recv-window` is nonzero. Setting `disable-mtu-discovery: true` disables QUIC path MTU discovery. Both `fast-open` values are accepted because sing-quic sends the TCP request with the first write. Underscore spellings such as `auth_str` work for Hysteria nodes. Using both spellings of the same key is an error.
 
+## Mieru nodes
+
+Clash YAML accepts `type: mieru` with `server`, `username`, `password` and either `port` or a single inclusive `port-range` such as `2000-2010`. Set `transport` to `TCP` or `UDP`. The optional `multiplexing`, `handshake-mode` and base64 `traffic-pattern` fields map to the native `protocol` block. Datagram forwarding defaults to off in Clash YAML. Set `udp: true` to enable it over either transport. Common dialer fields include `dialer-proxy`, `interface-name`, `routing-mark` and `ip-version`. Enabled `tfo`, enabled `mptcp` or a `smux` block makes the node unavailable.
+
 ## SSH nodes
 
 Clash YAML accepts `type: ssh` with `server`, `port`, `username`, `password`, an inline `private-key` and its optional `private-key-passphrase`. Previews mask the username, password, private key and passphrase. A private key supplied as a file path makes the node unavailable. Common dialer options, including `dialer-proxy`, are preserved.
@@ -108,7 +112,9 @@ Select groups retain supported members in original order. Unsupported group type
 ./bin/rekactl import -source links -format links -apply links.txt
 ```
 
-Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Hysteria v1, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Mieru, Hysteria v1, Hysteria2/`hy2` and TUIC v5 URLs. Most formats report unknown options and duplicate parameters. Mieru follows mihomo’s query handling described below. `#` comment lines and blank lines are skipped.
+
+A Mieru link such as `mierus://alice:password@proxy.example?port=443&port=2000-2010&protocol=TCP&protocol=UDP#Home` creates `Home:443/TCP` and `Home:2000-2010/UDP`. Ports and protocols are paired in order. The importer skips links with no ports or unequal counts. It takes the base name from the fragment, then `profile`, then the server. Repeated names receive suffixes such as `-01`. Every link enables UDP forwarding. As in mihomo, the first `multiplexing`, `handshake-mode` and `traffic-pattern` values apply to all pairs, and unrelated parameters such as `mtu` are ignored.
 
 AnyTLS links accept `sni`, `insecure=1` and the `hpkp` certificate pin, and enable UDP. In Clash YAML, `type: anytls` defaults UDP to off and uses `server` when `sni` is empty. AnyTLS manages its own TCP sessions. The importer rejects `smux`, `disable-reuse: true` and `tfo: true`.
 

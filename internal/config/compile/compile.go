@@ -438,6 +438,7 @@ var fieldsByType = map[string][]string{
 	model.OutboundHTTP:        {"server", "port", "username", "password", "tls", "headers"},
 	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp", "tls"},
 	model.OutboundSSH:         {"server", "port", "username", "password", "protocol"},
+	model.OutboundMieru:       {"server", "port", "username", "password", "protocol", "udp"},
 	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version", "plugin"},
 	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "encryption", "packet-encoding", "tls", "udp", "transport", "multiplex"},
 	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
@@ -607,8 +608,10 @@ func (c *compiler) outbounds(eff *Effective) {
 			if _, present := c.ppos[base+"/port"]; !present && ob.Type == model.OutboundSSH {
 				ob.Port = 22
 			}
-			hopping := (ob.Type == "hysteria" || ob.Type == "hysteria2") && ob.Protocol != nil && len(ob.Protocol.ServerPorts) > 0
-			if (ob.Port < 1 || ob.Port > 65535) && !(ob.Port == 0 && (hopping || realmEnabled)) {
+			hopping := (ob.Type == "hysteria" || ob.Type == "hysteria2" || ob.Type == model.OutboundMieru) && ob.Protocol != nil && len(ob.Protocol.ServerPorts) > 0
+			if _, present := c.ppos[base+"/port"]; ob.Type == model.OutboundMieru && !present && !hopping {
+				c.errorf(doc, base+"/port", "outbound.port", "Mieru requires port or protocol/server-ports")
+			} else if (ob.Port < 1 || ob.Port > 65535) && !(ob.Port == 0 && (hopping || realmEnabled)) {
 				c.errorf(doc, base+"/port", "outbound.port", "port must be between 1 and 65535")
 			}
 			out.Server, out.Port = strings.Trim(ob.Server, "[]"), uint16(ob.Port)

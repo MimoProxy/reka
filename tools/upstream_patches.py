@@ -844,3 +844,24 @@ MODULES['github.com/sagernet/sing'][1]['common/domain/matcher.go'] = (
 MODULES['go4.org/netipx'] = ('v0.0.0-20231129151722-fdeea329fbba', {
     'ipset.go': ('01d0a58880b95e75f0b8e90e076eb9b56697bf9c9d075c030d422f2aafacd659', walk_ip_ranges),
 })
+
+
+# mieru keeps two process-global replay caches of up to 4Mi entries each,
+# with current and previous generations over a six-minute window. Its client
+# records every received segment, so a sustained UDP download costs tens to
+# hundreds of MB, far over the iOS Packet Tunnel limit. Reka only runs the
+# client side, where the server's segments are already authenticated per
+# session, so cap the caches at 16Ki entries (about 2.5 MB worst case for
+# both generations). Replays inside the most recent 16Ki segments are still
+# detected.
+MIERU_REPLAY_CACHE = 'replay.NewCache(4*1024*1024, cipher.KeyRefreshInterval*3)'
+
+
+def mieru_replay_cache(source):
+    return replace(source, MIERU_REPLAY_CACHE, 'replay.NewCache(16*1024, cipher.KeyRefreshInterval*3)')
+
+
+MODULES['github.com/enfein/mieru/v3'] = ('v3.39.0', {
+    'pkg/protocol/underlay_stream.go': ('956e8ea334fda0049e7e4f233b95c5538ebbc4a24e931218a9bcf968a4a6a94b', mieru_replay_cache),
+    'pkg/protocol/underlay_packet.go': ('3fec4f0041fec6e8768b37d44f00b703f8759cb1e8203422e12cdaa8438b1787', mieru_replay_cache),
+})

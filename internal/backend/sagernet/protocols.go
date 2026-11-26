@@ -80,6 +80,9 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	var plugin *ssPlugin
 	var xhttpTransport outboundResource
 	var bandwidthConfigured *atomic.Bool
+	if s.Type == "mieru" && values["multiplex"] != nil {
+		return nil, fmt.Errorf("Mieru does not support generic multiplex")
+	}
 	multiplex, err := popMultiplex(values)
 	if err != nil {
 		return nil, err
@@ -272,6 +275,8 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 		return socks.NewOutbound(ctx, b.router, logger, tag, o)
 	case "ssh":
 		return newSSHOutbound(ctx, tag, data)
+	case "mieru":
+		return newMieruOutbound(ctx, tag, data)
 	case "shadowsocks":
 		var o option.ShadowsocksOutboundOptions
 		if err = json.Unmarshal(data, &o); err != nil {

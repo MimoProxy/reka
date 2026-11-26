@@ -95,7 +95,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertExtended(n, path)
 		return
 	}
-	nativeType := map[string]string{"ss": "shadowsocks", "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH}[typ]
+	nativeType := map[string]string{"ss": "shadowsocks", "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH, "mieru": model.OutboundMieru}[typ]
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	if nativeType == "" {
@@ -104,6 +104,10 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
 	switch typ {
+	case "mieru":
+		c.convertMieru(&r, out)
+		c.addOutbound(&r, out, &binding)
+		return
 	case "ssh":
 		c.convertSSH(&r, out)
 		c.addOutbound(&r, out, &binding)
@@ -338,7 +342,9 @@ func (c *converter) validateOutbound(out object, n *yaml.Node, path string) bool
 		switch {
 		case key == "/method":
 			key = "/cipher"
-		case out["type"] == model.OutboundSSH && strings.HasPrefix(key, "/protocol/"):
+		case out["type"] == model.OutboundMieru && strings.HasPrefix(key, "/protocol/server-ports"):
+			key = "/port-range"
+		case (out["type"] == model.OutboundSSH || out["type"] == model.OutboundMieru) && strings.HasPrefix(key, "/protocol/"):
 			key = strings.TrimPrefix(key, "/protocol")
 		case strings.HasPrefix(key, "/tls"):
 			key = "/tls"

@@ -838,7 +838,7 @@ func parseLevel(s string) slog.Level {
 }
 
 // usesUpstreamOutbound selects the backend's generic ProxySpec option pipeline,
-// including Reka's SSH adapter. VLESS with REALITY uses a dedicated spec.
+// including Reka's SSH and Mieru adapters. VLESS with REALITY uses a dedicated spec.
 func usesUpstreamOutbound(o compile.Outbound) bool {
 	if o.Multiplex != nil && o.Multiplex.Enabled && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
@@ -847,7 +847,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 		return true
 	}
 	switch o.Type {
-	case "http", "socks", "vmess", "trojan", "anytls", "hysteria", "hysteria2", "tuic", "snell", model.OutboundWireGuard, model.OutboundSSH:
+	case "http", "socks", "vmess", "trojan", "anytls", "hysteria", "hysteria2", "tuic", "snell", model.OutboundWireGuard, model.OutboundSSH, model.OutboundMieru:
 		return true
 	case "vless":
 		return o.TLS == nil || o.TLS.Reality == nil
@@ -1614,6 +1614,9 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			if p.Heartbeat > 0 {
 				values["heartbeat"] = fmt.Sprintf("%dms", p.Heartbeat)
 			}
+		case model.OutboundMieru:
+			values["transport"], values["server_ports"], values["udp"] = p.Transport, p.ServerPorts, o.UDP
+			values["multiplexing"], values["handshake_mode"], values["traffic_pattern"] = p.Multiplexing, p.HandshakeMode, p.TrafficPattern
 		case model.OutboundSSH:
 			if p.PrivateKey != "" {
 				values["private_key"], values["private_key_passphrase"] = p.PrivateKey, p.PrivateKeyPassphrase

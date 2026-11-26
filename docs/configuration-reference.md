@@ -55,7 +55,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `name` | 可选字符串 | 显示名称，不影响路由引用 |
 | `type` | 必填字符串 | 见下面协议表 |
 | `server` | 字符串 | 服务器域名或 IP，不含 URL 协议、路径和端口 |
-| `port` | 整数 | 通常必填，范围 1–65535；SSH 默认 22；Hysteria v1 和 HY2 支持端口跳跃，HY2 还支持 Realm |
+| `port` | 整数 | 通常必填，范围 1–65535；SSH 默认 22；Mieru 可用单个端口范围；Hysteria v1 和 HY2 支持端口跳跃，HY2 还支持 Realm |
 | `udp` | 布尔，通常默认 `true` | 是否允许原生 UDP；SSH、HTTP 和 reject 不提供原生 UDP |
 | `dialer` | 对象 | 物理出站参数或经过其他节点，见 3.6 |
 | `multiplex` | 对象，默认关闭 | 通用多路复用，见 3.7 |
@@ -69,6 +69,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `http` | `server`、`port`；可选 `username` + `password` | 可选 `tls`；`headers: [{name: X-Key, value: value}]`；无原生 UDP |
 | `socks` | `server`、`port`；可选 `username` + `password` | SOCKS5 出站；可选 `tls`、`udp` |
 | `ssh` | `server` 必填，`port` 默认 22，`username` 默认 `root` | 通过一条 SSH 会话转发 TCP 流。可配置 `dialer`，主机密钥与认证见 [SSH](#ssh) |
+| `mieru` | `server`、`username`、`password`、`protocol.transport`，以及一个端口或范围 | 支持 TCP 和 UDP 转发，配置见 [Mieru](#mieru) |
 | `shadowsocks` | `server`、`port`、`method`、`password` | `plugin`、`udp-over-tcp`、`udp-over-tcp-version`，见 3.8 |
 | `vless` | `server`、`port`、`uuid` | `tls`、`flow`、`encryption`、`packet-encoding`、`transport` |
 | `vmess` | `server`、`port`、`uuid` | `tls`、`protocol`、`packet-encoding`、`transport` |
@@ -211,6 +212,36 @@ Realm 的 `tls` 验证控制服务，节点顶层 `tls` 验证最终 QUIC peer�
 
 SSH 仅支持 TCP，流量经服务端的 `direct-tcpip` 通道转发。配置可省略 `udp` 或设为 `false`；SSH 有自己的加密和通道复用，不接受 `tls`、`transport` 或 `multiplex`。
 
+#### Mieru
+
+```yaml
+outbounds:
+  - id: mieru-home
+    type: mieru
+    server: proxy.example
+    username: alice
+    password: secret://nodes/mieru/password
+    udp: true
+    protocol:
+      transport: UDP
+      server-ports: ["2000-2010"]
+      multiplexing: MULTIPLEXING_HIGH
+      handshake-mode: HANDSHAKE_STANDARD
+```
+
+单个端口用顶层 `port: 443`。端口范围用 `protocol.server-ports`，只接受一个闭区间，例如 `["2000-2010"]` 或原生的 `["2000:2010"]`。端点在 1–65535 之间，起点可以等于终点。两种配置互斥。用户名和密码必填，均支持秘密引用和预览掩码。
+
+| `protocol` 字段 | 值和行为 |
+| --- | --- |
+| `transport` | 必填，`TCP` 或 `UDP`。该字段决定到 Mieru 服务器的传输方式。 |
+| `multiplexing` | `MULTIPLEXING_OFF`、`MULTIPLEXING_LOW`、`MULTIPLEXING_MIDDLE` 或 `MULTIPLEXING_HIGH`。留空或设为 `MULTIPLEXING_DEFAULT` 使用库默认值。 |
+| `handshake-mode` | `HANDSHAKE_STANDARD` 等待握手响应，`HANDSHAKE_NO_WAIT` 随首次写入发送请求。留空或设为 `HANDSHAKE_DEFAULT` 使用库默认值。 |
+| `traffic-pattern` | 可选，使用 mihomo 兼容的 Base64 编码 Mieru 流量模式。 |
+
+顶层 `udp` 控制是否通过 Mieru 流转发应用的 UDP 数据报，原生配置默认开启。两种服务器传输均可承载 TCP 和 UDP。TCP 服务器域名交给出站 dialer。UDP 传输需要 IP 端点，填写域名时由 Reka 按 `dialer.ip-version` 解析。通用 `dialer` 支持上游代理、接口绑定和路由标记。Mieru 使用自身的加密、传输和会话复用，配置会拒绝顶层 `tls`、`transport`、`multiplex`，以及启用的 `dialer.tfo` 和 `dialer.mptcp`。
+
+为控制移动端内存用量，Reka 将 Mieru 的流传输和数据包传输回放缓存容量均设为 16 Ki 条（16,384 条）。每张表达到这一容量时轮换，库保留当前表和上一张表。
+
 #### WireGuard
 
 Set `server` and `port` to the peer's UDP endpoint. Set the following fields under `protocol`.
@@ -271,7 +302,7 @@ Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivit
 | `statistic` | false；仅保留兼容元数据，Reka 始终报告自己的逐连接流量 |
 | `brutal` | `{enabled: true, up-bps: 1250000, down-bps: 2000000}`；单位字节/秒，两方向至少 65536 |
 
-通用 multiplex 不适用于 Hysteria v1、SSH、AnyTLS、WireGuard、reject、pass 或 reject-drop。SSH 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
+通用 multiplex 不适用于 Hysteria v1、SSH、Mieru、AnyTLS、WireGuard、reject、pass 或 reject-drop。SSH、Mieru 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
 
 ### 3.8 Shadowsocks 的 UoT 与 `plugin`
 

@@ -84,7 +84,10 @@ def main():
         if 'Dir' not in module:
             module = json.loads(subprocess.check_output(['go', 'mod', 'download', '-json', name + '@' + version], cwd=ROOT, env=module_env))
         module_root = Path(module['Dir'])
-        module_copy = output / 'upstream' / name.rsplit('/', 1)[1]
+        parts = name.split('/')
+        # A major-version suffix (github.com/x/y/v3) is not a useful copy name.
+        base = parts[-2] if len(parts) > 3 and parts[-1][:1] == 'v' and parts[-1][1:].isdigit() else parts[-1]
+        module_copy = output / 'upstream' / base
         if not module_copy.exists():
             shutil.copytree(module_root, module_copy)
         if tree_hashes(module_root) != tree_hashes(module_copy):
@@ -93,7 +96,7 @@ def main():
             source_file = module_copy / filename
             if sha256(source_file) != digest:
                 raise SystemExit('Pinned source changed; review patch for ' + name + '/' + filename)
-            patched_file = patches / (name.rsplit('/', 1)[1] + '-' + filename.replace('/', '-') + '.txt')
+            patched_file = patches / (base + '-' + filename.replace('/', '-') + '.txt')
             patched_file.write_text(transform(source_file.read_text()))
             subprocess.check_call(['gofmt', '-w', str(patched_file)])
             extra_overlays[str(source_file)] = str(patched_file)

@@ -19,6 +19,7 @@ var protocolFields = map[string][]string{
 	"tuic":                  {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"},
 	"snell":                 {"version", "user-key", "mode", "reuse", "obfs"},
 	model.OutboundSSH:       {"private-key", "private-key-passphrase", "host-key", "host-key-algorithms", "client-version", "insecure-skip-host-key"},
+	model.OutboundMieru:     {"transport", "multiplexing", "handshake-mode", "traffic-pattern", "server-ports"},
 	model.OutboundWireGuard: {"private-key", "public-key", "pre-shared-key", "address", "allowed-ips", "persistent-keepalive", "reserved", "mtu"},
 }
 
@@ -35,6 +36,10 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	}
 	if ob.Type == model.OutboundSSH {
 		c.ssh(base, ob.Protocol, out)
+		return
+	}
+	if ob.Type == model.OutboundMieru {
+		c.mieru(base, ob.Protocol, out)
 		return
 	}
 	if ob.Type == model.OutboundWireGuard {

@@ -26,11 +26,11 @@ func IsSensitive(path string) bool {
 	if err != nil {
 		return false
 	}
+	if len(segs) >= 5 && segs[0] == "sources" {
+		segs = segs[2:]
+	}
 	if len(segs) == 3 {
 		return segs[0] == "outbounds" && sensitiveFields[segs[2]] || segs[0] == "modules" && segs[2] == "url"
-	}
-	if len(segs) == 6 && segs[0] == "sources" {
-		segs = segs[2:]
 	}
 	if len(segs) == 4 && segs[0] == "outbounds" && segs[2] == "protocol" {
 		return segs[3] == "private-key" || segs[3] == "private-key-passphrase" || segs[3] == "pre-shared-key" || segs[3] == "auth-base64"
