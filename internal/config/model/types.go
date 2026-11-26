@@ -63,13 +63,15 @@ type WireGuardLink struct {
 }
 
 type TailscaleLink struct {
-	ID           string   `yaml:"id"`
-	ControlURL   string   `yaml:"control-url"`
-	AuthKey      string   `yaml:"auth-key"`
-	Hostname     string   `yaml:"hostname"`
-	Ephemeral    bool     `yaml:"ephemeral"`
-	AcceptRoutes *bool    `yaml:"accept-routes"`
-	Routes       []string `yaml:"routes"`
+	ID                     string   `yaml:"id"`
+	ControlURL             string   `yaml:"control-url"`
+	AuthKey                string   `yaml:"auth-key"`
+	Hostname               string   `yaml:"hostname"`
+	Ephemeral              bool     `yaml:"ephemeral"`
+	AcceptRoutes           *bool    `yaml:"accept-routes"`
+	ExitNode               string   `yaml:"exit-node"`
+	ExitNodeAllowLANAccess bool     `yaml:"exit-node-allow-lan-access"`
+	Routes                 []string `yaml:"routes"`
 }
 
 // Outbound types.

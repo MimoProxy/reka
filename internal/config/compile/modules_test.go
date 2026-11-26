@@ -132,6 +132,40 @@ func TestModuleLayerValidation(t *testing.T) {
 	}
 }
 
+func TestStashModuleTailscaleReference(t *testing.T) {
+	const profile = moduleProfile + `groups: [{id: choice, type: select, members: [filter/ts]}]
+`
+	const body = `rules: ['DOMAIN,sample.test,Tailnet']
+proxies: [{id: ts, name: Tailnet, type: tailscale, udp: false}]
+`
+	compileBody := func(body string) (*Effective, model.Diagnostics) {
+		opts := moduleOptions(body)
+		opts.Sources = []byte(strings.Replace(string(opts.Sources), "format: surge", "format: stash", 1))
+		return Compile([]byte(profile), []byte(tailscaleLinkLocal), opts)
+	}
+	eff, ds := compileBody(body)
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	out, ok := eff.Outbound("filter/ts")
+	if !ok || out.Type != model.OutboundTailscale || out.Name != "Tailnet" || out.UDP || out.Tailscale != nil {
+		t.Fatalf("invalid module reference: %+v", out)
+	}
+	if len(eff.Rules) != 2 || eff.Rules[1].Target != out.ID || len(eff.Groups) != 1 || !slices.Equal(eff.Groups[0].Members, []string{out.ID}) {
+		t.Fatalf("module reference is missing from rules or groups: %+v %+v", eff.Rules, eff.Groups)
+	}
+	origin, ok := eff.OriginOf(model.JoinPath("/outbounds", out.ID))
+	if !ok || origin.Layer != LayerModule || origin.Source != "filter" || origin.Line != 2 {
+		t.Fatalf("unexpected module reference origin: %+v", origin)
+	}
+	bad := strings.Replace(body, "udp: false", "auth-key: example-secret", 1)
+	if eff, ds := compileBody(bad); eff != nil || !slices.ContainsFunc(ds.Errors(), func(d model.Diagnostic) bool {
+		return d.Code == "module.proxy" && d.Path == "/modules/filter" && !strings.Contains(d.Message, "example-secret")
+	}) {
+		t.Fatalf("module accepted device credentials: %v", ds)
+	}
+}
+
 func TestCompileLoonAndStashSnapshots(t *testing.T) {
 	const loon = `#!name=Loon filters
 [Argument]

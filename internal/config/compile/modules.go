@@ -177,6 +177,20 @@ func (c *compiler) convertModules(sources map[string]model.Source, targets map[s
 			c.sourceHashes[def.ID] = digest
 		}
 		layers[def.ID] = c.moduleNodes(def.ID, result)
+		for _, ref := range result.TailscaleReferences {
+			var node yaml.Node
+			if err := node.Encode(ref); err != nil {
+				c.errorf(model.DocProfile, path, "module.proxy", "cannot encode Tailscale reference")
+				continue
+			}
+			id := def.ID + "/" + ref.ID
+			put(&node, "id", scalar(id))
+			put(&node, "type", scalar(model.OutboundTailscale))
+			targets["outbounds"].Content = append(targets["outbounds"].Content, &node)
+			c.scopedIDs[id] = true
+			c.origins[model.JoinPath("/outbounds", id)] = moduleOrigin(def.ID, ref.Line)
+			policies.add(id, ref.Name)
+		}
 	}
 	return layers
 }

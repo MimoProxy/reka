@@ -327,6 +327,7 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	p.DNSChanged = gen.eff == nil && eff.DNS != nil || gen.eff != nil && gen.eff.DNSFingerprint != eff.DNSFingerprint
 	p.AutomaticGroupsChanged = gen.eff == nil && len(eff.AutoGroups) > 0 || gen.eff != nil && !reflect.DeepEqual(gen.eff.AutoGroups, eff.AutoGroups)
 	keepIDs := map[string]bool{}
+	activeLink := e.tailscale.Load()
 	for _, o := range eff.Outbounds {
 		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
@@ -340,8 +341,8 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 			p.Outbounds = append(p.Outbounds, ResourceChange{ID: o.ID, Action: ActionKeep})
 		default:
 			note := "new connections use a new instance; the old one drains"
-			if o.Type == model.OutboundTailscale {
-				note = "restarts the Tailscale node and disconnects its flows"
+			if activeLink != nil && activeLink.tag == o.ID {
+				note = "stops the previous Tailscale node and disconnects its flows"
 				p.Interrupts = true
 			}
 			p.Outbounds = append(p.Outbounds, ResourceChange{ID: o.ID, Action: ActionReplace, Connections: old.Active(), Note: note})
@@ -351,7 +352,7 @@ func (e *Engine) plan(eff *compile.Effective) Plan {
 	for id, old := range snap.Resources {
 		if !keepIDs[id] {
 			change := ResourceChange{ID: id, Action: ActionRemove, Connections: old.Active()}
-			if old.Type() == model.OutboundTailscale {
+			if activeLink != nil && activeLink.tag == id {
 				change.Note = "stops the Tailscale node and disconnects its flows"
 				p.Interrupts = true
 			}
@@ -464,7 +465,7 @@ type Prepared struct {
 	dnsBound    bool
 	eff         *compile.Effective
 	plan        Plan
-	tailscale   *tailscaleLink
+	tailscale   preparedTailscale
 	outbounds   map[string]*sagernet.Outbound
 	created     []*sagernet.Outbound
 	// bound are new listeners already accepting connections (bind-first).
@@ -528,22 +529,22 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 	if goruntime.GOOS == "android" && eff.Network.Mode == "tun" && p.plan.NetworkChanged && e.opts.TUNFD <= 0 {
 		return fail(&PrepareError{Path: "/network", Err: errors.New("host must supply a freshly established VpnService fd through reconfigureVPN")})
 	}
-	link, err := e.prepareTailscale(eff)
+	ts, err := e.prepareTailscale(eff)
 	if err != nil {
 		return fail(&PrepareError{Path: "/link/tailscale", Err: err})
 	}
-	p.tailscale = link
+	p.tailscale = ts
 	for _, o := range eff.Outbounds {
 		if o.Type == model.OutboundReject || o.Type == "pass" {
 			continue
 		}
 		if old, ok := snap.Resources[o.ID]; ok && fingerprintOf(gen, o.ID) == o.Fingerprint &&
-			(o.Tailscale == nil || link == e.tailscale.Load()) {
+			(o.Type != model.OutboundTailscale || ts.link == e.tailscale.Load()) {
 			p.outbounds[o.ID] = old
 			continue
 		}
-		if o.Tailscale != nil {
-			out := e.backend.NewTailscaleOutbound(o.ID, link)
+		if o.Type == model.OutboundTailscale {
+			out := e.backend.NewTailscaleOutbound(o.ID, ts.link, o.UDP)
 			p.created = append(p.created, out)
 			p.outbounds[o.ID] = out
 			continue
@@ -1519,7 +1520,7 @@ func (e *Engine) Close() {
 		l.in.Close()
 	}
 	e.listeners = nil
-	e.replaceTailscale(nil)
+	e.replaceTailscale(preparedTailscale{})
 	e.mu.Unlock()
 	e.backgroundScripts.workers.Wait()
 	e.backend.CloseConnections(nil)

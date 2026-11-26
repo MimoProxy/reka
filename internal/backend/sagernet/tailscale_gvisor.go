@@ -27,11 +27,11 @@ import (
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/tailscale/health"
 	"github.com/sagernet/tailscale/ipn"
-	"github.com/sagernet/tailscale/ipn/ipnlocal"
 	"github.com/sagernet/tailscale/ipn/ipnstate"
 	"github.com/sagernet/tailscale/ipn/store"
 	"github.com/sagernet/tailscale/net/netns"
 	"github.com/sagernet/tailscale/net/tsaddr"
+	"github.com/sagernet/tailscale/tailcfg"
 	"github.com/sagernet/tailscale/tsconst"
 	"github.com/sagernet/tailscale/tsnet"
 	"github.com/sagernet/tailscale/types/nettype"
@@ -44,13 +44,16 @@ var tailscaleInProcess atomic.Bool
 type tailscaleNode struct {
 	scope     *adapter.Scope
 	server    *tsnet.Server
-	local     *ipnlocal.LocalBackend
+	local     tailscaleLocalBackend
 	dns       adapter.DNSRouter
 	lastError atomic.Pointer[string]
 	closed    atomic.Bool
 	closeOnce sync.Once
 	closeErr  error
-	statusMu  sync.RWMutex
+	statusMu  sync.RWMutex // protects preferences and status across updates and shutdown
+	prefs     TailscalePreferences
+	exitID    tailcfg.StableNodeID
+	exitError string
 }
 
 // NewTailscaleNode starts the userspace server immediately. Control plane
@@ -168,28 +171,43 @@ func (b *Backend) NewTailscaleNode(tag string, opts TailscaleOptions) (_ Tailsca
 		return server.Close()
 	})
 	err = server.Start()
-	node.local = server.ExportLocalBackend()
+	local := server.ExportLocalBackend()
+	if local != nil {
+		node.local = local
+	}
 	if err != nil {
 		return nil, fmt.Errorf("start Tailscale: %w", err)
 	}
-	local := node.local
-	// tsnet starts with fresh preferences and keeps the persisted identity.
-	// Enable the outbound-only filter and keep OS DNS settings untouched.
-	_, err = local.EditPrefs(&ipn.MaskedPrefs{
-		Prefs:        ipn.Prefs{RouteAll: opts.AcceptRoutes, ShieldsUp: true},
-		RouteAllSet:  true,
-		ShieldsUpSet: true,
-		CorpDNSSet:   true,
-	})
-	if err != nil {
+	if err := node.SetPreferences(opts.TailscalePreferences); err != nil {
 		return nil, fmt.Errorf("configure Tailscale: %w", err)
 	}
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
+	// A no-disconnect notification callback can run while LocalBackend holds
+	// a lock. Re-read the latest map on a separate worker, coalescing bursts.
+	changed := make(chan struct{}, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		for {
+			select {
+			case <-scope.Context().Done():
+				return
+			case <-changed:
+				node.statusMu.Lock()
+				_ = node.applyPreferencesLocked()
+				node.statusMu.Unlock()
+			}
+		}
+	})
+	workers.Go(func() {
 		var lastLoginError string
-		const watch = ipn.NotifyInitialState | ipn.NotifyInitialHealthState | ipn.NotifyInProcessNoDisconnect
+		const watch = ipn.NotifyInitialState | ipn.NotifyInitialHealthState | ipn.NotifyInProcessNoDisconnect |
+			ipn.NotifyNoNetMap | ipn.NotifyPeerPatches
 		local.WatchNotifications(scope.Context(), watch, nil, func(n *ipn.Notify) bool {
+			if n.State != nil || n.SelfChange != nil || len(n.PeersChanged) > 0 || len(n.PeersRemoved) > 0 || len(n.PeerChangedPatch) > 0 {
+				select {
+				case changed <- struct{}{}:
+				default:
+				}
+			}
 			var message string
 			if n.Health != nil {
 				loginError := n.Health.Warnings[tsconst.HealthWarnableLoginState].Args[health.ArgError]
@@ -206,9 +224,9 @@ func (b *Backend) NewTailscaleNode(tag string, opts TailscaleOptions) (_ Tailsca
 			}
 			return true
 		})
-	}()
+	})
 	scope.Add(func() error {
-		<-watchDone
+		workers.Wait()
 		return nil
 	})
 	b.endpointListeners.add(scope, node)
@@ -310,15 +328,16 @@ func (n *tailscaleNode) Status() api.TailscaleStatus {
 	if last := n.lastError.Load(); last != nil {
 		lastError = *last
 	}
-	return tailscaleStatus(state, lastError)
+	return tailscaleStatus(state, lastError, n.exitID, n.exitError)
 }
 
-func tailscaleStatus(status *ipnstate.Status, lastError string) api.TailscaleStatus {
+func tailscaleStatus(status *ipnstate.Status, lastError string, exitID tailcfg.StableNodeID, exitError string) api.TailscaleStatus {
 	result := api.TailscaleStatus{
-		State:        tailscaleState(status.BackendState),
-		TailscaleIPs: append([]netip.Addr{}, status.TailscaleIPs...),
-		Peers:        make([]api.TailscalePeer, 0, len(status.Peer)),
-		LastError:    lastError,
+		State:         tailscaleState(status.BackendState),
+		TailscaleIPs:  append([]netip.Addr{}, status.TailscaleIPs...),
+		Peers:         make([]api.TailscalePeer, 0, len(status.Peer)),
+		LastError:     lastError,
+		ExitNodeError: exitError,
 	}
 	if result.State == api.TailscaleNeedsLogin {
 		result.AuthURL = status.AuthURL
@@ -332,10 +351,19 @@ func tailscaleStatus(status *ipnstate.Status, lastError string) api.TailscaleSta
 	ipnstate.SortPeers(peers)
 	for _, peer := range peers {
 		details := api.TailscalePeer{
-			Hostname:      peer.HostName,
-			TailscaleIPs:  append([]netip.Addr{}, peer.TailscaleIPs...),
-			Online:        peer.Online,
+			Hostname:       peer.HostName,
+			TailscaleIPs:   append([]netip.Addr{}, peer.TailscaleIPs...),
+			Online:         peer.Online,
+			ExitNodeOption: peer.ExitNodeOption,
+			ExitNode: result.State == api.TailscaleRunning && exitID != "" && peer.ID == exitID &&
+				peer.ExitNode && peer.ExitNodeOption && peer.Online && !peer.Expired,
 			DirectAddress: peer.CurAddr,
+		}
+		if details.ExitNode {
+			result.ExitNode = cmp.Or(peer.HostName, strings.TrimSuffix(peer.DNSName, "."))
+			if result.ExitNode == "" && len(peer.TailscaleIPs) > 0 {
+				result.ExitNode = peer.TailscaleIPs[0].String()
+			}
 		}
 		if details.DirectAddress == "" {
 			details.DERPRegion = peer.Relay
@@ -375,11 +403,14 @@ func (n *tailscaleNode) DialContext(ctx context.Context, network string, destina
 		if err != nil {
 			return nil, err
 		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("no addresses for %s", destination.Fqdn)
+		}
 		return N.DialSerial(ctx, n, network, destination, addrs)
 	}
 	addr := destination.Addr.Unmap()
-	if !addr.IsValid() || addr == tsaddr.TailscaleServiceIP() || addr == tsaddr.TailscaleServiceIPv6() {
-		return nil, errors.New("invalid Tailscale destination or disabled Tailscale service address")
+	if err := n.checkRoute(addr); err != nil {
+		return nil, err
 	}
 	ip4, ip6 := n.server.TailscaleIPs()
 	source := ip4
@@ -424,7 +455,9 @@ func (n *tailscaleNode) ListenPacket(ctx context.Context, destination M.Socksadd
 	if state := tailscaleState(n.local.State().String()); state != api.TailscaleRunning {
 		return nil, fmt.Errorf("Tailscale node is not running (%s)", state)
 	}
-	target := destination
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if destination.IsDomain() {
 		addrs, err := n.dns.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
@@ -433,11 +466,15 @@ func (n *tailscaleNode) ListenPacket(ctx context.Context, destination M.Socksadd
 		if len(addrs) == 0 {
 			return nil, fmt.Errorf("no addresses for %s", destination.Fqdn)
 		}
-		target = M.SocksaddrFrom(addrs[0], destination.Port)
+		conn, addr, err := N.ListenSerial(ctx, n, destination, addrs)
+		if err != nil {
+			return nil, err
+		}
+		return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(addr, destination.Port), destination), nil
 	}
-	addr := target.Addr.Unmap()
-	if !addr.IsValid() {
-		return nil, errors.New("invalid Tailscale destination")
+	addr := destination.Addr.Unmap()
+	if err := n.checkRoute(addr); err != nil {
+		return nil, err
 	}
 	ip4, ip6 := n.server.TailscaleIPs()
 	network, source := "udp4", ip4
@@ -451,8 +488,38 @@ func (n *tailscaleNode) ListenPacket(ctx context.Context, destination M.Socksadd
 	if err != nil {
 		return nil, err
 	}
-	if target != destination {
-		return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), target, destination), nil
+	return &tailscalePacketConn{PacketConn: conn, node: n}, nil
+}
+
+type tailscalePacketConn struct {
+	net.PacketConn
+	node *tailscaleNode
+}
+
+func (c *tailscalePacketConn) WriteTo(payload []byte, destination net.Addr) (int, error) {
+	if err := c.node.checkRoute(M.AddrFromNet(destination).Unmap()); err != nil {
+		return 0, err
 	}
-	return conn, nil
+	return c.PacketConn.WriteTo(payload, destination)
+}
+
+func (n *tailscaleNode) checkRoute(addr netip.Addr) error {
+	if n.closed.Load() {
+		return net.ErrClosed
+	}
+	if !addr.IsValid() || addr == tsaddr.TailscaleServiceIP() || addr == tsaddr.TailscaleServiceIPv6() {
+		return errors.New("invalid Tailscale destination or disabled Tailscale service address")
+	}
+	if tsaddr.IsTailscaleIP(addr) {
+		return nil
+	}
+	// PeerForIP uses the route manager's longest-prefix lookup, including
+	// approved subnet routes only when accepted, and the selected default.
+	n.statusMu.RLock()
+	defer n.statusMu.RUnlock()
+	peer, ok := n.local.PeerForIP(addr)
+	if ok && (peer.Route.Bits() > 0 || n.exitID != "" && peer.Node.StableID() == n.exitID && peer.Node.Online().Get() && !peer.Node.Expired()) {
+		return nil
+	}
+	return fmt.Errorf("no Tailscale route to %s; enable an exit node", addr)
 }

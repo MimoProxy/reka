@@ -84,13 +84,15 @@ type LocalWireGuardLink struct {
 // LocalTailscale runs the device's Tailscale node. AuthKeySecret names the
 // secret holding the auth key; without it the node uses interactive login.
 type LocalTailscale struct {
-	ID            string   `json:"id"`
-	ControlURL    string   `json:"controlURL,omitempty"`
-	AuthKeySecret string   `json:"authKeySecret,omitempty"`
-	Hostname      string   `json:"hostname,omitempty"`
-	Ephemeral     bool     `json:"ephemeral,omitempty"`
-	AcceptRoutes  *bool    `json:"acceptRoutes,omitempty"`
-	Routes        []string `json:"routes,omitempty"`
+	ID                     string   `json:"id"`
+	ControlURL             string   `json:"controlURL,omitempty"`
+	AuthKeySecret          string   `json:"authKeySecret,omitempty"`
+	Hostname               string   `json:"hostname,omitempty"`
+	Ephemeral              bool     `json:"ephemeral,omitempty"`
+	AcceptRoutes           *bool    `json:"acceptRoutes,omitempty"`
+	ExitNode               string   `json:"exitNode,omitempty"`
+	ExitNodeAllowLANAccess bool     `json:"exitNodeAllowLANAccess,omitempty"`
+	Routes                 []string `json:"routes,omitempty"`
 }
 
 func localSettings(scenes []SceneDefinition, mitm *LocalMITM, link *LocalLink) (json.RawMessage, error) {
@@ -108,13 +110,15 @@ func localSettings(scenes []SceneDefinition, mitm *LocalMITM, link *LocalLink) (
 		CA      string `json:"ca"`
 	}
 	type tailscaleSettings struct {
-		ID           string   `json:"id"`
-		ControlURL   string   `json:"control-url,omitempty"`
-		AuthKey      string   `json:"auth-key,omitempty"`
-		Hostname     string   `json:"hostname,omitempty"`
-		Ephemeral    bool     `json:"ephemeral,omitempty"`
-		AcceptRoutes *bool    `json:"accept-routes,omitempty"`
-		Routes       []string `json:"routes,omitempty"`
+		ID                     string   `json:"id"`
+		ControlURL             string   `json:"control-url,omitempty"`
+		AuthKey                string   `json:"auth-key,omitempty"`
+		Hostname               string   `json:"hostname,omitempty"`
+		Ephemeral              bool     `json:"ephemeral,omitempty"`
+		AcceptRoutes           *bool    `json:"accept-routes,omitempty"`
+		ExitNode               string   `json:"exit-node,omitempty"`
+		ExitNodeAllowLANAccess bool     `json:"exit-node-allow-lan-access,omitempty"`
+		Routes                 []string `json:"routes,omitempty"`
 	}
 	type linkSettings struct {
 		WireGuard []LocalWireGuardLink `json:"wireguard,omitempty"`
@@ -135,6 +139,7 @@ func localSettings(scenes []SceneDefinition, mitm *LocalMITM, link *LocalLink) (
 			settings := tailscaleSettings{
 				ID: ts.ID, ControlURL: ts.ControlURL, Hostname: ts.Hostname,
 				Ephemeral: ts.Ephemeral, AcceptRoutes: ts.AcceptRoutes, Routes: ts.Routes,
+				ExitNode: ts.ExitNode, ExitNodeAllowLANAccess: ts.ExitNodeAllowLANAccess,
 			}
 			if ts.AuthKeySecret != "" {
 				// Only link credentials, which profiles and subscriptions

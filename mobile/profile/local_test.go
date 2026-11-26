@@ -15,7 +15,8 @@ func TestPrepareLocalLink(t *testing.T) {
 	accept := false
 	link := &LocalLink{
 		WireGuard: []LocalWireGuardLink{{Outbound: "home-wg", Routes: []string{"10.0.0.0/24"}}},
-		Tailscale: &LocalTailscale{ID: "home", AuthKeySecret: "link/tailscale/home/auth-key", AcceptRoutes: &accept, Routes: []string{"10.1.0.0/24"}},
+		Tailscale: &LocalTailscale{ID: "home", AuthKeySecret: "link/tailscale/home/auth-key", AcceptRoutes: &accept,
+			ExitNode: "auto", ExitNodeAllowLANAccess: true, Routes: []string{"10.1.0.0/24"}},
 	}
 	store, err := secret.NewFileStore(filepath.Join(t.TempDir(), "secrets"), nil)
 	if err != nil {
@@ -37,7 +38,8 @@ func TestPrepareLocalLink(t *testing.T) {
 	}
 	ts := settings.Link.Tailscale
 	if len(ts) != 1 || ts[0].ID != "home" || ts[0].AuthKey != secret.Ref("link/tailscale/home/auth-key") ||
-		ts[0].AcceptRoutes == nil || *ts[0].AcceptRoutes || len(ts[0].Routes) != 1 {
+		ts[0].AcceptRoutes == nil || *ts[0].AcceptRoutes || len(ts[0].Routes) != 1 ||
+		ts[0].ExitNode != "auto" || !ts[0].ExitNodeAllowLANAccess {
 		t.Fatalf("Tailscale link = %+v", ts)
 	}
 

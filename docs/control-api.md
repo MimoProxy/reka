@@ -93,7 +93,7 @@ API 参数通常用 `snake_case`，配置文档和 patch 路径使用 YAML 的 `
 | `Hello` | `versions: [1]`，可选 `client` | `version`、`server`、`schema_versions`、`epoch` |
 | `GetCapabilities` | 无 | API/schema 版本、方法列表、协议/规则/平台能力 |
 | `GetStatus` | 无 | 配置版本与运行时状态 |
-| `GetTailscaleStatus` | None | Local Tailscale node, login, and peer status |
+| `GetTailscaleStatus` | None | Local Tailscale node, login, peers and active exit node |
 | `ProbeOutbound` | `outbound`、`url`，可选 `timeout_ms` | 显式节点/组的测速结果 |
 | `GetConnectionTimeline` | `id`，可选历史 `epoch` | 连接阶段和关联的 DNS、HTTP 摘要 |
 | `AddTemporaryRule` / `ListTemporaryRules` / `RemoveTemporaryRule` | `rule` 和可选 `ttl_seconds`，或 `id` | 临时分流规则 |
@@ -186,7 +186,32 @@ Call `GetTailscaleStatus` with empty parameters over the same framed control con
 
 The result reports `state` as `starting`, `needs-login`, `running`, `stopped`, or `error`. `stopped` also covers configurations without a Tailscale node. When configured, `id` identifies the local `link.tailscale` entry. `auth-url` is present only when login is required. Open it in a browser to authenticate the node. `last-error`, when present, describes the most recent error.
 
-`tailscale-ips` contains the node's Tailscale IP addresses. Each entry in `peers` includes `hostname`, `tailscale-ips`, and `online`. A known direct path has `direct-address`, and a known relay path has `derp-region`. Connection fields may be absent when there is no known active path. The status call is read-only. New connections to the outbound fail immediately until the node is running. [Tailscale configuration](configuration-reference.md#linktailscale)
+`tailscale-ips` contains the node's Tailscale IP addresses. Each entry in `peers` includes `hostname`, `tailscale-ips`, and `online`. A known direct path has `direct-address`, and a known relay path has `derp-region`. Connection fields may be absent when there is no known active path.
+
+The top-level `exit-node` is the hostname or IP of the effective exit peer, or an empty string when there is none. A peer's `exit-node-option` indicates that it offers an approved exit route. Its `exit-node` flag identifies the active exit. A device configured with `exit-node: auto` selects exactly one online candidate. If none or several qualify, `exit-node-error` explains why selection is empty.
+
+```json
+{
+  "id": 2,
+  "result": {
+    "id": "home",
+    "state": "running",
+    "tailscale-ips": ["100.64.0.1"],
+    "exit-node": "gateway",
+    "peers": [
+      {
+        "hostname": "gateway",
+        "tailscale-ips": ["100.64.0.2"],
+        "online": true,
+        "exit-node-option": true,
+        "exit-node": true
+      }
+    ]
+  }
+}
+```
+
+All profile and imported Tailscale references share this device status. New connections fail immediately until the node is running. [Tailscale configuration](configuration-reference.md#linktailscale)
 
 ### GetConfiguration
 

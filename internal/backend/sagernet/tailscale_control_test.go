@@ -29,6 +29,7 @@ import (
 	"github.com/sagernet/tailscale/control/controlhttp/controlhttpserver"
 	"github.com/sagernet/tailscale/derp/derpserver"
 	"github.com/sagernet/tailscale/ipn"
+	"github.com/sagernet/tailscale/net/tsaddr"
 	"github.com/sagernet/tailscale/tailcfg"
 	"github.com/sagernet/tailscale/tsnet"
 	"github.com/sagernet/tailscale/types/key"
@@ -137,7 +138,8 @@ func (c *testTailnet) register(w http.ResponseWriter, r *http.Request, machine k
 			ID: tailcfg.NodeID(id), StableID: tailcfg.StableNodeID(fmt.Sprint(id)), User: 1,
 			Name: request.Hostinfo.Hostname + ".tailnet.test.", Hostinfo: request.Hostinfo.View(),
 			Key: request.NodeKey, Machine: machine, Addresses: []netip.Prefix{address},
-			HomeDERP: testTailnetRegion, Online: &online, MachineAuthorized: true, Cap: request.Version,
+			AllowedIPs: []netip.Prefix{address},
+			HomeDERP:   testTailnetRegion, Online: &online, MachineAuthorized: true, Cap: request.Version,
 		})
 	}
 	c.mu.Unlock()
@@ -161,19 +163,25 @@ func (c *testTailnet) serveMap(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		node := c.nodes[index]
-		// The test control server approves all advertised subnet routes.
-		routes := node.PrimaryRoutes
+		// Approve all advertised routes. Default routes belong in AllowedIPs
+		// and do not make this peer a primary router for every subnet.
+		allowed := node.AllowedIPs
 		if !request.Stream && request.Hostinfo != nil {
-			routes = request.Hostinfo.RoutableIPs
+			allowed = append(slices.Clone(node.Addresses), request.Hostinfo.RoutableIPs...)
 		}
 		discoKey := node.DiscoKey
 		if !request.DiscoKey.IsZero() {
 			discoKey = request.DiscoKey
 		}
-		if node.DiscoKey != discoKey || !slices.Equal(node.PrimaryRoutes, routes) {
+		if node.DiscoKey != discoKey || !slices.Equal(node.AllowedIPs, allowed) {
 			node.DiscoKey = discoKey
-			node.PrimaryRoutes = routes
-			node.AllowedIPs = append(slices.Clone(node.Addresses), routes...)
+			node.AllowedIPs = allowed
+			node.PrimaryRoutes = nil
+			for _, route := range allowed {
+				if !slices.Contains(node.Addresses, route) && !tsaddr.IsExitRoute(route) {
+					node.PrimaryRoutes = append(node.PrimaryRoutes, route)
+				}
+			}
 			close(c.updated)
 			c.updated = make(chan struct{})
 		}
@@ -211,19 +219,18 @@ func (c *testTailnet) serveMap(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func waitTailscaleState(t *testing.T, ctx context.Context, node TailscaleNode, state string, withPeer bool) api.TailscaleStatus {
+func waitTailscaleStatus(t *testing.T, ctx context.Context, node TailscaleNode, description string, ready func(api.TailscaleStatus) bool) api.TailscaleStatus {
 	t.Helper()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		status := node.Status()
-		if status.State == state && (!withPeer || len(status.Peers) > 0) &&
-			(state != api.TailscaleNeedsLogin || status.AuthURL != "") {
+		if ready(status) {
 			return status
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("waiting for Tailscale state %q: %+v", state, status)
+			t.Fatalf("waiting for %s: %+v", description, status)
 		case <-ticker.C:
 		}
 	}
@@ -239,14 +246,16 @@ func TestTailscalePeer(t *testing.T) {
 		return Route{}
 	})
 	node, err := backend.NewTailscaleNode("tailscale/test", TailscaleOptions{
-		StateDirectory: t.TempDir(), ControlURL: control.url, AuthKey: testTailnetAuthKey,
-		Hostname: "reka-test", AcceptRoutes: true,
+		TailscaleIdentity: TailscaleIdentity{
+			StateDirectory: t.TempDir(), ControlURL: control.url, AuthKey: testTailnetAuthKey, Hostname: "reka-test",
+		},
+		TailscalePreferences: TailscalePreferences{AcceptRoutes: true},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { node.Close() })
-	out := backend.NewTailscaleOutbound("tailscale/test", node)
+	out := backend.NewTailscaleOutbound("tailscale/test", node, true)
 	t.Cleanup(func() { out.Close() })
 	peer := &tsnet.Server{
 		Dir: t.TempDir(), Hostname: "echo-test", ControlURL: control.url, AuthKey: testTailnetAuthKey, UserLogf: logger.Discard,
@@ -268,13 +277,16 @@ func TestTailscalePeer(t *testing.T) {
 		t.Fatal("start echo peer:", err)
 	}
 	peerIP := peerStatus.TailscaleIPs[0]
-	status := waitTailscaleState(t, ctx, node, api.TailscaleRunning, true)
+	subnetTarget := netip.MustParseAddrPort("192.0.2.20:27001")
+	status := waitTailscaleStatus(t, ctx, node, "peer and approved subnet route", func(s api.TailscaleStatus) bool {
+		_, routed := node.(*tailscaleNode).local.PeerForIP(subnetTarget.Addr())
+		return s.State == api.TailscaleRunning && len(s.Peers) > 0 && routed
+	})
 	if len(status.TailscaleIPs) == 0 || !slices.Contains(status.Peers[0].TailscaleIPs, peerIP) ||
 		status.Peers[0].Hostname != "echo-test" || !status.Peers[0].Online {
 		t.Fatalf("unexpected Tailscale status: %+v", status)
 	}
 	target := netip.AddrPortFrom(peerIP, 27001)
-	subnetTarget := netip.MustParseAddrPort("192.0.2.20:27001")
 	// Keep the peer's temporary subnet IP installed until the copy finishes.
 	removeEcho := peer.RegisterFallbackTCPHandler(func(_, dst netip.AddrPort) (func(net.Conn), bool) {
 		if dst != target && dst != subnetTarget {
@@ -416,6 +428,111 @@ func assertTailnetTCPEcho(t *testing.T, ctx context.Context, outbound *Outbound,
 	}
 }
 
+func TestTailscaleExitNode(t *testing.T) {
+	control := newTestTailnet(t)
+	backend := New(Options{Logger: testLogger(t)})
+	t.Cleanup(func() { backend.Close() })
+	node, err := backend.NewTailscaleNode("tailscale/test", TailscaleOptions{
+		TailscaleIdentity: TailscaleIdentity{
+			StateDirectory: t.TempDir(), ControlURL: control.url, AuthKey: testTailnetAuthKey, Hostname: "client",
+		},
+		TailscalePreferences: TailscalePreferences{ExitNode: "auto", ExitNodeAllowLANAccess: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { node.Close() })
+	out := backend.NewTailscaleOutbound("tailscale/test", node, true)
+	t.Cleanup(func() { out.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	waitTailscaleStatus(t, ctx, node, "auto selection without a candidate", func(s api.TailscaleStatus) bool {
+		return s.State == api.TailscaleRunning && s.ExitNode == "" && s.ExitNodeError != ""
+	})
+
+	// The exit peer forwards this documentation-only address to a loopback
+	// origin. The client dials only the documentation address.
+	target := netip.MustParseAddrPort("203.0.113.80:80")
+	origin := tailnetTestHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "response from origin")
+	}), false)
+	peer := &tsnet.Server{
+		Dir: t.TempDir(), Hostname: "exit-peer", ControlURL: control.url, AuthKey: testTailnetAuthKey, UserLogf: logger.Discard,
+	}
+	t.Cleanup(func() { peer.Close() })
+	removeForwarder := peer.RegisterFallbackTCPHandler(func(_, dst netip.AddrPort) (func(net.Conn), bool) {
+		if dst != target {
+			return nil, false
+		}
+		return func(conn net.Conn) {
+			defer conn.Close()
+			var dialer net.Dialer
+			upstream, err := dialer.DialContext(ctx, "tcp", origin.Listener.Addr().String())
+			if err != nil {
+				return
+			}
+			defer upstream.Close()
+			go func() { _, _ = io.Copy(upstream, conn) }()
+			_, _ = io.Copy(conn, upstream)
+		}, true
+	})
+	t.Cleanup(removeForwarder)
+	if _, err := peer.Up(ctx); err != nil {
+		t.Fatal("start exit peer:", err)
+	}
+	if _, err := peer.ExportLocalBackend().EditPrefs(&ipn.MaskedPrefs{
+		Prefs: ipn.Prefs{AdvertiseRoutes: tsaddr.ExitRoutes()}, AdvertiseRoutesSet: true,
+	}); err != nil {
+		t.Fatal("advertise exit routes:", err)
+	}
+	waitTailscaleStatus(t, ctx, node, "approved exit peer selected", func(s api.TailscaleStatus) bool {
+		return s.ExitNode == peer.Hostname && s.ExitNodeError == "" && len(s.Peers) == 1 &&
+			s.Peers[0].ExitNodeOption && s.Peers[0].ExitNode
+	})
+	clientBackend := node.(*tailscaleNode).local
+	prefs := clientBackend.Prefs()
+	if prefs.ExitNodeID() != peer.ExportLocalBackend().Status().Self.ID || !prefs.ExitNodeAllowLANAccess() {
+		t.Fatalf("exit prefs: id=%q allow-lan-access=%v", prefs.ExitNodeID(), prefs.ExitNodeAllowLANAccess())
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+target.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{DialContext: out.Dial, DisableKeepAlives: true}}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("access origin via exit peer:", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || string(body) != "response from origin" {
+		t.Fatalf("origin response %q, error %v", body, err)
+	}
+
+	if err := node.SetPreferences(TailscalePreferences{}); err != nil {
+		t.Fatal("disable exit node:", err)
+	}
+	waitTailscaleStatus(t, ctx, node, "exit peer available and unselected", func(s api.TailscaleStatus) bool {
+		return s.ExitNode == "" && s.ExitNodeError == "" && len(s.Peers) == 1 &&
+			s.Peers[0].ExitNodeOption && !s.Peers[0].ExitNode
+	})
+	prefs = clientBackend.Prefs()
+	if prefs.ExitNodeID() != "" || prefs.ExitNodeIP().IsValid() || prefs.ExitNodeAllowLANAccess() {
+		t.Fatalf("cleared exit prefs: id=%q ip=%v allow-lan-access=%v", prefs.ExitNodeID(), prefs.ExitNodeIP(), prefs.ExitNodeAllowLANAccess())
+	}
+	dialCtx, cancelDial := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancelDial()
+	for _, network := range []string{"tcp", "udp"} {
+		conn, err := out.Dial(dialCtx, network, target.String())
+		if conn != nil {
+			conn.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "no Tailscale route") || dialCtx.Err() != nil {
+			t.Fatalf("%s without exit node: error %v, context %v", network, err, dialCtx.Err())
+		}
+	}
+}
+
 func TestTailscaleInteractiveLogin(t *testing.T) {
 	for _, name := range []string{"TS_AUTHKEY", "TS_AUTH_KEY", "TS_CLIENT_SECRET", "TS_CLIENT_ID", "TS_ID_TOKEN", "TS_AUDIENCE"} {
 		t.Setenv(name, "")
@@ -424,7 +541,7 @@ func TestTailscaleInteractiveLogin(t *testing.T) {
 	backend := New(Options{Logger: testLogger(t)})
 	t.Cleanup(func() { backend.Close() })
 	node, err := backend.NewTailscaleNode("tailscale/test", TailscaleOptions{
-		StateDirectory: t.TempDir(), ControlURL: control.url, Hostname: "reka-test",
+		TailscaleIdentity: TailscaleIdentity{StateDirectory: t.TempDir(), ControlURL: control.url, Hostname: "reka-test"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -432,11 +549,13 @@ func TestTailscaleInteractiveLogin(t *testing.T) {
 	t.Cleanup(func() { node.Close() })
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	status := waitTailscaleState(t, ctx, node, api.TailscaleNeedsLogin, false)
+	status := waitTailscaleStatus(t, ctx, node, "interactive login", func(s api.TailscaleStatus) bool {
+		return s.State == api.TailscaleNeedsLogin && s.AuthURL != ""
+	})
 	if status.AuthURL != testTailnetLoginURL {
 		t.Fatalf("authentication URL = %q, want %q", status.AuthURL, testTailnetLoginURL)
 	}
-	out := backend.NewTailscaleOutbound("tailscale/test", node)
+	out := backend.NewTailscaleOutbound("tailscale/test", node, true)
 	defer out.Close()
 	dialCtx, cancelDial := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancelDial()

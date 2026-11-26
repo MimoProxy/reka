@@ -70,6 +70,12 @@ Clash YAML accepts `type: ssh` with `server`, `port`, `username`, `password`, an
 
 Supply `host-key` as a list of authorized_keys public keys. `host-key-algorithms` can set their negotiation order. When `host-key` is absent or empty, the importer preserves mihomo's behavior by setting `insecure-skip-host-key: true` and warns that the server identity is unchecked. Add the server's trusted public key to enable verification. SSH forwards TCP only, so `udp: true` produces an ignored-field diagnostic.
 
+## Tailscale nodes
+
+A mihomo `type: tailscale` proxy imports as a native reference to the device's Tailscale node. Its name supplies the display name and stable source ID. Rules and groups can use that ID. The importer preserves `udp` and defaults it to `false` when omitted, matching mihomo.
+
+The importer skips `auth-key`, `control-url`, `state-dir`, `hostname`, `ephemeral`, `accept-routes`, `exit-node` and `exit-node-allow-lan-access`. It reports each supplied field by name and discards its value. Set up the node and choose its exit in the device's `local.yaml`. The host manages the state directory. A device without a local node can still load the reference and its rules. [Device configuration](configuration-reference.md#linktailscale)
+
 ## WireGuard nodes
 
 Clash YAML accepts a `wireguard` proxy with a single peer. Put the endpoint, public key and peer options at the top level or in one `peers` entry. The local `private-key`, `ip` and `ipv6` belong to the node. Import preserves explicit prefix lengths and appends `/32` to bare IPv4 addresses and `/128` to bare IPv6 addresses.

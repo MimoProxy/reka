@@ -23,6 +23,7 @@ func TestDetectFormat(t *testing.T) {
 		{"commented marker", "", "[Rule]\n# [Argument]\n// example reject-dict", "surge"},
 		{"YAML mapping", "", "\ufeff# comment\n---\nscript-providers: {}", "stash"},
 		{"YAML flow mapping", "", "{name: Example, rules: []}", "stash"},
+		{"YAML proxy list", "", "proxies: [{type: tailscale, name: Tailnet}]", "stash"},
 		{"unknown mapping", "", "other: []", ""},
 		{"invalid YAML", "", "name: [Example", ""},
 		{"unknown", "", "plain text", ""},

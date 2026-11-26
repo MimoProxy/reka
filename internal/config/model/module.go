@@ -66,10 +66,13 @@ func ValidModuleFormat(format string) bool {
 	return false
 }
 
-var moduleID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var stableID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// ValidStableID reports whether an unscoped native resource ID is valid.
+func ValidStableID(id string) bool { return stableID.MatchString(id) }
 
 func ValidModule(m *Module) error {
-	if m == nil || !moduleID.MatchString(m.ID) {
+	if m == nil || !ValidStableID(m.ID) {
 		return errors.New("module id must be a native stable ID")
 	}
 	if (m.URL == "") == (m.File == "") {

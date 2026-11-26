@@ -17,6 +17,110 @@ const tailscaleLinkLocal = `link:
     - id: home
 `
 
+func TestTailscaleReferencesAndRouting(t *testing.T) {
+	const profile = `schema-version: 1
+imports: [{source: feed, outbounds: true, groups: true}]
+outbounds: [{id: ts, name: Local tailnet, type: tailscale}]
+groups:
+  - {id: choice, type: select, members: [ts, feed/imported]}
+rules:
+  - {match: {domain: named.test}, outbound: ts}
+  - {match: {domain: group.test}, outbound: choice}
+`
+	const sources = `sources:
+  - id: feed
+    outbounds: [{id: imported, type: tailscale, udp: false}]
+    groups: [{id: speed, type: url-test, include-all: true}]
+`
+	for _, local := range []string{"", tailscaleLinkLocal} {
+		eff, ds := Compile([]byte(profile), []byte(local), Options{Sources: []byte(sources)})
+		if eff == nil || ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		for id, udp := range map[string]bool{"ts": true, "feed/imported": false} {
+			out, ok := eff.Outbound(id)
+			if !ok || out.Type != model.OutboundTailscale || out.Tailscale != nil || out.UDP != udp || out.Fingerprint == "" {
+				t.Errorf("unexpected reference %q: %+v", id, out)
+			}
+		}
+		if !slices.ContainsFunc(eff.Groups, func(g router.Group) bool {
+			return g.ID == "feed/speed" && slices.Equal(g.Members, []string{"feed/imported"})
+		}) {
+			t.Fatalf("url-test did not include its scoped reference: %+v", eff.Groups)
+		}
+		for _, host := range []string{"named.test", "group.test"} {
+			if got := eff.Router.Route(t.Context(), router.Metadata{Domain: host}, nil); got.Outbound != "ts" {
+				t.Fatalf("route for %s = %+v", host, got)
+			}
+		}
+		warnings := map[string]string{}
+		for _, d := range ds {
+			if d.Code == "outbound.tailscale-unavailable" && d.Severity == model.SeverityWarning {
+				warnings[d.Path] = d.Document
+			}
+		}
+		if local == "" {
+			if warnings["/sources/feed/outbounds/imported/type"] != model.DocSources || warnings["/outbounds/ts/type"] != model.DocProfile {
+				t.Fatalf("missing warnings on the declaring documents: %v", ds)
+			}
+		} else if len(warnings) != 0 {
+			t.Fatalf("configured node produced unavailable warnings: %v", ds)
+		}
+	}
+}
+
+func TestTailscaleReferenceRejectsNodeOptions(t *testing.T) {
+	for _, config := range []string{"server: localhost", "port: 1234", "tls: {}", "protocol: {}", "transport: {}", "multiplex: {}", "dialer: {}",
+		"password: example", "auth-key: example", "control-url: example", "hostname: example", "state-dir: state", "ephemeral: true",
+		"accept-routes: true", "exit-node: auto", "exit-node-allow-lan-access: false"} {
+		field, _, _ := strings.Cut(config, ":")
+		t.Run(field, func(t *testing.T) {
+			profile := "schema-version: 1\noutbounds: [{id: ts, type: tailscale, " + config + "}]\n"
+			eff, ds := Compile([]byte(profile), nil, Options{})
+			if eff != nil || !slices.ContainsFunc(ds.Errors(), func(d model.Diagnostic) bool {
+				return d.Document == model.DocProfile && d.Path == "/outbounds/ts/"+field && d.Line == 2
+			}) {
+				t.Fatalf("expected an error on %s: %v", field, ds)
+			}
+		})
+	}
+}
+
+func TestTailscaleReferenceFingerprints(t *testing.T) {
+	const profile = `schema-version: 1
+outbounds:
+  - {id: ts, type: tailscale}
+  - {id: remote, type: socks, server: relay.test, port: 1080, dialer: {proxy: ts}}
+`
+	compile := func(local string) map[string]string {
+		t.Helper()
+		eff, ds := Compile([]byte(profile), []byte(local), Options{})
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		fingerprints := map[string]string{}
+		for _, out := range eff.Outbounds {
+			fingerprints[out.ID] = out.Fingerprint
+		}
+		return fingerprints
+	}
+	base := compile(tailscaleLinkLocal)
+	preferred := compile(tailscaleLinkLocal + "      accept-routes: false\n      exit-node: gateway\n      exit-node-allow-lan-access: true\n")
+	for _, out := range []string{"tailscale/home", "ts", "remote"} {
+		if base[out] != preferred[out] {
+			t.Errorf("routing preferences changed the %s fingerprint", out)
+		}
+	}
+	for _, local := range []string{"", tailscaleLinkLocal + "      hostname: replacement\n", "link: {tailscale: [{id: renamed}]}"} {
+		changed := compile(local)
+		for _, out := range []string{"ts", "remote"} {
+			if base[out] == changed[out] {
+				t.Errorf("node identity change did not update the %s fingerprint", out)
+			}
+		}
+	}
+}
+
 func TestTailscaleLinkOptionsAndRuleOrder(t *testing.T) {
 	profile := strings.Replace(wireGuardLinkProfile, "rules:\n", `groups:
   - {id: home-access, type: select, members: [tailscale/home, direct]}
@@ -30,6 +134,8 @@ rules:
       hostname: local-node
       ephemeral: true
       accept-routes: false
+      exit-node: auto
+      exit-node-allow-lan-access: true
       routes: [10.0.1.99/23, '2001:db8:2::1/48']
 `
 	eff, ds := Compile([]byte(profile), []byte(local), Options{})
@@ -41,7 +147,8 @@ rules:
 	if !ok || out.Type != model.OutboundTailscale || out.Tailscale == nil || !out.UDP || out.Builtin || out.Fingerprint == "" {
 		t.Fatal("missing local Tailscale outbound")
 	}
-	if want := (Tailscale{ID: "home", ControlURL: "https://control.example.test:443", Hostname: "local-node", Ephemeral: true}); *out.Tailscale != want {
+	identity := TailscaleIdentity{ID: "home", ControlURL: "https://control.example.test:443", Hostname: "local-node", Ephemeral: true}
+	if want := (Tailscale{TailscaleIdentity: identity, ExitNode: "auto", ExitNodeAllowLANAccess: true}); *out.Tailscale != want {
 		t.Fatal("Tailscale settings did not survive compilation")
 	}
 	if want := []string{"tunnel", target, target, target, "home-access", "reject", "reject"}; len(eff.Rules) != len(want) {
@@ -127,7 +234,6 @@ func TestTailscaleLinkValidation(t *testing.T) {
 		{"reserved secret", "{id: home, auth-key: secret://mitm/private-key}", "/home/auth-key", "secret.reserved"},
 		{"bad secret reference", "{id: home, auth-key: secret://../auth}", "/home/auth-key", "secret.name"},
 		{"route limit", "{id: home, routes: [" + strings.Repeat("10.0.0.0/24, ", 64) + "10.0.1.0/24]}", "/home/routes", "link.tailscale.routes"},
-		{"exit node", "{id: home, exit-node: test}", "/home/exit-node", "schema.unknown-field"},
 		{"custom state directory", "{id: home, state-directory: test}", "/home/state-directory", "schema.unknown-field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

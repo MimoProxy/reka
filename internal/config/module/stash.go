@@ -21,6 +21,8 @@ func (c *converter) convertStash(text []byte) {
 		return
 	}
 	providers := parseStashProviders(fields["script-providers"])
+	// Rule targets can precede the proxy list in YAML.
+	proxyIssues, resolve := c.stashProxies(fields["proxies"])
 	for i := 0; i < len(root.Content); i += 2 {
 		key, value := root.Content[i], root.Content[i+1]
 		switch key.Value {
@@ -32,12 +34,20 @@ func (c *converter) convertStash(text []byte) {
 					var rule model.Rule
 					issue := unsupported("module.rule-syntax", "expected a rule string")
 					if text, ok := stashString(item); ok {
-						rule, issue = convertRule(text, text, c.opts.Resolve)
+						rule, issue = convertRule(text, text, resolve)
 					}
 					c.report.record(item.Line, "rules", c.addRule(item.Line, rule, issue))
 				}
 			} else {
 				c.report.record(key.Line, "rules", stashExpectedList())
+			}
+		case "proxies":
+			if seq := stashSequence(value); seq != nil {
+				for i, item := range seq.Content {
+					c.report.record(item.Line, key.Value, proxyIssues[i])
+				}
+			} else {
+				c.report.record(key.Line, key.Value, stashExpectedList())
 			}
 		case "cron":
 			fields, ok := stashMapping(value)
@@ -91,6 +101,87 @@ func stashMetadata(fields map[string]*yaml.Node) Metadata {
 	return Metadata{Name: name, Desc: desc, Icon: icon, Category: category}
 }
 
+func (c *converter) stashProxies(node *yaml.Node) ([]outcome, func(string) (string, bool)) {
+	seq := stashSequence(node)
+	if seq == nil {
+		return nil, c.opts.Resolve
+	}
+	issues := make([]outcome, len(seq.Content))
+	targets := make(map[string]string)
+	for i, item := range seq.Content {
+		ref, issue := c.stashTailscaleReference(item)
+		if issue.status == "" {
+			scoped := ref.ID
+			if c.opts.ID != "" {
+				scoped = c.opts.ID + "/" + ref.ID
+			}
+			if targets[ref.ID] != "" || targets[ref.Name] != "" || targets[scoped] != "" {
+				issue = failed("module.proxy", "duplicate module proxy ID or name")
+			} else {
+				targets[ref.ID], targets[scoped] = scoped, scoped
+				if ref.Name != "" {
+					targets[ref.Name] = scoped
+				}
+				c.result.TailscaleReferences = append(c.result.TailscaleReferences, ref)
+			}
+		}
+		issues[i] = issue
+	}
+	return issues, func(policy string) (string, bool) {
+		if scoped, ok := targets[policy]; ok {
+			return scoped, true
+		}
+		if c.opts.Resolve != nil {
+			return c.opts.Resolve(policy)
+		}
+		return "", false
+	}
+}
+
+func (c *converter) stashTailscaleReference(item *yaml.Node) (TailscaleReference, outcome) {
+	fields, valid := stashMapping(item)
+	kind, _ := stashString(fields["type"])
+	if !valid || kind != model.OutboundTailscale {
+		return TailscaleReference{}, ignored("module.proxy", "only Tailscale references can be declared by modules")
+	}
+	var ref TailscaleReference
+	ref.Line = item.Line
+	for i := 0; i < len(item.Content); i += 2 {
+		switch item.Content[i].Value {
+		case "id", "name", "type", "udp":
+		default:
+			return ref, failed("module.proxy", "Tailscale references accept only id, name, type and udp")
+		}
+	}
+	if field := fields["name"]; field != nil {
+		if ref.Name, valid = stashString(field); !valid || strings.TrimSpace(ref.Name) == "" {
+			return ref, failed("module.proxy", "expected a nonempty proxy name")
+		}
+	}
+	if field := fields["id"]; field != nil {
+		if ref.ID, valid = stashString(field); !valid || !model.ValidStableID(ref.ID) {
+			return ref, failed("module.proxy", "proxy id must be a native stable ID")
+		}
+	} else {
+		switch {
+		case ref.Name == "":
+			return ref, failed("module.proxy", "Tailscale reference requires an id or name")
+		case model.ValidStableID(ref.Name):
+			ref.ID = ref.Name
+		default:
+			ref.ID = c.id("p", ref.Name, item.Line)
+		}
+	}
+	if field := fields["udp"]; field != nil {
+		var udp bool
+		if field.ShortTag() != "!!bool" || field.Decode(&udp) != nil {
+			return ref, failed("module.proxy", "udp must be a boolean")
+		}
+		ref.UDP = &udp
+	}
+	return ref, outcome{}
+}
+
 func stashTopLevel(key string) outcome {
 	switch key {
 	case "author", "homepage", "date", "raw-url", "tg-channel", "openUrl", "open-url", "tag", "tags", "version", "license", "system",
@@ -100,8 +191,8 @@ func stashTopLevel(key string) outcome {
 		return unsupported("module.arguments", "Stash arguments are not supported")
 	case "rule-providers":
 		return ignored("module.rule-set", "modules cannot define rule sets")
-	case "proxies", "proxy-groups", "proxy-providers":
-		return ignored("module.proxy", "modules cannot define policies")
+	case "proxy-groups", "proxy-providers":
+		return ignored("module.proxy", "modules cannot define proxy groups or providers")
 	case "dns", "hosts":
 		return unsupported("module.host", "modules cannot change DNS settings")
 	case "external-controller", "secret", "mode", "log-level", "tun", "mixed-port", "port", "socks-port", "allow-lan", "bind-address", "ipv6":
