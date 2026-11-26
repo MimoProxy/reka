@@ -14,7 +14,12 @@ LDFLAGS ?= -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0
 OVERLAY := $(shell python3 tools/build-overlay.py)
 GO_OVERLAY = -modfile bin/build.mod -overlay "$(OVERLAY)"
 
-GOFLAGS_BUILD = $(GO_OVERLAY) -trimpath -tags "$(TAGS)" -ldflags "$(LDFLAGS) -s -w -buildid="
+# -trimpath on every build, test and vet keeps Go's build cache keys free of
+# the checkout path, so worktrees and temp copies share one cache instead of
+# each adding a full copy of the dependency tree.
+GO_COMMON = $(GO_OVERLAY) -trimpath
+
+GOFLAGS_BUILD = $(GO_COMMON) -tags "$(TAGS)" -ldflags "$(LDFLAGS) -s -w -buildid="
 
 # The Android probe and JNI binding need the NDK (mobile/android/build.sh).
 PKGS = $(shell go list ./... | grep -v -e /tools/tunprobe-android/ -e /mobile/jni)
@@ -26,14 +31,14 @@ build:
 	go build $(GOFLAGS_BUILD) -o bin/rekactl ./cmd/rekactl
 
 test:
-	go test $(GO_OVERLAY) -timeout "$(TEST_TIMEOUT)" -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
+	go test $(GO_COMMON) -timeout "$(TEST_TIMEOUT)" -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
 
 # The pinned overlays make Vision and SOCKS UDP race/checkptr-testable.
 race:
-	CGO_ENABLED=1 go test $(GO_OVERLAY) -race -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
+	CGO_ENABLED=1 go test $(GO_COMMON) -race -tags "$(TAGS)" -ldflags "$(LDFLAGS)" $(PKGS)
 
 vet:
-	go vet $(GO_OVERLAY) -tags "$(TAGS)" $(PKGS)
+	go vet $(GO_COMMON) -tags "$(TAGS)" $(PKGS)
 
 android:
 	mobile/android/build.sh
