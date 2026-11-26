@@ -6,17 +6,21 @@ import (
 )
 
 func TestStandaloneSecurityCarriersAndSecrets(t *testing.T) {
-	for _, protocol := range []string{"vless", "vmess", "trojan"} {
+	for _, protocol := range []string{"vless", "vmess", "trojan", "anytls"} {
 		for _, tc := range []struct{ key, options, kind string }{
 			{"shadow-tls-opts", "version: 3, password: outer-private", "shadow-tls"},
 			{"restls-opts", "password: outer-private, version-hint: tls13, restls-script: '100~20'", "restls"},
 			{"jls-opts", "username: user-private, password: outer-private", "jls"},
 		} {
 			credentials := "uuid: b831381d-6324-4d53-ad4f-8cda48b30811"
-			if protocol == "trojan" {
+			if protocol == "trojan" || protocol == "anytls" {
 				credentials = "password: inner-secret"
 			}
-			input := "proxies: [{name: a, type: " + protocol + ", server: node.test, port: 443, tls: true, servername: camo.test, " + credentials + ", " + tc.key + ": {" + tc.options + "}}]"
+			tls := "tls: true, servername: camo.test"
+			if protocol == "anytls" {
+				tls = "sni: camo.test"
+			}
+			input := "proxies: [{name: a, type: " + protocol + ", server: node.test, port: 443, " + tls + ", " + credentials + ", " + tc.key + ": {" + tc.options + "}}]"
 			r := Import(request(input))
 			if !r.Report.CanApply {
 				t.Fatal(protocol, tc.kind, r.Report)
@@ -33,8 +37,10 @@ func TestStandaloneSecurityCarriersAndSecrets(t *testing.T) {
 			if wrong.Report.CanApply {
 				t.Fatal("unknown security field accepted")
 			}
-			if noTLS := Import(request(strings.Replace(input, "tls: true", "tls: false", 1))); noTLS.Report.CanApply {
-				t.Fatal("active security mode accepted without TLS", protocol)
+			if protocol != "anytls" {
+				if noTLS := Import(request(strings.Replace(input, "tls: true", "tls: false", 1))); noTLS.Report.CanApply {
+					t.Fatal("active security mode accepted without TLS", protocol)
+				}
 			}
 		}
 	}

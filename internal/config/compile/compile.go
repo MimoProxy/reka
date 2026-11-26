@@ -432,6 +432,7 @@ var fieldsByType = map[string][]string{
 	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "encryption", "packet-encoding", "tls", "udp", "transport", "multiplex"},
 	"vmess":                   {"server", "port", "uuid", "tls", "udp", "protocol", "transport", "multiplex", "packet-encoding"},
 	"trojan":                  {"server", "port", "password", "tls", "udp", "transport", "multiplex"},
+	"anytls":                  {"server", "port", "password", "tls", "udp", "protocol"},
 	"hysteria2":               {"server", "port", "password", "tls", "udp", "protocol"},
 	"tuic":                    {"server", "port", "uuid", "password", "tls", "udp", "protocol"},
 	"snell":                   {"server", "port", "password", "udp", "protocol"},
@@ -521,7 +522,9 @@ func (c *compiler) outbounds(eff *Effective) {
 			continue
 		}
 		for _, k := range c.present(base) {
-			if !slices.Contains(allowed, k) && !slices.Contains(commonFields, k) {
+			if ob.Type == "anytls" && k == "multiplex" {
+				c.errorf(doc, base+"/multiplex", "outbound.field", "AnyTLS manages its own sessions and does not accept multiplex")
+			} else if !slices.Contains(allowed, k) && !slices.Contains(commonFields, k) {
 				c.errorf(doc, base+"/"+k, "outbound.field", "field %q does not apply to %s outbounds", k, ob.Type)
 			}
 		}
@@ -533,6 +536,10 @@ func (c *compiler) outbounds(eff *Effective) {
 			value := *ob.Dialer
 			if ob.Type == model.OutboundReject || ob.Type == "pass" || ob.Type == "reject-drop" {
 				c.errorf(doc, base+"/dialer", "outbound.dialer", "reject does not dial a connection")
+			}
+			// sing-box AnyTLS needs the remote address before the first write.
+			if ob.Type == "anytls" && value.TFO {
+				c.errorf(doc, base+"/dialer/tfo", "outbound.dialer", "TCP Fast Open (TFO) is not supported by AnyTLS")
 			}
 			if value.RoutingMark < 0 || uint64(value.RoutingMark) > uint64(^uint32(0)) {
 				c.errorf(doc, base+"/dialer/routing-mark", "outbound.dialer", "routing-mark must be a uint32")

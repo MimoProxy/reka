@@ -8,9 +8,9 @@ import (
 
 func tlsExtraKeys(typ string) []string {
 	switch typ {
-	case "http", "socks5", "vless", "vmess", "trojan", "hysteria2", "hy2", "tuic":
+	case "http", "socks5", "vless", "vmess", "trojan", "anytls", "hysteria2", "hy2", "tuic":
 		keys := []string{"fingerprint", "name-cert-verify", "certificate", "private-key", "ech-opts"}
-		if typ == "vmess" || typ == "vless" || typ == "trojan" {
+		if typ == "vmess" || typ == "vless" || typ == "trojan" || typ == "anytls" {
 			keys = append(keys, "shadow-tls-opts", "restls-opts", "jls-opts")
 		}
 		return keys

@@ -66,7 +66,9 @@ Select groups retain supported members in original order. Unsupported group type
 ./bin/rekactl import -source links -format links -apply links.txt
 ```
 
-Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+
+AnyTLS links accept `sni`, `insecure=1` and the `hpkp` certificate pin, and enable UDP. In Clash YAML, `type: anytls` defaults UDP to off and uses `server` when `sni` is empty. AnyTLS manages its own TCP sessions. The importer rejects `smux`, `disable-reuse: true` and `tfo: true`.
 
 ## API
 

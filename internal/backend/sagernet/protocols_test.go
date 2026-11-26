@@ -17,6 +17,7 @@ import (
 	MX "github.com/sagernet/sing-box/common/mux"
 	S "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/anytls"
 	PHTTP "github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
@@ -58,7 +59,12 @@ func TestProtocolInteroperability(t *testing.T) {
 		typ, transport string
 		mux            bool
 		version        int
-	}{{"vmess", "", false, 0}, {"trojan", "", false, 0}, {"hysteria2", "", false, 0}, {"tuic", "", false, 0}, {"snell", "", false, 5}, {"snell", "", false, 6}}
+	}{
+		{"vmess", "", false, 0}, {"trojan", "", false, 0},
+		{"anytls", "", false, 0}, {"anytls", "ech", false, 0},
+		{"hysteria2", "", false, 0}, {"tuic", "", false, 0},
+		{"snell", "", false, 5}, {"snell", "", false, 6},
+	}
 	for _, tc := range []struct {
 		typ     string
 		version int
@@ -107,7 +113,7 @@ func TestProtocolInteroperability(t *testing.T) {
 			opts := map[string]any{}
 			users := []map[string]any{{"name": "test", "uuid": uuid, "password": password}}
 			base["users"] = users
-			if tc.typ == "trojan" || tc.typ == "hysteria2" || tc.typ == "tuic" || tc.transport == "http-tls" || tc.transport == "h2" {
+			if tc.typ == "trojan" || tc.typ == "anytls" || tc.typ == "hysteria2" || tc.typ == "tuic" || tc.transport == "http-tls" || tc.transport == "h2" {
 				tlsOptions := map[string]any{}
 				for k, v := range serverTLS {
 					tlsOptions[k] = v
@@ -207,6 +213,12 @@ func TestProtocolInteroperability(t *testing.T) {
 						if err == nil {
 							in, err = trojan.NewInbound(b.ctx, route, logger, "test", o)
 						}
+					case "anytls":
+						var o option.AnyTLSInboundOptions
+						err = json.Unmarshal(raw, &o)
+						if err == nil {
+							in, err = anytls.NewInbound(b.ctx, route, logger, "test", o)
+						}
 					case "vless":
 						var o option.VLESSInboundOptions
 						err = json.Unmarshal(raw, &o)
@@ -246,16 +258,16 @@ func TestProtocolInteroperability(t *testing.T) {
 			}
 			if base["tls"] != nil {
 				pin := sha256.Sum256(cert.Certificate[0])
-				spec.TLS = &TLSSpec{CertificatePin: hex.EncodeToString(pin[:]), ServerName: "localhost", ALPN: []string{"h3"}}
+				spec.TLS = &TLSSpec{CertificatePin: hex.EncodeToString(pin[:]), ServerName: "localhost"}
+				if tc.typ == "hysteria2" || tc.typ == "tuic" {
+					spec.TLS.ALPN = []string{"h3"}
+				}
 				if tc.transport == "ech" || tc.transport == "ech-dns" {
 					spec.TLS.ECH = &ECHSpec{Config: base64.StdEncoding.EncodeToString(echConfig.Bytes)}
 					if tc.transport == "ech-dns" {
 						spec.TLS.ECH.Config = ""
 						spec.TLS.ECH.Lookup = func(context.Context, string) ([]byte, error) { return echConfig.Bytes, nil }
 					}
-				}
-				if tc.typ == "trojan" || tc.transport == "h2" || tc.transport == "http-tls" {
-					spec.TLS.ALPN = nil
 				}
 			}
 			out, err := b.NewOutbound("test", spec)
@@ -385,7 +397,7 @@ func TestProtocolInteroperability(t *testing.T) {
 					c.Close()
 				}
 				if err == nil {
-					t.Fatal("invalid QUIC ECH fell back to clear SNI")
+					t.Fatal("invalid ECH fell back to clear SNI")
 				}
 			}
 

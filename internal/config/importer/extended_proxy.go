@@ -1,10 +1,11 @@
 package importer
 
 import (
-	"github.com/MimoProxy/reka/internal/config/model"
-	"go.yaml.in/yaml/v3"
 	"strconv"
 	"strings"
+
+	"github.com/MimoProxy/reka/internal/config/model"
+	"go.yaml.in/yaml/v3"
 )
 
 func (r *proxyReader) number(key string, def int) int {
@@ -37,15 +38,17 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	if !realmEnabled && (nativeType != "hysteria2" || empty(get(n, "ports")) || (!empty(get(n, "port")) && text(get(n, "port")) != "0")) {
 		port = r.port()
 	}
-	out := object{"id": id, "name": name, "type": nativeType, "server": r.str("server"), "port": port, "udp": r.boolean("udp", false)}
+	server := r.str("server")
+	out := object{"id": id, "name": name, "type": nativeType, "server": server, "port": port, "udp": r.boolean("udp", false)}
 	allowed := map[string]bool{}
-	for _, k := range []string{"name", "type", "server", "port", "udp", "tls", "servername", "sni", "skip-cert-verify", "client-fingerprint", "alpn"} {
-		allowed[k] = true
-	}
 	permit := func(keys ...string) {
 		for _, k := range keys {
 			allowed[k] = true
 		}
+	}
+	permit("name", "type", "server", "port", "udp", "sni", "skip-cert-verify", "client-fingerprint", "alpn")
+	if nativeType != "anytls" {
+		permit("tls", "servername")
 	}
 	p := object{}
 	switch nativeType {
@@ -63,6 +66,29 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	case "trojan":
 		permit("password", "network", "ws-opts", "grpc-opts", "http-upgrade-opts", "smux")
 		out["password"] = r.str("password")
+	case "anytls":
+		permit("password", "client-metadata", "idle-session-check-interval", "idle-session-timeout", "min-idle-session", "disable-reuse")
+		out["password"] = r.str("password")
+		if v := get(n, "client-metadata"); v != nil {
+			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" {
+				r.fail("client-metadata", "import.type", "expected a string")
+			} else {
+				p["client-metadata"] = v.Value
+			}
+		}
+		for _, key := range []string{"idle-session-check-interval", "idle-session-timeout"} {
+			if get(n, key) != nil {
+				p[key+"-seconds"] = r.number(key, 0)
+			}
+		}
+		if get(n, "min-idle-session") != nil {
+			p["min-idle-session"] = r.number("min-idle-session", 0)
+		}
+		if v := get(n, "disable-reuse"); v != nil && empty(v) {
+			r.fail("disable-reuse", "import.type", "expected true or false")
+		} else if r.boolean("disable-reuse", false) {
+			r.fail("disable-reuse", "import.unsupported-field", "disabling AnyTLS session reuse is unsupported")
+		}
 	case "hysteria2":
 		permit("password", "up", "down", "obfs", "obfs-password", "ports", "hop-interval", "realm-opts", "obfs-min-packet-size", "obfs-max-packet-size")
 		if ports := r.str("ports"); ports != "" {
@@ -122,6 +148,14 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		out["protocol"] = p
 	}
 	c.convertDialer(&r, out, allowed)
+	if nativeType == "anytls" {
+		if dialer, ok := out["dialer"].(object); ok && dialer["tfo"] == true {
+			r.fail("tfo", "import.unsupported-field", "TCP Fast Open is unsupported for AnyTLS")
+		}
+		if get(n, "smux") != nil {
+			r.fail("smux", "import.unsupported-field", "AnyTLS manages its own session multiplexing")
+		}
+	}
 	permitTLSExtras(nativeType, allowed)
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		key, v := n.Content[i].Value, n.Content[i+1]
@@ -132,8 +166,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 			r.fail(key, "import.unsupported-field", "unsupported protocol option")
 		}
 	}
-	tlsEnabled := nativeType == "trojan" || nativeType == "hysteria2" || nativeType == "tuic"
-	tlsEnabled = r.boolean("tls", tlsEnabled)
+	tlsEnabled := nativeType == "anytls" || r.boolean("tls", nativeType == "trojan" || nativeType == "hysteria2" || nativeType == "tuic")
 	if nativeType == "vmess" && r.str("network") == "h2" {
 		tlsEnabled = true
 	}
@@ -142,9 +175,18 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	}
 	if tlsEnabled && nativeType != "snell" {
 		tls := object{}
-		sni := r.str("servername")
-		if sni == "" {
+		var sni string
+		if nativeType == "anytls" {
 			sni = r.str("sni")
+			if sni == "" {
+				// mihomo defaults the AnyTLS server name to the node address.
+				sni = server
+			}
+		} else {
+			sni = r.str("servername")
+			if sni == "" {
+				sni = r.str("sni")
+			}
 		}
 		if sni != "" {
 			tls["server-name"] = sni
@@ -170,8 +212,10 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 		}
 	}
 	c.convertTLSExtras(&r, nativeType, out)
-	c.convertTransport(&r, out)
-	c.convertMultiplex(&r, out)
+	if nativeType != "anytls" {
+		c.convertTransport(&r, out)
+		c.convertMultiplex(&r, out)
+	}
 	if !r.bad && !c.validateOutbound(out, n, path) {
 		r.bad = true
 	}

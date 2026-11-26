@@ -123,7 +123,9 @@ func parseLink(raw string) (object, error) {
 		return nil, fmt.Errorf("invalid port")
 	}
 	name := u.Fragment
-	if strings.TrimSpace(name) == "" {
+	if u.Scheme == "anytls" && name == "" {
+		name = u.Hostname() + ":" + portText
+	} else if strings.TrimSpace(name) == "" {
 		name = u.Scheme + "@" + u.Host
 	}
 	out := object{"name": name, "type": u.Scheme, "server": u.Hostname(), "port": port, "udp": true}
@@ -242,6 +244,23 @@ func parseLink(raw string) (object, error) {
 		if err := parseSecureLink(u, out, query); err != nil {
 			return nil, err
 		}
+	case "anytls":
+		for key := range query {
+			switch key {
+			case "sni", "insecure", "hpkp":
+			default:
+				return nil, fmt.Errorf("unknown AnyTLS option")
+			}
+		}
+		// mihomo uses the password component when present, and otherwise the username.
+		password, ok := u.User.Password()
+		if !ok {
+			password = u.User.Username()
+		}
+		out["password"] = password
+		out["sni"] = query.Get("sni")
+		out["skip-cert-verify"] = query.Get("insecure") == "1"
+		out["fingerprint"] = query.Get("hpkp")
 	default:
 		return nil, fmt.Errorf("unsupported scheme")
 	}

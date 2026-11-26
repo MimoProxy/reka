@@ -355,6 +355,12 @@ type Protocol struct {
 	ZeroRTT        bool           `yaml:"zero-rtt"`
 	Heartbeat      int            `yaml:"heartbeat"`
 	Obfs           *Obfs          `yaml:"obfs"`
+
+	// AnyTLS uses the sing-anytls and mihomo 30-second defaults when these durations are zero.
+	IdleSessionCheckIntervalSeconds int    `yaml:"idle-session-check-interval-seconds" json:",omitempty"`
+	IdleSessionTimeoutSeconds       int    `yaml:"idle-session-timeout-seconds" json:",omitempty"`
+	MinIdleSession                  int    `yaml:"min-idle-session" json:",omitempty"`
+	ClientMetadata                  string `yaml:"client-metadata" json:",omitempty"`
 }
 type Obfs struct {
 	MinPacketSize int    `yaml:"min-packet-size"`

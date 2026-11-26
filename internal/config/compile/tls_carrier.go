@@ -12,8 +12,8 @@ func (c *compiler) tlsCarrier(path string, ob model.Outbound) *model.TLSCarrier 
 	}
 	value := *ob.TLS.Carrier
 	fail := func(field, message string) { c.errorf(model.DocProfile, path+"/"+field, "tls.carrier", "%s", message) }
-	if !slices.Contains([]string{"vmess", "vless", "trojan"}, ob.Type) {
-		fail("type", "security carriers apply to VMess, VLESS or Trojan")
+	if !slices.Contains([]string{"vmess", "vless", "trojan", "anytls"}, ob.Type) {
+		fail("type", "security carriers apply to VMess, VLESS, Trojan or AnyTLS")
 	}
 	if ob.TLS.Reality != nil || ob.TLS.ECH != nil {
 		fail("type", "security carriers are mutually exclusive with REALITY and ECH")

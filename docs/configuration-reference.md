@@ -72,6 +72,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `vless` | `server`、`port`、`uuid` | `tls`、`flow`、`encryption`、`packet-encoding`、`transport` |
 | `vmess` | `server`、`port`、`uuid` | `tls`、`protocol`、`packet-encoding`、`transport` |
 | `trojan` | `server`、`port`、`password` | **必须有** `tls`；可用 `transport` |
+| `anytls` | `server`、`port`、`password` | **必须有** `tls`；UDP 通过 TCP 会话转发；不接受 REALITY、`transport`、`multiplex` 或开启 `dialer.tfo` |
 | `hysteria2` | `server`、`port`、`password` | **必须有** `tls`；`protocol` 配置带宽、混淆、跳端口、Realm |
 | `tuic` | `server`、`port`、`uuid`、`password` | **必须有** `tls`；`protocol` 配置拥塞控制等 |
 | `snell` | `server`、`port`、`password`（PSK） | **必须有** `protocol.version: 5` 或 `6`；不接受顶层 `tls` |
@@ -95,7 +96,7 @@ Shadowsocks 支持的 `method`：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-25
 | `certificate`、`private-key` | 成对 PEM 字符串或 secret 引用 | 客户端证书和私钥；使用内联内容，不是文件路径 |
 | `reality` | 对象 | 仅 VLESS，见下文 |
 | `ech` | 对象 | ECH，见下文 |
-| `carrier` | 对象 | VMess/VLESS/Trojan 的替代安全握手，见 3.9 |
+| `carrier` | 对象 | VMess/VLESS/Trojan/AnyTLS 的安全握手，见 3.9 |
 
 证书 pin 是叶证书时直接信任该证书；pin 是中间证书或根证书时仍需验证叶证书链和名称。REALITY 不接受普通证书 pin、验证名称和客户端证书配置。
 
@@ -145,6 +146,9 @@ VLESS encryption 的 MODE 为 `native`、`xorpub`、`random`；RTT 为 `1rtt`、
 | TUIC | `udp-relay-mode` | `native`、`quic`；可省略 |
 | TUIC | `zero-rtt` | 布尔，默认 false |
 | TUIC | `heartbeat` | 非负整数，**毫秒**；省略/0 使用协议默认值 |
+| AnyTLS | `idle-session-check-interval-seconds`、`idle-session-timeout-seconds` | 整数，0–86400 秒；省略/0 默认 30 秒，底层 sing-anytls 同样将 1–5 秒按 30 秒执行 |
+| AnyTLS | `min-idle-session` | 整数，0–64，默认 0 |
+| AnyTLS | `client-metadata` | 字符串，默认空，不发送非空客户端标识 |
 | Snell | `version` | 必填，`5` 或 `6`；v5 采用固定依赖的 v4 兼容 wire client |
 | Snell | `user-key` | 可选字符串或 secret 引用 |
 | Snell | `reuse` | 布尔，默认 false |
@@ -209,7 +213,7 @@ Realm 的 `tls` 验证控制服务，节点顶层 `tls` 验证最终 QUIC peer�
 | `statistic` | false；仅保留兼容元数据，Reka 始终报告自己的逐连接流量 |
 | `brutal` | `{enabled: true, up-bps: 1250000, down-bps: 2000000}`；单位字节/秒，两方向至少 65536 |
 
-可用于建立连接的各类出站；reject、pass、reject-drop 不支持。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
+适用于除 AnyTLS、reject、pass、reject-drop 以外可建立连接的出站。AnyTLS 使用自身的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
 
 ### 3.8 Shadowsocks 的 UoT 与 `plugin`
 
@@ -231,7 +235,7 @@ kcptun 的 `kcp` 使用这些原名：`key`、`crypt`、`mode`、`conn`、`autoe
 
 ### 3.9 `tls.carrier` 安全握手
 
-只适用于 VMess / VLESS / Trojan，放在节点 `tls` 内；伪装名称、ALPN 和 ClientHello 由同一 TLS 对象的其余字段配置。
+适用于 VMess、VLESS、Trojan 和 AnyTLS，放在节点 `tls` 内；伪装名称、ALPN 和 ClientHello 由同一 TLS 对象的其余字段配置。
 
 | `carrier.type` | 专属字段 |
 | --- | --- |

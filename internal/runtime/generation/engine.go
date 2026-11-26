@@ -823,7 +823,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 		return true
 	}
 	switch o.Type {
-	case "http", "socks", "vmess", "trojan", "hysteria2", "tuic", "snell":
+	case "http", "socks", "vmess", "trojan", "anytls", "hysteria2", "tuic", "snell":
 		return true
 	case "vless":
 		return o.TLS == nil || o.TLS.Reality == nil
@@ -1573,6 +1573,14 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			if p.Heartbeat > 0 {
 				values["heartbeat"] = fmt.Sprintf("%dms", p.Heartbeat)
 			}
+		case "anytls":
+			if p.IdleSessionCheckIntervalSeconds > 0 {
+				values["idle_session_check_interval"] = fmt.Sprintf("%ds", p.IdleSessionCheckIntervalSeconds)
+			}
+			if p.IdleSessionTimeoutSeconds > 0 {
+				values["idle_session_timeout"] = fmt.Sprintf("%ds", p.IdleSessionTimeoutSeconds)
+			}
+			values["min_idle_session"], values["client_metadata"] = p.MinIdleSession, p.ClientMetadata
 		case "snell":
 			version := p.Version
 			if version == 5 {

@@ -45,7 +45,12 @@ func (r *proxyReader) boolean(key string, def bool) bool {
 		r.fail(key, "import.type", "expected true or false")
 		return def
 	}
-	return n.Value == "true"
+	var value bool
+	if err := n.Decode(&value); err != nil {
+		r.fail(key, "import.type", "expected true or false")
+		return def
+	}
+	return value
 }
 func (r *proxyReader) port() int {
 	p := r.number("port", 0)
@@ -62,7 +67,8 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 	name := r.str("name")
 	id := c.names[name]
 	typ := r.str("type")
-	if typ == "vmess" || typ == "trojan" || typ == "hysteria2" || typ == "hy2" || typ == "tuic" || typ == "snell" {
+	switch typ {
+	case "vmess", "trojan", "anytls", "hysteria2", "hy2", "tuic", "snell":
 		c.convertExtended(n, path)
 		return
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
@@ -276,6 +277,12 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			return nil, err
 		}
 		return trojan.NewOutbound(ctx, b.router, logger, tag, o)
+	case "anytls":
+		var o option.AnyTLSOutboundOptions
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
+		}
+		return anytls.NewOutbound(ctx, b.router, logger, tag, o)
 	case "hysteria2":
 		var o option.Hysteria2OutboundOptions
 		if err = json.Unmarshal(data, &o); err != nil {

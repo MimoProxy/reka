@@ -21,19 +21,25 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 			fail("uuid", "a valid UUID is required")
 		}
 	}
-	if slices.Contains([]string{"trojan", "hysteria2", "tuic", "snell"}, ob.Type) && out.Password == "" && !c.hasErrorAt(base+"/password") {
+	if slices.Contains([]string{"trojan", "anytls", "hysteria2", "tuic", "snell"}, ob.Type) && out.Password == "" && !c.hasErrorAt(base+"/password") {
 		fail("password", "password is required")
 	}
 	if (ob.Type == "hysteria2" || ob.Type == "tuic") && ob.TLS != nil && ob.TLS.Fingerprint != "" {
 		fail("tls/fingerprint", "QUIC does not use a TCP ClientHello fingerprint")
 	}
-	if slices.Contains([]string{"trojan", "hysteria2", "tuic"}, ob.Type) && ob.TLS == nil {
+	if slices.Contains([]string{"trojan", "anytls", "hysteria2", "tuic"}, ob.Type) && ob.TLS == nil {
 		fail("tls", "this protocol requires TLS")
 	}
 	if ob.Protocol != nil {
 		p := *ob.Protocol
 		p.ServerPorts = slices.Clone(p.ServerPorts)
-		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
+		allowed := map[string][]string{
+			"vmess":     {"security", "alter-id"},
+			"anytls":    {"idle-session-check-interval-seconds", "idle-session-timeout-seconds", "min-idle-session", "client-metadata"},
+			"hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"},
+			"tuic":      {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"},
+			"snell":     {"version", "user-key", "mode", "reuse", "obfs"},
+		}
 		for _, field := range c.present(base + "/protocol") {
 			if !slices.Contains(allowed[ob.Type], field) {
 				fail("protocol/"+field, "option does not apply to protocol")
@@ -44,6 +50,17 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		}
 		if ob.Type == "vmess" && !slices.Contains([]string{"", "auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"}, p.Security) {
 			fail("protocol/security", "unsupported VMess cipher")
+		}
+		if ob.Type == "anytls" {
+			if p.IdleSessionCheckIntervalSeconds < 0 || p.IdleSessionCheckIntervalSeconds > 86400 {
+				fail("protocol/idle-session-check-interval-seconds", "idle session check interval must be between 0 and 86400 seconds")
+			}
+			if p.IdleSessionTimeoutSeconds < 0 || p.IdleSessionTimeoutSeconds > 86400 {
+				fail("protocol/idle-session-timeout-seconds", "idle session timeout must be between 0 and 86400 seconds")
+			}
+			if p.MinIdleSession < 0 || p.MinIdleSession > 64 {
+				fail("protocol/min-idle-session", "minimum idle sessions must be between 0 and 64")
+			}
 		}
 		if ob.Type == "hysteria2" {
 			if p.UpMbps > math.MaxInt/125000 || p.DownMbps > math.MaxInt/125000 {
