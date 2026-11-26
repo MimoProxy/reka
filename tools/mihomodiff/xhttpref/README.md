@@ -1,13 +1,13 @@
 # Independent XHTTP test peer
 
-This helper links the unmodified XHTTP server from locked mihomo v1.19.34 and its VLESS framing component. It is excluded from ordinary builds by the `reka_reference` build tag. It creates only temporary loopback listeners. The handler echoes payloads, or forwards to an explicitly configured loopback fixture for encrypted VLESS/Vision composition tests; it never dials an arbitrary VLESS destination.
+This helper links the unmodified XHTTP server from locked mihomo v1.19.34 and its VLESS framing component. It lives in the separate pinned-reference module and is excluded from ordinary builds by the `reka_reference` build tag. It creates only temporary loopback listeners. The handler echoes payloads, or forwards to an explicitly configured loopback fixture for encrypted VLESS/Vision composition tests; it never dials an arbitrary VLESS destination.
 
 From the repository root:
 
 ```sh
-GOCACHE=/tmp/reka-go-cache go build -modfile tools/mihomodiff/go.mod \
+(cd tools/mihomodiff && GOCACHE=/tmp/reka-go-cache go build \
   -tags reka_reference -ldflags '-checklinkname=0' \
-  -o /tmp/reka-xhttp-reference ./tools/xhttpref
+  -o /tmp/reka-xhttp-reference ./xhttpref)
 OVERLAY=$(python3 tools/build-overlay.py)
 GOCACHE=/tmp/reka-go-cache REKA_XHTTP_REFERENCE=/tmp/reka-xhttp-reference \
   go test -modfile bin/build.mod -overlay "$OVERLAY" -race \

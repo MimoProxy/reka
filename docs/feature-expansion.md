@@ -79,7 +79,7 @@ new streams use the new pool.
 
 The narrow compatibility client is adapted from pinned mihomo v1.19.34, with
 origin hashes and changes in `internal/compat/xhttp/ORIGIN.md`. It adds no module
-dependencies. `tools/xhttpref` links the unmodified pinned server separately
+dependencies. `tools/mihomodiff/xhttpref` links the unmodified pinned server separately
 for local interoperability tests. This is evidence for protocol compatibility;
 it does not establish compatibility with every public CDN or server deployment.
 
@@ -180,7 +180,7 @@ make test
 make vet
 make race
 # Reference interop is explicit; ordinary tests skip external peer tests.
-# Build the helper as documented in tools/xhttpref/README.md, then:
+# Build the helper as documented in tools/mihomodiff/xhttpref/README.md, then:
 REKA_XHTTP_REFERENCE=/tmp/reka-xhttp-reference make test
 ```
 

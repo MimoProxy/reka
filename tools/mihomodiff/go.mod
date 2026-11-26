@@ -6,6 +6,7 @@ require (
 	github.com/MimoProxy/reka v0.0.0
 	github.com/metacubex/http v0.1.8
 	github.com/metacubex/mihomo v1.19.34
+	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
 	github.com/metacubex/sing v0.5.9
 	github.com/metacubex/sing-vmess v0.2.5
 	github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141
@@ -70,7 +71,6 @@ require (
 	github.com/metacubex/mipstack v0.0.0-20261019124225-9a80a07eaeb9 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/qpack v0.6.0 // indirect
-	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4 // indirect
 	github.com/metacubex/randv2 v0.2.0 // indirect
 	github.com/metacubex/restls-client-go v0.1.9 // indirect
 	github.com/metacubex/sing-mux v0.3.12 // indirect
