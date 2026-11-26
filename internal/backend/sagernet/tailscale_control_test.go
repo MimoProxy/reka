@@ -306,13 +306,7 @@ func TestTailscalePeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { packetListener.Close() })
-	go func() {
-		var buffer [64]byte
-		n, source, err := packetListener.ReadFrom(buffer[:])
-		if err == nil {
-			_, _ = packetListener.WriteTo(buffer[:n], source)
-		}
-	}()
+	go serveTailnetUDPEcho(packetListener)
 
 	deadline, _ := ctx.Deadline()
 	var buffer [8]byte
@@ -321,16 +315,7 @@ func TestTailscalePeer(t *testing.T) {
 		t.Fatal("Tailscale UDP open:", err)
 	}
 	defer packet.Close()
-	if err := packet.SetDeadline(deadline); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := packet.WriteTo([]byte("udp echo"), net.UDPAddrFromAddrPort(target)); err != nil {
-		t.Fatal(err)
-	}
-	n, source, err := packet.ReadFrom(buffer[:])
-	if err != nil || string(buffer[:n]) != "udp echo" || source.String() != target.String() {
-		t.Fatalf("Tailscale UDP echo %q from %v: %v", buffer[:n], source, err)
-	}
+	assertTailnetUDPEcho(t, packet, target, "udp echo", deadline)
 
 	// The same flow socket must reach a second destination, not only the
 	// one it was opened for.
@@ -340,40 +325,8 @@ func TestTailscalePeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { secondListener.Close() })
-	go func() {
-		var buffer [64]byte
-		for {
-			n, source, err := secondListener.ReadFrom(buffer[:])
-			if err != nil {
-				return
-			}
-			_, _ = secondListener.WriteTo(buffer[:n], source)
-		}
-	}()
-	// UDP may drop the first datagram to a new port on slow runners, so
-	// resend until the echo arrives or the test deadline passes.
-	for {
-		if _, err := packet.WriteTo([]byte("udp two!"), net.UDPAddrFromAddrPort(second)); err != nil {
-			t.Fatal(err)
-		}
-		attempt := time.Now().Add(time.Second)
-		if attempt.After(deadline) {
-			attempt = deadline
-		}
-		if err := packet.SetReadDeadline(attempt); err != nil {
-			t.Fatal(err)
-		}
-		n, source, err = packet.ReadFrom(buffer[:])
-		if err == nil {
-			if string(buffer[:n]) != "udp two!" || source.String() != second.String() {
-				t.Fatalf("Tailscale UDP second destination %q from %v", buffer[:n], source)
-			}
-			break
-		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("Tailscale UDP second destination: %v", err)
-		}
-	}
+	go serveTailnetUDPEcho(secondListener)
+	assertTailnetUDPEcho(t, packet, second, "udp two!", deadline)
 	if err := packet.SetDeadline(deadline); err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +378,57 @@ func assertTailnetTCPEcho(t *testing.T, ctx context.Context, outbound *Outbound,
 	var buffer [8]byte
 	if _, err := io.ReadFull(conn, buffer[:]); err != nil || string(buffer[:]) != "tcp echo" {
 		t.Fatalf("Tailscale TCP echo from %v got %q: %v", target, buffer, err)
+	}
+}
+
+func serveTailnetUDPEcho(listener net.PacketConn) {
+	var buffer [64]byte
+	for {
+		n, source, err := listener.ReadFrom(buffer[:])
+		if err != nil {
+			return
+		}
+		_, _ = listener.WriteTo(buffer[:n], source)
+	}
+}
+
+// assertTailnetUDPEcho resends payload once a second until target echoes it.
+// The test relay listens on loopback and there is no STUN server, so netcheck
+// reports that UDP cannot send and magicsock rebinds on each endpoint update.
+// A rebind closes any DERP connection that is not on the default-route
+// interface, which loopback never is, and drops the datagrams queued on it.
+// TCP retransmits through the reconnect; a single UDP datagram does not.
+func assertTailnetUDPEcho(t *testing.T, packet net.PacketConn, target netip.AddrPort, payload string, deadline time.Time) {
+	t.Helper()
+	buffer := make([]byte, len(payload)+1)
+	var last string
+	for {
+		if _, err := packet.WriteTo([]byte(payload), net.UDPAddrFromAddrPort(target)); err != nil {
+			t.Fatal(err)
+		}
+		attempt := time.Now().Add(time.Second)
+		if attempt.After(deadline) {
+			attempt = deadline
+		}
+		if err := packet.SetReadDeadline(attempt); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			n, source, err := packet.ReadFrom(buffer)
+			if err != nil {
+				last = err.Error()
+				break
+			}
+			if string(buffer[:n]) == payload && source.String() == target.String() {
+				return
+			}
+			// A late echo of an earlier probe can arrive here; keep reading,
+			// and report it only if the expected echo never comes.
+			last = fmt.Sprintf("%q from %v", buffer[:n], source)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("Tailscale UDP echo from %v: last %s", target, last)
+		}
 	}
 }
 
