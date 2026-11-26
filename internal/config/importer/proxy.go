@@ -66,7 +66,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertExtended(n, path)
 		return
 	}
-	nativeType := map[string]string{"ss": "shadowsocks", "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject"}[typ]
+	nativeType := map[string]string{"ss": "shadowsocks", "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard}[typ]
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	if nativeType == "" {
@@ -74,6 +74,11 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		return
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
+	if typ == "wireguard" {
+		c.convertWireGuard(&r, out)
+		c.addOutbound(&r, out, &binding)
+		return
+	}
 	allowed := map[string]bool{"name": true, "type": true}
 	for _, key := range []string{"server", "port", "udp", "username", "password", "cipher", "uuid", "flow", "packet-encoding", "network", "tls", "servername", "sni", "client-fingerprint", "skip-cert-verify", "alpn", "reality-opts", "encryption", "xudp", "packet-addr", "ws-opts", "grpc-opts", "http-upgrade-opts", "h2-opts", "http-opts", "xhttp-opts", "smux"} {
 		switch key {
@@ -263,14 +268,15 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertTransport(&r, out)
 	}
 	c.convertMultiplex(&r, out)
-	if !r.bad {
-		r.bad = !c.validateOutbound(out, n, path)
-	}
-	if r.bad {
+	c.addOutbound(&r, out, &binding)
+}
+
+func (c *converter) addOutbound(r *proxyReader, out object, binding *Binding) {
+	if r.bad || !c.validateOutbound(out, r.n, r.path) {
 		return
 	}
 	c.nodes = append(c.nodes, out)
-	c.available[name] = true
+	c.available[binding.Name] = true
 	binding.Available = true
 }
 

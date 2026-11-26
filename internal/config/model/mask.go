@@ -32,7 +32,18 @@ func IsSensitive(path string) bool {
 	if len(segs) == 6 && segs[0] == "sources" {
 		segs = segs[2:]
 	}
+	if len(segs) == 4 && segs[0] == "outbounds" && segs[2] == "protocol" {
+		return segs[3] == "private-key" || segs[3] == "pre-shared-key"
+	}
 	return len(segs) == 4 && segs[0] == "scripts" && segs[2] == "download" && segs[3] == "url"
+}
+
+func sensitiveNestedField(key string) bool {
+	switch key {
+	case "password", "username", "key", "user-key", "token", "certificate", "private-key", "pre-shared-key", "value":
+		return true
+	}
+	return false
 }
 
 func unalias(n *yaml.Node) *yaml.Node {
@@ -54,7 +65,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			for i := 0; i+1 < len(n.Content); i += 2 {
 				k, v := n.Content[i].Value, unalias(n.Content[i+1])
 				path := JoinPath(prefix, k)
-				if (k == "password" || k == "username" || k == "key" || k == "user-key" || k == "token" || k == "certificate" || k == "private-key" || k == "value") && v.Kind == yaml.ScalarNode && !strings.HasPrefix(v.Value, SecretPrefix) {
+				if sensitiveNestedField(k) && v.Kind == yaml.ScalarNode && !strings.HasPrefix(v.Value, SecretPrefix) {
 					fn(path, v)
 				} else {
 					nested(v, path)
@@ -295,7 +306,7 @@ func sensitiveNodes(root *yaml.Node, fn func(path string, n *yaml.Node)) {
 			}
 			if strings.Contains(path.Value, "/protocol") || strings.Contains(path.Value, "/transport") || strings.Contains(path.Value, "/headers") || strings.Contains(path.Value, "/tls") || strings.Contains(path.Value, "/plugin") {
 				prefix := JoinPath("/patches", ElementSegment(patch, i), "value")
-				if value.Kind == yaml.ScalarNode && (strings.HasSuffix(path.Value, "/password") || strings.HasSuffix(path.Value, "/username") || strings.HasSuffix(path.Value, "/key") || strings.HasSuffix(path.Value, "/user-key") || strings.HasSuffix(path.Value, "/token") || strings.HasSuffix(path.Value, "/value") || strings.HasSuffix(path.Value, "/certificate") || strings.HasSuffix(path.Value, "/private-key")) {
+				if value.Kind == yaml.ScalarNode && sensitiveNestedField(path.Value[strings.LastIndexByte(path.Value, '/')+1:]) {
 					if !strings.HasPrefix(value.Value, SecretPrefix) {
 						fn(prefix, value)
 					}

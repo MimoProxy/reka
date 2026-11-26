@@ -226,11 +226,7 @@ func (c scriptHTTPClient) dial(ctx context.Context, g *generation, policy, netwo
 	if lookup == nil {
 		lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 			if g.dns != nil {
-				scope := "proxy"
-				if out.Type() == model.OutboundDirect {
-					scope = "direct"
-				}
-				return g.dns.Lookup(ctx, host, scope)
+				return g.dns.Lookup(ctx, host, outboundLookupScope(out.Type(), "direct"))
 			}
 			return c.engine.opts.Resolver.LookupNetIP(ctx, "ip", host)
 		}

@@ -9,9 +9,36 @@ import (
 	"strings"
 )
 
+var protocolFields = map[string][]string{
+	"vmess":                 {"security", "alter-id"},
+	"hysteria2":             {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"},
+	"tuic":                  {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"},
+	"snell":                 {"version", "user-key", "mode", "reuse", "obfs"},
+	model.OutboundWireGuard: {"private-key", "public-key", "pre-shared-key", "address", "allowed-ips", "persistent-keepalive", "reserved", "mtu"},
+}
+
 func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	fail := func(field, message string) {
 		c.errorf(model.DocProfile, base+"/"+field, "outbound.protocol", "%s", message)
+	}
+	if ob.Protocol != nil {
+		for _, field := range c.present(base + "/protocol") {
+			if !slices.Contains(protocolFields[ob.Type], field) {
+				fail("protocol/"+field, "option does not apply to protocol")
+			}
+		}
+	}
+	if ob.Type == model.OutboundWireGuard {
+		if _, present := c.ppos[base+"/multiplex"]; present {
+			fail("multiplex", "multiplex does not apply to WireGuard")
+		}
+		p := model.Protocol{}
+		if ob.Protocol != nil {
+			p = *ob.Protocol
+		}
+		c.wireGuard(base+"/protocol", &p)
+		out.Protocol = &p
+		return
 	}
 	if ob.Type == "vmess" && !slices.Contains([]string{"", "xudp", "packetaddr"}, ob.PacketEncoding) {
 		fail("packet-encoding", "unsupported VMess packet encoding")
@@ -33,12 +60,6 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	if ob.Protocol != nil {
 		p := *ob.Protocol
 		p.ServerPorts = slices.Clone(p.ServerPorts)
-		allowed := map[string][]string{"vmess": {"security", "alter-id"}, "hysteria2": {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"}, "tuic": {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"}, "snell": {"version", "user-key", "mode", "reuse", "obfs"}}
-		for _, field := range c.present(base + "/protocol") {
-			if !slices.Contains(allowed[ob.Type], field) {
-				fail("protocol/"+field, "option does not apply to protocol")
-			}
-		}
 		if p.AlterID < 0 || p.AlterID > 65535 || p.UpMbps < 0 || p.DownMbps < 0 || p.Heartbeat < 0 {
 			fail("protocol", "invalid protocol numeric option")
 		}

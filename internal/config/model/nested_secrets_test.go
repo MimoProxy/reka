@@ -129,6 +129,28 @@ func TestRealmTokenMaskAndRestore(t *testing.T) {
 	}
 }
 
+func TestWireGuardKeysMaskAndRestore(t *testing.T) {
+	const outbound = "{id: tunnel, type: wireguard, protocol: {private-key: confidential-private, pre-shared-key: confidential-shared, public-key: published}}"
+	for kind, input := range map[string]string{
+		DocProfile: "outbounds: [" + outbound + "]",
+		DocSources: "sources: [{id: feed, outbounds: [" + outbound + "]}]",
+		DocOverlay: "patches: [{op: set, path: /outbounds/tunnel/protocol/private-key, value: confidential-private}, {op: set, path: /outbounds/tunnel/protocol/pre-shared-key, value: confidential-shared}, {op: set, path: /outbounds/tunnel/protocol/public-key, value: published}]",
+	} {
+		original, ds := LoadDoc(kind, []byte(input))
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		masked, _ := LoadDoc(kind, []byte(input))
+		if masked.MaskSecrets() != 2 || strings.Contains(string(masked.Bytes()), "confidential-") ||
+			!strings.Contains(string(masked.Bytes()), "published") {
+			t.Fatal("incorrect WireGuard key masking", kind)
+		}
+		if err := masked.UnmaskSecrets(original); err != nil || string(masked.Bytes()) != string(original.Bytes()) {
+			t.Fatal("WireGuard keys were not restored", kind, err)
+		}
+	}
+}
+
 func TestPluginNestedSecretsAcrossDocuments(t *testing.T) {
 	for _, tc := range []struct{ kind, input string }{
 		{DocProfile, `schema-version: 1

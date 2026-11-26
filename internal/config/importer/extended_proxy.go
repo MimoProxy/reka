@@ -172,15 +172,7 @@ func (c *converter) convertExtended(n *yaml.Node, path string) {
 	c.convertTLSExtras(&r, nativeType, out)
 	c.convertTransport(&r, out)
 	c.convertMultiplex(&r, out)
-	if !r.bad && !c.validateOutbound(out, n, path) {
-		r.bad = true
-	}
-	if r.bad {
-		return
-	}
-	c.nodes = append(c.nodes, out)
-	c.available[name] = true
-	binding.Available = true
+	c.addOutbound(&r, out, &binding)
 }
 func (c *converter) convertTransport(r *proxyReader, out object) {
 	network := r.str("network")

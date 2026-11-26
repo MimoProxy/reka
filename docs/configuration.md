@@ -225,6 +225,22 @@ Hysteria2：
     server-name: hy2.example.com
 ```
 
+WireGuard can route private-subnet traffic through a single peer. Supply the peer's base64 public key and store the local private key under the referenced secret name.
+
+```yaml
+- id: private-net
+  type: wireguard
+  server: vpn.example.com
+  port: 51820
+  protocol:
+    private-key: secret://outbounds/private-net/private-key
+    public-key: "<peer public key>"
+    address: [10.8.0.2/32]
+    allowed-ips: [192.168.10.0/24]
+```
+
+See the [WireGuard field reference](configuration-reference.md#wireguard) for dual-stack addresses, keepalives, WARP reserved bytes and defaults.
+
 VMess、TUIC、Snell、HTTP/SOCKS、TLS、WS/gRPC/H2、插件、链式代理等见[配置字段参考](configuration-reference.md)。原生类型名是 `shadowsocks` / `socks`；Clash 的 `ss` / `socks5` 等写法应走导入。
 
 ### 手动切换与自动选择

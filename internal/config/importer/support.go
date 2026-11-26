@@ -19,7 +19,7 @@ func SupportMatrix() []Support {
 		}
 	}
 	add("proxies", "supported", "name", "Exact original name → stable hashed ID; duplicates/reserved names are errors")
-	add("proxies", "partial", "type", "ss/vless/vmess/trojan/hysteria2/tuic/snell/http/socks5/direct/reject; only documented options are accepted")
+	add("proxies", "partial", "type", "ss/vless/vmess/trojan/hysteria2/tuic/snell/wireguard/http/socks5/direct/reject with the documented options")
 	add("proxies", "supported", "server port", "Scalar host/IP and integer or quoted numeric port; native validation applies")
 	add("ss/socks5/vless", "supported", "udp", "Absent means false, matching the locked Clash options")
 	add("direct", "supported", "udp", "Defaults to true")
@@ -44,11 +44,11 @@ func SupportMatrix() []Support {
 	add("ss", "supported", "udp-over-tcp udp-over-tcp-version", "TCP-only node transport for UDP; default legacy v1 or explicit v1/v2; TCP and UDP echo tested")
 	add("http", "supported", "headers", "Custom CONNECT headers; configured credentials take precedence over Proxy-Authorization; values are masked")
 	add("vmess/vless", "supported", "h2-opts http-opts", "HTTP method/path/header lists and H2 host/path; H2 enables TLS, including when omitted in Clash")
-	add("proxies", "supported with accounting diagnostic", "smux", "h2mux/smux/yamux on all dialing protocols; enabled/padding/connection/stream limits, only-tcp and brutal-opts integer K/M/G/T bps/Bps rates (unitless Mbps). statistic is retained as metadata while native per-flow accounting is always active. Brutal needs a compatible Linux server/kernel module; unavailable server negotiation fails.")
+	add("proxies except wireguard", "supported with accounting diagnostic", "smux", "h2mux/smux/yamux on stream and datagram proxies. Supports enabled/padding/connection/stream limits, only-tcp and brutal-opts integer K/M/G/T bps/Bps rates (unitless Mbps). statistic is retained as metadata while native per-flow accounting is always active. Brutal needs a compatible Linux server/kernel module. Unavailable server negotiation fails.")
 	add("http/socks5/vmess/vless/trojan/hysteria2/tuic", "supported", "fingerprint name-cert-verify", "Full DER certificate SHA256 pin (not SPKI); independent verification name keeps SNI; real TLS/uTLS/QUIC tests")
 	add("http/socks5/vmess/vless/trojan/hysteria2/tuic", "supported", "certificate private-key", "Matching inline PEM, secret references or explicit caller-supplied certificate_files path attachments; masked previews and subscription refresh; remote paths never opened implicitly")
 	add("http/socks5/vmess/vless/trojan/hysteria2/tuic", "supported", "ech-opts", "enable/config/query-server-name; explicit base64 ECHConfigList or HTTPS DNS lookup through active proxy-server DNS; real TLS/uTLS and HY2/TUIC TCP/UDP tests, wrong-key rejection; excludes REALITY")
-	add("proxies", "supported", "dialer-proxy", "Named node/group dependency; combined cycles rejected; source namespaces and nodes-only dependencies preserved; parent transport changes replace dependent children, existing streams drain")
+	add("proxies except wireguard", "supported", "dialer-proxy", "Named node/group dependency. Combined cycles are rejected. Source namespaces and nodes-only dependencies are preserved. Parent transport changes replace dependent children while existing streams drain.")
 	add("ss", "supported", "plugin plugin-opts", "obfs http/tls, v2ray-plugin/gost-plugin websocket with optional TLS/ECH/mux, v2ray HTTPUpgrade/fast-open, ShadowTLS v1/v2/v3 and ClientHello presets; protected physical sockets, native UDP or UoT and owned lifecycle. Restls TLS1.2/TLS1.3 and record scripts, JLS native/uTLS authentication, and kcptun with all reference block ciphers, compression and SMux v1/v2; kcptun forces UoT and drains its owned pool.")
 	add("vmess/vless/trojan", "supported", "shadow-tls-opts restls-opts jls-opts", "Mutually exclusive stream security carriers; ShadowTLS v1/v2/v3, Restls TLS1.2/TLS1.3 scripts and JLS native/uTLS. Reuses the already protected/interface-bound/detoured socket. Real TCP/UDP across TCP/WS/HTTPUpgrade/gRPC/H2 and independent original peers; encrypted VLESS Vision/mux combinations tested.")
 	add("proxy-groups", "supported", "name proxies icon", "Names/explicit member list; icon retained as GUI metadata; member availability is reported")
@@ -88,6 +88,13 @@ func SupportMatrix() []Support {
 	add("hysteria2", "supported", "ports hop-interval", "Port lists/ranges and interval ranges; at least five seconds; mutually exclusive with Realm")
 	add("hysteria2", "supported", "realm-opts", "enable/server-url/token/realm-id/stun-servers; separate control TLS sni/skip-cert-verify/name-cert-verify/fingerprint/certificate/private-key/alpn, explicit PEM file attachments; protected control and STUN/punch sockets, token masking and transport rotation; real punch TCP/UDP plus certificate/token negatives")
 	add("tuic", "supported", "uuid password congestion-controller udp-relay-mode reduce-rtt heartbeat-interval", "TUIC v5; cubic/new_reno/bbr; native/quic UDP; heartbeat milliseconds")
+	add("wireguard", "supported", "ip ipv6", "Local tunnel addresses. A bare IPv4 address receives /32 and a bare IPv6 address receives /128.")
+	add("wireguard", "supported", "private-key public-key pre-shared-key", "Base64-encoded 32-byte keys. The private key and optional pre-shared key are masked in previews.")
+	add("wireguard", "supported", "allowed-ips reserved", "Peer routes default to both IPv4 and IPv6 default routes. Reserved bytes accept an empty or three-byte list, standard base64, or a comma-separated decimal string.")
+	add("wireguard", "supported", "mtu persistent-keepalive udp", "Tunnel MTU, optional keepalive interval in seconds, and UDP forwarding. Clash UDP forwarding defaults to false.")
+	add("wireguard", "partial", "peers", "One peer may supply server, port, public-key, pre-shared-key, allowed-ips and reserved. Multiple peers make the node unavailable. Incoming peer-initiated connections are rejected.")
+	add("wireguard", "unsupported", "amnezia-wg-option", "AmneziaWG options make the node unavailable.")
+	add("wireguard", "ignored", "remote-dns-resolve dns refresh-server-ip-interval workers ip-stack", "Reported with a warning for each field.")
 	add("snell", "supported", "psk version userkey mode reuse obfs-opts", "v5/v6 servers; v5 uses upstream v4-compatible client framing verified against v5 server; v6 modes; native protocol lifetime owns reuse")
 	return entries
 }
