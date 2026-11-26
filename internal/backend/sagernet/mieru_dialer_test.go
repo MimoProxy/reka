@@ -104,7 +104,19 @@ func TestMieruCloseCancelsPhysicalDial(t *testing.T) {
 	if err := <-finished; !errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 		t.Fatalf("closing outbound should interrupt detour before caller timeout, got %v", err)
 	}
-	if o.out.(*mieruOutbound).client.IsRunning() {
+	waitMieruStopped(t, o)
+}
+
+// waitMieruStopped waits for the background Stop that Close starts.
+func waitMieruStopped(t *testing.T, o *Outbound) {
+	t.Helper()
+	m := o.out.(*mieruOutbound)
+	select {
+	case <-m.stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Mieru client did not stop after close")
+	}
+	if m.client.IsRunning() {
 		t.Fatal("Mieru client is still running after close")
 	}
 }
@@ -147,6 +159,7 @@ func TestMieruCloseWakesSilentHandshake(t *testing.T) {
 	if err := <-finished; !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("handshake after close returned %v", err)
 	}
+	waitMieruStopped(t, o)
 }
 
 func TestMieruPacketBoundaries(t *testing.T) {

@@ -322,7 +322,8 @@ func TestHotSwapDrainsMieru(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("old generation did not drain")
 	}
-	if old.out.(*mieruOutbound).client.IsRunning() || !fresh.out.(*mieruOutbound).client.IsRunning() {
+	waitMieruStopped(t, old)
+	if !fresh.out.(*mieruOutbound).client.IsRunning() {
 		t.Fatal("expected only the replacement Mieru client to be running after drain")
 	}
 	mieruRoundTrip(t, freshConn, []byte("after old client stopped"), false)

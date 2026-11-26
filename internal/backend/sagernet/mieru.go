@@ -42,6 +42,8 @@ type mieruOutbound struct {
 
 	physical  *mieruDialer
 	cancel    context.CancelFunc
+	closeOnce sync.Once
+	stopped   chan struct{} // closed once the client has been stopped
 	mu        sync.RWMutex
 	startOnce sync.Once
 	startErr  error
@@ -106,6 +108,7 @@ func newMieruOutbound(ctx context.Context, tag string, data []byte) (adapter.Out
 		multiplex: profile.GetMultiplexing().GetLevel() != pb.MultiplexingLevel_MULTIPLEXING_OFF,
 		physical:  physical,
 		cancel:    cancel,
+		stopped:   make(chan struct{}),
 	}, nil
 }
 
@@ -245,9 +248,34 @@ func (m *mieruOutbound) dial(ctx context.Context, network string, dst M.Socksadd
 	stop := context.AfterFunc(m.physical.lifetime, cancel)
 	defer cancel()
 	defer stop()
-	conn, err := m.client.DialContext(dialCtx, model.NetAddrSpec{
-		Net: network, AddrSpec: model.AddrSpec{IP: dst.Addr.AsSlice(), FQDN: dst.Fqdn, Port: int(dst.Port)},
-	})
+	// Mieru reads the handshake response without watching the context, and a
+	// session whose socket is gone only finishes closing after the library's
+	// graceful-close wait (up to 1000 one-millisecond sleeps). Return as soon as
+	// the caller or the outbound gives up, and reap a late result.
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan dialResult, 1)
+	go func() {
+		conn, err := m.client.DialContext(dialCtx, model.NetAddrSpec{
+			Net: network, AddrSpec: model.AddrSpec{IP: dst.Addr.AsSlice(), FQDN: dst.Fqdn, Port: int(dst.Port)},
+		})
+		done <- dialResult{conn, err}
+	}()
+	var conn net.Conn
+	var err error
+	select {
+	case r := <-done:
+		conn, err = r.conn, r.err
+	case <-dialCtx.Done():
+		go func() {
+			if r := <-done; r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
+		err = dialCtx.Err()
+	}
 	if m.physical.lifetime.Err() != nil {
 		err = net.ErrClosed
 	} else if ctx.Err() != nil {
@@ -293,13 +321,21 @@ func (m *mieruOutbound) ListenPacket(ctx context.Context, dst M.Socksaddr) (net.
 func (m *mieruOutbound) Close() error {
 	// A forced close can race both DNS/dial and the standard SOCKS handshake.
 	// Wake socket I/O as well, then let Stop collect the finished underlays.
-	m.cancel()
-	m.physical.sockets.Interrupt(true)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.client.IsRunning() {
-		return m.client.Stop()
-	}
+	// Stop waits for every session's graceful-close attempt, which cannot
+	// succeed once the sockets are interrupted, so it runs in the background;
+	// stopped is closed when it finishes.
+	m.closeOnce.Do(func() {
+		m.cancel()
+		m.physical.sockets.Interrupt(true)
+		go func() {
+			defer close(m.stopped)
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if m.client.IsRunning() {
+				_ = m.client.Stop() // Stop reports no error for a running client.
+			}
+		}()
+	})
 	return nil
 }
 
