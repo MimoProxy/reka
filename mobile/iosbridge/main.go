@@ -1,4 +1,4 @@
-//go:build ios && cgo && with_gvisor
+//go:build darwin && cgo && with_gvisor
 
 package main
 
@@ -24,8 +24,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"runtime"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -245,37 +243,14 @@ func start(open func() (*packettunnel.Session, error), extension bool, failure *
 	}
 	// Packet-flow sessions run inside the VPN extension process.
 	if extension {
-		runtime.GOMAXPROCS(2)
-		// The limit covers all memory the Go runtime holds, not just the
-		// heap, and under load Go grows until it reaches it. sing-box's
-		// libbox sets 4/5 of the extension's 50 MB limit; the same ratio
-		// of the 25 MiB steady budget leaves room for the 4–6 MiB the
-		// extension holds outside Go (JavaScriptCore, system frameworks)
-		// and leaves room for HTTP scripts under their 38 MiB budget. With
-		// every ad-blocked app open, memory outside Go reached about
-		// 12 MiB, so a higher limit would leave little headroom below the
-		// memory guard. On an iPhone with Bilibili and YouTube
-		// traffic through HTTPS interception, 28 MiB let Go reach 27.6 MiB
-		// and the footprint 31 MiB. With 20 MiB the same kind of load
-		// peaked at 24.5 MiB, with collection taking about 8% of two
-		// cores; bursts with several hundred goroutines still exceed the
-		// limit and spend up to 17% collecting.
-		debug.SetMemoryLimit(20 << 20)
-		// GOGC 50 matches sing-box libbox's
-		// oomkiller.DefaultAppleNetworkExtensionGCPercent. Without HTTPS
-		// interception it made no measurable difference, because tunnel
-		// memory is live data. Interception allocates per request: on an
-		// iPhone, 8 parallel intercepted requests for 30 s peaked at 25.8 MiB
-		// with the default and 23.0 MiB with GOGC 50, against a 25 MiB steady
-		// budget.
-		debug.SetGCPercent(50)
+		tuneExtensionRuntime()
 	}
 	session, err := open()
 	if err != nil {
 		writeError(failure, capacity, err.Error())
 		return 0
 	}
-	if extension {
+	if extension && guardExtensionMemory {
 		session.StartMemoryGuard()
 	}
 	lastID++
