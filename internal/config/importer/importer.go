@@ -129,6 +129,10 @@ func (c *converter) diag(n *yaml.Node, path, code, message string, fatal bool) {
 	c.report.Diagnostics = append(c.report.Diagnostics, d)
 }
 func (c *converter) unsupported(n *yaml.Node, path, code, message string) {
+	if c.report.Format == "wireguard" {
+		c.diag(n, path, code, message, true)
+		return
+	}
 	c.report.Partial = true
 	c.diag(n, path, code, message, false)
 }
@@ -188,8 +192,10 @@ func importDirect(req Request) Result {
 		c.clash([]byte(req.Data))
 	case "links":
 		c.links(req.Data)
+	case "wireguard":
+		c.wireGuardConf(req.Data)
 	default:
-		c.diag(nil, "/format", "import.format", "format must be auto, clash or links", true)
+		c.diag(nil, "/format", "import.format", "format must be auto, clash, links or wireguard", true)
 	}
 	return c.finish()
 }

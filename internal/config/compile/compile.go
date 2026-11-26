@@ -371,7 +371,8 @@ func (c *compiler) compose() *Effective {
 	c.outbounds(eff)
 	c.groups(eff)
 	c.detours(eff)
-	c.rules(eff)
+	linkRules := c.wireGuardLinkRules(eff)
+	c.rules(eff, linkRules)
 	c.dns(eff)
 	c.listenersAndLocal(eff)
 	c.mitm(eff)
@@ -411,7 +412,15 @@ func (c *compiler) compose() *Effective {
 		if eff.Routing.Mode == "direct" {
 			target = model.OutboundDirect
 		}
-		activeRules, _ := router.CompileRules([]router.RuleSpec{{ID: "routing-mode-" + eff.Routing.Mode, Kind: router.KindMatch, Target: target}})
+		activeSpecs := []router.RuleSpec{{ID: "routing-mode-" + eff.Routing.Mode, Kind: router.KindMatch, Target: target}}
+		if eff.Routing.Mode == "global" {
+			activeSpecs = slices.Concat(linkRules, activeSpecs)
+		}
+		activeRules, err := router.CompileRules(activeSpecs)
+		if err != nil {
+			c.errorf(model.DocProfile, "/routing", "rule.invalid", "%v", err)
+			return eff
+		}
 		eff.ActiveRouter, err = router.New(activeRules, router.Options{Outbounds: ids, Groups: eff.Groups, Final: target})
 		if err != nil {
 			c.errorf(model.DocProfile, "/routing", "routing.target", "%v", err)
@@ -982,7 +991,7 @@ func findCycle(start string, groups map[string]router.Group) string {
 	return visit(start)
 }
 
-func (c *compiler) rules(eff *Effective) {
+func (c *compiler) rules(eff *Effective, linkRules []router.RuleSpec) {
 	rc := c.prepareRuleResources()
 	c.validateSubRules(rc, eff)
 	c.expandSubRules()
@@ -1003,6 +1012,17 @@ func (c *compiler) rules(eff *Effective) {
 	ids := map[string]bool{}
 	catchAll := -1
 	h := sha256.New()
+	addRule := func(spec router.RuleSpec, description string) {
+		eff.Rules = append(eff.Rules, spec)
+		eff.RuleIDs = append(eff.RuleIDs, spec.ID)
+		eff.RuleDescriptions = append(eff.RuleDescriptions, description)
+		b, _ := json.Marshal(spec)
+		h.Write(b)
+	}
+	shiftAnonymousRuleOrigins(eff, len(linkRules))
+	for _, spec := range linkRules {
+		addRule(spec, DescribeRoutingRule(spec))
+	}
 	for i, r := range c.profile.Rules {
 		base := model.JoinPath("/rules", seg(r.ID, i))
 		if r.ID != "" {
@@ -1053,11 +1073,7 @@ func (c *compiler) rules(eff *Effective) {
 		if validated.NeedsProcess() && !c.opts.ProcessLookup {
 			c.warnf(doc, base, "rule.process", "this platform cannot identify processes; the rule never matches")
 		}
-		eff.Rules = append(eff.Rules, spec)
-		eff.RuleIDs = append(eff.RuleIDs, r.ID)
-		eff.RuleDescriptions = append(eff.RuleDescriptions, rc.ruleDescription(r, spec))
-		b, _ := json.Marshal(spec)
-		h.Write(b)
+		addRule(spec, rc.ruleDescription(r, spec))
 	}
 	eff.RuleSetSelectors = rc.ruleSetSelectors()
 	if catchAll < 0 && len(c.profile.Rules) > 0 && !c.diags.HasErrors() {

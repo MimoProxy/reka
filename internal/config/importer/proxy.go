@@ -308,7 +308,9 @@ func (c *converter) validateOutbound(out object, n *yaml.Node, path string) bool
 			key = "/tls"
 		}
 		at := n
-		if len(key) > 1 {
+		if c.report.Format == "wireguard" {
+			at = wireGuardConfDiagnosticNode(n, key)
+		} else if len(key) > 1 {
 			if child := get(n, strings.TrimPrefix(key, "/")); child != nil {
 				at = child
 			}

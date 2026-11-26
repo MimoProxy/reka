@@ -95,6 +95,12 @@ func SupportMatrix() []Support {
 	add("wireguard", "partial", "peers", "One peer may supply server, port, public-key, pre-shared-key, allowed-ips and reserved. Multiple peers make the node unavailable. Incoming peer-initiated connections are rejected.")
 	add("wireguard", "unsupported", "amnezia-wg-option", "AmneziaWG options make the node unavailable.")
 	add("wireguard", "ignored", "remote-dns-resolve dns refresh-server-ip-interval workers ip-stack", "Reported with a warning for each field.")
+	add("wireguard .conf", "supported", "Interface Peer", "One of each, matched case insensitively. Endpoint is required. Unknown fields and sections make the node unavailable.")
+	add("wireguard .conf", "supported", "Name", "A # Name = comment before [Interface] supplies the stable node name. Defaults to WireGuard.")
+	add("wireguard .conf Interface", "supported", "PrivateKey Address MTU", "Address accepts comma-separated values and repeated lines. Bare IPv4 and IPv6 addresses receive /32 and /128.")
+	add("wireguard .conf Interface", "ignored", "DNS ListenPort Table FwMark SaveConfig", "Reported with a warning for each field.")
+	add("wireguard .conf Interface", "ignored", "PreUp PostUp PreDown PostDown", "Reported with a warning. Scripts will not be executed.")
+	add("wireguard .conf Peer", "supported", "PublicKey PresharedKey AllowedIPs Endpoint PersistentKeepalive", "Comma-separated allowed prefixes. Endpoint accepts a host or IPv4 address with a port, or a bracketed IPv6 address with a port. Keepalive accepts seconds or off. UDP forwarding is enabled.")
 	add("snell", "supported", "psk version userkey mode reuse obfs-opts", "v5/v6 servers; v5 uses upstream v4-compatible client framing verified against v5 server; v6 modes; native protocol lifetime owns reuse")
 	return entries
 }

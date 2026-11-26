@@ -1,6 +1,6 @@
 # Clash subscription import
 
-The importer converts local Clash YAML or share-link text into one native source snapshot. This local command resolves inline providers but does not download HTTP resources. [Background subscriptions and provider acquisition](subscriptions.md) happen outside this pure conversion path. Neither path changes the profile/local settings/overlay. Runtime support remains limited to the current native protocols and rules. See the generated [field support table](clash-support.md).
+The importer converts local Clash YAML, share-link text or a WireGuard `.conf` into one native source snapshot. This local command resolves inline providers but does not download HTTP resources. [Background subscriptions and provider acquisition](subscriptions.md) happen outside this pure conversion path. Neither path changes the profile/local settings/overlay. Runtime support remains limited to the current native protocols and rules. See the generated [field support table](clash-support.md).
 
 Conversion has been checked against a small set of real, anonymized subscriptions: all of their VMess and VLESS nodes convert. Providers, rule sets, logical rules and explicit GeoIP/GeoSite assets are covered in [rule resources](rule-resources.md); automatic groups and DNS in their own documents. Some subscription rules and auxiliary groups still need references or options Reka does not support; a partial import is not evidence of complete subscription compatibility.
 
@@ -60,6 +60,26 @@ The importer carries over `pre-shared-key`, `allowed-ips`, `persistent-keepalive
 
 Multiple peers and `amnezia-wg-option` make a node unavailable with a diagnostic. Reka ignores `remote-dns-resolve`, `dns`, `refresh-server-ip-interval`, `workers` and `ip-stack` with field warnings. Imported nodes use the [native WireGuard defaults and outbound-only behavior](configuration-reference.md#wireguard).
 
+### WireGuard `.conf` files
+
+Use `-format wireguard` to import wg-quick text. The default `auto` format recognizes an `[Interface]` header on the first non-comment, nonblank line. A client can also decode a WireGuard QR code and submit the resulting text to the importer.
+
+```sh
+./bin/rekactl import -source home -format wireguard home.conf
+./bin/rekactl import -source home -format wireguard -apply home.conf
+```
+
+Section and key names are case-insensitive. Whitespace around `=` is optional. Blank lines, full-line `#` and `;` comments, and trailing `#` comments are accepted. An optional `# Name = Home` comment before `[Interface]` supplies the display name and the input to the stable ID. Otherwise the name defaults to `WireGuard`.
+
+| Section | Supported fields |
+| --- | --- |
+| `[Interface]` | `PrivateKey`, `Address`, `MTU`. `Address` accepts multiple lines and comma-separated lists. Bare IPv4 and IPv6 addresses receive `/32` and `/128` respectively. |
+| `[Peer]` | `PublicKey`, `PresharedKey`, `AllowedIPs`, `Endpoint`, `PersistentKeepalive`. `AllowedIPs` accepts comma-separated prefixes. `Endpoint` is required and accepts `host:port`, `1.2.3.4:port` and `[IPv6]:port`. Peer hostnames are retained for runtime resolution. |
+
+The importer reports `DNS` (including comma-separated values), `ListenPort`, `Table`, `FwMark`, `SaveConfig`, `PreUp`, `PostUp`, `PreDown` and `PostDown` as ignored. Hook commands are never executed. An unknown section or field, a missing peer or endpoint, or multiple peers makes the node unavailable. Diagnostics point to the original `.conf` lines.
+
+Enable the source's outbounds in the profile and use the preview's full `source/id` to reference the node. Add the device-local routing entry to reach the home subnet automatically. [Home network example](configuration.md#access-a-home-network-through-wireguard)
+
 ## Stable identities and metadata
 
 Names are matched exactly, including Unicode, whitespace and slashes. The importer generates portable IDs `p-<96-bit SHA-256 prefix>` for nodes and `g-<prefix>` for groups from their original names. Reordering, server changes and credential rotation keep the ID; renaming produces a new one. Duplicate names across nodes/groups and reserved DIRECT/REJECT names are errors. Native source namespacing still adds `source/`.
@@ -78,7 +98,7 @@ Auto-detection supports plain or base64-encoded lists. Implemented node formats 
 
 ## API
 
-`GetCapabilities` advertises `source_formats: ["native", "clash", "links"]` and the machine-readable `import_support` field matrix.
+`GetCapabilities` lists `wireguard` alongside the other `source_formats` and provides the machine-readable `import_support` field matrix.
 
 Pure conversion:
 

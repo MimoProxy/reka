@@ -31,6 +31,9 @@ func (c *converter) convertWireGuard(r *proxyReader, out object) {
 		}
 	}
 	allowed := map[string]bool{"name": true, "type": true, "peers": true, "ip": true, "ipv6": true, "private-key": true, "udp": true, "mtu": true, "persistent-keepalive": true}
+	if c.report.Format == "wireguard" {
+		allowed["address"] = true
+	}
 	peerFields := map[string]bool{"server": true, "port": true, "public-key": true, "pre-shared-key": true, "allowed-ips": true, "reserved": true}
 	for key := range peerFields {
 		allowed[key] = true
@@ -69,6 +72,11 @@ func (c *converter) convertWireGuard(r *proxyReader, out object) {
 		}
 	}
 	addresses := []string{}
+	if n := get(r.n, "address"); n != nil && c.report.Format == "wireguard" {
+		for _, addr := range n.Content {
+			addresses = append(addresses, addr.Value)
+		}
+	}
 	for _, key := range []string{"ip", "ipv6"} {
 		address := r.str(key)
 		if address == "" {
