@@ -172,6 +172,25 @@ func TestOoklaServerSelectionFailsWhenNoCandidateResponds(t *testing.T) {
 	})
 }
 
+func TestOoklaProbeAnsweredAtDeadlineFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := &http.Client{Transport: speedTestTransport(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path == "/hello" {
+				// The transport may still hand back a response that raced the deadline.
+				<-request.Context().Done()
+				return speedTestResponse(http.StatusOK, http.NoBody), nil
+			}
+			return speedTestResponse(http.StatusOK, strings.NewReader(`[{"host":"late.example.com:8080"}]`)), nil
+		})}
+		start := time.Now()
+		_, err := resolveOoklaEndpoints(t.Context(), client, ooklaServerListURL)
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrOoklaUnreachable) ||
+			time.Since(start) != ooklaProbeLimit {
+			t.Fatalf("selection error = %v after %s", err, time.Since(start))
+		}
+	})
+}
+
 func TestOoklaServerListFailureIsUnreachable(t *testing.T) {
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A proxy that blocks speed test sites closes the connection without a response.
