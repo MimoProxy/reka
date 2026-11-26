@@ -151,6 +151,42 @@ func TestWireGuardKeysMaskAndRestore(t *testing.T) {
 	}
 }
 
+func TestSSHSecretsMaskAndRestore(t *testing.T) {
+	const outbound = "{id: jump, type: ssh, password: confidential-password, protocol: {private-key: confidential-key, private-key-passphrase: confidential-passphrase, host-key: [published]}}"
+	for _, prefix := range []string{"/outbounds/jump", "/sources/feed/outbounds/jump"} {
+		for _, field := range []string{"private-key", "private-key-passphrase"} {
+			if !IsSensitive(prefix + "/protocol/" + field) {
+				t.Errorf("%s/protocol/%s is not marked sensitive", prefix, field)
+			}
+		}
+	}
+	for kind, input := range map[string]string{
+		DocProfile: "outbounds: [" + outbound + "]",
+		DocSources: "sources: [{id: feed, outbounds: [" + outbound + "]}]",
+		DocOverlay: `patches:
+- {op: set, path: /outbounds/jump/password, value: confidential-password}
+- {op: set, path: /outbounds/jump/protocol/private-key, value: confidential-key}
+- {op: set, path: /outbounds/jump/protocol/private-key-passphrase, value: confidential-passphrase}
+- {op: set, path: /outbounds/jump/protocol/host-key, value: [published]}
+`,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			original, ds := LoadDoc(kind, []byte(input))
+			if ds.HasErrors() {
+				t.Fatal(ds)
+			}
+			masked, _ := LoadDoc(kind, []byte(input))
+			if masked.MaskSecrets() != 3 || strings.Contains(string(masked.Bytes()), "confidential-") ||
+				!strings.Contains(string(masked.Bytes()), "published") {
+				t.Fatal("SSH credentials were not masked correctly")
+			}
+			if err := masked.UnmaskSecrets(original); err != nil || string(masked.Bytes()) != string(original.Bytes()) {
+				t.Fatal("masked SSH credentials were not restored", err)
+			}
+		})
+	}
+}
+
 func TestPluginNestedSecretsAcrossDocuments(t *testing.T) {
 	for _, tc := range []struct{ kind, input string }{
 		{DocProfile, `schema-version: 1

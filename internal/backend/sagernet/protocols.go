@@ -127,6 +127,10 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if s.Username != "" {
 		values["username"] = s.Username
 	}
+	if s.Type == "ssh" && values["username"] != nil {
+		values["user"] = values["username"]
+		delete(values, "username")
+	}
 	if s.Method != "" {
 		values["method"] = s.Method
 	}
@@ -260,6 +264,8 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			return nil, err
 		}
 		return socks.NewOutbound(ctx, b.router, logger, tag, o)
+	case "ssh":
+		return newSSHOutbound(ctx, tag, data)
 	case "shadowsocks":
 		var o option.ShadowsocksOutboundOptions
 		if err = json.Unmarshal(data, &o); err != nil {

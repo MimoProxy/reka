@@ -52,6 +52,12 @@ Partial mode can change routing: unavailable rules are absent and unsupported me
 
 `-apply` first plans, then commits the normalized snapshot through ConfigService. Repeating an import under the same source ID replaces that source only. Other sources and profile/overlay/local documents remain intact. The usual base-version, plan-hash, operation-ID, preparation and recovery guarantees apply. Import does not automatically rewrite profile references or enable imported rules/DNS. Activate a source DNS explicitly with `dns: {from: airport, listen: "127.0.0.1:5353"}`; imported remote listen addresses are ignored.
 
+## SSH nodes
+
+Clash YAML accepts `type: ssh` with `server`, `port`, `username`, `password`, an inline `private-key` and its optional `private-key-passphrase`. Previews mask the username, password, private key and passphrase. A private key supplied as a file path makes the node unavailable. Common dialer options, including `dialer-proxy`, are preserved.
+
+Supply `host-key` as a list of authorized_keys public keys. `host-key-algorithms` can set their negotiation order. When `host-key` is absent or empty, the importer preserves mihomo's behavior by setting `insecure-skip-host-key: true` and warns that the server identity is unchecked. Add the server's trusted public key to enable verification. SSH forwards TCP only, so `udp: true` produces an ignored-field diagnostic.
+
 ## WireGuard nodes
 
 Clash YAML accepts a `wireguard` proxy with a single peer. Put the endpoint, public key and peer options at the top level or in one `peers` entry. The local `private-key`, `ip` and `ipv6` belong to the node. Import preserves explicit prefix lengths and appends `/32` to bare IPv4 addresses and `/128` to bare IPv6 addresses.

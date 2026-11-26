@@ -12,6 +12,7 @@ func FuzzSubscriptions(f *testing.F) {
 		"ss://YWVzLTEyOC1nY206cGFzcw@127.0.0.1:8388#test",
 		"proxies: [{name: x, type: anytls, server: node.test, port: 443, password: test-password, idle-session-timeout: 30}]",
 		"anytls://test-password@node.test:443?sni=cover.test&insecure=1#test",
+		"proxies: [{name: x, type: ssh, server: node.test, port: 22, username: alice, password: test-password, host-key: [], udp: true}]",
 		"proxies: &a [*a]",
 		"",
 	} {

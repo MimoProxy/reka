@@ -40,6 +40,8 @@ import (
 )
 
 func TestProtocolInteroperability(t *testing.T) {
+	// SSH exposes TCP channels only. Its fixture forwards each channel to a loopback echo server.
+	t.Run("ssh", func(t *testing.T) { testSSHInteroperability(t, true) })
 	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	cert := tlsServer.TLS.Certificates[0]
 	tlsServer.Close()
