@@ -19,6 +19,7 @@ var protocolFields = map[string][]string{
 	"hysteria2":             {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"},
 	"tuic":                  {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"},
 	"snell":                 {"version", "user-key", "mode", "reuse", "obfs"},
+	model.OutboundSSH:       {"private-key", "private-key-passphrase", "host-key", "host-key-algorithms", "client-version", "insecure-skip-host-key"},
 	model.OutboundWireGuard: {"private-key", "public-key", "pre-shared-key", "address", "allowed-ips", "persistent-keepalive", "reserved", "mtu"},
 }
 
@@ -38,6 +39,10 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	}
 	if ob.Type == model.OutboundSSR {
 		c.ssr(base, ob, out)
+		return
+	}
+	if ob.Type == model.OutboundSSH {
+		c.ssh(base, ob.Protocol, out)
 		return
 	}
 	if ob.Type == model.OutboundWireGuard {

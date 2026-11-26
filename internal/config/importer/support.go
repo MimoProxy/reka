@@ -19,7 +19,7 @@ func SupportMatrix() []Support {
 		}
 	}
 	add("proxies", "supported", "name", "Exact original name → stable hashed ID; duplicates/reserved names are errors")
-	add("proxies", "partial", "type", "ss/ssr/vless/vmess/trojan/anytls/hysteria/hysteria2/tuic/snell/wireguard/http/socks5/direct/reject with the documented options")
+	add("proxies", "partial", "type", "ss/ssr/vless/vmess/trojan/anytls/hysteria/hysteria2/tuic/snell/wireguard/ssh/http/socks5/direct/reject with the documented options")
 	add("proxies", "supported", "server port", "Scalar host/IP and integer or quoted numeric port; native validation applies")
 	add("ss/ssr/socks5/vless/anytls", "supported", "udp", "Absent means false, matching the locked Clash options")
 	add("direct", "supported", "udp", "Defaults to true")
@@ -52,7 +52,7 @@ func SupportMatrix() []Support {
 	add("ss", "supported", "udp-over-tcp udp-over-tcp-version", "TCP-only node transport for UDP; default legacy v1 or explicit v1/v2; TCP and UDP echo tested")
 	add("http", "supported", "headers", "Custom CONNECT headers; configured credentials take precedence over Proxy-Authorization; values are masked")
 	add("vmess/vless", "supported", "h2-opts http-opts", "HTTP method/path/header lists and H2 host/path; H2 enables TLS, including when omitted in Clash")
-	add("proxies except wireguard/anytls/hysteria/ssr", "supported with accounting diagnostic", "smux", "h2mux/smux/yamux on stream and datagram proxies. Supports enabled/padding/connection/stream limits, only-tcp and brutal-opts integer K/M/G/T bps/Bps rates (unitless Mbps). statistic is retained as metadata while native per-flow accounting is always active. Brutal needs a compatible Linux server/kernel module. Unavailable server negotiation fails.")
+	add("proxies except wireguard/anytls/hysteria/ssh/ssr", "supported with accounting diagnostic", "smux", "h2mux/smux/yamux on stream and datagram proxies. Supports enabled/padding/connection/stream limits, only-tcp and brutal-opts integer K/M/G/T bps/Bps rates (unitless Mbps). statistic is retained as metadata while native per-flow accounting is always active. Brutal needs a compatible Linux server/kernel module. Unavailable server negotiation fails.")
 	add("http/socks5/vmess/vless/trojan/anytls/hysteria/hysteria2/tuic", "supported", "fingerprint name-cert-verify", "Full DER certificate SHA256 pin (not SPKI); independent verification name keeps SNI; real TLS/uTLS/QUIC tests")
 	add("http/socks5/vmess/vless/trojan/anytls/hysteria/hysteria2/tuic", "supported", "certificate private-key", "Matching inline PEM, secret references or explicit caller-supplied certificate_files path attachments; masked previews and subscription refresh; remote paths never opened implicitly")
 	add("http/socks5/vmess/vless/trojan/anytls/hysteria/hysteria2/tuic", "supported", "ech-opts", "enable/config/query-server-name; explicit base64 ECHConfigList or HTTPS DNS lookup through active proxy-server DNS; real TLS/uTLS and HY2/TUIC TCP/UDP tests, wrong-key rejection; excludes REALITY")
@@ -99,6 +99,10 @@ func SupportMatrix() []Support {
 	add("anytls", "supported", "min-idle-session", "Minimum idle sessions from 0 to 64")
 	add("anytls", "supported", "client-metadata", "Optional string. Defaults to empty, matching mihomo.")
 	add("anytls", "partial", "disable-reuse", "Omitted or false is accepted. True is unsupported.")
+	add("ssh", "supported", "username password private-key-passphrase", "Password or public key authentication. An encrypted private key uses the supplied passphrase. Credentials are masked in previews.")
+	add("ssh", "partial", "private-key", "Inline OpenSSH or PEM private keys are supported. A file path makes the node unavailable.")
+	add("ssh", "supported", "host-key host-key-algorithms", "Trusted host keys in authorized_keys format and optional host key algorithm list. Omitted or empty host-key explicitly disables host key verification and produces a warning.")
+	add("ssh", "ignored", "udp", "SSH carries TCP only. Enabling UDP produces a warning.")
 	add("vmess/trojan/vless", "supported", "ws-opts grpc-opts http-upgrade-opts", "Explicit path/Host/header/service-name and WS early-data fields; unknown options rejected")
 	add("hysteria", "supported", "auth auth-str", "Standard base64 auth takes precedence over plaintext auth-str. Both are optional. Underscores in Hysteria option names are accepted. Duplicate spellings are rejected.")
 	add("hysteria", "supported", "up down up-speed down-speed", "Both base rates are required. Integer K/M/G/T bps or Bps use decimal units. Unitless rates and nonzero speed overrides use Mbps. Effective rates must be at least 16384 bytes/s.")

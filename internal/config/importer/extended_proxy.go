@@ -305,19 +305,5 @@ func (c *converter) convertTransport(r *proxyReader, out object) {
 
 // Clash HTTP obfuscation selects one value from each configured list.
 func transportStrings(r *proxyReader, n *yaml.Node, key string) []string {
-	v := get(n, key)
-	if v == nil || v.Kind != yaml.SequenceNode {
-		r.fail(key, "import.transport", "expected a list of strings")
-		return nil
-	}
-	values := []string{}
-	for _, item := range v.Content {
-		item = deref(item)
-		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
-			r.fail(key, "import.transport", "expected a list of strings")
-			continue
-		}
-		values = append(values, item.Value)
-	}
-	return values
+	return r.stringList(get(n, key), key, "import.transport")
 }

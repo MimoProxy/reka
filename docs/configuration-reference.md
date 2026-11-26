@@ -55,8 +55,8 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `name` | 可选字符串 | 显示名称，不影响路由引用 |
 | `type` | 必填字符串 | 见下面协议表 |
 | `server` | 字符串 | 服务器域名或 IP，不含 URL 协议、路径和端口 |
-| `port` | 整数 | 通常必填，范围 1–65535；Hysteria v1 和 HY2 支持端口跳跃，HY2 还支持 Realm |
-| `udp` | 布尔，通常默认 `true` | 是否允许原生 UDP；HTTP 和 reject 不提供原生 UDP |
+| `port` | 整数 | 通常必填，范围 1–65535；SSH 默认 22；Hysteria v1 和 HY2 支持端口跳跃，HY2 还支持 Realm |
+| `udp` | 布尔，通常默认 `true` | 是否允许原生 UDP；SSH、HTTP 和 reject 不提供原生 UDP |
 | `dialer` | 对象 | 物理出站参数或经过其他节点，见 3.6 |
 | `multiplex` | 对象，默认关闭 | 通用多路复用，见 3.7 |
 
@@ -68,6 +68,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `reject` | 无服务器字段 | 不允许 dialer / multiplex |
 | `http` | `server`、`port`；可选 `username` + `password` | 可选 `tls`；`headers: [{name: X-Key, value: value}]`；无原生 UDP |
 | `socks` | `server`、`port`；可选 `username` + `password` | SOCKS5 出站；可选 `tls`、`udp` |
+| `ssh` | `server` 必填，`port` 默认 22，`username` 默认 `root` | 通过一条 SSH 会话转发 TCP 流。可配置 `dialer`，主机密钥与认证见 [SSH](#ssh) |
 | `shadowsocks` | `server`、`port`、`method`、`password` | `plugin`、`udp-over-tcp`、`udp-over-tcp-version`，见 3.8 |
 | `ssr` | `server`、`port`、`method`、`password` | 支持 TCP 和原生 UDP，拒绝 `tls`、`transport`、`multiplex`、`plugin` 和开启 `dialer.tfo` |
 | `vless` | `server`、`port`、`uuid` | `tls`、`flow`、`encryption`、`packet-encoding`、`transport` |
@@ -201,6 +202,21 @@ Realm 的 `tls` 验证控制服务，节点顶层 `tls` 验证最终 QUIC peer�
 
 `realm` 和混淆包大小参数仅适用于 Hysteria2。
 
+#### SSH
+
+`password` 位于节点顶层。也可用 `protocol.private-key` 认证，两者都填写时优先尝试公钥。密码、私钥和私钥口令都支持 `secret://` 引用，读取配置时会掩码。
+
+| `protocol` 字段 | 值和行为 |
+| --- | --- |
+| `private-key` | 内联 OpenSSH 或 PEM 私钥，支持 YAML 多行字符串。 |
+| `private-key-passphrase` | 解密私钥的口令，需要同时设置 `private-key`。 |
+| `host-key` | 固定的服务器公钥列表，每项为一行 authorized_keys 格式的公钥，任意一把匹配即可。 |
+| `host-key-algorithms` | 可选的主机密钥协商算法列表，按优先级排列。省略时会根据固定的公钥类型推导算法。 |
+| `client-version` | 可选的 SSH 客户端标识，使用可打印 ASCII 字符，以 `SSH-2.0-` 开头。整行含 CRLF 最多 255 字节。 |
+| `insecure-skip-host-key` | 显式设为 `true` 会跳过服务器身份校验。此选项与非空 `host-key` 必须选其一。 |
+
+SSH 仅支持 TCP，流量经服务端的 `direct-tcpip` 通道转发。配置可省略 `udp` 或设为 `false`；SSH 有自己的加密和通道复用，不接受 `tls`、`transport` 或 `multiplex`。
+
 #### WireGuard
 
 Set `server` and `port` to the peer's UDP endpoint. Set the following fields under `protocol`.
@@ -261,7 +277,7 @@ Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivit
 | `statistic` | false；仅保留兼容元数据，Reka 始终报告自己的逐连接流量 |
 | `brutal` | `{enabled: true, up-bps: 1250000, down-bps: 2000000}`；单位字节/秒，两方向至少 65536 |
 
-适用于除 Hysteria v1、AnyTLS、SSR、reject、pass、reject-drop 以外可建立连接的出站。AnyTLS 使用自身的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
+通用 multiplex 不适用于 Hysteria v1、SSH、AnyTLS、SSR、WireGuard、reject、pass 或 reject-drop。SSH 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
 
 ### 3.8 Shadowsocks 的 UoT 与 `plugin`
 

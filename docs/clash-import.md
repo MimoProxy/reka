@@ -60,6 +60,12 @@ Supply both `up` and `down`. Unitless integers mean Mbps. Rates such as `500 Kbp
 
 `obfs-protocol` overrides `protocol`. Both accept the UDP transport. A `ports` list enables hopping at a single integer `hop-interval` in seconds, defaulting to 10. The `recv-window` field sets the connection window. As in mihomo, `recv-window-conn` sets the stream window only when `recv-window` is nonzero. Setting `disable-mtu-discovery: true` disables QUIC path MTU discovery. Both `fast-open` values are accepted because sing-quic sends the TCP request with the first write. Underscore spellings such as `auth_str` work for Hysteria nodes. Using both spellings of the same key is an error.
 
+## SSH nodes
+
+Clash YAML accepts `type: ssh` with `server`, `port`, `username`, `password`, an inline `private-key` and its optional `private-key-passphrase`. Previews mask the username, password, private key and passphrase. A private key supplied as a file path makes the node unavailable. Common dialer options, including `dialer-proxy`, are preserved.
+
+Supply `host-key` as a list of authorized_keys public keys. `host-key-algorithms` can set their negotiation order. When `host-key` is absent or empty, the importer preserves mihomo's behavior by setting `insecure-skip-host-key: true` and warns that the server identity is unchecked. Add the server's trusted public key to enable verification. SSH forwards TCP only, so `udp: true` produces an ignored-field diagnostic.
+
 ## WireGuard nodes
 
 Clash YAML accepts a `wireguard` proxy with a single peer. Put the endpoint, public key and peer options at the top level or in one `peers` entry. The local `private-key`, `ip` and `ipv6` belong to the node. Import preserves explicit prefix lengths and appends `/32` to bare IPv4 addresses and `/128` to bare IPv6 addresses.

@@ -67,6 +67,7 @@ const (
 	OutboundReject      = "reject"
 	OutboundHTTP        = "http"
 	OutboundSOCKS       = "socks"
+	OutboundSSH         = "ssh"
 	OutboundShadowsocks = "shadowsocks"
 	OutboundSSR         = "ssr"
 	OutboundVLESS       = "vless"
@@ -94,9 +95,9 @@ type Outbound struct {
 	// UDP enables UDP relay where the protocol supports it. Default true.
 	UDP *bool `yaml:"udp"`
 
-	Username string `yaml:"username"` // http, socks
-	Password string `yaml:"password"` // http, socks, shadowsocks
-	Method   string `yaml:"method"`   // shadowsocks, ssr
+	Username string `yaml:"username"` // http, socks, ssh
+	Password string `yaml:"password"`
+	Method   string `yaml:"method"` // shadowsocks, ssr
 
 	UUID string `yaml:"uuid"` // vless
 	// Flow is "" or "xtls-rprx-vision".
@@ -357,6 +358,12 @@ type Protocol struct {
 	PersistentKeepalive int      `yaml:"persistent-keepalive,omitempty" json:",omitempty"`
 	Reserved            []uint8  `yaml:"reserved,omitempty" json:",omitempty"`
 	MTU                 int      `yaml:"mtu,omitempty" json:",omitempty"`
+
+	PrivateKeyPassphrase string   `yaml:"private-key-passphrase,omitempty" json:",omitempty"`
+	HostKey              []string `yaml:"host-key,omitempty" json:",omitempty"`
+	HostKeyAlgorithms    []string `yaml:"host-key-algorithms,omitempty" json:",omitempty"`
+	ClientVersion        string   `yaml:"client-version,omitempty" json:",omitempty"`
+	InsecureSkipHostKey  bool     `yaml:"insecure-skip-host-key,omitempty" json:",omitempty"`
 
 	AuthBase64              string `yaml:"auth-base64,omitempty" json:",omitempty"`
 	StreamReceiveWindow     uint64 `yaml:"stream-receive-window,omitempty" json:",omitempty"`

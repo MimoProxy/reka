@@ -437,6 +437,7 @@ var fieldsByType = map[string][]string{
 	"pass":               {}, "reject-drop": {},
 	model.OutboundHTTP:        {"server", "port", "username", "password", "tls", "headers"},
 	model.OutboundSOCKS:       {"server", "port", "username", "password", "udp", "tls"},
+	model.OutboundSSH:         {"server", "port", "username", "password", "protocol"},
 	model.OutboundShadowsocks: {"server", "port", "method", "password", "udp", "udp-over-tcp", "udp-over-tcp-version", "plugin"},
 	model.OutboundSSR:         {"server", "port", "method", "password", "udp", "protocol"},
 	model.OutboundVLESS:       {"server", "port", "uuid", "flow", "encryption", "packet-encoding", "tls", "udp", "transport", "multiplex"},
@@ -540,6 +541,12 @@ func (c *compiler) outbounds(eff *Effective) {
 				c.errorf(doc, base+"/multiplex", "outbound.field", "AnyTLS manages its own sessions and does not accept multiplex")
 			} else if ob.Type == model.OutboundSSR && (k == "tls" || k == "transport" || k == "multiplex") {
 				c.errorf(doc, base+"/"+k, "outbound.field", "SSR does not accept %s", k)
+			} else if ob.Type == model.OutboundSSH && k == "multiplex" {
+				c.errorf(doc, base+"/multiplex", "outbound.field", "SSH multiplexes its own channels and does not accept multiplex")
+			} else if ob.Type == model.OutboundSSH && k == "udp" {
+				if ob.UDP != nil && *ob.UDP {
+					c.errorf(doc, base+"/udp", "outbound.field", "SSH carries TCP only")
+				}
 			} else if !slices.Contains(allowed, k) && !slices.Contains(commonFields, k) {
 				c.errorf(doc, base+"/"+k, "outbound.field", "field %q does not apply to %s outbounds", k, ob.Type)
 			}
@@ -590,7 +597,7 @@ func (c *compiler) outbounds(eff *Effective) {
 			}
 		}
 		out.UDP = ob.UDP == nil || *ob.UDP
-		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundReject {
+		if ob.Type == model.OutboundHTTP || ob.Type == model.OutboundSSH || ob.Type == model.OutboundReject {
 			out.UDP = false
 		}
 		if ob.Multiplex != nil && ob.Multiplex.Enabled && !ob.Multiplex.OnlyTCP {
@@ -602,6 +609,9 @@ func (c *compiler) outbounds(eff *Effective) {
 				c.errorf(doc, base+"/server", "outbound.server", "server is required")
 			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
 				c.errorf(doc, base+"/server", "outbound.server", "server must be a host name or an IP address")
+			}
+			if _, present := c.ppos[base+"/port"]; !present && ob.Type == model.OutboundSSH {
+				ob.Port = 22
 			}
 			hopping := (ob.Type == "hysteria" || ob.Type == "hysteria2") && ob.Protocol != nil && len(ob.Protocol.ServerPorts) > 0
 			if (ob.Port < 1 || ob.Port > 65535) && !(ob.Port == 0 && (hopping || realmEnabled)) {

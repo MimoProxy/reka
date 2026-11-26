@@ -36,6 +36,22 @@ func (r *proxyReader) str(key string) string {
 	}
 	return n.Value
 }
+func (r *proxyReader) stringList(n *yaml.Node, key, code string) []string {
+	if n == nil || n.Kind != yaml.SequenceNode {
+		r.fail(key, code, "expected a list of strings")
+		return nil
+	}
+	values := make([]string, 0, len(n.Content))
+	for _, item := range n.Content {
+		item = deref(item)
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+			r.fail(key, code, "expected a list of strings")
+			continue
+		}
+		values = append(values, item.Value)
+	}
+	return values
+}
 func (r *proxyReader) boolean(key string, def bool) bool {
 	n := get(r.n, key)
 	if empty(n) {
@@ -79,7 +95,7 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		c.convertExtended(n, path)
 		return
 	}
-	nativeType := map[string]string{"ss": "shadowsocks", "ssr": model.OutboundSSR, "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard}[typ]
+	nativeType := map[string]string{"ss": "shadowsocks", "ssr": model.OutboundSSR, "vless": "vless", "http": "http", "socks5": "socks", "direct": "direct", "reject": "reject", "wireguard": model.OutboundWireGuard, "ssh": model.OutboundSSH}[typ]
 	binding := Binding{Kind: "outbound", Name: name, ID: id}
 	defer func() { c.report.Bindings = append(c.report.Bindings, binding) }()
 	if nativeType == "" {
@@ -87,12 +103,16 @@ func (c *converter) convertProxy(n *yaml.Node, path string) {
 		return
 	}
 	out := object{"id": id, "name": name, "type": nativeType}
-	if typ == model.OutboundSSR {
+	switch typ {
+	case model.OutboundSSR:
 		c.convertSSR(&r, out)
 		c.addOutbound(&r, out, &binding)
 		return
-	}
-	if typ == "wireguard" {
+	case "ssh":
+		c.convertSSH(&r, out)
+		c.addOutbound(&r, out, &binding)
+		return
+	case "wireguard":
 		c.convertWireGuard(&r, out)
 		c.addOutbound(&r, out, &binding)
 		return
@@ -322,6 +342,8 @@ func (c *converter) validateOutbound(out object, n *yaml.Node, path string) bool
 		switch {
 		case key == "/method":
 			key = "/cipher"
+		case out["type"] == model.OutboundSSH && strings.HasPrefix(key, "/protocol/"):
+			key = strings.TrimPrefix(key, "/protocol")
 		case strings.HasPrefix(key, "/tls"):
 			key = "/tls"
 		}

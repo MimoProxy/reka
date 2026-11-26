@@ -837,9 +837,8 @@ func parseLevel(s string) slog.Level {
 	return slog.LevelInfo
 }
 
-// usesUpstreamOutbound reports whether an outbound is built from the
-// upstream protocol packages with generic options. REALITY keeps Reka's own
-// handshake client; all other TLS protocols use the scoped component adapter.
+// usesUpstreamOutbound selects the backend's generic ProxySpec option pipeline,
+// including Reka's SSH adapter. VLESS with REALITY uses a dedicated spec.
 func usesUpstreamOutbound(o compile.Outbound) bool {
 	if o.Multiplex != nil && o.Multiplex.Enabled && !(o.Type == "vless" && o.TLS != nil && o.TLS.Reality != nil) {
 		return true
@@ -848,7 +847,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 		return true
 	}
 	switch o.Type {
-	case "http", "socks", "vmess", "trojan", "anytls", "hysteria", "hysteria2", "tuic", "snell", model.OutboundSSR, model.OutboundWireGuard:
+	case "http", "socks", "vmess", "trojan", "anytls", "hysteria", "hysteria2", "tuic", "snell", model.OutboundSSR, model.OutboundWireGuard, model.OutboundSSH:
 		return true
 	case "vless":
 		return o.TLS == nil || o.TLS.Reality == nil
@@ -1623,6 +1622,14 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			if p.Heartbeat > 0 {
 				values["heartbeat"] = fmt.Sprintf("%dms", p.Heartbeat)
 			}
+		case model.OutboundSSH:
+			if p.PrivateKey != "" {
+				values["private_key"], values["private_key_passphrase"] = p.PrivateKey, p.PrivateKeyPassphrase
+			}
+			if p.InsecureSkipHostKey {
+				values["reka_insecure_skip_host_key"] = true
+			}
+			values["host_key"], values["host_key_algorithms"], values["client_version"] = p.HostKey, p.HostKeyAlgorithms, p.ClientVersion
 		case model.OutboundWireGuard:
 			values["private_key"], values["address"], values["mtu"] = p.PrivateKey, p.Address, p.MTU
 			values["peers"] = []map[string]any{{
