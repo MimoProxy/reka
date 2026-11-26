@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,7 +102,12 @@ func newSession() *Session {
 }
 
 func (s *Session) backendOptions() sagernet.Options {
-	return sagernet.Options{History: s.events, Logger: s.logger.With("component", "core"), OnConnectionClosed: s.ranking.recordClosed}
+	return sagernet.Options{
+		History: s.events, Logger: s.logger.With("component", "core"), OnConnectionClosed: s.ranking.recordClosed,
+		// On iOS the Go resolver keeps working inside the extension; a macOS
+		// system extension needs the system resolver to look up servers.
+		SystemResolver: runtime.GOOS == "darwin",
+	}
 }
 
 func Start(node Node) (*Session, error) {
