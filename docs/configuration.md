@@ -243,6 +243,40 @@ See the [WireGuard field reference](configuration-reference.md#wireguard) for du
 
 VMess、TUIC、Snell、HTTP/SOCKS、TLS、WS/gRPC/H2、插件、链式代理等见[配置字段参考](configuration-reference.md)。原生类型名是 `shadowsocks` / `socks`；Clash 的 `ss` / `socks5` 等写法应走导入。
 
+### Access a home network through WireGuard
+
+Add a WireGuard outbound to `profile.yaml` with the home subnet in its `allowed-ips`. Use the peer's public key and the local address assigned by the peer administrator. Store the private key under the referenced secret name.
+
+```yaml
+schema-version: 1
+outbounds:
+  - id: home-wg
+    type: wireguard
+    server: home.example.com
+    port: 51820
+    protocol:
+      private-key: secret://outbounds/home-wg/private-key
+      public-key: "<peer public key>"
+      address: [10.8.0.2/32]
+      allowed-ips: [10.0.0.0/24]
+rules:
+  - match: {all: true}
+    outbound: direct
+```
+
+Add the route on each device that needs it in `local.yaml`.
+
+```yaml
+link:
+  wireguard:
+    - outbound: home-wg
+      routes: [10.0.0.0/24]
+```
+
+For an imported `.conf`, enable the source in the profile with `imports: [{source: home, outbounds: true}]` and use the full `home/p-…` ID from the import preview as `outbound`. Keep the profile's rules for other traffic. Omit `routes` to use the peer's `allowed-ips` if those prefixes are all valid local routes. For a full-tunnel peer, list just the home subnets under `routes`. [Importing a WireGuard `.conf`](clash-import.md#wireguard-conf-files)
+
+In `rule` mode, connections to IP addresses in `10.0.0.0/24` use `home-wg` before the profile rules are evaluated. In `global` mode, the home route takes precedence over the global target. In `direct` mode, the home route is inactive. Reka matches available destination IPs with `no-resolve`. If you join a network that overlaps the configured home subnet, remove the entry or set `routes: []` while you are on that network. [Field reference](configuration-reference.md#linkwireguard)
+
 ### 手动切换与自动选择
 
 ```sh

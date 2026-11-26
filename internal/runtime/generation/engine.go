@@ -1282,6 +1282,8 @@ func (g *generation) flowInfo(genNo uint64, md sagernet.Metadata, dec router.Dec
 	}
 	if dec.Temporary {
 		info.RuleSource = "temporary"
+	} else {
+		info.RuleSource = compile.LocalRuleSource(dec.Rule.ID)
 	}
 	if g == nil {
 		return info
@@ -1386,6 +1388,8 @@ func (e *Engine) Explain(ctx context.Context, req ExplainRequest) (Explanation, 
 	}
 	if x.Temporary {
 		out.RuleSource = "temporary"
+	} else {
+		out.RuleSource = compile.LocalRuleSource(x.Rule.ID)
 	}
 	out.Matched = x.RuleIndex >= 0 || x.Temporary
 	out.Final = !out.Matched

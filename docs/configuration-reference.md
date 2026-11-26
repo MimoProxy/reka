@@ -9,7 +9,7 @@
 | 文件 | 顶层字段 | 用途 |
 | --- | --- | --- |
 | `profile.yaml` | `schema-version`、`imports`、`outbounds`、`groups`、`rules`、`rule-sets`、`sub-rules`、`geodata`、`dns`、`listeners`、`log`、`routing`、`sniff`、`process`、`mitm`、`http-rewrites`、`header-rewrites`、`body-rewrites`、`map-local`、`scripts` | 节点、分组、路由、DNS、HTTP 重写与脚本配置。必须有 `schema-version: 1` |
-| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes`、`traffic-budgets`、`mitm` | 本机端口、日志、控制通道、系统接管、场景、预算和 MITM 开关；可为空 |
+| `local.yaml` | `schema-version`、`listeners`、`log`、`control`、`network`、`routing`、`sniff`、`process`、`network-scenes`、`traffic-budgets`、`mitm`、`link` | 本机端口、日志、控制通道、系统接管、场景、预算和 MITM 开关；可为空 |
 | `sources.yaml` | `schema-version`、`sources` | 导入和订阅的原生快照 |
 | `overlay.yaml` | `schema-version`、`patches` | 对已合成资源的持久覆盖 |
 
@@ -190,7 +190,7 @@ Set `server` and `port` to the peer's UDP endpoint. Set the following fields und
 | `reserved` | Three byte values from 0 to 255 for peers such as WARP. Omit or use `[]` for the WireGuard default of three zero bytes. |
 | `mtu` | Tunnel MTU in bytes, 576–65535. Omitting it or setting it to 0 uses the sing-box default of 1408. |
 
-Keys use standard base64 and must decode to exactly 32 bytes. Reka routes flows to this outbound using the usual rules and groups. To reach a private subnet, include it in the peer's `allowed-ips` and select the outbound for that subnet. The top-level `udp` flag defaults to true and controls UDP traffic inside the tunnel. The peer connection always uses UDP.
+Keys use standard base64 and must decode to exactly 32 bytes. Reka routes flows to this outbound using rules and groups. To reach a private subnet, include it in the peer's `allowed-ips` and select the outbound for that subnet. The top-level `udp` flag defaults to true and controls UDP traffic inside the tunnel. The peer connection always uses UDP. [Automatic subnet routing with `link.wireguard`](#linkwireguard)
 
 Reka resolves the peer hostname through its proxy-server DNS configuration, or through its protected system resolver when Reka DNS is disabled. Hostnames for destinations inside the tunnel follow the normal DNS policy, including `nameserver-policy` entries for private domains.
 
@@ -483,6 +483,26 @@ API 默认将内联凭据显示为 `********`，把遮罩原样提交会保留�
 | `override-destination` | false；true 才允许拨号目标改成嗅探域名 |
 
 默认仅在 IP 目标缺少域名且当前路由规则包含域名条件时嗅探。已有入口域名和 Fake IP 会直接用于路由。可显式设置 `enabled: true`、添加 `sniff.rules` 或开启 `override-destination` 来扩大嗅探范围。嗅探无法获取 ECH 加密的内部名称。最多并发 64 个嗅探操作，达到上限后直接路由。超时或收到无效数据时仍会原样重放。需要嗅探时，CONNECT/SOCKS 可能先确认隧道，再因路由拒绝而关闭。详见[功能扩展](feature-expansion.md)。
+
+### `link.wireguard`
+
+Set `link.wireguard` in `local.yaml` to route subnet traffic through a WireGuard outbound on this device.
+
+```yaml
+link:
+  wireguard:
+    - outbound: home-wg
+      routes: [10.0.0.0/24]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `outbound` | A WireGuard outbound ID from the profile or a full `source/id` enabled by the profile. A missing outbound produces a warning and skips the entry. An existing target of a different type produces an error. |
+| `routes` | A list of IPv4 or IPv6 CIDRs. Omit it to use the outbound's `allowed-ips`. If `allowed-ips` contains a default route, supply explicit subnet routes. An empty list generates no rule. Default routes and prefixes that overlap loopback, link-local or multicast ranges are prohibited. |
+
+The list accepts up to 64 entries and each outbound may appear once. In `rule` mode the generated `ip-cidr` rules precede the profile rules. In `global` mode they precede the global catch-all. `direct` mode bypasses them. The rules use `no-resolve` and match against available destination IP addresses. Their reserved IDs use `@link-wireguard-<index>`, and route explanations identify the corresponding `/link/wireguard/#<index>` entry in `local.yaml`.
+
+If a configured subnet overlaps the current network, disable the entry manually while connected to that network. [Complete home network example](configuration.md#access-a-home-network-through-wireguard)
 
 ### 10.1 网络场景
 

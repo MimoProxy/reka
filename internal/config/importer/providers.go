@@ -48,7 +48,7 @@ func Providers(req Request) ([]Provider, error) {
 	if format == "" || format == "auto" {
 		format = detectFormat(req.Data)
 	}
-	if format == "links" {
+	if format == "links" || format == "wireguard" {
 		return nil, nil
 	}
 	if format != "clash" {
