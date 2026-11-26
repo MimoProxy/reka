@@ -74,9 +74,12 @@ func convertRuleWithTarget(raw, line string, targetFor func(string) (string, boo
 	}
 	if approximate {
 		const message = "policy approximated by native reject"
-		if issue.status == Ignored {
+		switch {
+		case issue.status == Ignored:
 			issue.message += ". " + message
-		} else {
+		case issue.message != "":
+			issue.code, issue.message = "module.policy-approximate", issue.message+". "+message
+		default:
 			issue = outcome{Supported, "module.policy-approximate", message}
 		}
 	}
@@ -89,6 +92,7 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 		return m, badRule()
 	}
 	noResolve, ignoredModifier := false, false
+	var notes []string
 	for _, modifier := range modifiers {
 		switch strings.ToLower(strings.TrimSpace(modifier)) {
 		case "no-resolve":
@@ -96,6 +100,12 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 		case "pre-matching", "":
 			// Pre-matching only lets Surge apply a reject rule earlier; the
 			// result of matching is the same.
+		case "extended-matching":
+			// Surge also matches the sniffed SNI or Host. The kernel already
+			// routes connections to bare IPs by the sniffed name, so only a
+			// connection whose own domain differs from its SNI matches
+			// differently.
+			notes = appendNote(notes, extendedMatchingNote)
 		default:
 			ignoredModifier = true
 		}
@@ -137,6 +147,9 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 				return m, result
 			}
 			ignoredModifier = ignoredModifier || result.status == Ignored
+			for _, note := range result.notes() {
+				notes = appendNote(notes, note)
+			}
 			m.Children = append(m.Children, child)
 		}
 	case "DOMAIN-WILDCARD":
@@ -150,6 +163,20 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 			return m, unsupported("module.rule-resource", "modules cannot obtain rule sets from URLs or files")
 		}
 		m = model.Match{Kind: "rule-set", Values: []string{value}}
+	case "PROTOCOL":
+		switch strings.ToUpper(value) {
+		case "TCP", "UDP":
+			m = model.Match{Kind: "network", Values: []string{strings.ToLower(value)}}
+		case "QUIC":
+			// The kernel treats UDP port 443 as QUIC, as routing.block-quic does.
+			m = model.Match{Kind: "and", Children: []model.Match{
+				{Kind: "network", Values: []string{"udp"}},
+				{Kind: "dst-port", Values: []string{"443"}},
+			}}
+			notes = appendNote(notes, quicProtocolNote)
+		default:
+			return m, unsupported("module.rule-condition", "invalid or unsupported rule condition")
+		}
 	case "FINAL", "MATCH", "SUB-RULE":
 		return m, unsupported("module.rule-condition", "this condition cannot be used in a module rule")
 	default:
@@ -186,9 +213,41 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 		ignoredModifier = true
 	}
 	if ignoredModifier {
-		return m, ignored("module.rule-modifier", "one or more rule modifiers were ignored")
+		issue := ignored("module.rule-modifier", "one or more rule modifiers were ignored")
+		for _, note := range notes {
+			issue.message += ". " + note
+		}
+		return m, issue
+	}
+	if len(notes) != 0 {
+		return m, outcome{Supported, "module.rule-approximate", strings.Join(notes, ". ")}
 	}
 	return m, outcome{}
+}
+
+const (
+	extendedMatchingNote = "extended-matching uses the sniffed name only for connections without a domain"
+	quicProtocolNote     = "PROTOCOL,QUIC approximated by UDP port 443"
+)
+
+func appendNote(notes []string, note string) []string {
+	for _, existing := range notes {
+		if existing == note {
+			return notes
+		}
+	}
+	return append(notes, note)
+}
+
+// notes returns the approximation notes carried by a nested condition.
+func (o outcome) notes() []string {
+	var notes []string
+	for _, note := range []string{extendedMatchingNote, quicProtocolNote} {
+		if strings.Contains(o.message, note) {
+			notes = append(notes, note)
+		}
+	}
+	return notes
 }
 
 // Surge wildcards span labels and accept bracket classes, so the native

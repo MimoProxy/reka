@@ -58,6 +58,7 @@ const (
 	OutboundSOCKS       = "socks"
 	OutboundShadowsocks = "shadowsocks"
 	OutboundVLESS       = "vless"
+	OutboundWireGuard   = "wireguard"
 )
 
 // Outbound is one proxy node or built-in action. Which fields apply depends
@@ -336,6 +337,15 @@ type HysteriaRealm struct {
 }
 
 type Protocol struct {
+	PrivateKey          string   `yaml:"private-key,omitempty" json:",omitempty"`
+	PublicKey           string   `yaml:"public-key,omitempty" json:",omitempty"`
+	PreSharedKey        string   `yaml:"pre-shared-key,omitempty" json:",omitempty"`
+	Address             []string `yaml:"address,omitempty" json:",omitempty"`
+	AllowedIPs          []string `yaml:"allowed-ips,omitempty" json:",omitempty"`
+	PersistentKeepalive int      `yaml:"persistent-keepalive,omitempty" json:",omitempty"`
+	Reserved            []uint8  `yaml:"reserved,omitempty" json:",omitempty"`
+	MTU                 int      `yaml:"mtu,omitempty" json:",omitempty"`
+
 	Realm          *HysteriaRealm `yaml:"realm"`
 	UpBPS          *uint64        `yaml:"up-bps"`
 	DownBPS        *uint64        `yaml:"down-bps"`

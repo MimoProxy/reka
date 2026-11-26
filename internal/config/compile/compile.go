@@ -436,6 +436,7 @@ var fieldsByType = map[string][]string{
 	"hysteria2":               {"server", "port", "password", "tls", "udp", "protocol"},
 	"tuic":                    {"server", "port", "uuid", "password", "tls", "udp", "protocol"},
 	"snell":                   {"server", "port", "password", "udp", "protocol"},
+	model.OutboundWireGuard:   {"server", "port", "udp", "protocol"},
 }
 
 var commonFields = []string{"id", "name", "type", "dialer", "multiplex"}
@@ -537,6 +538,9 @@ func (c *compiler) outbounds(eff *Effective) {
 			if ob.Type == model.OutboundReject || ob.Type == "pass" || ob.Type == "reject-drop" {
 				c.errorf(doc, base+"/dialer", "outbound.dialer", "reject does not dial a connection")
 			}
+			if ob.Type == model.OutboundWireGuard && value.Proxy != "" {
+				c.errorf(doc, base+"/dialer/proxy", "outbound.dialer", "WireGuard does not support a dialer proxy")
+			}
 			// sing-box AnyTLS needs the remote address before the first write.
 			if ob.Type == "anytls" && value.TFO {
 				c.errorf(doc, base+"/dialer/tfo", "outbound.dialer", "TCP Fast Open (TFO) is not supported by AnyTLS")
@@ -577,7 +581,7 @@ func (c *compiler) outbounds(eff *Effective) {
 		if ob.Type != model.OutboundDirect && ob.Type != model.OutboundReject && ob.Type != "pass" && ob.Type != "reject-drop" {
 			realmEnabled := ob.Type == "hysteria2" && ob.Protocol != nil && ob.Protocol.Realm != nil && ob.Protocol.Realm.Enabled
 			if ob.Server == "" && !realmEnabled {
-				c.errorf(doc, base, "outbound.server", "server is required")
+				c.errorf(doc, base+"/server", "outbound.server", "server is required")
 			} else if strings.ContainsAny(ob.Server, " /:") && !isIP(ob.Server) {
 				c.errorf(doc, base+"/server", "outbound.server", "server must be a host name or an IP address")
 			}

@@ -31,6 +31,7 @@ import (
 )
 
 type ProxySpec struct {
+	PeerLookup                                     LookupFunc
 	ECHLookup                                      func(context.Context, string) ([]byte, error)
 	Plugin                                         *SSPluginSpec
 	Realm                                          *RealmSpec

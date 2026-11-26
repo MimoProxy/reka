@@ -32,11 +32,7 @@ func (e *Engine) preparePolicies(p *Prepared) {
 		tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			if p.dns != nil {
 				ctx = sagernet.WithLookup(ctx, func(ctx context.Context, host string) ([]netip.Addr, error) {
-					scope := "proxy"
-					if out.Type() == "direct" {
-						scope = "direct"
-					}
-					return p.dns.Lookup(ctx, host, scope)
+					return p.dns.Lookup(ctx, host, outboundLookupScope(out.Type(), "direct"))
 				})
 			}
 			return out.Dial(ctx, network, address)

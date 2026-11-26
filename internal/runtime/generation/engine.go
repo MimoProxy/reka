@@ -197,6 +197,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		return active.historyScope
 	}
 	e.backend = sagernet.New(opts.Backend)
+	e.guard.OnInterfaceChanged = e.backend.NotifyEndpointNetworkChanged
 	if opts.StateRoot != "" {
 		hooks := platform.NetworkHooks{Settings: platform.NativeSettings{}, SettingsFor: platform.SystemSettings, Bypass: e.guard.Set, StartTUN: func(c platform.TUNConfig) (io.Closer, string, error) {
 			d, name, err := e.backend.NewTUN(c, e.opts.TUNFD, e.guard, e.ExchangeDNS)
@@ -207,6 +208,26 @@ func NewEngine(opts EngineOptions) *Engine {
 		}}
 		if opts.NetworkHooks != nil {
 			hooks = *opts.NetworkHooks
+		}
+		setBypass := hooks.Bypass
+		bypassActive := false
+		hooks.Bypass = func(enabled bool, c platform.TUNConfig) error {
+			if setBypass != nil {
+				if err := setBypass(enabled, c); err != nil {
+					return err
+				}
+			}
+			if enabled {
+				// Endpoints can already own sockets when takeover starts.
+				// Protect them before the platform installs its TUN routes.
+				bypassActive = true
+				return e.backend.ReprotectEndpointSockets()
+			}
+			if bypassActive {
+				bypassActive = false
+				e.backend.NotifyEndpointNetworkChanged(context.Background())
+			}
+			return nil
 		}
 		e.takeover, e.networkErr = platform.NewTakeover(opts.StateRoot, hooks)
 	}
@@ -515,7 +536,11 @@ func (e *Engine) Prepare(eff *compile.Effective) (*Prepared, error) {
 			return sagernet.ResolveECH(ctx, name, func(ctx context.Context, q *D.Msg) (*D.Msg, error) { return resolver.Exchange(ctx, q, "proxy", false) })
 		}
 		if proxy, ok := spec.(sagernet.ProxySpec); ok {
-			proxy.ECHLookup = lookupECH
+			if proxy.Type == model.OutboundWireGuard {
+				proxy.PeerLookup = e.lookupEndpointPeer
+			} else {
+				proxy.ECHLookup = lookupECH
+			}
 			tlsSpecs := []*sagernet.TLSSpec{proxy.TLS}
 			if proxy.Plugin != nil {
 				tlsSpecs = append(tlsSpecs, proxy.Plugin.TLS)
@@ -823,7 +848,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 		return true
 	}
 	switch o.Type {
-	case "http", "socks", "vmess", "trojan", "anytls", "hysteria2", "tuic", "snell":
+	case "http", "socks", "vmess", "trojan", "anytls", "hysteria2", "tuic", "snell", model.OutboundWireGuard:
 		return true
 	case "vless":
 		return o.TLS == nil || o.TLS.Reality == nil
@@ -1235,11 +1260,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	}
 	if g.dns != nil {
 		result.Lookup = func(ctx context.Context, d string) ([]netip.Addr, error) {
-			scope := "proxy"
-			if out.Type() == "direct" {
-				scope = "direct"
-			}
-			return g.dns.Lookup(ctx, d, scope)
+			return g.dns.Lookup(ctx, d, outboundLookupScope(out.Type(), "direct"))
 		}
 	}
 	if mitm != nil && fixed == nil {
@@ -1573,6 +1594,13 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 			if p.Heartbeat > 0 {
 				values["heartbeat"] = fmt.Sprintf("%dms", p.Heartbeat)
 			}
+		case model.OutboundWireGuard:
+			values["private_key"], values["address"], values["mtu"] = p.PrivateKey, p.Address, p.MTU
+			values["peers"] = []map[string]any{{
+				"public_key": p.PublicKey, "pre_shared_key": p.PreSharedKey,
+				"allowed_ips": p.AllowedIPs, "reserved": p.Reserved,
+				"persistent_keepalive_interval": p.PersistentKeepalive,
+			}}
 		case "anytls":
 			if p.IdleSessionCheckIntervalSeconds > 0 {
 				values["idle_session_check_interval"] = fmt.Sprintf("%ds", p.IdleSessionCheckIntervalSeconds)

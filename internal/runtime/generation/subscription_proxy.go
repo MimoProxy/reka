@@ -69,7 +69,7 @@ func (e *Engine) SubscriptionProxyClient(source, name string) (*http.Client, err
 		}
 		ctx = sagernet.WithLookup(ctx, func(ctx context.Context, host string) ([]netip.Addr, error) {
 			if g.dns != nil {
-				return g.dns.Lookup(ctx, host, "proxy")
+				return g.dns.Lookup(ctx, host, outboundLookupScope(out.Type(), "proxy"))
 			}
 			return e.opts.Resolver.LookupNetIP(ctx, "ip", host)
 		})

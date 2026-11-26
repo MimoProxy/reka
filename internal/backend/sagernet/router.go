@@ -95,6 +95,7 @@ var errRejected = errors.New("reka: connection rejected by route")
 // rest of the interface is stubbed. Rule matching happens in Reka's RouteFunc,
 // which can be swapped while inbounds keep running.
 type router struct {
+	routerServices
 	backend    *Backend
 	route      atomic.Pointer[RouteFunc]
 	prepare    atomic.Pointer[PrepareFlowFunc]
@@ -234,20 +235,25 @@ func (r *router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, m
 	return <-done
 }
 
-func (r *router) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+// Reka owns these services outside sing-box. Both inbound and outbound-only
+// endpoint routers implement their connection handling separately.
+type routerServices struct{}
+
+func (routerServices) Start(adapter.StartStage, *adapter.Scope) error { return nil }
 
 func (r *router) PreMatch(adapter.InboundContext, []byte) adapter.PreMatchResult {
 	return adapter.PreMatchResult{Action: adapter.PreMatchContinue}
 }
 
-func (r *router) HijackDNSPacket(context.Context, []byte, N.PacketWriter, adapter.InboundContext) {}
-func (r *router) RuleSet(string) (adapter.RuleSet, bool)                                          { return nil, false }
-func (r *router) Rules() []adapter.Rule                                                           { return nil }
-func (r *router) NeedFindProcess() bool                                                           { return false }
-func (r *router) NeedFindNeighbor() bool                                                          { return false }
-func (r *router) NeighborResolver() adapter.NeighborResolver                                      { return nil }
-func (r *router) AppendTracker(adapter.ConnectionTracker)                                         {}
-func (r *router) ResetNetwork()                                                                   {}
+func (*router) HijackDNSPacket(context.Context, []byte, N.PacketWriter, adapter.InboundContext) {}
+
+func (routerServices) RuleSet(string) (adapter.RuleSet, bool)     { return nil, false }
+func (routerServices) Rules() []adapter.Rule                      { return nil }
+func (routerServices) NeedFindProcess() bool                      { return false }
+func (routerServices) NeedFindNeighbor() bool                     { return false }
+func (routerServices) NeighborResolver() adapter.NeighborResolver { return nil }
+func (routerServices) AppendTracker(adapter.ConnectionTracker)    {}
+func (routerServices) ResetNetwork()                              {}
 
 func itoa(p uint16) string {
 	var b [5]byte

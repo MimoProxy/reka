@@ -127,7 +127,7 @@ func TestRules(t *testing.T) {
 		{"DOMAIN-KEYWORD,example,Reject-Drop", "domain-keyword", "reject-drop", Supported, false},
 		{"DOMAIN-WILDCARD,?.*.example.com,REJECT-NO-DROP", "domain-regex", "reject", Supported, false},
 		{"IP-CIDR,192.0.2.0/24,REJECT-TINYGIF,no-resolve", "ip-cidr", "reject", Supported, true},
-		{"IP-CIDR6,2001:db8::/32,proxy,no-resolve,extended-matching", "ip-cidr", "route", Ignored, true},
+		{"IP-CIDR6,2001:db8::/32,proxy,no-resolve,extended-matching", "ip-cidr", "route", Supported, true},
 		{"IP-ASN,AS64500,direct,no-resolve", "ip-asn", "direct", Supported, true},
 		{"GEOIP,lan,DIRECT,no-resolve", "geoip", "direct", Supported, true},
 		{"GEOIP,ZZ,DIRECT", "geoip", "direct", Supported, false},
@@ -136,7 +136,14 @@ func TestRules(t *testing.T) {
 		{"DEST-PORT,443,REJECT", "dst-port", "reject", Supported, false},
 		{"SRC-IP,192.0.2.1,DIRECT", "src-ip-cidr", "direct", Supported, false},
 		{"PROCESS-NAME,Example,direct,pre-matching", "process-name", "direct", Supported, false},
-		{"DOMAIN,example.com,direct,extended-matching", "domain", "direct", Ignored, false},
+		{"DOMAIN,example.com,direct,extended-matching", "domain", "direct", Supported, false},
+		{"DOMAIN,example.com,direct,extended-matching,future-modifier", "domain", "direct", Ignored, false},
+		{"PROTOCOL,TCP,DIRECT", "network", "direct", Supported, false},
+		{"PROTOCOL,udp,REJECT", "network", "reject", Supported, false},
+		{"PROTOCOL,QUIC,REJECT", "and", "reject", Supported, false},
+		{"AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,example.com,extended-matching)),REJECT", "and", "reject", Supported, false},
+		{"PROTOCOL,STUN,REJECT", "", "", Unsupported, false},
+		{"PROTOCOL,HTTPS,DIRECT", "", "", Unsupported, false},
 		{"AND,((DOMAIN,example.com),(SRC-IP,192.0.2.1)),DIRECT", "and", "direct", Supported, false},
 		{"OR,((DOMAIN,example.com),(DOMAIN-SUFFIX,example.net)),REJECT", "or", "reject", Supported, false},
 		{"NOT,((DOMAIN,example.com)),DIRECT", "not", "direct", Supported, false},
@@ -187,6 +194,43 @@ func TestRules(t *testing.T) {
 				if report.Lines[1].Code != "module.policy-approximate" {
 					t.Fatal(report.Lines)
 				}
+			}
+		})
+	}
+}
+
+func TestRuleApproximationNotes(t *testing.T) {
+	for _, tc := range []struct {
+		line, code string
+		notes      []string
+		match      model.Match
+	}{
+		{"DOMAIN,example.com,DIRECT,extended-matching", "module.rule-approximate", []string{extendedMatchingNote}, model.Match{Kind: "domain", Values: []string{"example.com"}}},
+		{"PROTOCOL,QUIC,REJECT-TINYGIF", "module.policy-approximate", []string{quicProtocolNote, "policy approximated by native reject"}, model.Match{Kind: "and", Children: []model.Match{
+			{Kind: "network", Values: []string{"udp"}},
+			{Kind: "dst-port", Values: []string{"443"}},
+		}}},
+		{"AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,example.com,extended-matching)),REJECT", "module.rule-approximate", []string{extendedMatchingNote, quicProtocolNote}, model.Match{Kind: "and", Children: []model.Match{
+			{Kind: "and", Children: []model.Match{
+				{Kind: "network", Values: []string{"udp"}},
+				{Kind: "dst-port", Values: []string{"443"}},
+			}},
+			{Kind: "domain-suffix", Values: []string{"example.com"}},
+		}}},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			result, report := Convert([]byte("[Rule]\n"+tc.line), Options{})
+			line := report.Lines[1]
+			if line.Status != Supported || line.Code != tc.code || report.Partial || len(result.Rules) != 1 {
+				t.Fatalf("unexpected report %+v", report)
+			}
+			for _, note := range tc.notes {
+				if !strings.Contains(line.Message, note) {
+					t.Fatalf("message %q lacks %q", line.Message, note)
+				}
+			}
+			if !reflect.DeepEqual(result.Rules[0].Match, tc.match) {
+				t.Fatalf("match = %+v", result.Rules[0].Match)
 			}
 		})
 	}

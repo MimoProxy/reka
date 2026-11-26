@@ -72,11 +72,14 @@ Section names are case-insensitive. Lines beginning with `#`, `;`, or `//` are c
 | `[Rule]` | `IP-CIDR`, `IP-CIDR6`, `SRC-IP`, `SRC-IP-CIDR`, `DST-PORT` / `DEST-PORT`, `SRC-PORT`, `NETWORK` | Supported. `SRC-IP` uses the native source IP condition. |
 | `[Rule]` | `GEOIP,LAN`, country `GEOIP`, `GEOSITE`, `IP-ASN` | Supported. Country, site and ASN matches need locked native geodata. |
 | `[Rule]` | `PROCESS-NAME`, `PROCESS-PATH` and their `-WILDCARD` and `-REGEX` variants | Supported where process metadata is available. |
+| `[Rule]` | `PROTOCOL,TCP`, `PROTOCOL,UDP` | Supported as `NETWORK`. |
+| `[Rule]` | `PROTOCOL,QUIC` | Approximated by UDP to port 443, as `routing.block-quic` identifies QUIC, with a report note. Other `PROTOCOL` values are unsupported. |
 | `[Rule]` | `AND`, `OR`, `NOT` | Supported with parenthesized operands. |
 | `[Rule]` | Named `RULE-SET` and `DOMAIN-SET` | Supported as references to native rule sets. |
 | `[Rule]` | `no-resolve` | Supported for IP and resource conditions. |
 | `[Rule]` | `pre-matching` | Accepted; it only affects when Surge applies a reject. |
-| `[Rule]` | `extended-matching`, other rule modifiers | Ignored. The supported rule still applies. |
+| `[Rule]` | `extended-matching` | Accepted with a report note. Connections to a bare IP already match domain rules by the sniffed name; a connection that has a domain is not also matched by its SNI or Host. |
+| `[Rule]` | Other rule modifiers | Ignored. The supported rule still applies. |
 | `[Rule]` | Policies `DIRECT`, `REJECT`, `REJECT-DROP` | Supported as the corresponding native actions. |
 | `[Rule]` | Policies `REJECT-NO-DROP`, `REJECT-TINYGIF` | Approximated by native `reject`, with a report note. |
 | `[Rule]` | `FINAL`, `MATCH` | Unsupported. The profile owns its final rule. |
