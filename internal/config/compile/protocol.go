@@ -10,6 +10,7 @@ import (
 )
 
 var protocolFields = map[string][]string{
+	model.OutboundSSR:       {"obfs", "protocol", "protocol-param"},
 	"vmess":                 {"security", "alter-id"},
 	"anytls":                {"idle-session-check-interval-seconds", "idle-session-timeout-seconds", "min-idle-session", "client-metadata"},
 	"hysteria2":             {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"},
@@ -28,6 +29,13 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 				fail("protocol/"+field, "option does not apply to protocol")
 			}
 		}
+		if _, present := c.ppos[base+"/protocol/obfs/param"]; present && ob.Type != model.OutboundSSR {
+			fail("protocol/obfs/param", "obfs param does not apply to this protocol")
+		}
+	}
+	if ob.Type == model.OutboundSSR {
+		c.ssr(base, ob, out)
+		return
 	}
 	if ob.Type == model.OutboundWireGuard {
 		if _, present := c.ppos[base+"/multiplex"]; present {

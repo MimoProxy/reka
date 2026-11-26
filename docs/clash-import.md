@@ -94,7 +94,11 @@ Select groups retain supported members in original order. Unsupported group type
 ./bin/rekactl import -source links -format links -apply links.txt
 ```
 
-Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Hysteria2/`hy2` and TUIC v5 URLs. Unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+Auto-detection supports plain or base64-encoded lists. Implemented node formats are VLESS (`security=none/tls/reality`, TCP/WS/gRPC/HTTPUpgrade), Shadowsocks SIP002 (base64 user-info or legacy complete authority), conventional base64-JSON VMess, Trojan, AnyTLS, Hysteria2/`hy2` and TUIC v5 URLs. For these formats, unknown query options, duplicate query parameters, unknown plugin options and unsupported transports do not silently disappear. `#` comment lines and blank lines are skipped.
+
+ShadowsocksR (`type: ssr`) requires `cipher`, `password`, `obfs` and `protocol` in Clash YAML. Optional `obfs-param` and `protocol-param` are passed to their respective layers. Previews mask `password` and `protocol-param`. UDP defaults to off. The importer rejects `tfo: true` and `smux`.
+
+An `ssr://` link encodes `host:port:protocol:cipher:obfs:base64password/?query` in URL-safe base64. The `/?` separator is required even for an empty query. The password and the first `remarks`, `obfsparam` and `protoparam` values use unpadded URL-safe base64. Without remarks, Reka uses `ssr@host:port` as the name. Following mihomo, the link enables native UDP and ignores other query fields, including `group`, `udpport` and `uot`. The colon-delimited link format excludes IPv6 literals. A Clash YAML entry can specify an IPv6 server.
 
 AnyTLS links accept `sni`, `insecure=1` and the `hpkp` certificate pin, and enable UDP. In Clash YAML, `type: anytls` defaults UDP to off and uses `server` when `sni` is empty. AnyTLS manages its own TCP sessions. The importer rejects `smux`, `disable-reuse: true` and `tfo: true`.
 

@@ -848,7 +848,7 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 		return true
 	}
 	switch o.Type {
-	case "http", "socks", "vmess", "trojan", "anytls", "hysteria2", "tuic", "snell", model.OutboundWireGuard:
+	case "http", "socks", "vmess", "trojan", "anytls", "hysteria2", "tuic", "snell", model.OutboundSSR, model.OutboundWireGuard:
 		return true
 	case "vless":
 		return o.TLS == nil || o.TLS.Reality == nil
@@ -1567,11 +1567,19 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		}
 		values["headers"] = headers
 	}
-	if o.Type == "vmess" {
+	switch o.Type {
+	case "vmess":
 		values["security"], values["packet_encoding"] = "auto", o.PacketEncoding
+	case model.OutboundSSR:
+		values["udp"] = o.UDP
 	}
 	if p := o.Protocol; p != nil {
 		switch o.Type {
+		case model.OutboundSSR:
+			values["protocol"], values["protocol_param"] = p.SSRProtocol, p.SSRProtocolParam
+			if p.Obfs != nil {
+				values["obfs"], values["obfs_param"] = p.Obfs.Type, p.Obfs.Param
+			}
 		case "vmess":
 			if p.Security != "" {
 				values["security"] = p.Security

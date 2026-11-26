@@ -151,6 +151,30 @@ func TestWireGuardKeysMaskAndRestore(t *testing.T) {
 	}
 }
 
+func TestSSRProtocolParamMaskAndRestore(t *testing.T) {
+	const outbound = "{id: proxy, type: ssr, password: confidential-password, protocol: {protocol-param: '64:confidential-key', obfs: {type: http_simple, param: cdn.test}}}"
+	for kind, input := range map[string]string{
+		DocProfile: "outbounds: [" + outbound + "]",
+		DocSources: "sources: [{id: feed, outbounds: [" + outbound + "]}]",
+		DocOverlay: "patches: [{op: set, path: /outbounds/proxy/password, value: confidential-password}, {op: set, path: /outbounds/proxy/protocol/protocol-param, value: '64:confidential-key'}, {op: set, path: /outbounds/proxy/protocol/obfs/param, value: cdn.test}]",
+	} {
+		original, ds := LoadDoc(kind, []byte(input))
+		if ds.HasErrors() {
+			t.Fatal(ds)
+		}
+		masked, _ := LoadDoc(kind, []byte(input))
+		if masked.MaskSecrets() != 2 || strings.Contains(string(masked.Bytes()), "confidential-") || !strings.Contains(string(masked.Bytes()), "cdn.test") {
+			t.Fatal("incorrect SSR credential masking", kind)
+		}
+		if err := masked.UnmaskSecrets(original); err != nil || string(masked.Bytes()) != string(original.Bytes()) {
+			t.Fatal("SSR credentials were not restored", kind, err)
+		}
+	}
+	if !IsSensitive("/outbounds/proxy/protocol/protocol-param") || !IsSensitive("/sources/feed/outbounds/proxy/protocol/protocol-param") || IsSensitive("/outbounds/proxy/protocol/obfs/param") {
+		t.Fatal("incorrect SSR credential path classification")
+	}
+}
+
 func TestPluginNestedSecretsAcrossDocuments(t *testing.T) {
 	for _, tc := range []struct{ kind, input string }{
 		{DocProfile, `schema-version: 1

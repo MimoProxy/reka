@@ -98,6 +98,9 @@ func (c *converter) links(data string) {
 	}
 }
 func parseLink(raw string) (object, error) {
+	if scheme, body, ok := strings.Cut(raw, "://"); ok && strings.EqualFold(scheme, "ssr") {
+		return parseSSRLink(body)
+	}
 	if strings.HasPrefix(raw, "vmess://") {
 		return parseVMessLink(raw)
 	}

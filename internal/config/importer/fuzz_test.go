@@ -12,6 +12,8 @@ func FuzzSubscriptions(f *testing.F) {
 		"ss://YWVzLTEyOC1nY206cGFzcw@127.0.0.1:8388#test",
 		"proxies: [{name: x, type: anytls, server: node.test, port: 443, password: test-password, idle-session-timeout: 30}]",
 		"anytls://test-password@node.test:443?sni=cover.test&insecure=1#test",
+		"proxies: [{name: x, type: ssr, server: ssr.example, port: 8388, cipher: aes-256-cfb, password: test-password, obfs: http_post, obfs-param: cover.example, protocol: auth_chain_a, protocol-param: '64:test-key'}]",
+		ssrTestLink("ssr.example:8388:origin:none:plain:cGFzcw/?remarks=dGVzdA"),
 		"proxies: &a [*a]",
 		"",
 	} {

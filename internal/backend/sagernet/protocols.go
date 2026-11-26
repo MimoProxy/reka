@@ -69,6 +69,16 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 	if err != nil {
 		return nil, err
 	}
+	if s.Type == "ssr" {
+		if s.TLS != nil {
+			return nil, fmt.Errorf("SSR does not support TLS")
+		}
+		for _, key := range []string{"tls", "multiplex", "plugin", "plugin_opts", "realm", "transport", "reka_http", "udp_over_tcp"} {
+			if _, present := values[key]; present {
+				return nil, fmt.Errorf("SSR does not support %s", key)
+			}
+		}
+	}
 	if values["realm"] != nil && s.Realm == nil {
 		return nil, fmt.Errorf("Realm requires a scoped RealmSpec")
 	}
@@ -266,6 +276,12 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			return nil, err
 		}
 		return shadowsocks.NewOutbound(ctx, b.router, logger, tag, o)
+	case "ssr":
+		var o ssrOutboundOptions
+		if err = json.Unmarshal(data, &o); err != nil {
+			return nil, err
+		}
+		return newSSROutbound(ctx, tag, o)
 	case "vmess":
 		var o option.VMessOutboundOptions
 		if err = json.Unmarshal(data, &o); err != nil {

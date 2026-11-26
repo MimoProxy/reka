@@ -68,6 +68,7 @@ const (
 	OutboundHTTP        = "http"
 	OutboundSOCKS       = "socks"
 	OutboundShadowsocks = "shadowsocks"
+	OutboundSSR         = "ssr"
 	OutboundVLESS       = "vless"
 	OutboundWireGuard   = "wireguard"
 )
@@ -95,7 +96,7 @@ type Outbound struct {
 
 	Username string `yaml:"username"` // http, socks
 	Password string `yaml:"password"` // http, socks, shadowsocks
-	Method   string `yaml:"method"`   // shadowsocks
+	Method   string `yaml:"method"`   // shadowsocks, ssr
 
 	UUID string `yaml:"uuid"` // vless
 	// Flow is "" or "xtls-rprx-vision".
@@ -377,6 +378,9 @@ type Protocol struct {
 	Heartbeat      int            `yaml:"heartbeat"`
 	Obfs           *Obfs          `yaml:"obfs"`
 
+	SSRProtocol      string `yaml:"protocol,omitempty" json:",omitempty"`
+	SSRProtocolParam string `yaml:"protocol-param,omitempty" json:",omitempty"`
+
 	// AnyTLS uses the sing-anytls and mihomo 30-second defaults when these durations are zero.
 	IdleSessionCheckIntervalSeconds int    `yaml:"idle-session-check-interval-seconds" json:",omitempty"`
 	IdleSessionTimeoutSeconds       int    `yaml:"idle-session-timeout-seconds" json:",omitempty"`
@@ -389,6 +393,7 @@ type Obfs struct {
 	Type          string `yaml:"type"`
 	Password      string `yaml:"password"`
 	Host          string `yaml:"host"`
+	Param         string `yaml:"param,omitempty" json:",omitempty"`
 }
 type Transport struct {
 	XHTTP       *XHTTPOptions        `yaml:"xhttp"`

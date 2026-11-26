@@ -69,6 +69,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `http` | `server`、`port`；可选 `username` + `password` | 可选 `tls`；`headers: [{name: X-Key, value: value}]`；无原生 UDP |
 | `socks` | `server`、`port`；可选 `username` + `password` | SOCKS5 出站；可选 `tls`、`udp` |
 | `shadowsocks` | `server`、`port`、`method`、`password` | `plugin`、`udp-over-tcp`、`udp-over-tcp-version`，见 3.8 |
+| `ssr` | `server`、`port`、`method`、`password` | 支持 TCP 和原生 UDP，拒绝 `tls`、`transport`、`multiplex`、`plugin` 和开启 `dialer.tfo` |
 | `vless` | `server`、`port`、`uuid` | `tls`、`flow`、`encryption`、`packet-encoding`、`transport` |
 | `vmess` | `server`、`port`、`uuid` | `tls`、`protocol`、`packet-encoding`、`transport` |
 | `trojan` | `server`、`port`、`password` | **必须有** `tls`；可用 `transport` |
@@ -81,6 +82,8 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 HTTP / SOCKS 的 `username`、`password` 必须成对设置。HTTP 节点配置了用户名密码时，它们优先于自定义 `Proxy-Authorization`。UUID 必须是合法 UUID，不是任意字符串。
 
 Shadowsocks 支持的 `method`：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm`、`2022-blake3-chacha20-poly1305`、`aes-128-gcm`、`aes-192-gcm`、`aes-256-gcm`、`chacha20-ietf-poly1305`、`xchacha20-ietf-poly1305`。2022 密码使用相应 Base64 密钥。
+
+ShadowsocksR 的 `method` 支持 `rc4-md5`、AES 的 128/192/256 位 CTR 和 CFB（如 `aes-192-ctr`、`aes-256-cfb`）、`chacha20`、`chacha20-ietf`、`xchacha20`，以及 `none` 或 `dummy`。名称不区分大小写。`none` 和 `dummy` 关闭流加密，仍需提供 `password` 供 SSR 派生密钥。
 
 ### 3.2 `tls`
 
@@ -135,6 +138,9 @@ VLESS encryption 的 MODE 为 `native`、`xorpub`、`random`；RTT 为 `1rtt`、
 
 | 协议 | 字段 | 类型、单位和可用值 |
 | --- | --- | --- |
+| SSR | `obfs` | 对象，省略时为 `plain`。`type` 接受 `plain`、`http_simple`、`http_post`、`random_head`、`tls1.2_ticket_auth`、`tls1.2_ticket_fastauth`。可选字符串 `param` 传给混淆层，混淆仅用于 TCP |
+| SSR | `protocol` | 默认 `origin`。其他可用值为 `auth_sha1_v4`、`auth_aes128_md5`、`auth_aes128_sha1`、`auth_chain_a`、`auth_chain_b` |
+| SSR | `protocol-param` | 可选字符串，例如认证协议使用的 `uid:key`。此字段与节点的 `password` 均支持 secret 引用，读回时掩码 |
 | VMess | `security` | 默认 `auto`；`auto`、`none`、`zero`、`aes-128-gcm`、`chacha20-poly1305` |
 | VMess | `alter-id` | 整数，0–65535，默认 0 |
 | HY2 | `up-bps`、`down-bps` | 精确**字节/秒**；可省略以使用自动带宽行为 |
@@ -235,7 +241,7 @@ Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivit
 | `statistic` | false；仅保留兼容元数据，Reka 始终报告自己的逐连接流量 |
 | `brutal` | `{enabled: true, up-bps: 1250000, down-bps: 2000000}`；单位字节/秒，两方向至少 65536 |
 
-适用于除 AnyTLS、reject、pass、reject-drop 以外可建立连接的出站。AnyTLS 使用自身的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
+适用于除 AnyTLS、SSR、reject、pass、reject-drop 以外可建立连接的出站。AnyTLS 使用自身的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
 
 ### 3.8 Shadowsocks 的 UoT 与 `plugin`
 
