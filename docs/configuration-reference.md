@@ -464,7 +464,7 @@ DNS 放在 profile 或 source 内；不配置时使用系统解析。启用原�
 | `hosts` | `{id, addresses}` 列表 | id 为域名，addresses 为 IP 列表，或**单个域名别名**；通过 use-hosts 启用 |
 | `use-hosts` | false | 启用上述 hosts |
 | `use-system-hosts` | false | 读取本机 hosts；每代配置准备时读取一次 |
-| `enhanced-mode` | 默认 `redir-host` | `redir-host` 或 `fake-ip` |
+| `enhanced-mode` | 默认 `redir-host` | `redir-host` 和 `fake-ip` 都会将客户端 DNS 应答中的真实 IP 映射回查询域名，供规则匹配和代理出站使用，直连沿用原 IP |
 | `fake-ip-range` | 默认 `198.18.0.0/16` | IPv4 fake 地址段，至少四个地址 |
 | `fake-ip-range6` | 默认 `fc00::/18` | IPv6 fake 地址段，至少四个地址 |
 | `fake-ip-filter` | 模式字符串列表 | 域名模式、rule-set/geosite 选择器 |

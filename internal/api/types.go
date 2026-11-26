@@ -218,8 +218,10 @@ type FlowInfo struct {
 	Outbound      string   `json:"outbound"`
 	Fingerprint   string   `json:"fingerprint"`
 
-	// DestinationDomain includes names recovered from Fake IP mappings.
+	// DestinationDomain includes names recovered from client DNS answers.
 	DestinationDomain string `json:"destination_domain,omitempty"`
+	// DNSMapped distinguishes real-address answers from fake IPs in the event recorder.
+	DNSMapped bool `json:"-"`
 
 	// RuleLookup carries routing diagnostics to the connection event recorder.
 	RuleLookup *RuleLookupInfo `json:"-"`

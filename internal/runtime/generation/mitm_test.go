@@ -12,6 +12,7 @@ import (
 	"github.com/MimoProxy/reka/internal/config/compile"
 	"github.com/MimoProxy/reka/internal/mitm/ca"
 	"github.com/MimoProxy/reka/internal/secret"
+	D "github.com/miekg/dns"
 )
 
 func TestMITMQUICAdmission(t *testing.T) {
@@ -231,7 +232,17 @@ func TestMITMRequestsSniffingWithoutDomainRules(t *testing.T) {
 	t.Cleanup(e.Close)
 	store := newMITMTestStore(t)
 	saveMITMTestCA(t, store)
-	activateMITMTestConfig(t, e, store, "schema-version: 1\nmitm: {hostnames: [origin.test]}\n", 1)
+	const profile = `schema-version: 1
+mitm: {hostnames: [origin.test]}
+dns:
+  nameserver: [192.0.2.53]
+  use-hosts: true
+  hosts: [{id: origin.test, addresses: [203.0.113.8]}]
+`
+	activateMITMTestConfig(t, e, store, profile, 1)
+	if _, err := e.ExchangeDNS(t.Context(), new(D.Msg).SetQuestion("origin.test.", D.TypeA)); err != nil {
+		t.Fatal(err)
+	}
 	md := sagernet.Metadata{Network: "tcp", Destination: sagernet.Destination{Addr: netip.MustParseAddr("203.0.113.8"), Port: 8443}}
 	p := e.prepareFlow(context.Background(), md)
 	if p.Sniff.Enabled {
@@ -241,6 +252,17 @@ func TestMITMRequestsSniffingWithoutDomainRules(t *testing.T) {
 		t.Fatal("port outside the MITM scope requested sniffing")
 	}
 	md.Destination.Port = 443
+	for _, hint := range []string{"", "other.test"} {
+		md.SniffedDomain = hint
+		rt := e.route(t.Context(), md)
+		if rt.Release != nil {
+			rt.Release()
+		}
+		if rt.Outbound == nil || rt.MITM != nil {
+			t.Fatalf("real DNS mapping admitted MITM with sniffed domain %q", hint)
+		}
+	}
+	md.SniffedDomain = ""
 	p = e.prepareFlow(context.Background(), md)
 	if p.Release != nil {
 		defer p.Release()

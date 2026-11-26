@@ -28,6 +28,7 @@ type Options struct {
 	SystemExchange SystemExchangeFunc
 	Match          MatchFunc
 	Pool           *FakePool
+	Mapping        *HostMapping
 	Generation     uint64
 	Route          func(context.Context, Endpoint) string
 	Background     func(context.Context) (context.Context, func(), error)
@@ -94,6 +95,9 @@ func New(c Config, o Options) (*Service, error) {
 	if o.Pool == nil {
 		o.Pool = NewFakePool(65536)
 	}
+	if o.Mapping == nil {
+		o.Mapping = NewHostMapping()
+	}
 	if c.FakeRange == "" {
 		c.FakeRange = "198.18.0.0/16"
 	}
@@ -130,7 +134,7 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	for _, typ := range types {
 		q := new(D.Msg)
 		q.SetQuestion(D.Fqdn(domain), typ)
-		m, err := s.Exchange(history.WithDNSOrigin(ctx, history.DNSOrigin{Kind: "resolver"}), q, scope, false)
+		m, err := s.ExchangeResolver(history.WithDNSOrigin(ctx, history.DNSOrigin{Kind: "resolver"}), q, scope, false)
 		if err != nil {
 			last = err
 			continue
@@ -161,11 +165,19 @@ func (s *Service) lookup(ctx context.Context, domain, scope string, seen map[str
 	}
 	return addrs, nil
 }
+
+// Exchange answers a client query and remembers the real addresses it returns.
 func (s *Service) Exchange(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
+	return s.exchangeRecorded(ctx, q, scope, exchangeOptions{client: true, fake: fake})
+}
+
+// ExchangeResolver serves internal lookups and diagnostics.
+func (s *Service) ExchangeResolver(ctx context.Context, q *D.Msg, scope string, fake bool) (*D.Msg, error) {
 	return s.exchangeRecorded(ctx, q, scope, exchangeOptions{fake: fake})
 }
 
 type exchangeOptions struct {
+	client      bool
 	fake        bool
 	skipHosts   bool
 	includeIPv6 bool
@@ -181,6 +193,9 @@ func (s *Service) exchangeRecorded(ctx context.Context, q *D.Msg, scope string, 
 		exchangeCtx = history.WithDNSObserver(ctx, nil)
 	}
 	m, err := s.exchange(exchangeCtx, q, scope, opts, id, &outcome)
+	if opts.client && err == nil && m.Rcode == D.RcodeSuccess && outcome.ResultSource != "fake_ip" {
+		s.opts.Mapping.recordAnswers(q.Question[0].Name, m.Answer)
+	}
 	if observe != nil {
 		defer observe(exchangeObservation(q, m, start, outcome.ResultSource, err))
 	}
