@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -315,6 +316,30 @@ func pluginTestPeer(t *testing.T, s SSPluginSpec, ss netip.AddrPort) (uint16, *T
 		}()
 	}
 	return uint16(listener.Addr().(*net.TCPAddr).Port), clientTLS
+}
+
+// A v2ray-plugin mux frame can end while the reader still wants fewer bytes
+// than the next frame header, as when a Shadowsocks chunk length spans two
+// frames.
+func TestPluginMuxReadsAcrossFrameBoundaries(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close(); server.Close() })
+	go func() {
+		for _, data := range []string{"abc", "defgh"} {
+			frame := binary.BigEndian.AppendUint16(nil, 4)
+			frame = append(frame, 0, 0, VM.StatusKeep, 1)
+			frame = binary.BigEndian.AppendUint16(frame, uint16(len(data)))
+			if _, err := server.Write(append(frame, data...)); err != nil {
+				return
+			}
+		}
+	}()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	conn := &pluginChunkConn{Conn: VM.NewMuxConnWrapper(client, M.Socksaddr{Addr: netip.MustParseAddr("127.0.0.1")})}
+	got := make([]byte, 8)
+	if _, err := io.ReadFull(conn, got); err != nil || string(got) != "abcdefgh" {
+		t.Fatalf("read %q: %v", got, err)
+	}
 }
 
 func TestSSPluginsRealTCPNativeUDPAndUOT(t *testing.T) {
