@@ -1,6 +1,7 @@
 package sagernet
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/anytls/sing-anytls/padding"
 	"github.com/anytls/sing-anytls/session"
+	"github.com/anytls/sing-anytls/util"
 	"github.com/sagernet/sing/common/atomic"
 	"github.com/sagernet/sing/common/logger"
 )
@@ -59,4 +61,51 @@ func TestAnyTLSStreamCloseDuringReadWrite(t *testing.T) {
 			t.Fatal("read succeeded on a closed stream")
 		}
 	}
+}
+
+// The receive loop answers heartbeats and records the server's protocol
+// version while the client opens further streams on the same session.
+func TestAnyTLSOpenStreamDuringServerFrames(t *testing.T) {
+	var scheme atomic.TypedValue[*padding.PaddingFactory]
+	scheme.Store(padding.NewPaddingFactory(padding.DefaultPaddingScheme))
+	client, peer := net.Pipe()
+	sess := session.NewClientSession(client, &scheme, logger.NOP())
+	t.Cleanup(func() { _ = sess.Close() })
+	go func() { _, _ = io.Copy(io.Discard, peer) }()
+	frame := func(cmd byte, data []byte) []byte {
+		header := make([]byte, 7, 7+len(data))
+		header[0] = cmd
+		binary.BigEndian.PutUint16(header[5:], uint16(len(data)))
+		return append(header, data...)
+	}
+	const heartRequest, serverSettings = 8, 10
+	frames := append(frame(heartRequest, nil), frame(serverSettings, util.StringMap{"v": "2"}.ToBytes())...)
+	stop := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := peer.Write(frames); err != nil {
+				return
+			}
+		}
+	}()
+	sess.Run()
+	for range 100 {
+		stream, err := sess.OpenStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Write([]byte{0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	_ = peer.Close()
+	<-sent
 }

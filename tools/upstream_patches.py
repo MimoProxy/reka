@@ -866,9 +866,24 @@ def anytls_stream_close_error(source):
     source = replace(source, '\t\treturn s.dieErr\n', '\t\treturn s.closeError()\n')
     if 's.dieErr != nil' in source or 's.dieErr =' in source:
         raise RuntimeError('AnyTLS stream close error patch is incomplete')
+    # session.go makes the peer version atomic.
+    return replace(source, 's.sess.peerVersion >= 2', 's.sess.peerVersion.Load() >= 2', 2)
+
+
+def anytls_session_shared_state(source):
+    # The receive loop writes control frames and records the server version
+    # while callers open streams. Take the write lock for the buffering flag
+    # and keep the peer version atomic; the protocol is unchanged.
+    source = replace(source, '\tpeerVersion byte\n', '\tpeerVersion atomic.Uint32\n')
+    source = replace(source, '\t\t\t\t\t\t\ts.peerVersion = byte(v)\n', '\t\t\t\t\t\t\ts.peerVersion.Store(uint32(byte(v)))\n', 2)
+    source = replace(source, 's.peerVersion >= 2', 's.peerVersion.Load() >= 2')
+    source = replace(source, '\ts.buffering = false // proxy Write it\'s SocksAddr to flush the buffer\n', '\ts.connLock.Lock()\n\ts.buffering = false // proxy Write it\'s SocksAddr to flush the buffer\n\ts.connLock.Unlock()\n')
+    if 's.peerVersion =' in source or 'peerVersion >=' in source.replace('peerVersion.Load() >=', ''):
+        raise RuntimeError('AnyTLS session peer version patch is incomplete')
     return source
 
 
 MODULES['github.com/anytls/sing-anytls'] = ('v0.0.11', {
     'session/stream.go': ('1f7ebfeb99ab5b0857d007dfedf664a667ef513aa3c95637ee58e86569a972d3', anytls_stream_close_error),
+    'session/session.go': ('14e27f2cca6118a3025b1875ffe8963d2fe840f5554bd2ff4464dd0a5f162fb8', anytls_session_shared_state),
 })
