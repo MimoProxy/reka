@@ -107,6 +107,10 @@ func (s *Session) backendOptions() sagernet.Options {
 		// On iOS the Go resolver keeps working inside the extension; a macOS
 		// system extension needs the system resolver to look up servers.
 		SystemResolver: runtime.GOOS == "darwin",
+		// A macOS system extension can read the system socket table to find
+		// the process behind a tunnel flow, as the desktop daemon does. iOS
+		// does not expose other apps' sockets.
+		FindProcess: runtime.GOOS == "darwin",
 	}
 }
 

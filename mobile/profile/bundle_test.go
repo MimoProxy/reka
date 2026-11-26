@@ -156,6 +156,49 @@ rules:
 	}
 }
 
+func TestControlsProcessMode(t *testing.T) {
+	raw := []byte(`
+proxies:
+  - {name: Node A, type: ss, server: a.example.test, port: 443, cipher: aes-128-gcm, password: example-a}
+rules:
+  - MATCH,Node A
+`)
+	bundle, err := prepare(context.Background(), raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := bundle.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromProfile := *eff
+	fromProfile.Process.Mode = "off"
+	for _, tt := range []struct {
+		name    string
+		base    *compile.Effective
+		control string
+		want    string
+	}{
+		{"default", eff, "", "rule"},
+		{"profile value kept", &fromProfile, "", "off"},
+		{"control overrides profile", &fromProfile, "always", "always"},
+		{"control restores rule", &fromProfile, "rule", "rule"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			updated, err := ApplyControls(tt.base, bundle.Summary, Controls{Mode: "rule", ProcessMode: tt.control})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Process.Mode != tt.want {
+				t.Fatalf("process mode = %q, want %q", updated.Process.Mode, tt.want)
+			}
+		})
+	}
+	if _, err := ApplyControls(eff, bundle.Summary, Controls{Mode: "rule", ProcessMode: "sometimes"}); err == nil {
+		t.Fatal("invalid process mode was accepted")
+	}
+}
+
 func TestControlsIPVersion(t *testing.T) {
 	const input = `
 schema-version: 1

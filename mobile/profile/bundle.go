@@ -92,6 +92,9 @@ type Controls struct {
 	BlockQUIC string `json:"blockQuic,omitempty"`
 	// IPVersion overrides the dialer IP policy and DNS IPv6 setting when set.
 	IPVersion string `json:"ipVersion,omitempty"`
+	// ProcessMode overrides the profile's process.mode when set: off, rule
+	// (only when a rule needs the process) or always.
+	ProcessMode string `json:"processMode,omitempty"`
 	// Global chooses the outbound or group for global mode. It is ignored
 	// unless it names one in the profile.
 	Global string `json:"global,omitempty"`
@@ -378,6 +381,12 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 		return nil, errors.New("unknown QUIC blocking mode")
 	}
 	eff.Routing = model.Routing{Mode: mode, Global: global, BlockQUIC: blockQUIC}
+	if controls.ProcessMode != "" {
+		if !slices.Contains([]string{"off", "rule", "always"}, controls.ProcessMode) {
+			return nil, errors.New("unknown process mode")
+		}
+		eff.Process = model.Process{Mode: controls.ProcessMode}
+	}
 	if err := applyLANProxy(eff, controls.LANProxy); err != nil {
 		return nil, err
 	}

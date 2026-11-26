@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -538,4 +539,12 @@ func attachTestClient(t *testing.T, session *Session, ip string) (*stack.Stack, 
 		}
 	}()
 	return client, ctx
+}
+
+func TestBackendOptionsFindProcessOnlyOnMacOS(t *testing.T) {
+	s := newSession()
+	defer s.cancel()
+	if got, want := s.backendOptions().FindProcess, runtime.GOOS == "darwin"; got != want {
+		t.Fatalf("FindProcess = %v, want %v on %s", got, want, runtime.GOOS)
+	}
 }
