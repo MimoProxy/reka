@@ -297,6 +297,11 @@ func measureSpeedLatency(ctx context.Context, client *http.Client, rawURL string
 	if err := drainSpeedResponse(response.Body); err != nil {
 		return 0, err
 	}
+	// net/http returns a response that races with cancellation, so a reply
+	// finishing as the deadline expires would otherwise count as a sample.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	select {
 	case now = <-written:
 	default:
