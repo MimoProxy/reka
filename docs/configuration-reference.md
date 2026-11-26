@@ -55,7 +55,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `name` | 可选字符串 | 显示名称，不影响路由引用 |
 | `type` | 必填字符串 | 见下面协议表 |
 | `server` | 字符串 | 服务器域名或 IP，不含 URL 协议、路径和端口 |
-| `port` | 整数 | 通常必填，范围 1–65535；SSH 默认 22；HY2 端口跳跃和 Realm 见后文 |
+| `port` | 整数 | 通常必填，范围 1–65535；SSH 默认 22；Hysteria v1 和 HY2 支持端口跳跃，HY2 还支持 Realm |
 | `udp` | 布尔，通常默认 `true` | 是否允许原生 UDP；SSH、HTTP 和 reject 不提供原生 UDP |
 | `dialer` | 对象 | 物理出站参数或经过其他节点，见 3.6 |
 | `multiplex` | 对象，默认关闭 | 通用多路复用，见 3.7 |
@@ -74,6 +74,7 @@ mixed 同端口接受 HTTP 代理和 SOCKS4/4a/5；socks 类型支持 SOCKS4/4a/
 | `vmess` | `server`、`port`、`uuid` | `tls`、`protocol`、`packet-encoding`、`transport` |
 | `trojan` | `server`、`port`、`password` | **必须有** `tls`；可用 `transport` |
 | `anytls` | `server`、`port`、`password` | **必须有** `tls`；UDP 通过 TCP 会话转发；不接受 REALITY、`transport`、`multiplex` 或开启 `dialer.tfo` |
+| `hysteria` | `server`、`port`、`protocol`，认证可选 | 必须有 `tls` 和上下行带宽。见 [Hysteria v1](#hysteria-v1)。 |
 | `hysteria2` | `server`、`port`、`password` | **必须有** `tls`；`protocol` 配置带宽、混淆、跳端口、Realm |
 | `tuic` | `server`、`port`、`uuid`、`password` | **必须有** `tls`；`protocol` 配置拥塞控制等 |
 | `snell` | `server`、`port`、`password`（PSK） | **必须有** `protocol.version: 5` 或 `6`；不接受顶层 `tls` |
@@ -91,7 +92,7 @@ Shadowsocks 支持的 `method`：`2022-blake3-aes-128-gcm`、`2022-blake3-aes-25
 | --- | --- | --- |
 | `server-name` | 字符串 | SNI；服务器是域名时通常默认采用 `server`，用 IP 连接时应填服务器证书对应域名 |
 | `insecure` | 布尔，默认 `false` | 跳过普通 TLS 证书验证；REALITY 不接受此字段为 true |
-| `fingerprint` | 可选字符串 | TCP uTLS ClientHello 模板；`chrome`、`firefox`、`edge`、`safari`、`360`、`qq`、`ios`、`android`、`random`、`randomized`；HY2/TUIC 的 QUIC 不接受它 |
+| `fingerprint` | 可选字符串 | TCP uTLS ClientHello 模板；`chrome`、`firefox`、`edge`、`safari`、`360`、`qq`、`ios`、`android`、`random`、`randomized`；Hysteria v1、HY2 和 TUIC 的 QUIC 不接受它 |
 | `alpn` | 字符串列表 | ALPN；grpc/h2 必须包含 `h2`，ws/httpupgrade/http 若显式指定则必须为 `[http/1.1]` |
 | `certificate-sha256` | 字符串 | **完整 DER 证书**的 SHA-256 十六进制摘要，可带冒号；与 ClientHello `fingerprint` 不同 |
 | `verify-name` | 字符串 | 独立证书验证名称，保留原 SNI |
@@ -176,6 +177,25 @@ HY2 gecko 写作 `{type: gecko, password: ..., min-packet-size: 512, max-packet-
 
 Realm 的 `tls` 验证控制服务，节点顶层 `tls` 验证最终 QUIC peer，两者独立。
 
+#### Hysteria v1
+
+`type: hysteria` 通过 QUIC 转发 TCP 和 UDP。顶层填写 `server`、`port`、`tls` 和 `protocol`，可选 `password`、`udp`（默认 `true`）以及通用 `dialer`。服务器端口范围为 1–65535。设置 `protocol.server-ports` 时可以省略 `port` 或填 0。此协议拒绝 `transport` 和 `multiplex`。
+
+`tls: {}` 启用所需的 QUIC TLS。省略 `tls.alpn` 时，sing-quic 使用 `hysteria`，与 mihomo 一致。支持 SNI、跳过证书校验、独立验证名、证书 SHA-256 pin、客户端证书和 ECH。QUIC 不接受 uTLS `fingerprint`、REALITY 或 ShadowTLS、Restls、JLS 载体。
+
+| `protocol` 字段 | 默认值与约束 |
+| --- | --- |
+| `up-bps`、`down-bps` | 上下行都必填。可按方向选择精确字节/秒或整数 Mbps。每个方向最低为 16384 字节/秒。 |
+| `up-mbps`、`down-mbps` | 正整数 Mbps，1 Mbps = 125000 字节/秒。每个方向只能提供一种单位，换算不得溢出。 |
+| `auth-base64` | 标准 Base64 编码的认证字节，与顶层字符串 `password` 互斥。允许匿名时可省略两者。两种凭据都支持 `secret://` 引用和预览掩码。 |
+| `obfs` | 默认关闭。对象只接受 `type: xplus` 和非空 `password`。密码支持 `secret://` 引用和掩码。 |
+| `server-ports` | 默认使用单一服务器端口。跳跃端口写作显式的闭区间字符串列表，如 `["443:443", "20000:20100"]`，最多 1024 项。 |
+| `hop-interval-seconds` | 跳跃端口时使用固定间隔，默认 30 秒，显式配置范围为 5–86400 秒。v1 不接受 `hop-interval-max-seconds`。 |
+| `stream-receive-window`、`connection-receive-window` | QUIC 流级和连接级接收窗口，正整数字节数。省略时 sing-quic 分别使用 8388608 和 20971520 字节。 |
+| `disable-mtu-discovery` | 布尔，默认 `false`，沿用 sing-quic 的平台行为。设为 `true` 时禁用路径 MTU 探测。 |
+
+`realm` 和混淆包大小参数仅适用于 Hysteria2。
+
 #### SSH
 
 `password` 位于节点顶层。也可用 `protocol.private-key` 认证，两者都填写时优先尝试公钥。密码、私钥和私钥口令都支持 `secret://` 引用，读取配置时会掩码。
@@ -251,7 +271,7 @@ Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivit
 | `statistic` | false；仅保留兼容元数据，Reka 始终报告自己的逐连接流量 |
 | `brutal` | `{enabled: true, up-bps: 1250000, down-bps: 2000000}`；单位字节/秒，两方向至少 65536 |
 
-通用 multiplex 不适用于 SSH、AnyTLS、WireGuard、reject、pass 或 reject-drop。SSH 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
+通用 multiplex 不适用于 Hysteria v1、SSH、AnyTLS、WireGuard、reject、pass 或 reject-drop。SSH 和 AnyTLS 使用各自的会话复用。完整 multiplex 将 UDP 也送入 TCP carrier，因此它可以使 `udp: false` 的节点通过该封装承载 UDP；如果只想保持 TCP 多路复用，请显式设 `only-tcp: true`。Brutal 需要兼容服务端及 Linux TCP Brutal 内核模块，数值配置本身不保证实测吞吐量。
 
 ### 3.8 Shadowsocks 的 UoT 与 `plugin`
 

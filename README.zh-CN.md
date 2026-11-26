@@ -33,7 +33,7 @@ Clash 系内核只读一份扁平的配置文件：GUI 每次重新生成它，A
 - **事务**：版本历史与恢复、多个客户端之间的冲突检测、按操作 ID 安全重试、每一步都能崩溃恢复；手动编辑的文件也走同一个提交流程。
 - **热更新**：出站按指纹复用或替换，旧实例排空后才关闭；监听器先绑定新端口再停止旧端口；端口被占用时在任何改动生效之前就会被发现。
 - **路由**：按顺序首条命中的规则（`domain`、`domain-suffix`、`domain-keyword`、`domain-regex`、`ip-cidr`、`src-ip-cidr`、`dst-port`、`src-port`、`network`、`process-name`、全匹配），域名规则带索引；锁定规则集/地理库、递归逻辑与子规则；不发起网络请求的路由解释。
-- **协议**：mixed、SOCKS5、HTTP 监听器，UDP 按目标分流；DIRECT、REJECT、HTTP、SOCKS5、SSH（TCP 转发）、Shadowsocks、VLESS + REALITY + Vision + XUDP、VMess、Trojan、AnyTLS、Hysteria2、TUIC v5、Snell v5/v6 出站；VLESS encryption 还支持 Vision 与已列出的流式传输组合；VMess/VLESS/Trojan 支持 WS、gRPC、HTTPUpgrade、H2 和通用多路复用。VMess、VLESS、Trojan 和 AnyTLS 支持 ShadowTLS/Restls/JLS 安全载体。Shadowsocks 支持文档列出的七类插件。REALITY 客户端由 Reka 自己实现，支持 X25519MLKEM768。
+- **协议**：mixed、SOCKS5、HTTP 监听器，UDP 按目标分流；DIRECT、REJECT、HTTP、SOCKS5、SSH（TCP 转发）、Shadowsocks、VLESS + REALITY + Vision + XUDP、VMess、Trojan、AnyTLS、Hysteria v1、Hysteria2、TUIC v5、Snell v5/v6 出站；VLESS encryption 还支持 Vision 与已列出的流式传输组合；VMess/VLESS/Trojan 支持 WS、gRPC、HTTPUpgrade、H2 和通用多路复用。VMess、VLESS、Trojan 和 AnyTLS 支持 ShadowTLS/Restls/JLS 安全载体。Shadowsocks 支持文档列出的七类插件。REALITY 客户端由 Reka 自己实现，支持 X25519MLKEM768。
 - **DNS 与自动组**：按作用域的 DNS 策略、bootstrap、fallback、hosts 和缓存，DoT/DoH/DoQ/DoH3、hosts 别名与持久化 Fake IP 世代；select/url-test/fallback/load-balance 的健康检查有并发限制，观测状态不写配置。
 - **秘密**：`secret://` 引用，保存在 macOS 钥匙串、Windows DPAPI、Android Keystore 回调或权限为 0600 的文件中。
 - **新增能力**：HTTP/TLS/QUIC 有界嗅探、VLESS XHTTP（含独立下载端点）、监听器账号认证、进程路径/UID/入口规则，以及 DNS 并发与过期缓存；见[配置字段参考](docs/configuration-reference.md)和[功能扩展](docs/feature-expansion.md)。

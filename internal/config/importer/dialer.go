@@ -6,7 +6,7 @@ func (c *converter) convertDialer(r *proxyReader, out object, allowed map[string
 	if out["type"] == "reject" {
 		return
 	}
-	allowed["smux"] = out["type"] != "wireguard" && out["type"] != "ssh"
+	allowed["smux"] = out["type"] != "wireguard" && out["type"] != "hysteria" && out["type"] != "ssh"
 	dialer := object{}
 	for _, key := range []string{"interface-name", "routing-mark", "ip-version", "tfo", "mptcp", "dialer-proxy"} {
 		allowed[key] = true

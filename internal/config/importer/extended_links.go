@@ -95,6 +95,32 @@ func linkTransport(out object, q url.Values) {
 		out["http-upgrade-opts"] = object{"path": q.Get("path"), "host": q.Get("host")}
 	}
 }
+
+func parseHysteriaLink(out object, q url.Values) error {
+	for key := range q {
+		switch key {
+		case "auth", "peer", "obfs", "protocol", "alpn", "up", "upmbps", "down", "downmbps", "insecure":
+		default:
+			return fmt.Errorf("unknown Hysteria option")
+		}
+	}
+	out["auth-str"], out["sni"] = q.Get("auth"), q.Get("peer")
+	out["obfs"], out["protocol"] = q.Get("obfs"), q.Get("protocol")
+	for _, key := range []string{"up", "down"} {
+		value := q.Get(key)
+		if value == "" {
+			value = q.Get(key + "mbps")
+		}
+		out[key] = value
+	}
+	if alpn := q.Get("alpn"); alpn != "" {
+		out["alpn"] = strings.Split(alpn, ",")
+	}
+	// mihomo treats an absent or unrecognized insecure value as false.
+	out["skip-cert-verify"], _ = strconv.ParseBool(q.Get("insecure"))
+	return nil
+}
+
 func parseSecureLink(u *url.URL, out object, q url.Values) error {
 	known := map[string]bool{}
 	for _, k := range []string{"type", "security", "sni", "peer", "fp", "alpn", "allowInsecure", "insecure", "path", "host", "serviceName", "obfs", "obfs-password", "congestion_control", "udp_relay_mode", "zero_rtt"} {

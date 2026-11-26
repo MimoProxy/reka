@@ -33,14 +33,14 @@ func IsSensitive(path string) bool {
 		segs = segs[2:]
 	}
 	if len(segs) == 4 && segs[0] == "outbounds" && segs[2] == "protocol" {
-		return segs[3] == "private-key" || segs[3] == "private-key-passphrase" || segs[3] == "pre-shared-key"
+		return segs[3] == "private-key" || segs[3] == "private-key-passphrase" || segs[3] == "pre-shared-key" || segs[3] == "auth-base64"
 	}
 	return len(segs) == 4 && segs[0] == "scripts" && segs[2] == "download" && segs[3] == "url"
 }
 
 func sensitiveNestedField(key string) bool {
 	switch key {
-	case "password", "username", "key", "user-key", "token", "certificate", "private-key", "private-key-passphrase", "pre-shared-key", "value":
+	case "password", "username", "key", "user-key", "token", "certificate", "private-key", "private-key-passphrase", "pre-shared-key", "auth-base64", "value":
 		return true
 	}
 	return false

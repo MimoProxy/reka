@@ -1,17 +1,20 @@
 package compile
 
 import (
+	"encoding/base64"
 	"fmt"
-	"github.com/MimoProxy/reka/internal/config/model"
-	"golang.org/x/net/http/httpguts"
 	"math"
 	"slices"
 	"strings"
+
+	"github.com/MimoProxy/reka/internal/config/model"
+	"golang.org/x/net/http/httpguts"
 )
 
 var protocolFields = map[string][]string{
 	"vmess":                 {"security", "alter-id"},
 	"anytls":                {"idle-session-check-interval-seconds", "idle-session-timeout-seconds", "min-idle-session", "client-metadata"},
+	"hysteria":              {"auth-base64", "up-mbps", "down-mbps", "up-bps", "down-bps", "obfs", "server-ports", "hop-interval-seconds", "stream-receive-window", "connection-receive-window", "disable-mtu-discovery"},
 	"hysteria2":             {"up-mbps", "down-mbps", "obfs", "server-ports", "hop-interval-seconds", "hop-interval-max-seconds", "up-bps", "down-bps", "realm"},
 	"tuic":                  {"congestion-control", "udp-relay-mode", "zero-rtt", "heartbeat"},
 	"snell":                 {"version", "user-key", "mode", "reuse", "obfs"},
@@ -57,11 +60,14 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 	if slices.Contains([]string{"trojan", "anytls", "hysteria2", "tuic", "snell"}, ob.Type) && out.Password == "" && !c.hasErrorAt(base+"/password") {
 		fail("password", "password is required")
 	}
-	if (ob.Type == "hysteria2" || ob.Type == "tuic") && ob.TLS != nil && ob.TLS.Fingerprint != "" {
+	if slices.Contains([]string{"hysteria", "hysteria2", "tuic"}, ob.Type) && ob.TLS != nil && ob.TLS.Fingerprint != "" {
 		fail("tls/fingerprint", "QUIC does not use a TCP ClientHello fingerprint")
 	}
-	if slices.Contains([]string{"trojan", "anytls", "hysteria2", "tuic"}, ob.Type) && ob.TLS == nil {
+	if slices.Contains([]string{"trojan", "anytls", "hysteria", "hysteria2", "tuic"}, ob.Type) && ob.TLS == nil {
 		fail("tls", "this protocol requires TLS")
+	}
+	if ob.Type == "hysteria" && ob.Protocol == nil {
+		fail("protocol", "Hysteria requires upload and download bandwidth")
 	}
 	if ob.Protocol != nil {
 		p := *ob.Protocol
@@ -83,14 +89,18 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 				fail("protocol/min-idle-session", "minimum idle sessions must be between 0 and 64")
 			}
 		}
-		if ob.Type == "hysteria2" {
-			if p.UpMbps > math.MaxInt/125000 || p.DownMbps > math.MaxInt/125000 {
+		if ob.Type == "hysteria" || ob.Type == "hysteria2" {
+			if p.UpMbps > math.MaxInt/model.HysteriaBytesPerMbps || p.DownMbps > math.MaxInt/model.HysteriaBytesPerMbps {
 				fail("protocol", "legacy Mbps rate overflows; use exact bytes/s")
 			}
 			if p.UpBPS != nil && p.UpMbps != 0 || p.DownBPS != nil && p.DownMbps != 0 {
 				fail("protocol", "choose bytes/s or legacy Mbps for each direction")
 			}
-			c.realm(base+"/protocol/realm", &p)
+			if ob.Type == "hysteria" {
+				c.hysteriaOptions(base, &p)
+			} else {
+				c.realm(base+"/protocol/realm", &p)
+			}
 			if len(p.ServerPorts) > 1024 {
 				fail("protocol/server-ports", "too many port ranges")
 			}
@@ -133,7 +143,19 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 			copy := *p.Obfs
 			p.Obfs = &copy
 			p.Obfs.Password = c.resolveSecret(base+"/protocol/obfs/password", p.Obfs.Password)
-			if ob.Type == "hysteria2" {
+			if ob.Type == "hysteria" {
+				for _, field := range c.present(base + "/protocol/obfs") {
+					if field != "type" && field != "password" {
+						fail("protocol/obfs/"+field, "option does not apply to XPlus obfs")
+					}
+				}
+				if p.Obfs.Type != "xplus" {
+					fail("protocol/obfs/type", "Hysteria requires xplus obfs")
+				}
+				if p.Obfs.Password == "" && !c.hasErrorAt(base+"/protocol/obfs/password") {
+					fail("protocol/obfs/password", "XPlus obfs requires a password")
+				}
+			} else if ob.Type == "hysteria2" {
 				if p.Obfs.Host != "" {
 					fail("protocol/obfs/host", "obfs host only applies to Snell")
 				}
@@ -247,5 +269,40 @@ func (c *compiler) protocol(base string, ob model.Outbound, out *Outbound) {
 		if m.Statistic {
 			c.warnf(model.DocProfile, base+"/multiplex/statistic", "multiplex.statistic", "reference nested accounting is metadata; Reka always reports native per-flow traffic")
 		}
+	}
+}
+
+func (c *compiler) hysteriaOptions(base string, p *model.Protocol) {
+	path := base + "/protocol"
+	fail := func(field, message string) {
+		c.errorf(model.DocProfile, path+"/"+field, "outbound.protocol", "%s", message)
+	}
+	checkBandwidth := func(direction string, exact *uint64, mbps int) {
+		if exact == nil && mbps == 0 {
+			fail(direction+"-bps", fmt.Sprintf("Hysteria requires %s-bps or %s-mbps", direction, direction))
+		} else if exact != nil && *exact < model.HysteriaMinSpeedBPS {
+			fail(direction+"-bps", fmt.Sprintf("bandwidth must be at least %d bytes/s", model.HysteriaMinSpeedBPS))
+		}
+	}
+	checkBandwidth("up", p.UpBPS, p.UpMbps)
+	checkBandwidth("down", p.DownBPS, p.DownMbps)
+	if _, present := c.ppos[path+"/auth-base64"]; present {
+		if _, passwordPresent := c.ppos[base+"/password"]; passwordPresent {
+			fail("auth-base64", "password and auth-base64 are mutually exclusive")
+		}
+		p.AuthBase64 = c.resolveSecret(path+"/auth-base64", p.AuthBase64)
+		if _, err := base64.StdEncoding.DecodeString(p.AuthBase64); err != nil {
+			fail("auth-base64", "expected standard base64-encoded authentication bytes")
+		}
+	}
+	// sing-quic NewHopConn requires an interval of at least five seconds.
+	if _, present := c.ppos[path+"/hop-interval-seconds"]; present && p.HopInterval < 5 {
+		fail("hop-interval-seconds", "hop interval must be at least 5 seconds")
+	}
+	if _, present := c.ppos[path+"/stream-receive-window"]; present && p.StreamReceiveWindow == 0 {
+		fail("stream-receive-window", "stream receive window must be positive")
+	}
+	if _, present := c.ppos[path+"/connection-receive-window"]; present && p.ConnectionReceiveWindow == 0 {
+		fail("connection-receive-window", "connection receive window must be positive")
 	}
 }

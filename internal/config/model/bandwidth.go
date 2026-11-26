@@ -9,6 +9,13 @@ import (
 
 var bandwidthPattern = regexp.MustCompile(`^(\d+)\s*([KMGT]?)([Bb])ps$`)
 
+const (
+	// HysteriaMinSpeedBPS matches sing-quic hysteria.MinSpeedBPS in bytes per second.
+	HysteriaMinSpeedBPS = 16384
+	// HysteriaBytesPerMbps matches sing-quic hysteria.MbpsToBps.
+	HysteriaBytesPerMbps = 125000
+)
+
 // BandwidthBytes follows the pinned Clash integer/unit grammar. Unitless
 // values mean Mbps; lowercase b means bits, uppercase B means bytes. Reject
 // invalid input and arithmetic overflow instead of accidentally disabling a

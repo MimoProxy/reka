@@ -312,6 +312,15 @@ func (c *converter) clash(data []byte) {
 		return
 	}
 	proxies := c.items(root, "proxies")
+	for i, p := range proxies {
+		if text(get(p, "type")) == "hysteria" {
+			// A YAML anchor may also be used by another protocol with different key rules.
+			proxies[i] = copyNode(p)
+			if !c.normalizeHysteriaKeys(proxies[i], fmt.Sprintf("/proxies/#%d", i)) {
+				return
+			}
+		}
+	}
 	var groups, rules []*yaml.Node
 	if !c.req.NodesOnly {
 		groups = c.items(root, "proxy-groups")
