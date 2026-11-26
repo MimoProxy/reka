@@ -102,30 +102,39 @@ dns:
 			profile := base + fmt.Sprintf(`outbounds: [{id: relay, server: 192.0.2.42, port: 8443, type: %s}]
 rules:
   - {match: {domain: observed.test}, outbound: relay}
+  - {match: {domain: mapped.test}, outbound: relay}
   - {match: {all: true}, outbound: reject}
 `, tc.outbound)
 			pinFlowApply(t, e, profile, "", uint64(i+2))
-			md := sagernet.Metadata{
-				Network: "udp", InboundType: "tun", SniffedDomain: "observed.test",
-				Destination: sagernet.Destination{Addr: original, Port: 8443},
-			}
-			rt := e.route(t.Context(), md)
-			if rt.Release != nil {
-				defer rt.Release()
-			}
-			if rt.Outbound == nil || rt.Outbound.Tag() != "relay" {
-				t.Fatalf("sniffed domain did not select relay: %+v", rt.Info)
-			}
-			got := md.Destination
-			if rt.Destination != nil {
-				got = *rt.Destination
-			}
-			want := sagernet.Destination{Addr: original, Port: md.Destination.Port}
-			if tc.wantDomain {
-				want = sagernet.Destination{Domain: "mapped.test", Port: md.Destination.Port}
-			}
-			if got != want {
-				t.Fatalf("outbound destination = %+v, want %+v", got, want)
+			for _, sniffed := range []string{"", "observed.test"} {
+				md := sagernet.Metadata{
+					Network: "udp", InboundType: "tun", SniffedDomain: sniffed,
+					Destination: sagernet.Destination{Addr: original, Port: 8443},
+				}
+				rt := e.route(t.Context(), md)
+				if rt.Release != nil {
+					defer rt.Release()
+				}
+				if rt.Outbound == nil || rt.Outbound.Tag() != "relay" {
+					t.Fatalf("sniffed %q did not select relay: %+v", sniffed, rt.Info)
+				}
+				got := md.Destination
+				if rt.Destination != nil {
+					got = *rt.Destination
+				}
+				want := sagernet.Destination{Addr: original, Port: md.Destination.Port}
+				if tc.wantDomain {
+					// The sniffed name wins over the mapped one: a shared
+					// answer may map to a different site.
+					domain := "mapped.test"
+					if sniffed != "" {
+						domain = sniffed
+					}
+					want = sagernet.Destination{Domain: domain, Port: md.Destination.Port}
+				}
+				if got != want {
+					t.Fatalf("sniffed %q: outbound destination = %+v, want %+v", sniffed, got, want)
+				}
 			}
 		})
 	}

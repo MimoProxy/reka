@@ -1294,7 +1294,14 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	muxUDP, packetAddr := g.packetAddr[dec.Outbound]
 	packetAddr = packetAddr && md.Network == "udp"
 	if md.Destination.DNSMapped {
-		result.Destination = mappedDialDestination(md.Destination, out.Type(), packetAddr && !muxUDP)
+		dial := md.Destination
+		// A polluted answer is often handed out for several blocked names, so
+		// the address may map to another site. The sniffed SNI or Host names
+		// the site the client is actually connecting to.
+		if sniffed := router.NormalizeDomain(md.SniffedDomain); sniffed != "" {
+			dial.Domain = sniffed
+		}
+		result.Destination = mappedDialDestination(dial, out.Type(), packetAddr && !muxUDP)
 	} else if packetAddr && out.Type() == model.OutboundVLESS && md.Destination.Domain != "" {
 		env.observeLookup = false
 		addresses, err := env.Resolve(ctx, md.Destination.Domain)

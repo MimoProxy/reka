@@ -3,6 +3,7 @@ package acceptance
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -211,5 +212,57 @@ outbounds: [{id: relay, type: http, server: 127.0.0.1, port: %d}]
 	checkProxyTarget(unmapped, unmapped.String())
 	if count := queries.Load(); count != 1 {
 		t.Fatalf("upstream received %d queries, want only the original client query", count)
+	}
+}
+
+func TestRedirHostSharedAnswerUsesSniffedServerName(t *testing.T) {
+	upstream, _ := loopbackDNSUpstream(t)
+	requests := make(chan string, 2)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method + " " + r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+	// Sniffing keeps its defaults. The upstream answers every name with the
+	// same address, as a resolver returning polluted answers often does.
+	h := newHarness(t, fmt.Sprintf(`schema-version: 1
+outbounds: [{id: relay, type: http, server: 127.0.0.1, port: %d}]
+dns: {nameserver: [%q]}
+rules:
+  - {match: {domain-suffix: example.com}, outbound: relay}
+  - {match: {domain-suffix: example.net}, outbound: relay}
+  - {match: {all: true}, outbound: reject}
+`, proxy.Listener.Addr().(*net.TCPAddr).Port, upstream))
+	var ip netip.Addr
+	for _, name := range []string{"www.example.com.", "www.example.net."} {
+		reply, err := h.engine().ExchangeDNS(t.Context(), new(D.Msg).SetQuestion(name, D.TypeA))
+		if err != nil || len(reply.Answer) != 1 {
+			t.Fatalf("client DNS reply for %s = %v, error = %v", name, reply, err)
+		}
+		record, ok := reply.Answer[0].(*D.A)
+		if !ok {
+			t.Fatalf("expected A record for %s, got %v", name, reply.Answer)
+		}
+		ip, _ = netip.AddrFromSlice(record.A)
+		ip = ip.Unmap()
+	}
+	// The address now maps to the second name, but the client connects to the
+	// first one, as its TLS server name shows.
+	conn, err := socks5Connect(h.proxy(), netip.AddrPortFrom(ip, 443))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	go func() {
+		_ = tls.Client(conn, &tls.Config{ServerName: "www.example.com", InsecureSkipVerify: true}).Handshake()
+	}()
+	select {
+	case got := <-requests:
+		if got != "CONNECT www.example.com:443" {
+			t.Fatalf("upstream proxy received %q, want CONNECT www.example.com:443", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no upstream proxy request")
 	}
 }
