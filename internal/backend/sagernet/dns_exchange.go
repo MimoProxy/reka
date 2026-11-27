@@ -217,7 +217,7 @@ func exchangePlainDNS(ctx context.Context, network string, open func(context.Con
 	} else if n != len(wire) {
 		return nil, io.ErrShortWrite
 	}
-	raw := make([]byte, 65535)
+	raw := make([]byte, plainDNSReadSize(q))
 	for range 16 {
 		n, err := c.Read(raw)
 		if err != nil {
@@ -232,6 +232,20 @@ func exchangePlainDNS(ctx context.Context, network string, open func(context.Con
 		}
 	}
 	return nil, errors.New("invalid DNS response identity")
+}
+
+// UDP replies are read into a buffer as large as the query's EDNS0 size,
+// and at least 2048 bytes, as sing-box's UDP transport does. A 64 KiB
+// buffer for every query allocated about 40 MiB in 30 seconds of app
+// traffic on an iPhone, nearly a fifth of the extension's allocations.
+const plainDNSMinReadSize = 2048
+
+func plainDNSReadSize(q *D.Msg) int {
+	size := plainDNSMinReadSize
+	if opt := q.IsEdns0(); opt != nil {
+		size = max(size, int(opt.UDPSize()))
+	}
+	return size
 }
 
 // exchangeDoH posts one query to a DNS-over-HTTPS endpoint. Redirects are
