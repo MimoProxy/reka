@@ -90,6 +90,13 @@ type memoryGuard struct {
 	baselineUsage    uint64
 	baselineTime     time.Time
 	escalated        bool
+
+	// For the host's timeline: the highest sample since the last takePeak,
+	// the connections closed by every reset so far and how often usage
+	// came close enough to the trigger to arm the guard.
+	peakUsage   uint64
+	closedTotal int
+	armedTotal  int
 }
 
 // sample reports process footprint in bytes. reset returns the number of closed connections.
@@ -160,6 +167,16 @@ func (g *memoryGuard) stats() memoryGuardStats {
 	return g.status
 }
 
+// takePeak returns the highest sample since the previous call, the
+// connections closed by resets so far and the times the guard armed so
+// far, and starts a new peak.
+func (g *memoryGuard) takePeak() (peak uint64, closedTotal, armedTotal int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	peak, g.peakUsage = g.peakUsage, 0
+	return peak, g.closedTotal, g.armedTotal
+}
+
 func (g *memoryGuard) run() {
 	defer close(g.done)
 	timer := g.newTimer(g.interval)
@@ -208,6 +225,7 @@ func (g *memoryGuard) poll(pressure bool) {
 		g.baselineUsage = usage
 		g.baselineTime = now
 	}
+	g.peakUsage = max(g.peakUsage, usage)
 	previous := g.status.State
 	state := g.nextState(previous, usage)
 	var reason string
@@ -230,6 +248,9 @@ func (g *memoryGuard) poll(pressure bool) {
 	if state == memoryGuardNormal && !pressure {
 		g.forceMinInterval = false
 	}
+	if previous == memoryGuardNormal && state != memoryGuardNormal {
+		g.armedTotal++
+	}
 	g.updateInterval(state)
 	g.status.State = state
 	g.mu.Unlock()
@@ -242,6 +263,7 @@ func (g *memoryGuard) poll(pressure bool) {
 		g.status.LastReason = reason
 		g.status.LastUsage = usage
 		g.status.LastClosed = closed
+		g.closedTotal += closed
 		g.mu.Unlock()
 	}
 }

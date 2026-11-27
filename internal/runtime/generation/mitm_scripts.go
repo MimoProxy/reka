@@ -267,3 +267,15 @@ func (e *Engine) scriptStatus(g *generation) api.MITMScriptStatus {
 	}
 	return info
 }
+
+// describe returns the name and module of the HTTP script with the given ID.
+func (t *mitmScriptTable) describe(id string) (name, module string) {
+	for _, entries := range [...][]mitmScriptEntry{t.requests, t.responses} {
+		for _, entry := range entries {
+			if entry.id == id {
+				return entry.spec.Name, entry.module
+			}
+		}
+	}
+	return "", ""
+}

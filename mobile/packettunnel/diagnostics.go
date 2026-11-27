@@ -37,6 +37,8 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 		return true, nil
 	case "profileRead":
 		return readRuntimeProfile(op.Category, op.Offset)
+	case "processSample":
+		return s.processSample(), nil
 	case "flowLimits":
 		var stats sagernet.PacketFlowStats
 		if s.tunnel != nil {

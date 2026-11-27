@@ -291,7 +291,10 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 	}
 	if g.scripts.count() != 0 && (!plain || e.scriptHost != nil) {
 		route.MatchScript = e.mitmScriptMatcher(snap, state)
-		route.OnScript = e.scriptRuns.record
+		route.OnScript = func(run api.MITMScriptRun, executed bool) {
+			e.scriptRuns.record(run, executed)
+			e.scriptPressure.noteMITM(run, executed)
+		}
 	}
 	if g.httpEngine.reroute {
 		// Capture metadata only on routes that can change the destination.

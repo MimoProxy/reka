@@ -150,6 +150,7 @@ type Engine struct {
 	scriptStore          *scriptStore
 	scriptNotifications  *scriptNotifications
 	scriptRuns           mitmScriptCounters
+	scriptPressure       scriptPressure
 	backgroundScripts    backgroundScripts
 	scriptClashPort      atomic.Uint32
 

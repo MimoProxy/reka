@@ -317,6 +317,7 @@ func (e *Engine) startBackgroundScript(entry *backgroundScriptEntry, trigger, ev
 		result, err := b.host.RunWithSource(b.ctx, &spec, &script.Input{}, services, readSource)
 		run.Value, run.ValueTruncated = result.Value, result.ValueTruncated
 		run.Result, run.Error = scriptRunOutcome(err)
+		e.scriptPressure.noteError(run.ID, err)
 		run.DurationMS = time.Since(start).Milliseconds()
 		run.Logs, run.LogsTruncated = logs.finish()
 		e.mu.Lock()
