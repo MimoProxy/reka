@@ -353,6 +353,7 @@ func scriptRunOutcome(err error) (string, string) {
 }
 
 func (e *Engine) logScriptRun(run api.ScriptRun) {
+	e.recordBackgroundScriptRun(run)
 	level := slog.LevelWarn
 	if run.Result == "done" || run.Result == "overlap" {
 		level = slog.LevelInfo

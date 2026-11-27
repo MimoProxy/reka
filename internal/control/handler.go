@@ -121,7 +121,7 @@ var Methods = []string{
 	"ProbeOutbound", "GetTraffic", "QueryDNS", "FlushDNSCache", "ResetNetwork", "GetLogs", "StageResource", "GetRules",
 	"GetGroupStatus", "Hello", "GetCapabilities", "GetStatus", "GetTailscaleStatus", "GetConfiguration", "ValidateConfiguration",
 	"PlanConfiguration", "CommitConfiguration", "GetOperation", "ListRevisions", "RestoreRevision",
-	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
+	"ListConnections", "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ListScriptHistory", "ClearHistory", "GetRequestDetail", "StartHTTPSDebug", "GetHTTPSDebug", "StopHTTPSDebug", "CloseConnections", "ExplainRoute", "Subscribe", "Unsubscribe",
 	"SetSecret", "DeleteSecret", "ListSecrets", "ImportSource", "ConfigureSubscription", "ListSubscriptions", "RefreshSubscription",
 	"AddModule", "RemoveModule", "SetModuleEnabled", "SetModuleArguments", "RefreshModule", "ListModules", "GetModuleReport", "PreviewModule",
 	"GenerateMITMCA", "ImportMITMCA", "GetMITMCA", "ExportMITMCA", "DeleteMITMCA", "GetMITMStatus",
@@ -503,7 +503,7 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 			return nil, err
 		}
 		return svc.RestoreRevision(s.ctx, p)
-	case "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory":
+	case "ListConnectionHistory", "ListDNSHistory", "ListRequestHistory", "ListScriptHistory":
 		p, err := decode[history.ListOptions](req.Params)
 		if err != nil {
 			return nil, err
@@ -514,6 +514,8 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 			kind = history.DNS
 		case "ListRequestHistory":
 			kind = history.Requests
+		case "ListScriptHistory":
+			kind = history.Scripts
 		}
 		store, scope := svc.Engine().History()
 		page, err := store.List(kind, scope.ProfileID, p)
@@ -607,7 +609,7 @@ func (s *Session) dispatch(req Request) (result any, err error) {
 		if err != nil {
 			return nil, err
 		}
-		if p.Kind != history.Connections && p.Kind != history.DNS && p.Kind != history.Requests {
+		if p.Kind != history.Connections && p.Kind != history.DNS && p.Kind != history.Requests && p.Kind != history.Scripts {
 			return nil, &service.Error{Code: service.CodeBadRequest, Message: "unknown history kind"}
 		}
 		store, scope := svc.Engine().History()

@@ -291,9 +291,10 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 	}
 	if g.scripts.count() != 0 && (!plain || e.scriptHost != nil) {
 		route.MatchScript = e.mitmScriptMatcher(snap, state)
-		route.OnScript = func(run api.MITMScriptRun, executed bool) {
+		route.OnScript = func(run api.MITMScriptRun, executed bool, request sagernet.MITMScriptRequest) {
 			e.scriptRuns.record(run, executed)
 			e.scriptPressure.noteMITM(run, executed)
+			e.recordMITMScriptRun(g, run, request)
 		}
 	}
 	if g.httpEngine.reroute {

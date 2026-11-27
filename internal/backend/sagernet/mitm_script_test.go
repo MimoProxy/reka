@@ -168,7 +168,7 @@ func TestMITMScriptResponseUsesSuppliedEncoding(t *testing.T) {
 func TestMITMScriptUnsupportedDoesNotReadBody(t *testing.T) {
 	match := &MITMScript{ID: "disabled", RequiresBody: true, MaxSize: 64}
 	handler := mitmHTTPHandler{route: &MITMRoute{
-		OnScript: func(run api.MITMScriptRun, executed bool) {
+		OnScript: func(run api.MITMScriptRun, executed bool, _ MITMScriptRequest) {
 			if executed || run.Result != "unsupported" {
 				t.Errorf("script outcome %+v, executed %v", run, executed)
 			}
@@ -211,7 +211,7 @@ func TestMITMScriptRecordsMemoryOutcomes(t *testing.T) {
 			var got api.MITMScriptRun
 			var executed bool
 			handler := mitmHTTPHandler{route: &MITMRoute{
-				OnScript: func(run api.MITMScriptRun, ran bool) {
+				OnScript: func(run api.MITMScriptRun, ran bool, _ MITMScriptRequest) {
 					got, executed = run, ran
 				},
 			}}
@@ -257,7 +257,7 @@ func TestMITMScriptLocalHeadResponse(t *testing.T) {
 				}}, nil
 			}}
 		},
-		OnScript: func(run api.MITMScriptRun, executed bool) {
+		OnScript: func(run api.MITMScriptRun, executed bool, _ MITMScriptRequest) {
 			if !executed {
 				t.Error("local script did not execute")
 			}

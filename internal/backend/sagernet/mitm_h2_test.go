@@ -13,10 +13,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/script"
@@ -421,8 +423,15 @@ func TestMITMHTTP2RewritesAndScripts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var scriptRequests []MITMScriptRequest
+	var scriptMu sync.Mutex
 	route := &MITMRoute{
 		H2: true, Rewrite: rules, MaxBodySize: 256,
+		OnScript: func(_ api.MITMScriptRun, _ bool, request MITMScriptRequest) {
+			scriptMu.Lock()
+			scriptRequests = append(scriptRequests, request)
+			scriptMu.Unlock()
+		},
 		MatchScript: func(kind script.Kind, url string) *MITMScript {
 			if url != newURL {
 				t.Errorf("unexpected script match %s %s", kind, url)
@@ -486,6 +495,18 @@ func TestMITMHTTP2RewritesAndScripts(t *testing.T) {
 				t.Fatalf("local request diagnostics = %+v", row)
 			}
 		case "/original":
+			scriptMu.Lock()
+			for _, request := range scriptRequests {
+				// Scripts see the rewritten URL, and the run names its request.
+				if request.Method != http.MethodPost || request.URL != newURL || request.RequestID != row.ID ||
+					request.ConnectionID != row.ConnectionID || request.Started.IsZero() {
+					t.Errorf("script request = %+v, row %d on connection %d", request, row.ID, row.ConnectionID)
+				}
+			}
+			if len(scriptRequests) != 2 {
+				t.Errorf("script requests = %+v", scriptRequests)
+			}
+			scriptMu.Unlock()
 			if !slices.Equal(row.MatchedIDs, wantMatches) || len(row.Scripts) != 2 ||
 				row.Scripts[0].Result != "modified" || row.Scripts[1].Result != "modified" ||
 				row.RewriteKinds["url"] != httprewrite.KindURL || row.RewriteKinds["request-header"] != httprewrite.KindHeader ||

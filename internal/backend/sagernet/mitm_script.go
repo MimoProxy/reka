@@ -64,12 +64,16 @@ func (s *mitmHTTPHandler) runScript(ctx context.Context, match *MITMScript, inpu
 		phase = "response"
 	}
 	run := api.MITMScriptRun{ID: match.ID, Phase: phase}
-	if match.Run == nil {
-		run.Result = "unsupported"
-		s.recordScript(stats, run, false)
-		return false
+	// A request rewrite can change the URL before the script sees it.
+	if input.request != nil {
+		stats.request.URL = input.request.URL.String()
 	}
 	start := time.Now()
+	if match.Run == nil {
+		run.Result = "unsupported"
+		s.recordScript(stats, run, false, start)
+		return false
+	}
 	job, err := input.scriptInput(match, buffer)
 	var result script.Result
 	var executed bool
@@ -85,14 +89,16 @@ func (s *mitmHTTPHandler) runScript(ctx context.Context, match *MITMScript, inpu
 	}
 	run.DurationMS = time.Since(start).Milliseconds()
 	run.Result, run.Error = mitmScriptOutcome(result.Action, err)
-	s.recordScript(stats, run, executed)
+	s.recordScript(stats, run, executed, start)
 	return run.Result == "oversize"
 }
 
-func (s *mitmHTTPHandler) recordScript(stats *mitmRequestStats, run api.MITMScriptRun, executed bool) {
+func (s *mitmHTTPHandler) recordScript(stats *mitmRequestStats, run api.MITMScriptRun, executed bool, started time.Time) {
 	stats.scripts = append(stats.scripts, run)
 	if s.route.OnScript != nil {
-		s.route.OnScript(run, executed)
+		request := stats.request
+		request.Started = started
+		s.route.OnScript(run, executed, request)
 	}
 }
 
@@ -104,7 +110,7 @@ func (s *mitmHTTPHandler) recordScriptInputError(stats *mitmRequestStats, match 
 	if match.Run != nil {
 		run.Result, run.Error = "failed", "could not read HTTP body"
 	}
-	s.recordScript(stats, run, false)
+	s.recordScript(stats, run, false, time.Now())
 }
 
 func (v mitmScriptInput) scriptInput(match *MITMScript, buffer mitmBufferedBody) (*script.Input, error) {

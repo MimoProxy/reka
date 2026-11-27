@@ -41,6 +41,7 @@ type mitmHTTPHandler struct {
 }
 
 type mitmRequestStats struct {
+	request       MITMScriptRequest
 	matches       []string
 	scripts       []api.MITMScriptRun
 	passthroughs  uint64
@@ -103,6 +104,9 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, obs := s.backend.beginRequest(r.Context(), request, s.metadata.Inbound, r.RemoteAddr)
 	bindRequestConnection(ctx, s.attempt)
 	var stats mitmRequestStats
+	stats.request = MITMScriptRequest{
+		Method: request.Method, URL: request.URL.String(), RequestID: obs.summary.ID, ConnectionID: s.attempt.ID,
+	}
 	var status int
 	var err error
 	var hijacked net.Conn

@@ -27,6 +27,8 @@ const (
 	DNS         Kind = "dns"
 	Requests    Kind = "requests"
 	Logs        Kind = "logs"
+	// Scripts holds finished script runs.
+	Scripts Kind = "scripts"
 )
 
 var ErrCursor = errors.New("invalid history cursor")

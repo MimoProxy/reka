@@ -29,6 +29,7 @@ func TestPacketTunnelHistoryLimits(t *testing.T) {
 	now := time.Now()
 	rows := map[history.Kind]int{
 		history.Connections: eventRows, history.DNS: eventRows, history.Logs: eventRows, history.Requests: requestEventRows,
+		history.Scripts: scriptEventRows,
 	}
 	for kind, want := range rows {
 		for range want + 6 {
@@ -42,7 +43,7 @@ func TestPacketTunnelHistoryLimits(t *testing.T) {
 		}
 	}
 	for kind, want := range map[history.Kind]int{
-		history.Connections: 48, history.DNS: 24, history.Logs: 24, history.Requests: 80,
+		history.Connections: 48, history.DNS: 24, history.Logs: 24, history.Requests: 80, history.Scripts: 48,
 	} {
 		if got := session.events.Count(kind); got != want {
 			t.Errorf("%s history retained %d large rows, want %d", kind, got, want)

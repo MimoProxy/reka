@@ -297,7 +297,7 @@ func TestMITMHTTP2OversizeResponseStreams(t *testing.T) {
 				},
 			}
 		},
-		OnScript: func(run api.MITMScriptRun, executed bool) {
+		OnScript: func(run api.MITMScriptRun, executed bool, _ MITMScriptRequest) {
 			if executed {
 				t.Error("oversized response was marked executed")
 			}

@@ -45,6 +45,10 @@ const (
 	// 1.3 KiB with its search text, so 256 rows add about 230 KiB.
 	requestEventRows  = 256
 	requestEventBytes = 320 << 10
+	// A script run row takes about 1 KiB with its search text. A background
+	// run also keeps up to 16 KiB of logs and value as its detail.
+	scriptEventRows  = 128
+	scriptEventBytes = 192 << 10
 )
 
 var configuredMTU atomic.Int32
@@ -99,6 +103,7 @@ func newSession() *Session {
 		history.Logs:        {Rows: eventRows, Bytes: eventBytes},
 		history.Connections: {Rows: eventRows, Bytes: connectionEventBytes},
 		history.Requests:    {Rows: requestEventRows, Bytes: requestEventBytes},
+		history.Scripts:     {Rows: scriptEventRows, Bytes: scriptEventBytes},
 	})
 	logs := newTunnelLogHandler(events)
 	now := time.Now()

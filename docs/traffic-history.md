@@ -29,11 +29,13 @@ TCP 转发中的 MITM 请求以原 TLS 连接的 ID 关联，记录命中的重�
 
 | 方法 | 参数及响应 |
 | --- | --- |
-| `ListConnectionHistory`、`ListDNSHistory`、`ListRequestHistory` | 可选 `limit`（最多 100）、`before`（上一页的 `next`）、`query`。返回 `{epoch, rows:[{cursor,data}], next? ,expired?}`。游标失效后从最新页重新读取。 |
-| `ClearHistory` | `{kind:"connections"\|"dns"\|"requests"}`。返回 `{cleared}`。 |
+| `ListConnectionHistory`、`ListDNSHistory`、`ListRequestHistory`、`ListScriptHistory` | 可选 `limit`（最多 100）、`before`（上一页的 `next`）、`query`。返回 `{epoch, rows:[{cursor,data}], next? ,expired?}`。游标失效后从最新页重新读取。 |
+| `ClearHistory` | `{kind:"connections"\|"dns"\|"requests"\|"scripts"}`。返回 `{cleared}`。 |
 | `GetRequestDetail` | `{cursor}`。用请求列表的游标读取保留中的调试详情。 |
 | `StartHTTPSDebug` | `{targets:[...], capture_body?:false}`。返回监听地址、会话凭证、到期时间和公开 CA。 |
 | `GetHTTPSDebug`、`StopHTTPSDebug` | 查询或关闭当前调试会话。 |
 | `GetMITMStatus` | 查询 TCP 转发使用的 MITM 配置、CA 加载情况、绕过表和累计计数。 |
+
+`ListScriptHistory` 每行是一次已结束的脚本运行：脚本 ID、名称、模块、类型（`http-request`、`http-response`、`cron`、`generic`、`event`）、HTTP 脚本对应的方法、URL、请求和连接 ID，以及开始时间、耗时、结果和错误。
 
 `ListConnections` 仍可读取活动连接，`QueryDNS` 仍可单独发起查询。

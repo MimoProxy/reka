@@ -55,10 +55,18 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 			return nil, errors.New("request details have expired")
 		}
 		return json.RawMessage(detail), nil
+	case "scriptHistory":
+		return s.historyPage(history.Scripts, op)
+	case "scriptDetail":
+		detail, ok := s.events.Detail(history.Scripts, s.historyProfile(), op.Cursor)
+		if !ok {
+			return nil, errors.New("script run details have expired")
+		}
+		return json.RawMessage(detail), nil
 	case "clearHistory":
 		kind := history.Kind(op.Category)
 		switch kind {
-		case history.Connections, history.DNS, history.Requests:
+		case history.Connections, history.DNS, history.Requests, history.Scripts:
 			return s.events.Clear(kind, s.historyProfile()), nil
 		case history.Logs:
 			return s.events.Clear(kind, ""), nil
