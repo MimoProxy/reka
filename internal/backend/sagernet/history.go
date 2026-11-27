@@ -22,6 +22,7 @@ type connectionAttemptKey struct{}
 type connectionAttempt struct {
 	store             *history.Store
 	releasePacketFlow func() bool // Reports whether the flow was evicted.
+	onTCPDial         func(error)
 	mu                sync.Mutex
 	api.ConnectionTrace
 	events   []connectionEvent
@@ -58,7 +59,7 @@ func (b *Backend) beginConnectionAt(ctx context.Context, md Metadata, start time
 	}
 	release, _ := ctx.Value(packetFlowReleaseKey{}).(func() bool)
 	attempt := &connectionAttempt{
-		store: b.history, releasePacketFlow: release, ConnectionTrace: api.ConnectionTrace{Connection: c},
+		store: b.history, releasePacketFlow: release, onTCPDial: b.onTCPDial, ConnectionTrace: api.ConnectionTrace{Connection: c},
 		up: rateCounter{start: c.Start}, down: rateCounter{start: c.Start},
 	}
 	if b.historyScope != nil {

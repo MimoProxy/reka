@@ -171,6 +171,9 @@ func dialTCP(ctx context.Context, out *Outbound, destination M.Socksaddr, attemp
 	finished := time.Now()
 	observed := socketDial.finish(remote, err)
 	observeRequestDial(ctx, attempt.dialed(start, finished, err, observed, out.Type() == "direct" && out.dependencyCloser == nil))
+	if attempt.onTCPDial != nil {
+		attempt.onTCPDial(err)
+	}
 	return remote, err
 }
 

@@ -45,6 +45,8 @@ func (s *Session) runDiagnostics(op Operation) (any, error) {
 			stats = s.tunnel.Stats()
 		}
 		return FlowLimits{stats, s.device.written.Load(), s.device.dropped.Load()}, nil
+	case "uplink":
+		return s.Uplink(), nil
 	case "connectionHistory":
 		return s.historyPage(history.Connections, op)
 	case "requestHistory":

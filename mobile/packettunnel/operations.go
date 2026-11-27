@@ -308,6 +308,7 @@ func (s *Session) NetworkChanged(available, changed bool) {
 	}
 	if !available || changed {
 		s.cancelSpeedTest(0)
+		s.uplink.reset()
 	}
 	if s.profile != nil {
 		p := s.profile

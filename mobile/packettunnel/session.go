@@ -84,6 +84,7 @@ type Session struct {
 	input     sync.Mutex
 	close     sync.Once
 	device    *packetDevice
+	uplink    *uplinkMonitor
 	backend   *sagernet.Backend
 	outbound  *sagernet.Outbound
 	tunnel    *sagernet.PacketFlow
@@ -110,10 +111,12 @@ func newSession() *Session {
 	})
 	logs := newTunnelLogHandler(events)
 	now := time.Now()
-	return &Session{
+	s := &Session{
 		ctx: ctx, cancel: cancel, mtu: mtu, device: &packetDevice{endpoint: channel.New(queueSize, uint32(mtu), "")},
 		events: events, logger: slog.New(logs), logs: logs, started: now, ranking: trafficRanking{sinceMS: now.UnixMilli()},
 	}
+	s.uplink = newUplinkMonitor(s.uplinkChanged)
+	return s
 }
 
 func (s *Session) backendOptions() sagernet.Options {
@@ -126,6 +129,7 @@ func (s *Session) backendOptions() sagernet.Options {
 		// the process behind a tunnel flow, as the desktop daemon does. iOS
 		// does not expose other apps' sockets.
 		FindProcess: runtime.GOOS == "darwin",
+		OnTCPDial:   s.uplink.record,
 	}
 }
 

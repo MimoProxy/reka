@@ -68,6 +68,9 @@ type Options struct {
 	// as sing-box's local DNS transport does on Darwin. Protect does not
 	// apply to these lookups.
 	SystemResolver bool
+	// OnTCPDial receives the result of every outbound TCP dial, including
+	// MITM upstream dials. It runs on the dialing goroutine and must not block.
+	OnTCPDial func(error)
 }
 
 const defaultHalfCloseTimeout = 2 * time.Second
@@ -95,6 +98,7 @@ type Backend struct {
 	logger            *slogLogger
 	router            *router
 	conns             connTable
+	onTCPDial         func(error)
 
 	preMatchReportOnce sync.Once
 	preMatchReports    chan preMatchReport
@@ -122,6 +126,7 @@ func New(opts Options) *Backend {
 		conns:             connTable{onClosed: opts.OnConnectionClosed},
 
 		halfCloseTimeout: opts.HalfCloseTimeout,
+		onTCPDial:        opts.OnTCPDial,
 	}
 	if b.halfCloseTimeout <= 0 {
 		b.halfCloseTimeout = defaultHalfCloseTimeout

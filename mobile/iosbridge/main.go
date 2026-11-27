@@ -314,6 +314,24 @@ func RekaGoCounts(id C.uint64_t, connections, dns *C.uint32_t) C.int32_t {
 	return 1
 }
 
+// RekaGoUplink reports whether every outbound dial has been failing, as on a
+// network that the system lists as available but that passes no traffic.
+// sinceMs is when the failures began; failures counts them.
+//
+//export RekaGoUplink
+func RekaGoUplink(id C.uint64_t, sinceMS *C.int64_t, failures *C.uint32_t) C.int32_t {
+	session := lookup(id)
+	if session == nil || sinceMS == nil || failures == nil {
+		return -1
+	}
+	status := session.Uplink()
+	*sinceMS, *failures = C.int64_t(status.SinceMS), C.uint32_t(status.Failures)
+	if status.Stalled {
+		return 1
+	}
+	return 0
+}
+
 //export RekaGoNetworkChanged
 func RekaGoNetworkChanged(id C.uint64_t, available, changed C.int32_t) {
 	if session := lookup(id); session != nil {

@@ -261,13 +261,22 @@ func TestTCPConnectionFailureEvents(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			records := history.New()
-			backend := New(Options{History: records, Logger: testLogger(t)})
+			var dials []error
+			backend := New(Options{History: records, Logger: testLogger(t), OnTCPDial: func(err error) { dials = append(dials, err) }})
 			defer backend.Close()
 			backend.SetRoute(func(context.Context, Metadata) Route { return tt.route })
 			_, local := connectionEventPipe(t)
 			md := adapter.InboundContext{InboundType: "socks", Destination: M.ParseSocksaddr("destination.test:443")}
 			if err := backend.router.RouteConnection(t.Context(), local, md); !errors.Is(err, tt.err) {
 				t.Fatalf("connection error = %v, want %v", err, tt.err)
+			}
+			// Only real dials reach the dial observer; rejections never dial.
+			wantDials := 0
+			if tt.wantStage == "dial" {
+				wantDials = 1
+			}
+			if len(dials) != wantDials || wantDials == 1 && !errors.Is(dials[0], syscall.ECONNREFUSED) {
+				t.Fatalf("dial results %v", dials)
 			}
 			trace := readClosedConnectionEventTrace(t, records, backend.conns.next.Load())
 			checkConnectionEventKinds(t, trace.Events, tt.wantKinds...)
