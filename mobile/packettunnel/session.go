@@ -40,6 +40,11 @@ const (
 	eventRows            = 64
 	eventBytes           = 96 << 10
 	connectionEventBytes = 192 << 10
+	// Requests are kept longer so a rewritten or scripted request is still
+	// listed after a page loads its images. A request row takes about
+	// 1.3 KiB with its search text, so 256 rows add about 230 KiB.
+	requestEventRows  = 256
+	requestEventBytes = 320 << 10
 )
 
 var configuredMTU atomic.Int32
@@ -89,9 +94,11 @@ type Session struct {
 func newSession() *Session {
 	mtu := int(configuredMTU.Load())
 	ctx, cancel := context.WithCancel(context.Background())
-	events := history.NewBoundedByKind(eventRows, map[history.Kind]int{
-		history.DNS: eventBytes, history.Logs: eventBytes,
-		history.Connections: connectionEventBytes, history.Requests: eventBytes,
+	events := history.NewBoundedByKind(map[history.Kind]history.Limit{
+		history.DNS:         {Rows: eventRows, Bytes: eventBytes},
+		history.Logs:        {Rows: eventRows, Bytes: eventBytes},
+		history.Connections: {Rows: eventRows, Bytes: connectionEventBytes},
+		history.Requests:    {Rows: requestEventRows, Bytes: requestEventBytes},
 	})
 	logs := newTunnelLogHandler(events)
 	now := time.Now()

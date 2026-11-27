@@ -47,3 +47,18 @@ func TestHistoryBoundedPagesAndProfileClear(t *testing.T) {
 		t.Fatal(expired, err)
 	}
 }
+
+func TestBoundedByKindRows(t *testing.T) {
+	s := NewBoundedByKind(map[Kind]Limit{
+		DNS:      {Rows: 2, Bytes: 64 << 10},
+		Requests: {Rows: 5, Bytes: 64 << 10},
+	})
+	for i := range 8 {
+		s.Record(DNS, Scope{}, time.Now(), map[string]int{"i": i}, nil)
+		s.Record(Requests, Scope{}, time.Now(), map[string]int{"i": i}, nil)
+		s.Record(Logs, Scope{}, time.Now(), map[string]int{"i": i}, nil)
+	}
+	if s.Count(DNS) != 2 || s.Count(Requests) != 5 || s.Count(Logs) != 0 {
+		t.Fatalf("counts: dns %d, requests %d, logs %d", s.Count(DNS), s.Count(Requests), s.Count(Logs))
+	}
+}

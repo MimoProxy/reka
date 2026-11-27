@@ -82,6 +82,7 @@ type Store struct {
 	buckets      map[Kind]*bucket
 	cleared      map[Kind]map[string]time.Time
 	kindBytes    map[Kind]int
+	kindRows     map[Kind]int
 	rows         int
 	defaultBytes int
 }
@@ -103,14 +104,22 @@ func NewBounded(rows, bytes int, kinds ...Kind) *Store {
 	return newStore(rows, 0, limits)
 }
 
-// NewBoundedByKind records only the given kinds, each with its own byte limit
-// and the same row limit.
-func NewBoundedByKind(rows int, bytes map[Kind]int) *Store {
-	limits := make(map[Kind]int, len(bytes))
-	for kind, limit := range bytes {
-		limits[kind] = max(1, limit)
+// Limit bounds one kind of history.
+type Limit struct {
+	Rows, Bytes int
+}
+
+// NewBoundedByKind records only the given kinds, each with its own limits.
+func NewBoundedByKind(limits map[Kind]Limit) *Store {
+	bytes := make(map[Kind]int, len(limits))
+	rows := make(map[Kind]int, len(limits))
+	for kind, limit := range limits {
+		bytes[kind] = max(1, limit.Bytes)
+		rows[kind] = max(1, limit.Rows)
 	}
-	return newStore(rows, 0, limits)
+	s := newStore(1, 0, bytes)
+	s.kindRows = rows
+	return s
 }
 
 func newStore(rows, bytes int, kindBytes map[Kind]int) *Store {
@@ -168,7 +177,11 @@ func (s *Store) RecordFlow(kind Kind, scope Scope, started time.Time, flow uint6
 	}
 	b := s.buckets[kind]
 	if b == nil {
-		b = &bucket{rows: make([]entry, s.rows)}
+		rows := s.rows
+		if limit, ok := s.kindRows[kind]; ok {
+			rows = limit
+		}
+		b = &bucket{rows: make([]entry, rows)}
 		s.buckets[kind] = b
 	}
 	for b.count == len(b.rows) || size > limit-b.bytes {

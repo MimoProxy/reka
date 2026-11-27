@@ -27,19 +27,22 @@ func TestPacketTunnelHistoryLimits(t *testing.T) {
 	// Two copies of the JSON string and 128 bytes of overhead use 4 KiB.
 	large := strings.Repeat("x", 1982)
 	now := time.Now()
-	for _, kind := range []history.Kind{history.Connections, history.DNS, history.Logs, history.Requests} {
-		for range 70 {
+	rows := map[history.Kind]int{
+		history.Connections: eventRows, history.DNS: eventRows, history.Logs: eventRows, history.Requests: requestEventRows,
+	}
+	for kind, want := range rows {
+		for range want + 6 {
 			session.events.Record(kind, history.Scope{}, now, "small", nil)
 		}
-		if got := session.events.Count(kind); got != 64 {
-			t.Fatalf("%s history retained %d small rows, want 64", kind, got)
+		if got := session.events.Count(kind); got != want {
+			t.Fatalf("%s history retained %d small rows, want %d", kind, got, want)
 		}
-		for range 70 {
+		for range want + 6 {
 			session.events.Record(kind, history.Scope{}, now, large, nil)
 		}
 	}
 	for kind, want := range map[history.Kind]int{
-		history.Connections: 48, history.DNS: 24, history.Logs: 24, history.Requests: 24,
+		history.Connections: 48, history.DNS: 24, history.Logs: 24, history.Requests: 80,
 	} {
 		if got := session.events.Count(kind); got != want {
 			t.Errorf("%s history retained %d large rows, want %d", kind, got, want)
