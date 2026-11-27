@@ -43,6 +43,8 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 	action := sagernet.PreMatchReject
 	dec := router.Decision{RuleIndex: -1, LookupRule: -1, Outbound: model.OutboundReject}
 	var rejectReason string
+	// decided is set when a rule, not a precondition, decided the verdict.
+	decided := false
 	routeMD := g.flowRouterMetadata(md, state.scene)
 	if md.Network != "udp" || e.inboundAllowsUDP(g, md) {
 		ctx := context.Background()
@@ -64,7 +66,7 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 		if e.mitmBlocksQUIC(g, md) {
 			rejectReason = mitmQUIC
 			if result.Decided {
-				dec = result.Decision
+				dec, decided = result.Decision, true
 			}
 		} else if !result.Decided {
 			// The rule is unknown, but the outcome may still be certain.
@@ -73,9 +75,9 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 			}
 			rejectReason = blockQUIC
 		} else if out, ok, reason := flowOutbound(g, s.Resources, md, &result.Decision); !ok {
-			dec, rejectReason = result.Decision, reason
+			dec, rejectReason, decided = result.Decision, reason, true
 		} else {
-			dec, rejectReason = result.Decision, reason
+			dec, rejectReason, decided = result.Decision, reason, true
 			switch out.Type() {
 			case "reject-drop":
 				// A dropped TCP flow completes its handshake and then stalls;
@@ -92,6 +94,9 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 	}
 	if observe := e.opts.ObserveRoute; observe != nil {
 		observe(RouteObservation{Domain: routeMD.Domain, Address: inputAddress, Decision: dec})
+	}
+	if decided {
+		g.countRule(dec)
 	}
 	return sagernet.PreMatchVerdict{
 		Action: action,

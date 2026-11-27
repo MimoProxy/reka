@@ -99,7 +99,9 @@ type generation struct {
 	router       *router.Router
 	outUDP       map[string]bool
 	// blockQUIC holds outbounds that set block-quic, for per-policy mode.
-	blockQUIC          map[string]bool
+	blockQUIC map[string]bool
+	// ruleHits counts flows per saved rule, with the final target last.
+	ruleHits           []atomic.Uint64
 	packetAddr         map[string]bool // packetaddr outbounds, with true for multiplexed UDP
 	inUDP              map[string]bool
 	packetFlowNames    map[string]string
@@ -725,6 +727,7 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	}
 	g := &generation{historyScope: scope, policies: p.policies, dns: p.dns, revision: revision, eff: p.eff, router: eff.RoutingRouter(), outUDP: map[string]bool{}, inUDP: map[string]bool{}, packetAddr: map[string]bool{}}
 	g.packetFlowNames = packetFlowNames
+	g.inheritRuleHits(previousGeneration)
 	for _, group := range eff.AutoGroups {
 		// Router.New fills in empty selections, so use the configured value.
 		if group.Type == "load-balance" && group.Selected == "" {
@@ -1312,6 +1315,8 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	})
 	if err != nil {
 		slog.Error("route", "err", err)
+	} else if inboundFlow && !(dec.DNSFailure && dec.Target == "") {
+		g.countRule(dec)
 	}
 	if observe := e.opts.ObserveRoute; observe != nil {
 		observe(RouteObservation{Domain: routerMetadata(md).Domain, Address: inputAddress, Decision: dec})

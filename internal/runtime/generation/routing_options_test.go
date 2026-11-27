@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
@@ -129,5 +130,48 @@ rules:
 	})
 	if tag != "" || info.RejectReason != dnsFailed || !info.DNSFailure {
 		t.Fatalf("routed to %q, reason %q, DNS failure %v", tag, info.RejectReason, info.DNSFailure)
+	}
+	if hits := e.RuleHits(); len(hits.Rules) != 0 || hits.Final != 0 {
+		t.Fatalf("a rejected lookup failure was counted: %+v", hits)
+	}
+}
+
+func TestRuleHits(t *testing.T) {
+	const profile = `schema-version: 1
+rules:
+  - {id: a, match: {domain: a.test}, outbound: direct}
+  - {match: {domain: %s}, outbound: reject}
+  - {match: {domain: c.test}, outbound: direct}
+`
+	e := NewEngine(EngineOptions{HostPacketFlow: true})
+	defer e.Close()
+	route := func(domain string) {
+		t.Helper()
+		_, _ = routeTag(t, e, sagernet.Metadata{InboundType: "tun", Network: "tcp", Destination: sagernet.Destination{Domain: domain, Port: 443}})
+	}
+	activateProfile(t, e, fmt.Sprintf(profile, "b.test"), 1)
+	for _, domain := range []string{"a.test", "a.test", "b.test", "c.test", "other.test"} {
+		route(domain)
+	}
+	hits := e.RuleHits()
+	want := []RuleHit{{Index: 0, ID: "a", Hits: 2}, {Index: 1, Anonymous: 1, Hits: 1}, {Index: 2, Anonymous: 2, Hits: 1}}
+	if fmt.Sprint(hits.Rules) != fmt.Sprint(want) || hits.Final != 1 || hits.RuleCount != 3 {
+		t.Fatalf("got %+v", hits)
+	}
+	// Reloading keeps the counts of unchanged rules and drops changed ones.
+	activateProfile(t, e, fmt.Sprintf(profile, "changed.test"), 2)
+	hits = e.RuleHits()
+	want = []RuleHit{{Index: 0, ID: "a", Hits: 2}, {Index: 2, Anonymous: 2, Hits: 1}}
+	if fmt.Sprint(hits.Rules) != fmt.Sprint(want) || hits.Final != 1 {
+		t.Fatalf("after reload: %+v", hits)
+	}
+	e.ResetRuleHits()
+	if hits = e.RuleHits(); len(hits.Rules) != 0 || hits.Final != 0 {
+		t.Fatalf("after reset: %+v", hits)
+	}
+	// Address destinations rejected before any rule are not counted.
+	_, _ = routeTag(t, e, sagernet.Metadata{InboundType: "socks", Inbound: "missing", Network: "udp", Destination: sagernet.Destination{Addr: netip.MustParseAddr("192.0.2.1"), Port: 53}})
+	if hits = e.RuleHits(); len(hits.Rules) != 0 || hits.Final != 0 {
+		t.Fatalf("precondition rejection counted: %+v", hits)
 	}
 }

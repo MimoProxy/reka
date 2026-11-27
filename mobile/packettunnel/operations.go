@@ -132,6 +132,16 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		default:
 			return engine.GetScriptRuns(op.Target, op.Limit), nil
 		}
+	case "ruleHits":
+		if s.profile == nil {
+			return generation.RuleHits{Rules: []generation.RuleHit{}}, nil
+		}
+		return s.profile.engine.RuleHits(), nil
+	case "resetRuleHits":
+		if s.profile != nil {
+			s.profile.engine.ResetRuleHits()
+		}
+		return true, nil
 	case "tailscaleStatus":
 		// Reports the link without starting a node, so it is safe to poll.
 		if s.profile == nil {
