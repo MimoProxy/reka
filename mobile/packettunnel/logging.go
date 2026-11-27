@@ -22,8 +22,18 @@ const (
 	logFieldValue   = 200
 	// The log file outlives the extension process, so it shows how a session
 	// ended even when the system killed the extension. One rotated copy is
-	// kept, so at most twice this much stays on disk.
-	logFileBytes = 192 << 10
+	// kept, so at most twice this much stays on disk. Writes go straight to
+	// the file, so its size costs no extension memory.
+	logFileBytes = 512 << 10
+
+	// A network outage makes every dial log the same error. Without a limit,
+	// a few minutes of them push out the lines that show how it started.
+	// Each kind of warning or error is kept logRepeatBurst times per window;
+	// the rest are counted and summarized in one line, written with the first
+	// line logged after the window ends.
+	logRepeatWindow = 30 * time.Second
+	logRepeatBurst  = 3
+	logRepeatKinds  = 128
 )
 
 // logEntry is one tunnel log line, both in the ring and in the log file.
@@ -38,12 +48,13 @@ type logEntry struct {
 type tunnelLogHandler struct {
 	events    *history.Store
 	sink      *logFile
+	repeats   *logRepeats
 	component string
 	attrs     []slog.Attr
 }
 
 func newTunnelLogHandler(events *history.Store) tunnelLogHandler {
-	return tunnelLogHandler{events: events, sink: &logFile{}}
+	return tunnelLogHandler{events: events, sink: &logFile{}, repeats: newLogRepeats()}
 }
 
 func (h tunnelLogHandler) Enabled(_ context.Context, level slog.Level) bool {
@@ -78,9 +89,107 @@ func (h tunnelLogHandler) Handle(_ context.Context, record slog.Record) error {
 		add(attr)
 	}
 	record.Attrs(add)
-	h.events.Record(history.Logs, history.Scope{}, record.Time, entry, nil)
-	h.sink.write(entry)
+	keep, summaries := h.repeats.admit(entry, record.Level >= slog.LevelWarn)
+	for _, summary := range summaries {
+		h.write(summary)
+	}
+	if keep {
+		h.write(entry)
+	}
 	return nil
+}
+
+func (h tunnelLogHandler) write(entry logEntry) {
+	h.events.Record(history.Logs, history.Scope{}, time.UnixMilli(entry.TimeMS), entry, nil)
+	h.sink.write(entry)
+}
+
+// logRepeats limits how often one kind of log line is kept. Lines are the
+// same kind when they differ only in names, addresses and numbers, such as
+// the same dial error for different hosts.
+type logRepeats struct {
+	mu        sync.Mutex
+	kinds     map[string]*logRepeat
+	nextSweep int64
+}
+
+type logRepeat struct {
+	startMS    int64
+	seen       int
+	suppressed int
+	last       logEntry
+}
+
+func newLogRepeats() *logRepeats {
+	return &logRepeats{kinds: make(map[string]*logRepeat)}
+}
+
+// admit reports whether entry should be written, and returns summaries for
+// windows that ended with suppressed lines. Only warnings and errors are
+// limited.
+func (r *logRepeats) admit(entry logEntry, limited bool) (bool, []logEntry) {
+	if r == nil {
+		return true, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := entry.TimeMS
+	window := logRepeatWindow.Milliseconds()
+	var summaries []logEntry
+	if now >= r.nextSweep {
+		r.nextSweep = now + time.Second.Milliseconds()
+		for key, kind := range r.kinds {
+			if now-kind.startMS < window {
+				continue
+			}
+			if kind.suppressed > 0 {
+				summaries = append(summaries, kind.summary(now))
+			}
+			delete(r.kinds, key)
+		}
+	}
+	if !limited {
+		return true, summaries
+	}
+	key := entry.Level + "\x00" + entry.Component + "\x00" + logKind(entry.Message)
+	kind := r.kinds[key]
+	if kind == nil {
+		if len(r.kinds) < logRepeatKinds {
+			r.kinds[key] = &logRepeat{startMS: now, seen: 1}
+		}
+		return true, summaries
+	}
+	kind.seen++
+	if kind.seen <= logRepeatBurst {
+		return true, summaries
+	}
+	kind.suppressed++
+	kind.last = entry
+	return false, summaries
+}
+
+func (k *logRepeat) summary(now int64) logEntry {
+	fields := map[string]string{
+		"count":  fmt.Sprint(k.suppressed),
+		"window": logRepeatWindow.String(),
+		"last":   history.Text(k.last.Message, logFieldValue),
+	}
+	return logEntry{
+		TimeMS: now, Level: k.last.Level, Component: k.last.Component,
+		Message: "Similar log lines suppressed", Fields: fields,
+	}
+}
+
+// logKind replaces each word that holds a digit or a dot, such as a host,
+// address, port or count, so lines that differ only in those match.
+func logKind(message string) string {
+	words := strings.Fields(message)
+	for i, word := range words {
+		if strings.ContainsAny(word, "0123456789.") {
+			words[i] = "*"
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func logValue(value slog.Value) string {

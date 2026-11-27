@@ -6,11 +6,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/mobile/profile"
@@ -99,5 +101,49 @@ func TestTunnelLogFileRotates(t *testing.T) {
 	}
 	if current.Size() > logFileBytes || rotated.Size() > logFileBytes {
 		t.Fatalf("log files exceed the limit: %d, %d", current.Size(), rotated.Size())
+	}
+}
+
+func TestTunnelLogSuppressesRepeatedErrors(t *testing.T) {
+	events := history.NewBounded(256, 1<<20)
+	logger := slog.New(newTunnelLogHandler(events)).With("component", "core")
+	start := time.UnixMilli(1_000_000)
+	log := func(at time.Duration, level slog.Level, message string) {
+		record := slog.NewRecord(start.Add(at), level, message, 0)
+		_ = logger.Handler().Handle(t.Context(), record)
+	}
+	for i := range 20 {
+		log(time.Duration(i)*time.Second, slog.LevelError,
+			fmt.Sprintf("open connection to host%d.example.com:443 using outbound/direct[direct]: lookup host%d.example.com: i/o timeout", i, i))
+	}
+	// A different kind of error and info lines are kept.
+	log(21*time.Second, slog.LevelError, "open connection to 1.2.3.4:443 using outbound/direct[direct]: connect: no route to host")
+	log(22*time.Second, slog.LevelInfo, "Network stall cleared")
+	log(22*time.Second, slog.LevelInfo, "Network stall cleared")
+	// The first line after the window carries the summary.
+	log(31*time.Second, slog.LevelWarn, "Network stalled")
+
+	page, err := events.List(history.Logs, "", history.ListOptions{Limit: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var messages []string
+	var summary *logEntry
+	for _, row := range page.Rows {
+		var entry logEntry
+		if err := json.Unmarshal(row.Data, &entry); err != nil {
+			t.Fatal(err)
+		}
+		messages = append(messages, entry.Message)
+		if entry.Message == "Similar log lines suppressed" {
+			summary = &entry
+		}
+	}
+	if len(messages) != 8 {
+		t.Fatalf("kept %d lines: %q", len(messages), messages)
+	}
+	if summary == nil || summary.Level != "error" || summary.Component != "core" || summary.Fields["count"] != "17" ||
+		!strings.Contains(summary.Fields["last"], "host19.example.com") {
+		t.Fatalf("summary %+v", summary)
 	}
 }
