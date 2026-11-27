@@ -135,7 +135,7 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.attempt.MITMScripts = appendMITMScriptStats(s.attempt.MITMScripts, stats.scripts)
 		s.attempt.MITMBodyPassthroughs += stats.passthroughs
 		s.attempt.mu.Unlock()
-		obs.setMITM(stats)
+		obs.setMITM(stats, s.route.Rewrite)
 		obs.finish(status, err)
 		if hijacked != nil {
 			// Close and drop do not wait to write a TLS close notification.

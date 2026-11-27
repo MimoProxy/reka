@@ -482,12 +482,14 @@ func TestMITMHTTP2RewritesAndScripts(t *testing.T) {
 	for _, row := range f.requestHistory(t, 2) {
 		switch row.Path {
 		case "/local":
-			if !slices.Equal(row.MatchedIDs, []string{"local"}) || len(row.Scripts) != 0 {
+			if !slices.Equal(row.MatchedIDs, []string{"local"}) || len(row.Scripts) != 0 || row.RewriteKinds["local"] != httprewrite.KindMapLocal {
 				t.Fatalf("local request diagnostics = %+v", row)
 			}
 		case "/original":
 			if !slices.Equal(row.MatchedIDs, wantMatches) || len(row.Scripts) != 2 ||
-				row.Scripts[0].Result != "modified" || row.Scripts[1].Result != "modified" {
+				row.Scripts[0].Result != "modified" || row.Scripts[1].Result != "modified" ||
+				row.RewriteKinds["url"] != httprewrite.KindURL || row.RewriteKinds["request-header"] != httprewrite.KindHeader ||
+				row.RewriteKinds["response-body"] != httprewrite.KindBody {
 				t.Fatalf("rewritten request diagnostics = %+v", row)
 			}
 		default:

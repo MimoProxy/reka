@@ -117,24 +117,36 @@ func New(spec Spec, opts Options) (*Set, error) {
 		opts:     opts,
 		http:     make([]urlRule, 0, len(spec.HTTPRewrites)),
 		mapLocal: make([]mapRule, 0, len(spec.MapLocal)),
+		kinds:    make(map[string]string),
 	}
 	var errs ValidationErrors
 	v := validator{errs: &errs, warnings: &s.warnings}
 	for i, r := range spec.HTTPRewrites {
 		v.kind, v.index = "http-rewrites", i
 		s.addURLRule(r, v)
+		switch r.Action {
+		case "302", "307":
+			s.kinds[r.ID] = KindRedirect
+		case "reject":
+			s.kinds[r.ID] = KindReject
+		default:
+			s.kinds[r.ID] = KindURL
+		}
 	}
 	for i, r := range spec.HeaderRewrites {
 		v.kind, v.index = "header-rewrites", i
 		s.addHeaderRule(r, v)
+		s.kinds[r.ID] = KindHeader
 	}
 	for i, r := range spec.BodyRewrites {
 		v.kind, v.index = "body-rewrites", i
 		s.addBodyRule(r, v)
+		s.kinds[r.ID] = KindBody
 	}
 	for i, r := range spec.MapLocal {
 		v.kind, v.index = "map-local", i
 		s.addMapRule(r, v)
+		s.kinds[r.ID] = KindMapLocal
 	}
 	if len(errs) > 0 {
 		return nil, errs

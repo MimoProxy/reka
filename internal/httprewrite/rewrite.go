@@ -67,6 +67,27 @@ type Set struct {
 	bodyIndex   [2]ruleIndex
 	mapIndex    ruleIndex
 	warnings    []ValidationError
+	// kinds maps each rule ID to the Kind it reports.
+	kinds map[string]string
+}
+
+// Kinds of rewrite a matched rule ID can name.
+const (
+	KindURL      = "url"
+	KindRedirect = "redirect"
+	KindReject   = "reject"
+	KindHeader   = "header"
+	KindBody     = "body"
+	KindMapLocal = "map-local"
+)
+
+// Kind reports what kind of rewrite the rule with the given ID is, or "" for
+// an unknown ID.
+func (s *Set) Kind(id string) string {
+	if s == nil {
+		return ""
+	}
+	return s.kinds[id]
 }
 
 type rewritePhase int

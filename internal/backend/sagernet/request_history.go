@@ -17,6 +17,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/api"
 	"github.com/MimoProxy/reka/internal/history"
+	"github.com/MimoProxy/reka/internal/httprewrite"
 )
 
 const httpObservationKey = "reka.inbound.http-observation.v1"
@@ -25,31 +26,34 @@ type requestHistoryKey struct{}
 
 type requestRecord struct {
 	history.Scope
-	ID               uint64              `json:"id"`
-	ConnectionID     uint64              `json:"connection_id,omitempty"`
-	Start            time.Time           `json:"start"`
-	DurationMS       int64               `json:"duration_ms"`
-	TTFBMS           *int64              `json:"ttfb_ms,omitempty"`
-	DialMS           *int64              `json:"dial_ms,omitempty"`
-	DNSMS            *int64              `json:"dns_ms,omitempty"`
-	TLSMS            *int64              `json:"tls_ms,omitempty"`
-	Reused           *bool               `json:"reused,omitempty"`
-	UpstreamHTTP     string              `json:"upstream_http_version,omitempty"`
-	Detail           bool                `json:"detail,omitempty"`
-	Inbound          string              `json:"inbound"`
-	Client           string              `json:"client,omitempty"`
-	Method           string              `json:"method"`
-	Scheme           string              `json:"scheme"`
-	Host             string              `json:"host"`
-	Path             string              `json:"path"`
-	HTTPVersion      string              `json:"http_version"`
-	StatusCode       int                 `json:"status_code,omitempty"`
-	StatusSource     string              `json:"status_source,omitempty"`
-	RequestBytes     int64               `json:"request_bytes"`
-	ResponseBytes    int64               `json:"response_bytes"`
-	Error            string              `json:"error,omitempty"`
-	MITM             bool                `json:"mitm,omitempty"`
-	MatchedIDs       []string            `json:"matched_ids,omitempty"`
+	ID            uint64    `json:"id"`
+	ConnectionID  uint64    `json:"connection_id,omitempty"`
+	Start         time.Time `json:"start"`
+	DurationMS    int64     `json:"duration_ms"`
+	TTFBMS        *int64    `json:"ttfb_ms,omitempty"`
+	DialMS        *int64    `json:"dial_ms,omitempty"`
+	DNSMS         *int64    `json:"dns_ms,omitempty"`
+	TLSMS         *int64    `json:"tls_ms,omitempty"`
+	Reused        *bool     `json:"reused,omitempty"`
+	UpstreamHTTP  string    `json:"upstream_http_version,omitempty"`
+	Detail        bool      `json:"detail,omitempty"`
+	Inbound       string    `json:"inbound"`
+	Client        string    `json:"client,omitempty"`
+	Method        string    `json:"method"`
+	Scheme        string    `json:"scheme"`
+	Host          string    `json:"host"`
+	Path          string    `json:"path"`
+	HTTPVersion   string    `json:"http_version"`
+	StatusCode    int       `json:"status_code,omitempty"`
+	StatusSource  string    `json:"status_source,omitempty"`
+	RequestBytes  int64     `json:"request_bytes"`
+	ResponseBytes int64     `json:"response_bytes"`
+	Error         string    `json:"error,omitempty"`
+	MITM          bool      `json:"mitm,omitempty"`
+	MatchedIDs    []string  `json:"matched_ids,omitempty"`
+	// RewriteKinds names the kind of each matched rewrite, such as
+	// "map-local", so a client can say how the request was changed.
+	RewriteKinds     map[string]string   `json:"rewrite_kinds,omitempty"`
 	Scripts          []api.MITMScriptRun `json:"scripts,omitempty"`
 	BodyPassthroughs uint64              `json:"body_passthroughs,omitempty"`
 	ResourceError    bool                `json:"resource_error,omitempty"`
@@ -240,10 +244,20 @@ func (obs *requestObservation) clearOriginStatus() {
 	obs.mu.Unlock()
 }
 
-func (obs *requestObservation) setMITM(stats mitmRequestStats) {
+func (obs *requestObservation) setMITM(stats mitmRequestStats, rewrite *httprewrite.Set) {
+	var kinds map[string]string
+	for _, id := range stats.matches {
+		if kind := rewrite.Kind(id); kind != "" {
+			if kinds == nil {
+				kinds = make(map[string]string, len(stats.matches))
+			}
+			kinds[id] = kind
+		}
+	}
 	obs.mu.Lock()
 	obs.summary.MITM = true
 	obs.summary.MatchedIDs = stats.matches
+	obs.summary.RewriteKinds = kinds
 	obs.summary.Scripts = stats.scripts
 	obs.summary.BodyPassthroughs = stats.passthroughs
 	obs.summary.ResourceError = stats.resourceError
