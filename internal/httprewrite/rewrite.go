@@ -364,10 +364,13 @@ func (r *urlRule) reject() (*Response, ConnectionAction) {
 	case "array":
 		return localResponse(http.StatusOK, "application/json", []byte("[]")), ""
 	default:
-		// The empty 404 follows Stash's reject behavior.
-		return localResponse(http.StatusNotFound, "", nil), ""
+		return RejectResponse(), ""
 	}
 }
+
+// RejectResponse is the reply to a rejected HTTP request: an empty 404, as
+// Stash answers its reject rewrites.
+func RejectResponse() *Response { return localResponse(http.StatusNotFound, "", nil) }
 
 func (s *Set) findMapRule(url string) *mapRule {
 	var result *mapRule

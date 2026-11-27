@@ -240,7 +240,7 @@ func TestPlainHTTPRewriteReroutes(t *testing.T) {
 			}
 			released := make(chan struct{})
 			route := &MITMRoute{PlainHTTP: true, Host: "example.com", Rewrite: set, SkipServerCertVerify: true,
-				Reroute: func(_ context.Context, dst Destination) Route {
+				Reroute: func(_ context.Context, dst Destination, _ *HTTPRequestInfo) Route {
 					if dst.String() != tc.destination {
 						t.Errorf("reroute destination = %s, want %s", dst.String(), tc.destination)
 					}

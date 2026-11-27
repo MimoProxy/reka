@@ -59,7 +59,9 @@ type httpGeneration struct {
 	pins                    map[*sagernet.Outbound]*sagernet.PinnedOutbound
 	reroute                 bool
 	plainHTTP, plainScripts bool
-	refs                    atomic.Int64
+	// routeRequests is set when rules match request URLs or headers.
+	routeRequests bool
+	refs          atomic.Int64
 }
 
 func (m *httpGeneration) retain() bool { return m != nil && retainMITMRef(&m.refs) }
@@ -82,17 +84,19 @@ func (g *generation) loadHTTPEngine(previous *generation, outbounds map[string]*
 	}
 	issuer := g.loadMITMIssuer(previous)
 	scriptRouting := scriptsSupported && g.scripts.count() != 0
-	if issuer == nil && g.eff.HTTPRewrite == nil && !scriptRouting {
+	routeRequests := g.router != nil && g.router.Rules() != nil && g.router.Rules().MatchesHTTP()
+	if issuer == nil && g.eff.HTTPRewrite == nil && !scriptRouting && !routeRequests {
 		return
 	}
 	httpEnabled := canSniffHTTP(g.eff)
 	plainScripts := httpEnabled && scriptRouting && g.scripts.MayMatchHTTP("", 0)
-	plainHTTP := plainScripts || httpEnabled && g.eff.HTTPRewrite.MayMatchHTTP("", 0)
+	plainHTTP := plainScripts || httpEnabled && (routeRequests || g.eff.HTTPRewrite.MayMatchHTTP("", 0))
 	tls := issuer != nil && len(g.eff.MITM.Hostnames) != 0
-	m := &httpGeneration{issuer: issuer, plainHTTP: plainHTTP, plainScripts: plainScripts}
+	m := &httpGeneration{issuer: issuer, plainHTTP: plainHTTP, plainScripts: plainScripts, routeRequests: routeRequests}
 	if tls || plainHTTP {
 		requestScripts := tls && scriptRouting && len(g.scripts.requests) != 0 || plainScripts && g.scripts.mayMatchHTTPRequest("", 0)
-		m.reroute = g.eff.HTTPRewrite.MayChangeRequestURL() || requestScripts
+		// A request routed by its URL may leave through any outbound.
+		m.reroute = g.eff.HTTPRewrite.MayChangeRequestURL() || requestScripts || routeRequests
 		needed := sniffDNSDependencies(g, outbounds)
 		// Both request and response scripts may use the routed HTTP client.
 		if m.reroute || tls && scriptRouting || plainScripts {
@@ -168,7 +172,7 @@ func (g *generation) mayMatchPlainHTTP(host string, port uint16) bool {
 // A flow sniffed for another reason is still admitted by mayMatchPlainHTTP.
 func (g *generation) maySniffPlainHTTP(host string, port uint16) bool {
 	if port == plainHTTPPort {
-		return g.mayMatchPlainHTTP(host, port)
+		return g.httpEngine.routeRequests || g.mayMatchPlainHTTP(host, port)
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		host = addr.Unmap().String()
@@ -224,9 +228,16 @@ func (e *Engine) mitmBlocksQUIC(g *generation, md sagernet.Metadata) bool {
 	return isQUICFlow(md) && g.eff.MITM.QUICBlock && e.mitmMatches(g, md, mitmHostname(md))
 }
 
-func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state routingState, md sagernet.Metadata) *sagernet.MITMRoute {
+// newMITMRoute admits a connection to the HTTP engine. out and dec are the
+// connection's route; when dec depended on a request, each request is
+// routed again.
+func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state routingState, md sagernet.Metadata, out *sagernet.Outbound, dec router.Decision) *sagernet.MITMRoute {
 	g := snap.Value.(*generation)
 	if g.httpEngine == nil || md.Network != "tcp" || md.SkipMITM {
+		return nil
+	}
+	routeRequests := dec.HTTPPending && g.httpEngine.routeRequests
+	if out.Type() == "reject-drop" && !routeRequests {
 		return nil
 	}
 	var host string
@@ -239,13 +250,13 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 		}
 		port := md.Destination.Port
 		if hint := httpHostHint(md); hint != "" {
-			if !g.mayMatchPlainHTTP(hint, port) {
+			if !routeRequests && !g.mayMatchPlainHTTP(hint, port) {
 				return nil
 			}
 			host = mitmHostname(md)
 		} else {
 			addr := md.Destination.Addr.Unmap()
-			if !addr.IsValid() || !g.mayMatchPlainHTTPAddr(addr, port) {
+			if !addr.IsValid() || !routeRequests && !g.mayMatchPlainHTTPAddr(addr, port) {
 				return nil
 			}
 			host = addr.String()
@@ -285,9 +296,7 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 	if g.httpEngine.reroute {
 		// Capture metadata only on routes that can change the destination.
 		original := md
-		route.Reroute = func(ctx context.Context, dest sagernet.Destination) sagernet.Route {
-			target := original
-			target.Destination, target.SniffedDomain = dest, ""
+		reroute := func(ctx context.Context, target sagernet.Metadata) sagernet.Route {
 			withPins := func(ctx context.Context) context.Context {
 				return sagernet.WithPinnedOutbounds(ctx, g.httpEngine.pins)
 			}
@@ -302,12 +311,35 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 			rt := e.routeWithAcquire(withPins(ctx), target, acquire, snap, state, false)
 			if rt.Outbound != nil {
 				if rt.Destination == nil {
-					rt.Destination = &dest
+					rt.Destination = &target.Destination
 				}
 				rt.Context = withPins
 				rt = retainSniffSnapshot(rt, snap)
 			}
 			return rt
+		}
+		route.Reroute = func(ctx context.Context, dest sagernet.Destination, request *sagernet.HTTPRequestInfo) sagernet.Route {
+			target := original
+			target.Destination, target.SniffedDomain = dest, ""
+			if routeRequests {
+				target.HTTPRequest = request
+			}
+			return reroute(ctx, target)
+		}
+		if routeRequests {
+			route.RouteRequest = func(ctx context.Context, request sagernet.HTTPRequestInfo) (sagernet.Route, bool) {
+				target := original
+				target.HTTPRequest = &request
+				rt := reroute(ctx, target)
+				if rt.Outbound == out {
+					// The request keeps the connection's outbound and origin.
+					if rt.Release != nil {
+						rt.Release()
+					}
+					return sagernet.Route{}, false
+				}
+				return rt, true
+			}
 		}
 	}
 	return route

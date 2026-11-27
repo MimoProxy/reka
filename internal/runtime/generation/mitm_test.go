@@ -177,7 +177,7 @@ rules: [{match: {domain: target.test}, outbound: rewritten}]
 		t.Fatal("old reroute target did not retain its pin")
 	}
 	dest := sagernet.Destination{Domain: "target.test", Port: 443}
-	rt := original.MITM.Reroute(context.Background(), dest)
+	rt := original.MITM.Reroute(context.Background(), dest, nil)
 	if rt.Release != nil {
 		defer rt.Release()
 	}

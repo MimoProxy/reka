@@ -117,6 +117,40 @@ func TestIgnoredAndUnsupportedSections(t *testing.T) {
 	}
 }
 
+func TestHTTPRequestRules(t *testing.T) {
+	text := `[Rule]
+USER-AGENT, "httpdns*", REJECT
+AND, ((URL-REGEX, ^http:\/\/192\.0\.2\.1\/d\?), (USER-AGENT, Example*)), DIRECT
+URL-REGEX, "^http:\/\/((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(?:\/v?[0-9]+)?\/d\?", REJECT
+URL-REGEX,^http://example\.com/a{1,3},REJECT-DROP
+NOT, ((USER-AGENT, Example*)), DIRECT
+`
+	result, report := Convert([]byte(text), Options{})
+	if !report.CanApply || report.Partial || report.Rules.Imported != 5 {
+		t.Fatalf("unexpected report %+v", report)
+	}
+	want := []model.Rule{
+		{Match: model.Match{Kind: "user-agent", Values: []string{"httpdns*"}}, Outbound: "reject"},
+		{Match: model.Match{Kind: "and", Children: []model.Match{
+			{Kind: "url-regex", Values: []string{`^http:\/\/192\.0\.2\.1\/d\?`}},
+			{Kind: "user-agent", Values: []string{"Example*"}},
+		}}, Outbound: "direct"},
+		{Match: model.Match{Kind: "url-regex", Values: []string{`^http:\/\/((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(?:\/v?[0-9]+)?\/d\?`}}, Outbound: "reject"},
+		{Match: model.Match{Kind: "url-regex", Values: []string{`^http://example\.com/a{1,3}`}}, Outbound: "reject-drop"},
+		{Match: model.Match{Kind: "not", Children: []model.Match{{Kind: "user-agent", Values: []string{"Example*"}}}}, Outbound: "direct"},
+	}
+	if len(result.Rules) != len(want) {
+		t.Fatalf("rules = %+v", result.Rules)
+	}
+	for i := range want {
+		got := result.Rules[i]
+		got.ID, got.Syntax = "", ""
+		if !reflect.DeepEqual(got, want[i]) {
+			t.Fatalf("rule %d = %+v, want %+v", i, got, want[i])
+		}
+	}
+}
+
 func TestRules(t *testing.T) {
 	for _, tc := range []struct {
 		line, kind, target, status string
@@ -154,8 +188,10 @@ func TestRules(t *testing.T) {
 		{`DOMAIN,example.com,"Comma, Route"`, "domain", "route", Supported, false},
 		{"RULE-SET,https://example.com/sites.list,DIRECT", "", "", Unsupported, false},
 		{"DOMAIN-SET,https://example.com/sites.list,DIRECT", "", "", Unsupported, false},
-		{"URL-REGEX,^https://example.com,REJECT", "", "", Unsupported, false},
-		{"USER-AGENT,Example,REJECT", "", "", Unsupported, false},
+		{"URL-REGEX,^https://example.com,REJECT", "url-regex", "reject", Supported, false},
+		{"USER-AGENT,Example*,REJECT", "user-agent", "reject", Supported, false},
+		{`URL-REGEX,(?<=a)example,REJECT`, "", "", Unsupported, false},
+		{`USER-AGENT,"",REJECT`, "", "", Unsupported, false},
 		{"SCRIPT,example,REJECT", "", "", Unsupported, false},
 		{"SUBNET,example.net,REJECT", "", "", Unsupported, false},
 		{"CELLULAR-RADIO,LTE,REJECT", "", "", Unsupported, false},

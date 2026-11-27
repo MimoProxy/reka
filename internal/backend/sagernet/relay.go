@@ -52,6 +52,13 @@ func (b *Backend) relayTCP(ctx context.Context, rt Route, conn net.Conn, metadat
 			attempt.MITMSkipped = mitmSkipH2Disabled
 			attempt.mu.Unlock()
 			rt.MITM = nil
+			if rt.Outbound == rejectedOutbound {
+				// Only its requests could have been accepted.
+				attempt.complete(connectionReason(ctx.Err(), "rejected"), "route")
+				release()
+				N.CloseOnHandshakeFailure(conn, onClose, errRejected)
+				return
+			}
 			b.relayTCP(ctx, rt, conn, metadata, onClose, attempt)
 		}()
 		return

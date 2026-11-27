@@ -302,6 +302,7 @@ func (p *PrecompiledRuleSet) Build(resolve func(int, RuleSpec) (RuleSpec, error)
 		m.blocks[i].general = r
 		rs.maxDepth = max(rs.maxDepth, ruleDepth(r))
 		rs.hasProcess = rs.hasProcess || needsProcess(r)
+		rs.hasHTTP = rs.hasHTTP || matchesHTTP(r)
 	}
 	return rs, nil
 }

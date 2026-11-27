@@ -115,7 +115,12 @@ func advancedRanges(value string, bits int) ([]uidRange, error) {
 // Wildcards use the pinned reference's case-insensitive byte semantics: '*'
 // matches any span (including path separators), '?' matches exactly one byte.
 func matchProcessWildcard(pattern, value string) bool {
-	pattern, value = strings.ToLower(pattern), strings.ToLower(value)
+	return matchWildcard(strings.ToLower(pattern), strings.ToLower(value))
+}
+
+// matchWildcard matches '*' against any span and '?' against one byte, with
+// case-sensitive comparison of all other bytes.
+func matchWildcard(pattern, value string) bool {
 	p, v, star, resume := 0, 0, -1, 0
 	for v < len(value) {
 		if p < len(pattern) && (pattern[p] == '?' || pattern[p] == value[v]) {

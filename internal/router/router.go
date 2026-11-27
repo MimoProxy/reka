@@ -30,6 +30,7 @@ type RuleSet struct {
 
 	hasProcess bool
 	hasDomain  bool
+	hasHTTP    bool
 	// firstDomain bounds the prefix that can be matched before sniffing.
 	firstDomain int
 }
@@ -52,6 +53,7 @@ func CompileRules(specs []RuleSpec) (*RuleSet, error) {
 		}
 		rs.rules = append(rs.rules, r)
 		rs.maxDepth = max(rs.maxDepth, ruleDepth(r))
+		rs.hasHTTP = rs.hasHTTP || matchesHTTP(r)
 		if !rs.hasDomain && matchesDomain(r) {
 			rs.hasDomain = true
 			rs.firstDomain = i
@@ -141,6 +143,9 @@ func (rs *RuleSet) NeedsProcess() bool { return rs.hasProcess }
 // MatchesDomain reports whether rules can use the destination domain.
 func (rs *RuleSet) MatchesDomain() bool { return rs.hasDomain }
 
+// MatchesHTTP reports whether rules can use an HTTP request's URL or headers.
+func (rs *RuleSet) MatchesHTTP() bool { return rs.hasHTTP }
+
 // Metadata describes a connection for matching.
 type Metadata struct {
 	NetworkScene string
@@ -155,6 +160,19 @@ type Metadata struct {
 	// Addr is set when the destination is an address.
 	Addr netip.Addr
 	Port uint16
+	// HTTP is set when routing one HTTP request on a TCP connection: a
+	// cleartext request, or one decrypted by MITM. URL and user agent
+	// conditions never match without it.
+	HTTP *HTTPRequest
+}
+
+// HTTPRequest is the part of an HTTP request that rules can match.
+type HTTPRequest struct {
+	// URL is the absolute request URL, for example
+	// "http://example.com/path?query". The port is omitted when it is the
+	// scheme's default.
+	URL       string
+	UserAgent string
 }
 
 // Env supplies what matching may need beyond Metadata. Both lookups are
@@ -193,6 +211,22 @@ type evaluation struct {
 	processUIDKnown bool
 	stopped         bool // a lookup was disallowed
 	stoppedAt       int
+	// httpPending is set when a URL or user agent condition was evaluated
+	// without an HTTP request.
+	httpPending bool
+}
+
+// httpRequest returns the request URL and user agent conditions match.
+func (e *evaluation) httpRequest(index int) *HTTPRequest {
+	if e.md.HTTP != nil || e.md.Network != "tcp" {
+		return e.md.HTTP
+	}
+	e.httpPending = true
+	if e.packetOnly {
+		// A request may still arrive on this connection.
+		e.stopped, e.stoppedAt = true, index
+	}
+	return nil
 }
 
 func (e *evaluation) destinationAddr(index int) (netip.Addr, bool) {
@@ -387,6 +421,28 @@ func (e *evaluation) match(index int, r *rule) bool {
 		}
 		for _, re := range r.processRegexps {
 			if matched, err := re.MatchString(name); err == nil && matched {
+				return true
+			}
+		}
+		return false
+	case KindURLRegex:
+		request := e.httpRequest(index)
+		if request == nil {
+			return false
+		}
+		for _, re := range r.regexps {
+			if re.MatchString(request.URL) {
+				return true
+			}
+		}
+		return false
+	case KindUserAgent:
+		request := e.httpRequest(index)
+		if request == nil {
+			return false
+		}
+		for _, pattern := range r.strs {
+			if matchWildcard(pattern, request.UserAgent) {
 				return true
 			}
 		}
@@ -660,6 +716,10 @@ type Decision struct {
 	LookupRule     int
 	lookupRuleSpec *RuleSpec
 	Process        string
+	// HTTPPending is set when a URL or user agent condition was evaluated
+	// without an HTTP request. Routing each request on the connection may
+	// then choose a different rule.
+	HTTPPending bool
 }
 
 // LookupRuleSpec returns the rule that triggered the lookup, if any.
@@ -741,7 +801,7 @@ func (r *Router) decisionForRule(e *evaluation, index int) Decision {
 func (r *Router) decisionForTarget(e *evaluation, index int, spec RuleSpec, target string) Decision {
 	d := Decision{
 		RuleIndex: index, Rule: spec, Target: target, Resolved: e.addrs, ResolveError: e.resolveErr,
-		LookupRule: e.lookupRule, Process: e.process,
+		LookupRule: e.lookupRule, Process: e.process, HTTPPending: e.httpPending,
 	}
 	if e.lookupRule >= 0 {
 		d.lookupRuleSpec = e.lookupOverride
@@ -836,6 +896,16 @@ func needsProcess(r *rule) bool {
 		}
 	}
 	return false
+}
+
+func matchesHTTP(r *rule) bool {
+	switch r.spec.Kind {
+	case KindURLRegex, KindUserAgent:
+		return true
+	case KindRuleSet:
+		return r.spec.Set.MatchesHTTP()
+	}
+	return slices.ContainsFunc(r.children, matchesHTTP)
 }
 
 func matchesDomain(r *rule) bool {

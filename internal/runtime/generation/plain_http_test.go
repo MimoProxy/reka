@@ -7,6 +7,7 @@ import (
 
 	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
+	"github.com/MimoProxy/reka/internal/router"
 	"github.com/MimoProxy/reka/internal/script"
 )
 
@@ -140,7 +141,7 @@ http-rewrites:
 		t.Fatalf("retired HTTP route = %+v", route)
 	}
 	metadata.Destination.Port = 8080
-	rewritten := route.MITM.Reroute(t.Context(), metadata.Destination)
+	rewritten := route.MITM.Reroute(t.Context(), metadata.Destination, nil)
 	if rewritten.Release != nil {
 		defer rewritten.Release()
 	}
@@ -212,6 +213,7 @@ func TestPlainHTTPUnmatchedRouteAllocations(t *testing.T) {
 	activatePlainHTTPConfig(t, engine, profile, "", compile.Options{}, 1)
 	snap, gen := engine.current()
 	state := engine.routingState(gen)
+	direct := snap.Resources["direct"]
 	for _, dest := range []sagernet.Destination{
 		{Domain: "example.net", Port: 80},
 		{Domain: "ExAmPlE.NeT.", Port: 80},
@@ -220,7 +222,7 @@ func TestPlainHTTPUnmatchedRouteAllocations(t *testing.T) {
 	} {
 		md := sagernet.Metadata{Network: "tcp", Protocol: "http", Destination: dest}
 		if got := testing.AllocsPerRun(100, func() {
-			if route := engine.newMITMRoute(snap, state, md); route != nil {
+			if route := engine.newMITMRoute(snap, state, md, direct, router.Decision{}); route != nil {
 				t.Fatal("unmatched request selected the HTTP engine")
 			}
 		}); got != 0 {

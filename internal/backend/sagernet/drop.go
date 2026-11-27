@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 
+	"github.com/MimoProxy/reka/internal/lease"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -13,6 +14,15 @@ import (
 // a remote socket or sending an immediate rejection to the local client.
 type DropSpec struct{}
 type dropOutbound struct{ outbound.Adapter }
+
+// rejectedOutbound carries a connection whose own rule rejects it to the HTTP
+// engine, which routes each request again. A request that keeps this route
+// is answered as rejected; the outbound never dials.
+var rejectedOutbound = &Outbound{tag: "reject", typ: "reject", out: newDropOutbound("reject"), lease: lease.New()}
+
+// RejectedOutbound returns the shared outbound for such connections. It is
+// never retired.
+func RejectedOutbound() *Outbound { return rejectedOutbound }
 
 func newDropOutbound(tag string) *dropOutbound {
 	return &dropOutbound{outbound.NewAdapter("reject-drop", tag, []string{"tcp", "udp"}, nil)}

@@ -97,7 +97,7 @@ func newMITMH2Fixture(t *testing.T, route *MITMRoute, clientH2, originH2 bool, h
 		},
 	}}
 	if route.Reroute == nil {
-		route.Reroute = func(_ context.Context, dest Destination) Route {
+		route.Reroute = func(_ context.Context, dest Destination, _ *HTTPRequestInfo) Route {
 			if dest.Domain != "alternate-origin.test" {
 				t.Errorf("unexpected reroute destination %v", dest)
 			}
@@ -305,7 +305,7 @@ func TestMITMHTTP2UpstreamProtocolOrder(t *testing.T) {
 	})
 	f := newMITMH2Fixture(t, &MITMRoute{
 		H2: true, Rewrite: rewrite,
-		Reroute: func(_ context.Context, dest Destination) Route {
+		Reroute: func(_ context.Context, dest Destination, _ *HTTPRequestInfo) Route {
 			if dest.Domain != "alternate-origin.test" {
 				t.Errorf("unexpected reroute destination %v", dest)
 			}

@@ -110,6 +110,15 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 			ignoredModifier = true
 		}
 	}
+	if kind == "URL-REGEX" || kind == "USER-AGENT" {
+		// Surge and Loon quote these values, which may contain commas.
+		if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+			value = value[1 : len(value)-1]
+		}
+		if value == "" {
+			return m, badRule()
+		}
+	}
 	if regexRule(kind) {
 		if _, err := regexp.Compile(value); err != nil {
 			return m, incompatibleRegexp()
@@ -324,7 +333,7 @@ func ruleTarget(policy string, resolve func(string) (string, bool)) (string, boo
 }
 
 func regexRule(kind string) bool {
-	return kind == "DOMAIN-REGEX" || kind == "PROCESS-NAME-REGEX" || kind == "PROCESS-PATH-REGEX"
+	return kind == "DOMAIN-REGEX" || kind == "PROCESS-NAME-REGEX" || kind == "PROCESS-PATH-REGEX" || kind == "URL-REGEX"
 }
 
 func badRule() outcome { return unsupported("module.rule-syntax", "invalid module rule syntax") }

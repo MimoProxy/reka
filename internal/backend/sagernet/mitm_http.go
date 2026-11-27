@@ -182,10 +182,9 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch rewritten.Connection {
-	case httprewrite.Close, httprewrite.Drop:
+	closeConnection := func(action httprewrite.ConnectionAction) {
 		if r.ProtoMajor == 2 {
-			if rewritten.Connection == httprewrite.Drop {
+			if action == httprewrite.Drop {
 				timer := time.NewTimer(s.backend.halfCloseTimeout)
 				defer timer.Stop()
 				select {
@@ -198,13 +197,30 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 		buffered := hijack()
-		if rewritten.Connection == httprewrite.Close {
+		if action == httprewrite.Close {
 			return
 		}
 		// A hijack allows us to observe peer closure even when the request
 		// body has not been read. No response or continue message is sent.
 		_ = hijacked.SetReadDeadline(time.Now().Add(s.backend.halfCloseTimeout))
 		_, err = io.Copy(io.Discard, buffered.Reader)
+	}
+	// reject answers a request whose rule chose a reject policy.
+	reject := func(out *Outbound) bool {
+		action, rejected := mitmRouteRejection(out)
+		switch {
+		case !rejected:
+			return false
+		case action != "":
+			closeConnection(action)
+		default:
+			writeLocal(httprewrite.RejectResponse())
+		}
+		return true
+	}
+	switch rewritten.Connection {
+	case httprewrite.Close, httprewrite.Drop:
+		closeConnection(rewritten.Connection)
 		return
 	}
 
@@ -212,6 +228,34 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		localError(http.StatusBadGateway, "Invalid HTTP rewrite target")
 		return
+	}
+
+	// Rules see the request after URL rewrites, before its body is read. A
+	// request moved to another origin is routed where it is rerouted.
+	var requestInfo *HTTPRequestInfo
+	var requestRoute *Route
+	moved := rewritten.HostChanged || s.route.PlainHTTP && !sameMITMOrigin(originalURL, target)
+	if s.route.RouteRequest != nil {
+		requestInfo = &HTTPRequestInfo{URL: rewritten.URL, UserAgent: rewritten.Header.Get("User-Agent")}
+	}
+	if requestInfo != nil && !moved {
+		out := s.upstream.route.Outbound
+		if route, changed := s.route.RouteRequest(ctx, *requestInfo); changed {
+			route = normalizeRoute(route)
+			if route.Outbound == nil {
+				writeLocal(httprewrite.RejectResponse())
+				return
+			}
+			requestRoute, out = &route, route.Outbound
+			defer func() {
+				if requestRoute != nil {
+					requestRoute.Release()
+				}
+			}()
+		}
+		if reject(out) {
+			return
+		}
 	}
 
 	requestScript := s.matchScript(script.KindHTTPRequest, rewritten.URL)
@@ -336,9 +380,22 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reroute = !sameMITMOrigin(originalURL, request.URL)
 	}
 	upstream := s.upstream
-	if reroute {
-		upstream, err = s.reroute(ctx, destination, request.URL.Hostname(), h2)
+	if reroute || requestRoute != nil {
+		if reroute {
+			if requestInfo != nil {
+				requestInfo.URL = request.URL.String()
+			}
+			upstream, err = s.reroute(ctx, destination, request.URL.Hostname(), h2, requestInfo)
+		} else {
+			upstream = s.requestUpstream(ctx, *requestRoute, h2)
+			requestRoute = nil
+		}
 		if err != nil {
+			if requestInfo != nil && errors.Is(err, errRejected) {
+				// A rule rejected the rewritten request.
+				writeLocal(httprewrite.RejectResponse())
+				return
+			}
 			localError(http.StatusBadGateway, "Could not route rewritten HTTP request")
 			return
 		}
@@ -348,6 +405,9 @@ func (s *mitmHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			upstream.close()
 			upstream.route.Release()
 		}()
+		if requestInfo != nil && reject(upstream.route.Outbound) {
+			return
+		}
 	} else if upgrade && s.route.H2 && !s.route.PlainHTTP {
 		// HTTP/1 upgrades need a dedicated upstream that cannot negotiate h2.
 		upstream = newMITMUpstream(ctx, upstream.route, s.metadata, s.host, s.route.SkipServerCertVerify, false, s.attempt)
@@ -517,11 +577,11 @@ func (s *mitmHTTPHandler) waitForRequests() {
 	s.requests.Wait()
 }
 
-func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, host string, h2 bool) (*mitmUpstream, error) {
+func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, host string, h2 bool, request *HTTPRequestInfo) (*mitmUpstream, error) {
 	if s.route.Reroute == nil {
 		return nil, errRejected
 	}
-	route := normalizeRoute(s.route.Reroute(ctx, destination))
+	route := normalizeRoute(s.route.Reroute(ctx, destination, request))
 	if route.Outbound == nil {
 		return nil, errRejected
 	}
@@ -532,6 +592,30 @@ func (s *mitmHTTPHandler) reroute(ctx context.Context, destination Destination, 
 	metadata.Destination = M.ParseSocksaddr(destination.String())
 	metadata.Domain = host
 	return newMITMUpstream(ctx, route, metadata, host, s.route.SkipServerCertVerify, h2, s.attempt), nil
+}
+
+// requestUpstream carries one request to the connection's origin through the
+// outbound its own rule chose.
+func (s *mitmHTTPHandler) requestUpstream(ctx context.Context, route Route, h2 bool) *mitmUpstream {
+	metadata := s.metadata
+	if route.Destination != nil {
+		metadata.Destination = M.ParseSocksaddr(route.Destination.String())
+	}
+	return newMITMUpstream(ctx, route, metadata, s.host, s.route.SkipServerCertVerify, h2, s.attempt)
+}
+
+// mitmRouteRejection reports how a request routed to out is refused: an
+// empty action for a local reject response, or a connection action.
+func mitmRouteRejection(out *Outbound) (httprewrite.ConnectionAction, bool) {
+	switch {
+	case out == nil:
+		return "", true
+	case out.Type() == "reject":
+		return "", true
+	case out.Type() == "reject-drop":
+		return httprewrite.Drop, true
+	}
+	return "", false
 }
 
 func mitmRequestURL(r *http.Request, host string, port uint16, plainHTTP bool) *url.URL {

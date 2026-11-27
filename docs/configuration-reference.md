@@ -416,11 +416,15 @@ url-test 选最快健康成员，fallback 按成员顺序选第一个健康成�
 | `in-type` | HTTP、SOCKS4、SOCKS5、TUN；SOCKS 包括 SOCKS4/5 |
 | `in-port` | 本机代理监听端口；TUN 不匹配 |
 | `process-name-regex` | 不区分大小写的 .NET 兼容正则，支持 lookaround，匹配预算 50 ms；无法取得进程时不匹配 |
+| `url-regex` | Go/RE2 正则，匹配 HTTP 请求的完整 URL，例如 `http://119.29.29.90/d?dn=example.org`；默认端口省略，区分大小写 |
+| `user-agent` | HTTP 请求的 User-Agent 通配，`*` 任意跨度，`?` 一个字节，区分大小写 |
 | `rule-set` | 一个已声明的规则集 ID |
 | `geoip` | 内置仅 `LAN`；其他国家使用锁定地理资源对应的 rule-set |
 | `and`、`or` | 非空条件列表，按书写顺序短路 |
 | `not` | 恰好含一个条件的列表 |
 | `all` | 必须写 `true`，兜底 |
+
+`url-regex` 和 `user-agent` 只在 HTTP 引擎能读到请求时匹配：明文 HTTP 需要开启 HTTP 嗅探（端口 80，或因其他原因已嗅探出 HTTP 的连接）；HTTPS 只有主机名列入 MITM 并解密后才匹配，未解密的连接不匹配。连接建立时这些条件按不匹配计算，得到连接的路由；如果路由过程中经过了这类条件，HTTP 引擎会在读到每个请求头（URL 重写之后、读请求体之前）时，带着该请求的 URL 和 User-Agent 把整个规则列表重新匹配一次，同一连接上 keep-alive 的后续请求和 HTTP/2 的每个流都各自匹配。被重写或脚本改到其他主机的请求按新目标匹配。结果与连接相同就沿用连接的上游；选中别的出站时，该请求单独经由那个出站发往同一目标；`reject` 回复空的 404，`reject-drop` 不回复。条件不匹配时照常落到后面的规则。
 
 入口和进程路径规则的未知值不匹配；端口/UID 表达式支持 `/` 分隔备选值及闭区间，最多 28 段。完整大小写、平台和匹配语义见[高级规则](advanced-rules.md)。
 

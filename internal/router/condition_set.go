@@ -38,6 +38,7 @@ type ConditionSetBuilder struct {
 	maxDepth    int
 	hasDomain   bool
 	hasProcess  bool
+	hasHTTP     bool
 }
 
 // GrowDomains reserves space for single-value domain rows.
@@ -66,6 +67,7 @@ func (b *ConditionSetBuilder) Add(spec RuleSpec) error {
 	b.maxDepth = max(b.maxDepth, ruleDepth(r))
 	b.hasDomain = b.hasDomain || matchesDomain(r)
 	b.hasProcess = b.hasProcess || needsProcess(r)
+	b.hasHTTP = b.hasHTTP || matchesHTTP(r)
 	return nil
 }
 
@@ -117,7 +119,7 @@ func (b *ConditionSetBuilder) Build() (*RuleSet, error) {
 		return nil, err
 	}
 	members := b.members
-	set := &RuleSet{members: &members, maxDepth: b.maxDepth, hasDomain: b.hasDomain, hasProcess: b.hasProcess}
+	set := &RuleSet{members: &members, maxDepth: b.maxDepth, hasDomain: b.hasDomain, hasProcess: b.hasProcess, hasHTTP: b.hasHTTP}
 	*b = ConditionSetBuilder{}
 	return set, nil
 }

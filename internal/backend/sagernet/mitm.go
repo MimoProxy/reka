@@ -32,12 +32,18 @@ type MITMRoute struct {
 	MaxBodySize          int
 	H2                   bool
 	SkipServerCertVerify bool
-	Reroute              func(context.Context, Destination) Route
-	OnPinFailure         func(host, reason string)
-	OnConnection         func()
-	OnRequest            func()
-	MatchScript          func(kind script.Kind, rawURL string) *MITMScript
-	OnScript             func(run api.MITMScriptRun, executed bool)
+	// Reroute routes a request whose rewritten URL or script names another
+	// origin. The request is nil unless RouteRequest is set.
+	Reroute func(context.Context, Destination, *HTTPRequestInfo) Route
+	// RouteRequest routes each request by its URL and headers when the
+	// connection's route depended on them. changed is false when the
+	// request keeps the connection's route, and route is then empty.
+	RouteRequest func(context.Context, HTTPRequestInfo) (route Route, changed bool)
+	OnPinFailure func(host, reason string)
+	OnConnection func()
+	OnRequest    func()
+	MatchScript  func(kind script.Kind, rawURL string) *MITMScript
+	OnScript     func(run api.MITMScriptRun, executed bool)
 }
 
 func (b *Backend) relayHTTPEngine(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, originalDestination string, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {

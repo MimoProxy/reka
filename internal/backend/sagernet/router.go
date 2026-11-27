@@ -53,6 +53,15 @@ type Metadata struct {
 	ClientSource netip.Addr
 	// SkipMITM marks streams already handled by an HTTP proxy.
 	SkipMITM bool
+	// HTTPRequest is set when the HTTP engine routes one request.
+	HTTPRequest *HTTPRequestInfo
+}
+
+// HTTPRequestInfo is what routing rules can match in one HTTP request.
+type HTTPRequestInfo struct {
+	// URL is the absolute request URL, without the scheme's default port.
+	URL       string
+	UserAgent string
 }
 
 // Route is the routing decision for one connection.

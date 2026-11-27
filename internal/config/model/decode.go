@@ -507,7 +507,7 @@ func structFields(t reflect.Type) map[string]int {
 var MatchKeys = []string{
 	"domain", "domain-suffix", "domain-keyword", "domain-regex", "domain-pattern",
 	"ip-cidr", "src-ip-cidr", "dst-port", "src-port", "network", "process-name", "process-name-regex", "rule-set", "geoip", "geosite", "ip-asn", "and", "or", "not", "all",
-	"process-path", "process-path-regex", "process-name-wildcard", "process-path-wildcard", "in-name", "in-type", "in-port", "in-user", "uid", "network-scene",
+	"process-path", "process-path-regex", "process-name-wildcard", "process-path-wildcard", "in-name", "in-type", "in-port", "in-user", "uid", "network-scene", "url-regex", "user-agent",
 }
 
 func isMatchKey(k string) bool {

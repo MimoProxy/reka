@@ -1039,7 +1039,12 @@ func routerMetadata(md sagernet.Metadata) router.Metadata {
 	if domain == "" || md.Destination.DNSMapped && md.SniffedDomain != "" {
 		domain = md.SniffedDomain
 	}
+	var request *router.HTTPRequest
+	if md.HTTPRequest != nil {
+		request = &router.HTTPRequest{URL: md.HTTPRequest.URL, UserAgent: md.HTTPRequest.UserAgent}
+	}
 	return router.Metadata{
+		HTTP:        request,
 		InboundType: md.InboundProtocol,
 		InboundUser: md.InboundUser,
 		InboundPort: md.InboundPort,
@@ -1189,12 +1194,16 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 		ruleLookup   *api.RuleLookupInfo
 		mitm         *sagernet.MITMRoute
 		snapshot     *runtime.Snapshot[*sagernet.Outbound]
+		// rejected is set when a rejected connection still enters the HTTP
+		// engine, where an earlier request rule may accept its requests.
+		rejected bool
 	)
 	genNo, out, release, ok, err := acquire(func(s *runtime.Snapshot[*sagernet.Outbound]) (*sagernet.Outbound, bool) {
 		if mitm != nil {
 			g.httpEngine.release()
 			mitm = nil
 		}
+		rejected = false
 		snapshot = s
 		g = s.Value.(*generation)
 		if g.router == nil {
@@ -1236,8 +1245,11 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			return nil, false
 		}
 		o, ok, reason := flowOutbound(g, s.Resources, md, dec)
-		if ok && inboundFlow && o.Type() != "reject-drop" {
-			mitm = e.newMITMRoute(s, state, md)
+		if ok && inboundFlow {
+			mitm = e.newMITMRoute(s, state, md, o, dec)
+		} else if !ok && reason == "" && inboundFlow && dec.HTTPPending && dec.Outbound == model.OutboundReject {
+			mitm = e.newMITMRoute(s, state, md, sagernet.RejectedOutbound(), dec)
+			rejected = mitm != nil
 		}
 		rejectReason = reason
 		return o, ok
@@ -1261,6 +1273,11 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 	scope := history.Scope{}
 	if g != nil {
 		scope = g.historyScope
+	}
+	if !ok && rejected && err == nil {
+		out = sagernet.RejectedOutbound()
+		out.Lease().Acquire()
+		release, ok = out.Lease().Release, true
 	}
 	if !ok {
 		if mitm != nil {
