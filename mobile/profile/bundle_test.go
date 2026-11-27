@@ -130,6 +130,8 @@ rules:
 	}
 	fromProfile := *eff
 	fromProfile.Routing.BlockQUIC = "proxy"
+	fromProfile.Routing.UDPFallback = "direct"
+	fromProfile.Routing.DNSFailure = "final"
 	for _, tt := range []struct {
 		name    string
 		base    *compile.Effective
@@ -140,6 +142,7 @@ rules:
 		{"profile value kept", &fromProfile, "", "proxy"},
 		{"control overrides profile", &fromProfile, "all", "all"},
 		{"control turns it off", &fromProfile, "off", "off"},
+		{"control uses per-policy", &fromProfile, "per-policy", "per-policy"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			updated, err := ApplyControls(tt.base, bundle.Summary, Controls{Mode: "rule", BlockQUIC: tt.control})
@@ -148,6 +151,10 @@ rules:
 			}
 			if updated.Routing.BlockQUIC != tt.want {
 				t.Fatalf("block-quic = %q, want %q", updated.Routing.BlockQUIC, tt.want)
+			}
+			// Controls keep the profile's other routing options.
+			if got := updated.Routing; got.UDPFallback != tt.base.Routing.UDPFallback || got.DNSFailure != tt.base.Routing.DNSFailure {
+				t.Fatalf("routing = %+v, want options from %+v", got, tt.base.Routing)
 			}
 		})
 	}

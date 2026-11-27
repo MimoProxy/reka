@@ -42,6 +42,7 @@ const (
 	eventReady
 	eventDialFail
 	eventClosed
+	eventUDPFallback
 )
 
 var connectionEventKinds = [...]string{
@@ -65,6 +66,8 @@ var connectionEventKinds = [...]string{
 	eventReady:      "ready",
 	eventDialFail:   "dial_fail",
 	eventClosed:     "closed",
+	// The outbound that could not relay UDP, before the flow went direct.
+	eventUDPFallback: "udp_fallback",
 }
 
 // The first endpoints and the route path already live in the trace. Reuse

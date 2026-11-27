@@ -25,8 +25,14 @@ func (c *compiler) routing(eff *Effective) {
 	if !slices.Contains([]string{"rule", "global", "direct"}, eff.Routing.Mode) {
 		c.errorf(doc, "/routing/mode", "routing.mode", "routing mode must be rule, global or direct")
 	}
-	if !slices.Contains([]string{"off", "proxy", "all"}, eff.Routing.BlockQUIC) {
-		c.errorf(doc, "/routing/block-quic", "routing.block-quic", "block-quic must be off, proxy or all")
+	if !slices.Contains([]string{"off", "per-policy", "proxy", "all"}, eff.Routing.BlockQUIC) {
+		c.errorf(doc, "/routing/block-quic", "routing.block-quic", "block-quic must be off, per-policy, proxy or all")
+	}
+	if !slices.Contains([]string{"", "reject", "direct"}, eff.Routing.UDPFallback) {
+		c.errorf(doc, "/routing/udp-fallback", "routing.udp-fallback", "udp-fallback must be reject or direct")
+	}
+	if !slices.Contains([]string{"", "continue", "final", "reject"}, eff.Routing.DNSFailure) {
+		c.errorf(doc, "/routing/dns-failure", "routing.dns-failure", "dns-failure must be continue, final or reject")
 	}
 	if eff.Routing.Mode == "global" && eff.Routing.Global == "" {
 		c.errorf(doc, "/routing/global", "routing.target", "global mode requires an explicit outbound or group ID")

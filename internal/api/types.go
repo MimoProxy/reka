@@ -217,6 +217,12 @@ type FlowInfo struct {
 	Chain         []string `json:"chain,omitempty"`
 	Outbound      string   `json:"outbound"`
 	Fingerprint   string   `json:"fingerprint"`
+	// UDPFallback names the outbound that could not relay this UDP flow
+	// when routing.udp-fallback sent it direct instead.
+	UDPFallback string `json:"udp_fallback,omitempty"`
+	// DNSFailure is set when routing.dns-failure chose the route because
+	// the rule lookup failed.
+	DNSFailure bool `json:"dns_failure,omitempty"`
 
 	// DestinationDomain includes names recovered from client DNS answers.
 	DestinationDomain string `json:"destination_domain,omitempty"`

@@ -72,7 +72,7 @@ func (e *Engine) preMatch(md sagernet.Metadata) sagernet.PreMatchVerdict {
 				return sagernet.PreMatchVerdict{}
 			}
 			rejectReason = blockQUIC
-		} else if out, ok, reason := flowOutbound(g, s.Resources, md, result.Decision); !ok {
+		} else if out, ok, reason := flowOutbound(g, s.Resources, md, &result.Decision); !ok {
 			dec, rejectReason = result.Decision, reason
 		} else {
 			dec, rejectReason = result.Decision, reason

@@ -91,13 +91,15 @@ type RouteObservation struct {
 
 // generation is the immutable value published with each snapshot.
 type generation struct {
-	historyScope       history.Scope
-	policies           *policy.Manager
-	dns                *RD.Service
-	revision           uint64
-	eff                *compile.Effective
-	router             *router.Router
-	outUDP             map[string]bool
+	historyScope history.Scope
+	policies     *policy.Manager
+	dns          *RD.Service
+	revision     uint64
+	eff          *compile.Effective
+	router       *router.Router
+	outUDP       map[string]bool
+	// blockQUIC holds outbounds that set block-quic, for per-policy mode.
+	blockQUIC          map[string]bool
 	packetAddr         map[string]bool // packetaddr outbounds, with true for multiplexed UDP
 	inUDP              map[string]bool
 	packetFlowNames    map[string]string
@@ -734,6 +736,12 @@ func (e *Engine) activateProfile(p *Prepared, revision uint64, profileID string,
 	}
 	for _, o := range eff.Outbounds {
 		g.outUDP[o.ID] = o.UDP
+		if o.BlockQUIC {
+			if g.blockQUIC == nil {
+				g.blockQUIC = make(map[string]bool)
+			}
+			g.blockQUIC[o.ID] = true
+		}
 		if (o.Type == model.OutboundVLESS || o.Type == "vmess") && o.PacketEncoding == "packetaddr" {
 			g.packetAddr[o.ID] = o.Multiplex != nil && o.Multiplex.Enabled && !o.Multiplex.OnlyTCP
 		}
@@ -1121,32 +1129,79 @@ func (e *Engine) inboundAllowsUDP(g *generation, md sagernet.Metadata) bool {
 	return g.inUDP[md.Inbound]
 }
 
-const blockQUIC = "block-quic"
+// Reject reasons reported with a flow.
+const (
+	blockQUIC = "block-quic"
+	// udpUnsupported rejects UDP routed to an outbound or group without UDP
+	// relay when routing.udp-fallback is reject.
+	udpUnsupported = "udp-unsupported"
+	// dnsFailed rejects a flow whose rule lookup failed when
+	// routing.dns-failure is reject.
+	dnsFailed = "dns-failure"
+)
 
 // isQUICFlow reports whether block-quic treats md as QUIC.
 func isQUICFlow(md sagernet.Metadata) bool {
 	return md.Network == "udp" && (md.Destination.Port == 443 || md.Protocol == "quic")
 }
 
-func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sagernet.Metadata, dec router.Decision) (*sagernet.Outbound, bool, string) {
-	if md.Network == "udp" {
-		for _, id := range dec.Chain {
-			if g.eff.GroupUDPDisabled[id] {
-				return nil, false, ""
-			}
-		}
-		if !g.outUDP[dec.Outbound] {
+// flowOutbound returns the outbound for dec. UDP that dec cannot carry is
+// rejected, or sent direct when routing.udp-fallback is direct; then
+// dec.Outbound becomes direct and dec.UDPFallback names the original.
+func flowOutbound(g *generation, resources map[string]*sagernet.Outbound, md sagernet.Metadata, dec *router.Decision) (*sagernet.Outbound, bool, string) {
+	if dec.DNSFailure && dec.Target == "" {
+		return nil, false, dnsFailed
+	}
+	if md.Network == "udp" && dec.Outbound != "" && !decisionCarriesUDP(g, *dec) {
+		if _, ok := resources[dec.Outbound]; !ok {
+			// Reject and pass have no resource and no UDP relay; rejecting
+			// is what the rule asked for.
 			return nil, false, ""
 		}
+		if g.eff.Routing.UDPFallback != "direct" {
+			return nil, false, udpUnsupported
+		}
+		dec.UDPFallback, dec.Outbound = dec.Outbound, model.OutboundDirect
 	}
 	o, ok := resources[dec.Outbound]
-	if ok && isQUICFlow(md) {
-		mode, typ := g.eff.Routing.BlockQUIC, o.Type()
-		if typ != "reject-drop" && (mode == "all" || mode == "proxy" && typ != model.OutboundDirect) {
-			return nil, false, blockQUIC
-		}
+	if ok && isQUICFlow(md) && quicBlocked(g, *dec, o.Type()) {
+		return nil, false, blockQUIC
 	}
 	return o, ok, ""
+}
+
+func decisionCarriesUDP(g *generation, dec router.Decision) bool {
+	for _, id := range dec.Chain {
+		if g.eff.GroupUDPDisabled[id] {
+			return false
+		}
+	}
+	return g.outUDP[dec.Outbound]
+}
+
+// quicBlocked applies routing.block-quic to a QUIC flow routed by dec.
+// Per-policy mode blocks it when the outbound or any group on the way sets
+// block-quic. A drop outbound is exempt: it drops the flow instead.
+func quicBlocked(g *generation, dec router.Decision, typ string) bool {
+	if typ == "reject-drop" {
+		return false
+	}
+	switch g.eff.Routing.BlockQUIC {
+	case "all":
+		return true
+	case "proxy":
+		return typ != model.OutboundDirect
+	case "per-policy":
+		if g.blockQUIC[dec.Outbound] {
+			return true
+		}
+		for _, id := range dec.Chain {
+			if g.eff.GroupBlockQUIC[id] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mappedDialDestination returns a domain override only for protocols that can
@@ -1245,7 +1300,7 @@ func (e *Engine) routeWithAcquire(ctx context.Context, md sagernet.Metadata, acq
 			rejectReason = mitmQUIC
 			return nil, false
 		}
-		o, ok, reason := flowOutbound(g, s.Resources, md, dec)
+		o, ok, reason := flowOutbound(g, s.Resources, md, &dec)
 		if ok && inboundFlow {
 			mitm = e.newMITMRoute(s, state, md, o, dec)
 		} else if !ok && reason == "" && inboundFlow && dec.HTTPPending && dec.Outbound == model.OutboundReject {
@@ -1365,6 +1420,7 @@ func (g *generation) flowInfo(genNo uint64, md sagernet.Metadata, dec router.Dec
 		DestinationDomain: md.Destination.Domain, SniffedDomain: md.SniffedDomain, Protocol: md.Protocol,
 		DNSMapped:    md.Destination.DNSMapped,
 		NetworkScene: scene, RejectReason: rejectReason,
+		UDPFallback: dec.UDPFallback, DNSFailure: dec.DNSFailure,
 	}
 	if dec.Temporary {
 		info.RuleSource = "temporary"

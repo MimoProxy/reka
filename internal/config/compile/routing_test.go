@@ -13,6 +13,7 @@ func TestRoutingBlockQUIC(t *testing.T) {
 		{name: "omitted", want: "off"},
 		{name: "empty", profile: "routing: {block-quic: \"\"}\n", want: "off"},
 		{name: "off", profile: "routing: {block-quic: off}\n", want: "off"},
+		{name: "per-policy", profile: "routing: {block-quic: per-policy}\n", want: "per-policy"},
 		{name: "proxy", profile: "routing: {block-quic: proxy}\n", want: "proxy"},
 		{name: "all", profile: "routing: {block-quic: all}\n", want: "all"},
 		{name: "local overrides profile", profile: "routing: {block-quic: all}\n", local: "routing: {block-quic: proxy}\n", want: "proxy"},
@@ -46,5 +47,28 @@ func TestRoutingBlockQUICRejectsInvalidValue(t *testing.T) {
 				t.Fatalf("unexpected diagnostic: %+v", d)
 			}
 		})
+	}
+}
+
+func TestRoutingFallbackOptions(t *testing.T) {
+	eff, ds := Compile([]byte(`schema-version: 1
+routing: {udp-fallback: direct, dns-failure: final}
+outbounds:
+  - {id: node, type: socks, server: 127.0.0.1, port: 9, block-quic: true}
+`), nil, Options{})
+	if ds.HasErrors() {
+		t.Fatal(ds)
+	}
+	if eff.Routing.UDPFallback != "direct" || eff.Routing.DNSFailure != "final" || !eff.Outbounds[0].BlockQUIC {
+		t.Fatalf("routing = %+v, outbound = %+v", eff.Routing, eff.Outbounds[0])
+	}
+	for _, tt := range []struct{ profile, path string }{
+		{"routing: {udp-fallback: proxy}\n", "/routing/udp-fallback"},
+		{"routing: {dns-failure: drop}\n", "/routing/dns-failure"},
+	} {
+		eff, ds := Compile([]byte("schema-version: 1\n"+tt.profile), nil, Options{})
+		if errs := ds.Errors(); eff != nil || len(errs) != 1 || errs[0].Path != tt.path {
+			t.Fatalf("%s: diagnostics = %v", tt.profile, ds)
+		}
 	}
 }

@@ -541,11 +541,20 @@ type Group struct {
 
 // Router is an immutable routing table: rules, groups and the fallback.
 type Router struct {
-	rules     *RuleSet
-	groups    map[string]Group
-	outbounds map[string]bool
-	final     string
+	rules      *RuleSet
+	groups     map[string]Group
+	outbounds  map[string]bool
+	final      string
+	dnsFailure string
 }
+
+// DNSFailure values. With DNSFailureContinue a failed lookup only makes the
+// IP rules that needed it not match, as in Clash.
+const (
+	DNSFailureContinue = "continue"
+	DNSFailureFinal    = "final"
+	DNSFailureReject   = "reject"
+)
 
 // Options configure New.
 type Options struct {
@@ -554,16 +563,25 @@ type Options struct {
 	Groups    []Group
 	// Final is the target when no rule matches.
 	Final string
+	// DNSFailure decides a connection whose rule lookup failed before any
+	// rule matched. Empty means DNSFailureContinue.
+	DNSFailure string
 }
 
 // New builds a router over a compiled rule set. It checks that every
 // target exists and that groups do not form a cycle.
 func New(rules *RuleSet, opts Options) (*Router, error) {
 	r := &Router{
-		rules:     rules,
-		groups:    make(map[string]Group, len(opts.Groups)),
-		outbounds: make(map[string]bool, len(opts.Outbounds)),
-		final:     opts.Final,
+		rules:      rules,
+		groups:     make(map[string]Group, len(opts.Groups)),
+		outbounds:  make(map[string]bool, len(opts.Outbounds)),
+		final:      opts.Final,
+		dnsFailure: opts.DNSFailure,
+	}
+	switch opts.DNSFailure {
+	case "", DNSFailureContinue, DNSFailureFinal, DNSFailureReject:
+	default:
+		return nil, fmt.Errorf("unknown DNS failure behavior %q", opts.DNSFailure)
 	}
 	for _, id := range opts.Outbounds {
 		r.outbounds[id] = true
@@ -720,6 +738,12 @@ type Decision struct {
 	// without an HTTP request. Routing each request on the connection may
 	// then choose a different rule.
 	HTTPPending bool
+	// DNSFailure is set when the rule lookup failed and the router's DNS
+	// failure behavior chose this decision instead of the rules after it.
+	DNSFailure bool
+	// UDPFallback is set by callers that send UDP direct because Outbound
+	// cannot relay it; it names that outbound.
+	UDPFallback string
 }
 
 // LookupRuleSpec returns the rule that triggered the lookup, if any.
@@ -746,6 +770,9 @@ func (r *Router) RouteWithResolver(ctx context.Context, md Metadata, env Env, re
 func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision {
 	index := r.rules.first(e)
 	for {
+		if r.lookupFailedBefore(e, index) {
+			return r.dnsFailureDecision(e, resolve)
+		}
 		d := r.decisionForRule(e, index)
 		r.resolveDecision(&d)
 		if resolve != nil {
@@ -760,6 +787,44 @@ func (r *Router) decideWithPass(e *evaluation, resolve func(*Decision)) Decision
 			return Decision{RuleIndex: -1, LookupRule: -1}
 		}
 	}
+}
+
+// lookupFailedBefore reports whether the rule lookup failed and no rule
+// before the one that triggered it matched, so the DNS failure behavior
+// decides instead of index. index is -1 when no rule matched.
+func (r *Router) lookupFailedBefore(e *evaluation, index int) bool {
+	if r.dnsFailure == "" || r.dnsFailure == DNSFailureContinue || e.stopped || !e.resolved {
+		return false
+	}
+	if e.resolveErr == nil && e.dialAddr.IsValid() {
+		return false
+	}
+	if errors.Is(e.resolveErr, ErrNoLookup) {
+		return false
+	}
+	if e.lookupOverride != nil {
+		// A temporary rule triggered the lookup, before every saved rule.
+		return true
+	}
+	// The triggering rule itself may still match on another condition.
+	return e.lookupRule >= 0 && (index < 0 || index > e.lookupRule)
+}
+
+func (r *Router) dnsFailureDecision(e *evaluation, resolve func(*Decision)) Decision {
+	var d Decision
+	if r.dnsFailure == DNSFailureFinal {
+		d = r.decisionForRule(e, -1)
+		r.resolveDecision(&d)
+		if resolve != nil {
+			resolve(&d)
+		}
+		d.passes(-1)
+	} else {
+		// No target: the connection fails.
+		d = r.decisionForTarget(e, -1, RuleSpec{}, "")
+	}
+	d.DNSFailure = true
+	return d
 }
 
 // passes handles PASS for a saved rule or the final target.

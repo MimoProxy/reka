@@ -98,6 +98,7 @@ type Outbound struct {
 	Server            string                     `json:"server,omitempty"`
 	Port              uint16                     `json:"port,omitempty"`
 	UDP               bool                       `json:"udp"`
+	BlockQUIC         bool                       `json:"block-quic,omitempty"`
 	Username          string                     `json:"-"`
 	Method            string                     `json:"method,omitempty"`
 	Flow              string                     `json:"flow,omitempty"`
@@ -150,18 +151,20 @@ type GroupMetadata struct {
 
 // Effective is the immutable configuration used by the runtime.
 type Effective struct {
-	MITM             MITM                      `json:"mitm"`
-	NetworkScenes    []NetworkScene            `json:"network-scenes,omitempty"`
-	TrafficBudgets   map[string]TrafficBudget  `json:"traffic-budgets,omitempty"`
-	Process          model.Process             `json:"process"`
-	Routing          model.Routing             `json:"routing"`
-	ActiveRouter     *router.Router            `json:"-"`
-	Sniff            model.Sniff               `json:"sniff"`
-	SniffRules       *router.Router            `json:"-"`
-	SniffSkipDomains *router.Router            `json:"-"`
-	SniffForRouting  bool                      `json:"-"`
-	Network          platform.Network          `json:"network"`
-	GroupUDPDisabled map[string]bool           `json:"group-udp-disabled,omitempty"`
+	MITM             MITM                     `json:"mitm"`
+	NetworkScenes    []NetworkScene           `json:"network-scenes,omitempty"`
+	TrafficBudgets   map[string]TrafficBudget `json:"traffic-budgets,omitempty"`
+	Process          model.Process            `json:"process"`
+	Routing          model.Routing            `json:"routing"`
+	ActiveRouter     *router.Router           `json:"-"`
+	Sniff            model.Sniff              `json:"sniff"`
+	SniffRules       *router.Router           `json:"-"`
+	SniffSkipDomains *router.Router           `json:"-"`
+	SniffForRouting  bool                     `json:"-"`
+	Network          platform.Network         `json:"network"`
+	GroupUDPDisabled map[string]bool          `json:"group-udp-disabled,omitempty"`
+	// GroupBlockQUIC holds groups that set block-quic.
+	GroupBlockQUIC   map[string]bool           `json:"group-block-quic,omitempty"`
 	AutoGroups       []policy.Group            `json:"automatic-groups,omitempty"`
 	DNS              *RD.Config                `json:"-"`
 	DNSFingerprint   string                    `json:"dns-fingerprint,omitempty"`
@@ -405,7 +408,7 @@ func (c *compiler) compose() *Effective {
 	for i, o := range eff.Outbounds {
 		ids[i] = o.ID
 	}
-	r, err := router.New(rs, router.Options{Outbounds: ids, Groups: eff.Groups, Final: eff.Final})
+	r, err := router.New(rs, router.Options{Outbounds: ids, Groups: eff.Groups, Final: eff.Final, DNSFailure: eff.Routing.DNSFailure})
 	if err != nil {
 		c.errorf(model.DocProfile, "/groups", "group.invalid", "%v", err)
 		return eff
@@ -426,7 +429,7 @@ func (c *compiler) compose() *Effective {
 			c.errorf(model.DocProfile, "/routing", "rule.invalid", "%v", err)
 			return eff
 		}
-		eff.ActiveRouter, err = router.New(activeRules, router.Options{Outbounds: ids, Groups: eff.Groups, Final: target})
+		eff.ActiveRouter, err = router.New(activeRules, router.Options{Outbounds: ids, Groups: eff.Groups, Final: target, DNSFailure: eff.Routing.DNSFailure})
 		if err != nil {
 			c.errorf(model.DocProfile, "/routing", "routing.target", "%v", err)
 		}
@@ -458,7 +461,7 @@ var fieldsByType = map[string][]string{
 	model.OutboundTailscale:   {"udp"},
 }
 
-var commonFields = []string{"id", "name", "type", "dialer", "multiplex"}
+var commonFields = []string{"id", "name", "type", "dialer", "multiplex", "block-quic"}
 
 // ShadowsocksMethods are the ciphers the Shadowsocks outbound accepts.
 var ShadowsocksMethods = []string{
@@ -581,10 +584,10 @@ func (c *compiler) outbounds(eff *Effective) {
 			if c.local.Link == nil || len(c.local.Link.Tailscale) == 0 {
 				c.warnf(doc, base+"/type", "outbound.tailscale-unavailable", "Tailscale is not configured on this device; the node is unavailable")
 			}
-			eff.Outbounds = append(eff.Outbounds, Outbound{ID: ob.ID, Name: ob.Name, Type: ob.Type, UDP: ob.UDP == nil || *ob.UDP})
+			eff.Outbounds = append(eff.Outbounds, Outbound{ID: ob.ID, Name: ob.Name, Type: ob.Type, UDP: ob.UDP == nil || *ob.UDP, BlockQUIC: ob.BlockQUIC})
 			continue
 		}
-		out := Outbound{PacketEncoding: ob.PacketEncoding, Protocol: ob.Protocol, Transport: ob.Transport, Multiplex: ob.Multiplex, ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow}
+		out := Outbound{PacketEncoding: ob.PacketEncoding, Protocol: ob.Protocol, Transport: ob.Transport, Multiplex: ob.Multiplex, ID: ob.ID, Name: ob.Name, Type: ob.Type, Method: ob.Method, Flow: ob.Flow, BlockQUIC: ob.BlockQUIC}
 		if ob.Dialer != nil {
 			value := *ob.Dialer
 			if ob.Type == model.OutboundReject || ob.Type == "pass" || ob.Type == "reject-drop" {
@@ -1003,6 +1006,12 @@ func (c *compiler) groups(eff *Effective) {
 				eff.GroupUDPDisabled = map[string]bool{}
 			}
 			eff.GroupUDPDisabled[g.ID] = true
+		}
+		if g.BlockQUIC {
+			if eff.GroupBlockQUIC == nil {
+				eff.GroupBlockQUIC = map[string]bool{}
+			}
+			eff.GroupBlockQUIC[g.ID] = true
 		}
 		if ok {
 			if eff.GroupMetadata == nil {

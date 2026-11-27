@@ -129,11 +129,17 @@ func (a *connectionAttempt) setRoute(rt Route, originalAddr netip.Addr) {
 	matched := connectionEvent{kind: eventMatched, n: [2]int32{int32(a.RuleIndex)}, nCount: 1}
 	if a.RuleSource == "temporary" {
 		matched.code = a.RuleSource
+	} else if a.DNSFailure {
+		// routing.dns-failure chose the route after the rule lookup failed.
+		matched.code = "dns_failure"
 	}
 	if a.RuleIndex >= 0 || matched.code != "" {
 		matched.name = a.Rule
 	}
 	a.appendEventLocked(matched)
+	if a.UDPFallback != "" {
+		a.appendEventLocked(connectionEvent{kind: eventUDPFallback, name: history.Text(a.UDPFallback, connectionLabelBytes)})
+	}
 	if len(a.Chain) != 0 {
 		a.appendEventLocked(connectionEvent{kind: eventPath, name: a.Outbound})
 	}

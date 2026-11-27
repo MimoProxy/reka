@@ -243,7 +243,7 @@ func addNodeGroup(eff *compile.Effective) error {
 	eff.Final = id
 	eff.Routing.Global = id
 	var err error
-	eff.Router, err = router.New(eff.Router.Rules(), router.Options{Outbounds: ids, Groups: eff.Groups, Final: id})
+	eff.Router, err = router.New(eff.Router.Rules(), router.Options{Outbounds: ids, Groups: eff.Groups, Final: id, DNSFailure: eff.Routing.DNSFailure})
 	eff.ActiveRouter = eff.Router
 	return err
 }
@@ -377,10 +377,11 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	if blockQUIC == "" {
 		blockQUIC = "off"
 	}
-	if !slices.Contains([]string{"off", "proxy", "all"}, blockQUIC) {
+	if !slices.Contains([]string{"off", "per-policy", "proxy", "all"}, blockQUIC) {
 		return nil, errors.New("unknown QUIC blocking mode")
 	}
-	eff.Routing = model.Routing{Mode: mode, Global: global, BlockQUIC: blockQUIC}
+	eff.Routing = model.Routing{Mode: mode, Global: global, BlockQUIC: blockQUIC,
+		UDPFallback: base.Routing.UDPFallback, DNSFailure: base.Routing.DNSFailure}
 	if controls.ProcessMode != "" {
 		if !slices.Contains([]string{"off", "rule", "always"}, controls.ProcessMode) {
 			return nil, errors.New("unknown process mode")
@@ -390,7 +391,7 @@ func ApplyControls(base *compile.Effective, summary Summary, controls Controls) 
 	if err := applyLANProxy(eff, controls.LANProxy); err != nil {
 		return nil, err
 	}
-	opts := router.Options{Outbounds: ids, Groups: eff.Groups, Final: base.Final}
+	opts := router.Options{Outbounds: ids, Groups: eff.Groups, Final: base.Final, DNSFailure: base.Routing.DNSFailure}
 	eff.Router, err = router.New(base.Router.Rules(), opts)
 	if err != nil {
 		return nil, err

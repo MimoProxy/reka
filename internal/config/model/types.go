@@ -109,6 +109,9 @@ type Outbound struct {
 	Port   int    `yaml:"port"`
 	// UDP enables UDP relay where the protocol supports it. Default true.
 	UDP *bool `yaml:"udp"`
+	// BlockQUIC rejects QUIC through this outbound when routing.block-quic
+	// is per-policy.
+	BlockQUIC bool `yaml:"block-quic"`
 
 	Username string `yaml:"username"` // http, socks, ssh, mieru
 	Password string `yaml:"password"`
@@ -179,6 +182,9 @@ type Group struct {
 	Filter         string `yaml:"filter"`
 	ExcludeFilter  string `yaml:"exclude-filter"`
 	DisableUDP     bool   `yaml:"disable-udp"`
+	// BlockQUIC rejects QUIC through this group when routing.block-quic is
+	// per-policy.
+	BlockQUIC bool `yaml:"block-quic"`
 
 	Icon    string   `yaml:"icon"`
 	ID      string   `yaml:"id"`

@@ -93,11 +93,15 @@ rules: [{match: {all: true}, outbound: policy}]
 		{"group disallows UDP before block-quic", `routing: {block-quic: all}
 groups: [{id: policy, type: select, members: [reject-drop], disable-udp: true}]
 rules: [{match: {all: true}, outbound: policy}]
-`, udp, reject, "", ""},
+`, udp, reject, "", "udp-unsupported"},
 		{"outbound disallows UDP before block-quic", `routing: {block-quic: all}
 outbounds: [{id: tcp-only, type: http, server: 192.0.2.45, port: 8080}]
 rules: [{match: {all: true}, outbound: tcp-only}]
-`, udp, reject, "", ""},
+`, udp, reject, "", "udp-unsupported"},
+		{"UDP falls back to direct", `routing: {udp-fallback: direct}
+outbounds: [{id: tcp-only, type: http, server: 192.0.2.45, port: 8080}]
+rules: [{match: {all: true}, outbound: tcp-only}]
+`, udp, cont, "direct", ""},
 		{"block-quic off", "routing: {block-quic: off}\n" + proxy, udp, cont, "proxy", ""},
 		{"block-quic proxy", "routing: {block-quic: proxy}\n" + proxy, udp, reject, "", "block-quic"},
 		{"block-quic proxy direct exception", "routing: {block-quic: proxy}\n" + direct, udp, cont, "direct", ""},
