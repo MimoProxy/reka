@@ -1520,6 +1520,12 @@ func (e *Engine) Connections() []Connection {
 // CloseConnections closes connections by ID (all when ids is nil).
 func (e *Engine) CloseConnections(ids []uint64) int { return e.backend.CloseConnections(ids) }
 
+// CloseIdleConnections closes ended and idle connections first; see
+// sagernet.Backend.CloseIdleConnections.
+func (e *Engine) CloseIdleConnections(now time.Time, idle time.Duration, share float64) (closed, total int) {
+	return e.backend.CloseIdleConnections(now, idle, share)
+}
+
 // Status reports the running state.
 func (e *Engine) Status() Status {
 	snap, g := e.current()

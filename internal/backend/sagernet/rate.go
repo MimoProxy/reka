@@ -58,6 +58,15 @@ func (c *rateCounter) recordPeak(bytes int64) {
 
 func (c *rateCounter) Load() int64 { return c.total.Load() }
 
+// lastActive returns the start of the latest second that counted bytes, or
+// the counter's start when it counted none.
+func (c *rateCounter) lastActive() time.Time {
+	if c.total.Load() == 0 {
+		return c.start
+	}
+	return c.start.Add(time.Duration(c.window.Load()>>rateByteBits) * time.Second)
+}
+
 // Peak returns the largest window's bytes, including bytes already counted in
 // the current window without extrapolating its partial second.
 func (c *rateCounter) Peak() int64 {

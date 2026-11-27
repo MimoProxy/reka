@@ -37,7 +37,7 @@ func TestMemoryGuardThresholdHysteresis(t *testing.T) {
 		State: "triggered", Resets: 1, LastReason: "threshold", LastUsage: trigger, LastClosed: 3,
 	}
 
-	for _, footprint := range []uint64{trigger, trigger + 1, armed} {
+	for _, footprint := range []uint64{trigger, trigger, armed} {
 		usage.Store(footprint)
 		clock.tick(cfg.MinInterval)
 		clock.checkInterval(t, cfg.MinInterval)
@@ -57,6 +57,38 @@ func TestMemoryGuardThresholdHysteresis(t *testing.T) {
 	want.Resets++
 	want.LastUsage = trigger + 1
 	checkMemoryGuardStats(t, g, want)
+}
+
+func TestMemoryGuardEscalatesWhileRising(t *testing.T) {
+	cfg := defaultMemoryGuardConfig()
+	g, clock, usage := startTestMemoryGuard(t, cfg)
+	trigger := cfg.Limit - cfg.SafetyMargin
+	usage.Store(trigger)
+	clock.tick(cfg.MinInterval)
+	clock.checkInterval(t, cfg.MinInterval)
+	want := memoryGuardStats{
+		State: "triggered", Resets: 1, LastReason: "threshold", LastUsage: trigger, LastClosed: 3,
+	}
+	checkMemoryGuardStats(t, g, want)
+
+	// Usage that stays near the trigger keeps the active connections.
+	for _, footprint := range []uint64{trigger + cfg.EscalateGrowth - 1, trigger, trigger + cfg.EscalateGrowth - 1} {
+		usage.Store(footprint)
+		clock.tick(10 * cfg.MinInterval)
+		clock.checkInterval(t, cfg.MinInterval)
+		checkMemoryGuardStats(t, g, want)
+	}
+
+	// Closing idle connections did not stop the growth.
+	want = memoryGuardStats{
+		State: "triggered", Resets: 2, LastReason: "escalated", LastUsage: trigger + cfg.EscalateGrowth, LastClosed: 7,
+	}
+	for _, footprint := range []uint64{trigger + cfg.EscalateGrowth, trigger + 3*cfg.EscalateGrowth} {
+		usage.Store(footprint)
+		clock.tick(cfg.MinInterval)
+		clock.checkInterval(t, cfg.MinInterval)
+		checkMemoryGuardStats(t, g, want)
+	}
 }
 
 func TestMemoryGuardArmedInterval(t *testing.T) {
@@ -266,6 +298,8 @@ func startTestMemoryGuard(t *testing.T, cfg memoryGuardConfig) (*memoryGuard, *m
 			return 3
 		case "rate":
 			return 5
+		case "escalated":
+			return 7
 		default:
 			t.Errorf("unexpected reset reason %q", reason)
 			return 0

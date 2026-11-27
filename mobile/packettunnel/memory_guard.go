@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// Reset reasons. The first reset of a trigger closes idle connections;
+// memoryResetAll closes every connection.
+const (
+	memoryResetThreshold = "threshold"
+	memoryResetRate      = "rate"
+	memoryResetAll       = "escalated"
+)
+
 const (
 	memoryGuardNormal    = "normal"
 	memoryGuardArmed     = "armed"
@@ -20,6 +28,10 @@ type memoryGuardConfig struct {
 	MinInterval   time.Duration
 	ArmedInterval time.Duration
 	MaxInterval   time.Duration
+	// A trigger first closes only ended and idle connections. When usage
+	// then grows by EscalateGrowth more while still at the trigger, the
+	// guard closes every connection.
+	EscalateGrowth uint64
 }
 
 // The defaults match sing-box's oomkiller for the iOS Network Extension:
@@ -31,6 +43,13 @@ func defaultMemoryGuardConfig() memoryGuardConfig {
 		MinInterval:   100 * time.Millisecond,
 		ArmedInterval: time.Second,
 		MaxInterval:   10 * time.Second,
+		// sing-box closes every connection at once. Closing the idle ones
+		// first keeps active transfers. Escalation waits for continued
+		// growth rather than a deadline: on an iPhone, heap fragmentation
+		// kept the footprint at the trigger after the idle connections
+		// closed, and closing the remaining 74 freed nothing either. 1 MiB
+		// is twice the sample-to-sample noise seen at that level.
+		EscalateGrowth: 1 << 20,
 	}
 }
 
@@ -70,6 +89,7 @@ type memoryGuard struct {
 	hasBaseline      bool
 	baselineUsage    uint64
 	baselineTime     time.Time
+	escalated        bool
 }
 
 // sample reports process footprint in bytes. reset returns the number of closed connections.
@@ -194,11 +214,17 @@ func (g *memoryGuard) poll(pressure bool) {
 	if previous != memoryGuardTriggered {
 		switch {
 		case state == memoryGuardTriggered:
-			reason = "threshold"
+			reason = memoryResetThreshold
 		case g.reachesLimitTooSoon(usage, now):
 			state = memoryGuardTriggered
-			reason = "rate"
+			reason = memoryResetRate
 		}
+		if reason != "" {
+			g.escalated = false
+		}
+	} else if state == memoryGuardTriggered && !g.escalated && usage >= g.triggerThreshold &&
+		usage >= g.status.LastUsage+g.cfg.EscalateGrowth {
+		reason, g.escalated = memoryResetAll, true
 	}
 	// Give the pressure baseline a follow-up at the minimum interval even when usage is normal.
 	if state == memoryGuardNormal && !pressure {

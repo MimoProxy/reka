@@ -3,6 +3,8 @@
 package packettunnel
 
 import (
+	"time"
+
 	"github.com/MimoProxy/reka/internal/mitm/ca"
 	"github.com/MimoProxy/reka/internal/script"
 	"github.com/sagernet/sing/common/memory"
@@ -32,13 +34,32 @@ func (s *Session) resetForMemory(reason string) int {
 	}
 	ca.PurgeAll()
 	script.PurgeAll()
-	var closed int
-	if s.profile != nil {
+	all := reason == memoryResetAll
+	var closed, total int
+	switch {
+	case s.profile != nil && all:
 		closed = s.profile.engine.CloseConnections(nil)
-	} else if s.backend != nil {
+		total = closed
+	case s.profile != nil:
+		closed, total = s.profile.engine.CloseIdleConnections(time.Now(), memoryResetIdle, memoryResetShare)
+	case s.backend != nil && all:
 		closed = s.backend.CloseConnections(nil)
+		total = closed
+	case s.backend != nil:
+		closed, total = s.backend.CloseIdleConnections(time.Now(), memoryResetIdle, memoryResetShare)
 	}
-	s.logger.Warn("Memory is near the extension limit; closed all connections",
-		"reason", reason, "footprintMiB", memory.Total()>>20, "closed", closed)
+	message := "Memory is near the extension limit; closed idle connections"
+	if all {
+		message = "Memory is near the extension limit; closed all connections"
+	}
+	s.logger.Warn(message, "reason", reason, "footprintMiB", memory.Total()>>20, "closed", closed, "connections", total)
 	return closed
 }
+
+// A memory reset first closes connections idle this long, the same idle
+// time after which the packet flow table evicts a flow, and at least half
+// of all connections, longest idle first.
+const (
+	memoryResetIdle  = 5 * time.Second
+	memoryResetShare = 0.5
+)
