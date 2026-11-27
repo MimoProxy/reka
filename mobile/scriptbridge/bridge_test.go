@@ -358,3 +358,70 @@ func TestPreflightCountsBodySize(t *testing.T) {
 		t.Fatalf("host started %d runs, want 1", starts)
 	}
 }
+
+// A run that finds the footprint too high reclaims memory and checks again
+// before it is skipped, and reclaims at most once per interval.
+func TestReclaimBeforeSkip(t *testing.T) {
+	footprint := uint64(40)
+	var starts, reclaims int
+	host := &fakeHost{}
+	b := New(host, Options{
+		Footprint: func() uint64 { return footprint }, SkipAbove: 35, DiscardAbove: 35,
+		Reclaim:         func() { reclaims++; footprint -= 10 },
+		ReclaimInterval: time.Second,
+	})
+	now := time.Unix(1000, 0)
+	b.now = func() time.Time { return now }
+	host.start = func(run uint64, _, _, _ []byte) {
+		starts++
+		b.Done(run, []byte(`{"called":true}`), nil, nil)
+	}
+	if _, err := b.Run(context.Background(), newJob()); err != nil {
+		t.Fatalf("run after reclaim: %v", err)
+	}
+	if reclaims != 1 || starts != 1 {
+		t.Fatalf("reclaims = %d, starts = %d; want 1, 1", reclaims, starts)
+	}
+
+	// Within the interval the bridge only checks again.
+	footprint = 40
+	now = now.Add(500 * time.Millisecond)
+	if _, err := b.Run(context.Background(), newJob()); !errors.Is(err, script.ErrLowMemory) {
+		t.Fatalf("run within the interval = %v, want a skip", err)
+	}
+	if reclaims != 1 || starts != 1 {
+		t.Fatalf("reclaims = %d, starts = %d; want 1, 1", reclaims, starts)
+	}
+
+	// After the interval it reclaims again.
+	now = now.Add(time.Second)
+	if _, err := b.Run(context.Background(), newJob()); err != nil {
+		t.Fatalf("run after the interval: %v", err)
+	}
+	if reclaims != 2 || starts != 2 {
+		t.Fatalf("reclaims = %d, starts = %d; want 2, 2", reclaims, starts)
+	}
+}
+
+// A result over the discard limit is kept when reclaiming brings the
+// footprint back under it.
+func TestReclaimBeforeDiscard(t *testing.T) {
+	footprint := uint64(10)
+	var purges, reclaims int
+	host := &fakeHost{purge: func() { purges++ }}
+	b := New(host, Options{
+		Footprint: func() uint64 { return footprint }, SkipAbove: 35, DiscardAbove: 35,
+		Reclaim:         func() { reclaims++; footprint = 30 },
+		ReclaimInterval: time.Second,
+	})
+	host.start = func(run uint64, _, _, _ []byte) {
+		footprint = 40
+		b.Done(run, []byte(`{"called":true}`), nil, nil)
+	}
+	if _, err := b.Run(context.Background(), newJob()); err != nil {
+		t.Fatalf("Run = %v, want the result kept", err)
+	}
+	if reclaims != 1 || purges != 0 {
+		t.Fatalf("reclaims = %d, purges = %d; want 1, 0", reclaims, purges)
+	}
+}

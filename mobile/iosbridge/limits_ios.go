@@ -5,6 +5,7 @@ package main
 import (
 	"runtime"
 	"runtime/debug"
+	"time"
 
 	"github.com/MimoProxy/reka/mobile/scriptbridge"
 	"github.com/sagernet/sing/common/memory"
@@ -72,10 +73,19 @@ const (
 	scriptDiscardAbove = 38 << 20
 )
 
+// Before skipping a run or discarding its result, the bridge returns free
+// Go memory to the system and checks again. Under app traffic the
+// extension held 34-37 MiB while Go held 5-6 MiB of idle heap, so nearly
+// every run was skipped although returning that heap would have made
+// room. A forced collection costs CPU, so it runs at most once a second,
+// the memory guard's armed sampling interval from sing-box's oomkiller.
+const scriptReclaimInterval = time.Second
+
 func scriptRunCost(bodyBytes int) uint64 {
 	return scriptRunBaseCost + scriptRunCostPerByte*uint64(bodyBytes)
 }
 
 var scriptOptions = scriptbridge.Options{
 	Footprint: memory.Total, SkipAbove: scriptSkipAbove, RunCost: scriptRunCost, DiscardAbove: scriptDiscardAbove,
+	Reclaim: debug.FreeOSMemory, ReclaimInterval: scriptReclaimInterval,
 }

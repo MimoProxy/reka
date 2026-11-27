@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/MimoProxy/reka/internal/script"
 )
@@ -36,6 +37,12 @@ type Options struct {
 	// response body bytes. Nil counts as zero.
 	RunCost      func(bodyBytes int) uint64
 	DiscardAbove uint64
+	// Reclaim returns free memory to the system. Before a run is skipped or
+	// its result discarded, the bridge reclaims once and checks again, so
+	// memory the runtime holds but does not use cannot stop a run. Calls
+	// are at least ReclaimInterval apart. Nil disables it.
+	Reclaim         func()
+	ReclaimInterval time.Duration
 }
 
 // Bridge implements script.Engine using a native host.
@@ -46,6 +53,11 @@ type Bridge struct {
 	mu   sync.Mutex
 	next uint64
 	runs map[uint64]*runState
+
+	// Runs that find the footprint too high wait here while one reclaims.
+	reclaimMu   sync.Mutex
+	reclaimedAt time.Time
+	now         func() time.Time
 }
 
 type runState struct {
@@ -68,7 +80,7 @@ var _ script.Engine = (*Bridge)(nil)
 
 // New returns an engine backed by host.
 func New(host Host, opts Options) *Bridge {
-	return &Bridge{host: host, opts: opts, runs: make(map[uint64]*runState)}
+	return &Bridge{host: host, opts: opts, runs: make(map[uint64]*runState), now: time.Now}
 }
 
 // Run hands the script to the host and waits for completion or cancellation.
@@ -85,7 +97,7 @@ func (b *Bridge) Run(ctx context.Context, job *script.Job) (script.Done, error) 
 		if b.opts.RunCost != nil {
 			cost = b.opts.RunCost(len(requestBody) + len(responseBody))
 		}
-		if b.opts.Footprint()+cost > b.opts.SkipAbove {
+		if b.overBudget(cost, b.opts.SkipAbove) {
 			return script.Done{}, script.ErrLowMemory
 		}
 	}
@@ -125,11 +137,37 @@ func (b *Bridge) Run(ctx context.Context, job *script.Job) (script.Done, error) 
 		// Done had already claimed the result when the deadline fired.
 		result = <-r.done
 	}
-	if b.opts.Footprint != nil && b.opts.Footprint() > b.opts.DiscardAbove {
+	if b.opts.Footprint != nil && b.overBudget(0, b.opts.DiscardAbove) {
 		b.host.Purge()
 		return script.Done{}, script.ErrMemoryExceeded
 	}
 	return result.decode()
+}
+
+// overBudget reports whether the footprint plus extra exceeds limit, even
+// after reclaiming free memory.
+func (b *Bridge) overBudget(extra, limit uint64) bool {
+	if b.opts.Footprint()+extra <= limit {
+		return false
+	}
+	if b.opts.Reclaim == nil {
+		return true
+	}
+	b.reclaim()
+	return b.opts.Footprint()+extra > limit
+}
+
+// reclaim runs Reclaim unless it ran within ReclaimInterval. Callers check
+// the footprint again either way, since a recent reclaim by another run
+// may already have freed the memory.
+func (b *Bridge) reclaim() {
+	b.reclaimMu.Lock()
+	defer b.reclaimMu.Unlock()
+	if !b.reclaimedAt.IsZero() && b.now().Sub(b.reclaimedAt) < b.opts.ReclaimInterval {
+		return
+	}
+	b.opts.Reclaim()
+	b.reclaimedAt = b.now()
 }
 
 func runContextError(ctx context.Context) error {
