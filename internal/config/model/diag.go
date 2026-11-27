@@ -109,12 +109,20 @@ func JoinPath(base string, segs ...string) string {
 	return base
 }
 
+// A Replacer builds its lookup table on first use, so the replacers are
+// shared: compiling a profile with module rules escapes thousands of
+// segments, and a new Replacer for each allocated a 6 KiB table every time.
+var (
+	segEscaper   = strings.NewReplacer("~", "~0", "/", "~1")
+	segUnescaper = strings.NewReplacer("~1", "/", "~0", "~")
+)
+
 // escapeSeg escapes "/" and "~" in a path segment as JSON Pointer does.
 func escapeSeg(s string) string {
 	if !strings.ContainsAny(s, "/~") {
 		return s
 	}
-	return strings.NewReplacer("~", "~0", "/", "~1").Replace(s)
+	return segEscaper.Replace(s)
 }
 
 // SplitPath splits a path into unescaped segments.
@@ -126,9 +134,8 @@ func SplitPath(p string) ([]string, error) {
 		return nil, fmt.Errorf("path %q must start with /", p)
 	}
 	segs := strings.Split(p[1:], "/")
-	r := strings.NewReplacer("~1", "/", "~0", "~")
 	for i, s := range segs {
-		segs[i] = r.Replace(s)
+		segs[i] = segUnescaper.Replace(s)
 	}
 	return segs, nil
 }
