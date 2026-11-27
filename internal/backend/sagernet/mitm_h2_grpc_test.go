@@ -349,7 +349,8 @@ func TestMITMHTTP2OversizeResponseStreams(t *testing.T) {
 }
 
 // Scripts written for Surge read HTTP/2 fields by their lowercase wire names,
-// for example $request.headers.te or $response.headers["grpc-status"].
+// for example $request.headers.te or $response.headers["grpc-status"]. An
+// HTTP/2 client gets lowercase response names even from an HTTP/1.1 origin.
 func TestMITMScriptHeaderNamesFollowProtocol(t *testing.T) {
 	host := script.NewHost(gojaengine.New(), script.Limits{}, script.Environment{})
 	t.Cleanup(host.Close)
@@ -374,7 +375,7 @@ func TestMITMScriptHeaderNamesFollowProtocol(t *testing.T) {
 		requestNames, response string
 	}{
 		{true, true, "accept-encoding,content-length,content-type,host,te,user-agent,x-request-te", "bili-status-code,content-length,content-type,date,x-request-te"},
-		{true, false, "accept-encoding,content-length,content-type,host,te,user-agent,x-request-te", "Bili-Status-Code,Content-Type,Date,X-Request-Te"},
+		{true, false, "accept-encoding,content-length,content-type,host,te,user-agent,x-request-te", "bili-status-code,content-type,date,x-request-te"},
 		{false, true, "Accept-Encoding,Content-Length,Content-Type,Host,Te,User-Agent,X-Request-Te", "bili-status-code,content-length,content-type,date,x-request-te"},
 	} {
 		t.Run(strconv.FormatBool(tt.clientH2)+"/"+strconv.FormatBool(tt.originH2), func(t *testing.T) {

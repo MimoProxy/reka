@@ -138,7 +138,13 @@ func (v mitmScriptInput) scriptInput(match *MITMScript, buffer mitmBufferedBody)
 	if v.response == nil {
 		input.Request.Body = body
 	} else {
-		input.Response = &script.Response{Status: v.response.StatusCode, Headers: mitmScriptHeaders(v.response.Header, v.responseH2), Body: body}
+		// The app reads the response over its own connection, so an HTTP/2
+		// client sees lowercase names even when the origin answered over
+		// HTTP/1.1, which mitmUpstream prefers. Surge reaches such origins
+		// over HTTP/2, and scripts written for it read names such as
+		// headers["bili-status-code"] in lowercase.
+		h2 := v.responseH2 || requestH2
+		input.Response = &script.Response{Status: v.response.StatusCode, Headers: mitmScriptHeaders(v.response.Header, h2), Body: body}
 	}
 	return input, nil
 }
