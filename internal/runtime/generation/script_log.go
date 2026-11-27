@@ -23,8 +23,19 @@ func (e *Engine) recordMITMScriptRun(g *generation, run api.MITMScriptRun, reque
 		RequestID: request.RequestID, ConnectionID: request.ConnectionID,
 		StartedAt: request.Started.UTC(), DurationMS: run.DurationMS, Result: run.Result, Error: run.Error,
 	}
-	e.history.Record(history.Scripts, g.historyScope, request.Started, entry, nil)
+	var detail any
+	if request.Capture != nil {
+		detail = request.Capture
+	}
+	e.history.Record(history.Scripts, g.historyScope, request.Started, entry, detail)
 }
+
+// SetScriptCapture turns on or off keeping each HTTP script's input and
+// output with its run in the script history.
+func (e *Engine) SetScriptCapture(enabled bool) { e.scriptCapture.Store(enabled) }
+
+// ScriptCapture reports whether HTTP script runs keep their input and output.
+func (e *Engine) ScriptCapture() bool { return e.scriptCapture.Load() }
 
 // recordBackgroundScriptRun keeps the run's logs and value as the entry's detail.
 func (e *Engine) recordBackgroundScriptRun(run api.ScriptRun) {

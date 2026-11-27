@@ -296,6 +296,7 @@ func (e *Engine) newMITMRoute(snap *runtime.Snapshot[*sagernet.Outbound], state 
 			e.scriptPressure.noteMITM(run, executed)
 			e.recordMITMScriptRun(g, run, request)
 		}
+		route.CaptureScripts = e.scriptCapture.Load
 	}
 	if g.httpEngine.reroute {
 		// Capture metadata only on routes that can change the destination.

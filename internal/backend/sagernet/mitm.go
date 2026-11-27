@@ -28,6 +28,8 @@ type MITMScriptRequest struct {
 	RequestID    uint64
 	ConnectionID uint64
 	Started      time.Time
+	// Capture is what the script saw and returned, when CaptureScripts asked for it.
+	Capture *api.ScriptCapture
 }
 
 // MITMRoute contains the HTTP processing settings pinned by Route.Release, with an
@@ -52,6 +54,9 @@ type MITMRoute struct {
 	OnRequest    func()
 	MatchScript  func(kind script.Kind, rawURL string) *MITMScript
 	OnScript     func(run api.MITMScriptRun, executed bool, request MITMScriptRequest)
+	// CaptureScripts reports whether OnScript should receive each script's
+	// input and output. Copying bodies costs memory, so it is off unless asked.
+	CaptureScripts func() bool
 }
 
 func (b *Backend) relayHTTPEngine(ctx context.Context, rt Route, conn net.Conn, metadata adapter.InboundContext, originalDestination string, onClose N.CloseHandlerFunc, attempt *connectionAttempt) {

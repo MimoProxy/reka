@@ -89,7 +89,16 @@ func (s *mitmHTTPHandler) runScript(ctx context.Context, match *MITMScript, inpu
 	}
 	run.DurationMS = time.Since(start).Milliseconds()
 	run.Result, run.Error = mitmScriptOutcome(result.Action, err)
+	if s.route.CaptureScripts != nil && s.route.CaptureScripts() && job != nil {
+		// Only a finished run has a result to show.
+		var output *script.Result
+		if run.Result == "modified" || run.Result == "passed" {
+			output = &result
+		}
+		stats.request.Capture = captureScript(job, output)
+	}
 	s.recordScript(stats, run, executed, start)
+	stats.request.Capture = nil
 	return run.Result == "oversize"
 }
 

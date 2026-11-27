@@ -28,3 +28,46 @@ type ScriptLogEntry struct {
 	Result       string    `json:"result"`
 	Error        string    `json:"error,omitempty"`
 }
+
+// ScriptCapture is what an HTTP script saw and what it returned. Bodies are
+// previews: a client sees their full size and whether they were cut.
+type ScriptCapture struct {
+	Request  ScriptMessage  `json:"request"`
+	Response *ScriptMessage `json:"response,omitempty"`
+	Output   *ScriptOutput  `json:"output,omitempty"`
+}
+
+// ScriptMessage is an HTTP request or response as a script handled it.
+type ScriptMessage struct {
+	Method  string         `json:"method,omitempty"`
+	URL     string         `json:"url,omitempty"`
+	Status  int            `json:"status,omitempty"`
+	Headers []ScriptHeader `json:"headers,omitempty"`
+	Body    *ScriptBody    `json:"body,omitempty"`
+}
+
+type ScriptHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// ScriptBody holds the start of a body as UTF-8 text or, for binary data, as
+// standard base64.
+type ScriptBody struct {
+	Size      int    `json:"size"`
+	Text      string `json:"text,omitempty"`
+	Base64    string `json:"base64,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+// ScriptOutput is a script's $done result. Action is pass, modify, respond
+// or abort. Fields a script left unchanged are omitted.
+type ScriptOutput struct {
+	Action     string         `json:"action"`
+	URL        string         `json:"url,omitempty"`
+	Status     int            `json:"status,omitempty"`
+	HeadersSet bool           `json:"headers_set,omitempty"`
+	Headers    []ScriptHeader `json:"headers,omitempty"`
+	Body       *ScriptBody    `json:"body,omitempty"`
+	Response   *ScriptMessage `json:"response,omitempty"`
+}

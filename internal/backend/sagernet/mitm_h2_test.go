@@ -432,6 +432,7 @@ func TestMITMHTTP2RewritesAndScripts(t *testing.T) {
 			scriptRequests = append(scriptRequests, request)
 			scriptMu.Unlock()
 		},
+		CaptureScripts: func() bool { return true },
 		MatchScript: func(kind script.Kind, url string) *MITMScript {
 			if url != newURL {
 				t.Errorf("unexpected script match %s %s", kind, url)
@@ -505,6 +506,10 @@ func TestMITMHTTP2RewritesAndScripts(t *testing.T) {
 			}
 			if len(scriptRequests) != 2 {
 				t.Errorf("script requests = %+v", scriptRequests)
+			} else if in, out := scriptRequests[0].Capture, scriptRequests[1].Capture; in == nil || out == nil ||
+				in.Request.Body.Text != "request rewritten" || in.Output.Body.Text != "request scripted" ||
+				out.Response.Body.Text != "response rewritten" || out.Output.Body.Text != "response scripted" || out.Output.Action != "modify" {
+				t.Errorf("script captures = %+v, %+v", in, out)
 			}
 			scriptMu.Unlock()
 			if !slices.Equal(row.MatchedIDs, wantMatches) || len(row.Scripts) != 2 ||

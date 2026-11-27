@@ -30,12 +30,26 @@ func TestScriptHistoryRecordsRuns(t *testing.T) {
 	started := time.Now()
 	e.recordMITMScriptRun(g, api.MITMScriptRun{ID: "ads", Phase: "response", DurationMS: 12, Result: "modified"},
 		sagernet.MITMScriptRequest{Method: "GET", URL: "https://example.test/feed", RequestID: 7, ConnectionID: 3, Started: started})
+	e.SetScriptCapture(true)
+	if !e.ScriptCapture() {
+		t.Fatal("capture did not turn on")
+	}
+	e.recordMITMScriptRun(g, api.MITMScriptRun{ID: "ads", Phase: "response", Result: "passed"},
+		sagernet.MITMScriptRequest{Started: started, Capture: &api.ScriptCapture{
+			Request: api.ScriptMessage{URL: "https://example.test/feed"}, Output: &api.ScriptOutput{Action: "pass"},
+		}})
 
 	store, scope := e.History()
 	page, err := store.List(history.Scripts, scope.ProfileID, history.ListOptions{})
-	if err != nil || len(page.Rows) != 2 {
+	if err != nil || len(page.Rows) != 3 {
 		t.Fatalf("script history = %+v, %v", page, err)
 	}
+	var capture api.ScriptCapture
+	if data, ok := store.Detail(history.Scripts, scope.ProfileID, page.Rows[0].Cursor); !ok ||
+		json.Unmarshal(data, &capture) != nil || capture.Output == nil || capture.Output.Action != "pass" {
+		t.Errorf("captured detail = %s, %v", data, ok)
+	}
+	page.Rows = page.Rows[1:]
 	var http, background api.ScriptLogEntry
 	if json.Unmarshal(page.Rows[0].Data, &http) != nil || json.Unmarshal(page.Rows[1].Data, &background) != nil {
 		t.Fatalf("rows = %s, %s", page.Rows[0].Data, page.Rows[1].Data)

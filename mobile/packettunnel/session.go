@@ -45,10 +45,13 @@ const (
 	// 1.3 KiB with its search text, so 256 rows add about 230 KiB.
 	requestEventRows  = 256
 	requestEventBytes = 320 << 10
-	// A script run row takes about 1 KiB with its search text. A background
-	// run also keeps up to 16 KiB of logs and value as its detail.
+	// A script run row takes about 1 KiB with its search text, so 128 rows
+	// use about 128 KiB. A background run also keeps up to 16 KiB of logs and
+	// value, and with capture on an HTTP run keeps up to about 50 KiB of input
+	// and output. The byte limit is a ceiling, not an allocation: it is only
+	// reached while capture is on, and then holds about 20 captured runs.
 	scriptEventRows  = 128
-	scriptEventBytes = 192 << 10
+	scriptEventBytes = 1 << 20
 )
 
 var configuredMTU atomic.Int32

@@ -46,6 +46,7 @@ type Operation struct {
 	Members    []string             `json:"members,omitempty"`
 	Rounds     int                  `json:"rounds,omitempty"`
 	DNS        *api.DNSQueryRequest `json:"dns,omitempty"`
+	Enabled    *bool                `json:"enabled,omitempty"`
 }
 
 type ConnectionRow struct {
@@ -119,6 +120,14 @@ func (s *Session) RunOperation(op Operation) (any, error) {
 		return s.historyPage(history.DNS, op)
 	case "logs":
 		return s.historyPage(history.Logs, op)
+	case "scriptCapture":
+		if s.profile == nil {
+			return nil, errors.New("the operation requires a profile")
+		}
+		if op.Enabled != nil {
+			s.profile.engine.SetScriptCapture(*op.Enabled)
+		}
+		return map[string]bool{"enabled": s.profile.engine.ScriptCapture()}, nil
 	case "scripts", "runScript", "scriptRuns":
 		if s.profile == nil {
 			return nil, errors.New("the operation requires a profile")

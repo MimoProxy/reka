@@ -154,9 +154,11 @@ type Engine struct {
 	scriptStore          *scriptStore
 	scriptNotifications  *scriptNotifications
 	scriptRuns           mitmScriptCounters
-	scriptPressure       scriptPressure
-	backgroundScripts    backgroundScripts
-	scriptClashPort      atomic.Uint32
+	// scriptCapture asks MITM scripts to keep their input and output.
+	scriptCapture     atomic.Bool
+	scriptPressure    scriptPressure
+	backgroundScripts backgroundScripts
+	scriptClashPort   atomic.Uint32
 
 	mu        sync.Mutex
 	listeners map[string]*listener
