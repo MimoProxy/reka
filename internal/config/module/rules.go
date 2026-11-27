@@ -1,6 +1,7 @@
 package module
 
 import (
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -107,7 +108,10 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 			// differently.
 			notes = appendNote(notes, extendedMatchingNote)
 		default:
-			ignoredModifier = true
+			key, setting, _ := strings.Cut(strings.TrimSpace(modifier), "=")
+			if _, valid := updateInterval(setting); !valid || !strings.EqualFold(key, "update-interval") || !remoteRuleSetKind(kind) {
+				ignoredModifier = true
+			}
 		}
 	}
 	if kind == "URL-REGEX" || kind == "USER-AGENT" {
@@ -168,8 +172,16 @@ func ruleCondition(kind, value string, modifiers []string, depth int) (model.Mat
 		}
 		m = model.Match{Kind: "domain-regex", Values: []string{pattern}}
 	case "RULE-SET", "DOMAIN-SET":
+		if remoteURL(value) {
+			if depth > 0 {
+				return m, unsupported("module.rule-resource", "a remote rule set cannot be nested in a logical rule")
+			}
+			// The converter replaces the URL with the locked rule set.
+			m = model.Match{Kind: resourceKind(kind), Values: []string{value}}
+			break
+		}
 		if strings.Contains(value, ":") || strings.HasPrefix(value, "/") {
-			return m, unsupported("module.rule-resource", "modules cannot obtain rule sets from URLs or files")
+			return m, unsupported("module.rule-resource", "modules cannot read rule sets from files")
 		}
 		m = model.Match{Kind: "rule-set", Values: []string{value}}
 	case "PROTOCOL":
@@ -334,6 +346,42 @@ func ruleTarget(policy string, resolve func(string) (string, bool)) (string, boo
 
 func regexRule(kind string) bool {
 	return kind == "DOMAIN-REGEX" || kind == "PROCESS-NAME-REGEX" || kind == "PROCESS-PATH-REGEX" || kind == "URL-REGEX"
+}
+
+func remoteRuleSetKind(kind string) bool { return kind == "RULE-SET" || kind == "DOMAIN-SET" }
+
+func resourceKind(kind string) string {
+	if kind == "DOMAIN-SET" {
+		return DomainSetKind
+	}
+	return RuleSetKind
+}
+
+func remoteURL(value string) bool {
+	lower := strings.ToLower(value)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Hostname() != "" && parsed.Fragment == ""
+}
+
+// remoteRuleSet returns the list a RULE-SET or DOMAIN-SET rule downloads.
+func remoteRuleSet(line string) (RuleSetReference, bool) {
+	kind, payload, _ := strings.Cut(line, ",")
+	kind = strings.ToUpper(strings.TrimSpace(kind))
+	args, err := router.SplitClash(payload)
+	if !remoteRuleSetKind(kind) || err != nil || len(args) < 2 || !remoteURL(args[0]) {
+		return RuleSetReference{}, false
+	}
+	ref := RuleSetReference{Kind: resourceKind(kind), ResourceReference: ResourceReference{URL: args[0]}}
+	for _, modifier := range args[2:] {
+		key, value, _ := strings.Cut(strings.TrimSpace(modifier), "=")
+		if strings.EqualFold(key, "update-interval") {
+			ref.Interval, _ = updateInterval(value)
+		}
+	}
+	return ref, true
 }
 
 func badRule() outcome { return unsupported("module.rule-syntax", "invalid module rule syntax") }

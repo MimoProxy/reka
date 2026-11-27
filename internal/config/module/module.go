@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
@@ -31,16 +33,18 @@ type Options struct {
 type Result struct {
 	TailscaleReferences []TailscaleReference
 	Rules               []model.Rule
-	HTTPRewrites        []model.HTTPRewrite
-	HeaderRewrites      []model.HeaderRewrite
-	BodyRewrites        []model.BodyRewrite
-	MapLocal            []model.MapLocal
-	Scripts             []model.Script
-	MITM                model.MITM
-	InsertHostnames     []Hostname
-	AppendHostnames     []Hostname
-	ItemLines           map[string]int
-	MITMLines           map[string]int
+	// RuleSets are the remote lists that Rules refer to, locked like scripts.
+	RuleSets        []model.RuleSet
+	HTTPRewrites    []model.HTTPRewrite
+	HeaderRewrites  []model.HeaderRewrite
+	BodyRewrites    []model.BodyRewrite
+	MapLocal        []model.MapLocal
+	Scripts         []model.Script
+	MITM            model.MITM
+	InsertHostnames []Hostname
+	AppendHostnames []Hostname
+	ItemLines       map[string]int
+	MITMLines       map[string]int
 }
 
 // TailscaleReference is a module's name for the device-local Tailscale node.
@@ -150,6 +154,8 @@ type converter struct {
 	report Report
 	opts   Options
 	seen   map[string]int
+	// ruleSets maps a remote list's kind and URL to its profile ID.
+	ruleSets map[string]string
 }
 
 // Convert parses a module using the supplied arguments and already available
@@ -162,7 +168,7 @@ func Convert(text []byte, opts Options) (*Result, Report) {
 		result: Result{ItemLines: make(map[string]int), MITMLines: make(map[string]int)},
 		report: Report{ModuleID: opts.ID, Format: opts.Format, CanApply: true},
 		opts:   opts,
-		seen:   make(map[string]int),
+		seen:   make(map[string]int), ruleSets: make(map[string]string),
 	}
 	if len(text) > model.MaxDocumentSize {
 		c.report.record(0, "", failed("module.size", "module exceeds the document size limit"))
@@ -260,15 +266,72 @@ func (c *converter) convertLine(line int, section, raw, expanded string) outcome
 }
 
 func (c *converter) addRule(line int, rule model.Rule, issue outcome) outcome {
+	var ruleSet string
+	if !issue.skips() && (rule.Match.Kind == RuleSetKind || rule.Match.Kind == DomainSetKind) && remoteURL(rule.Match.Values[0]) {
+		var missing outcome
+		if ruleSet, missing = c.addRuleSet(line, rule.Match.Kind, rule.Match.Values[0]); missing.skips() {
+			issue = missing
+		}
+	}
 	c.report.Rules.record(!issue.skips())
 	if !issue.skips() {
+		// Identify the rule by its declaration, so overlays survive list updates.
 		rule.ID = c.id("r", struct {
 			Match    model.Match
 			Outbound string
 		}{rule.Match, rule.Outbound}, line)
+		if ruleSet != "" {
+			rule.Match.Kind, rule.Match.Values = "rule-set", []string{ruleSet}
+		}
 		c.result.Rules = append(c.result.Rules, rule)
 	}
 	return issue
+}
+
+// addRuleSet defines the locked rule set for a remote list once per module
+// and returns the profile ID that rules use to refer to it.
+func (c *converter) addRuleSet(line int, kind, url string) (string, outcome) {
+	key := kind + " " + url
+	if id, ok := c.ruleSets[key]; ok {
+		return id, outcome{}
+	}
+	hash := c.opts.resourceHash(kind, url)
+	if hash == "" {
+		return "", unsupported("module.rule-set-unavailable", "module rule set is not downloaded; refresh the module")
+	}
+	set := model.RuleSet{
+		ID: c.id("l", struct{ Kind, URL string }{kind, url}, line), Name: listName(url),
+		Behavior: RuleSetBehavior(kind), Format: "surge", Hash: hash,
+	}
+	c.result.RuleSets = append(c.result.RuleSets, set)
+	// The compiler scopes module items by the module ID.
+	id := set.ID
+	if c.opts.ID != "" {
+		id = c.opts.ID + "/" + id
+	}
+	c.ruleSets[key] = id
+	return id, outcome{}
+}
+
+// RuleSetBehavior is the rule-set behavior a remote list kind compiles to.
+func RuleSetBehavior(kind string) string {
+	if kind == DomainSetKind {
+		return "domain"
+	}
+	return "classical"
+}
+
+// listName is the file name of a list URL, shown in place of the rule-set ID.
+func listName(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	name := path.Base(strings.TrimSuffix(parsed.Path, "/"))
+	if name == "." || name == "/" {
+		return ""
+	}
+	return name
 }
 
 func (o Options) resourceHash(kind, url string) string {

@@ -12,9 +12,30 @@ import (
 )
 
 type ResourceReferences struct {
-	MapLocal []string
+	MapLocal []ResourceReference
 	Scripts  []ScriptReference
+	RuleSets []RuleSetReference
 }
+
+// ResourceReference identifies a remote resource and its refresh interval in
+// seconds. A zero interval uses the module's interval.
+type ResourceReference struct {
+	URL      string
+	Interval int
+}
+
+// RuleSetReference is a remote RULE-SET or DOMAIN-SET list. Kind is the
+// resource lock kind, RuleSetKind or DomainSetKind.
+type RuleSetReference struct {
+	Kind string
+	ResourceReference
+}
+
+// Resource lock kinds for remote rule lists in modules.
+const (
+	RuleSetKind   = "rule-set"
+	DomainSetKind = "domain-set"
+)
 
 // Inspect returns metadata and deduplicated remote references after argument
 // substitution. It uses the optional module interval for scripts that inherit
@@ -31,10 +52,12 @@ func Inspect(text []byte, arguments map[string]string, moduleInterval ...int) (M
 		}
 		switch section {
 		case "map local":
-			_, url, issue := parseMapLocal(expanded)
+			_, ref, issue := parseMapLocal(expanded)
 			if !issue.skips() {
-				collector.mapLocal(url)
+				collector.mapLocal(ref)
 			}
+		case "rule":
+			collector.ruleSet(expanded)
 		case "script":
 			_, ref, issue := parseScript(expanded)
 			if !issue.skips() {
@@ -46,10 +69,11 @@ func Inspect(text []byte, arguments map[string]string, moduleInterval ...int) (M
 }
 
 type referenceCollector struct {
-	refs          ResourceReferences
-	mapLocalSeen  map[string]bool
-	scriptIndices map[string]int
-	interval      int
+	refs            ResourceReferences
+	mapLocalIndices map[string]int
+	scriptIndices   map[string]int
+	ruleSetIndices  map[RuleSetReference]int
+	interval        int
 }
 
 func newReferenceCollector(interval int) *referenceCollector {
@@ -57,27 +81,55 @@ func newReferenceCollector(interval int) *referenceCollector {
 		interval = model.DefaultResourceInterval
 	}
 	return &referenceCollector{
-		mapLocalSeen: make(map[string]bool), scriptIndices: make(map[string]int), interval: interval,
+		mapLocalIndices: make(map[string]int), scriptIndices: make(map[string]int),
+		ruleSetIndices: make(map[RuleSetReference]int), interval: interval,
 	}
 }
 
-func (c *referenceCollector) mapLocal(url string) {
-	if url != "" && !c.mapLocalSeen[url] {
-		c.mapLocalSeen[url] = true
-		c.refs.MapLocal = append(c.refs.MapLocal, url)
+// Surge uses the first Map Local interval for a URL; scripts and rule sets
+// take the shortest so every declaration is refreshed at least as often as it
+// asks.
+func (c *referenceCollector) mapLocal(ref ResourceReference) {
+	if ref.URL == "" {
+		return
+	}
+	if _, seen := c.mapLocalIndices[ref.URL]; !seen {
+		c.mapLocalIndices[ref.URL] = len(c.refs.MapLocal)
+		c.refs.MapLocal = append(c.refs.MapLocal, c.withInterval(ref))
 	}
 }
 
 func (c *referenceCollector) script(ref ScriptReference) {
-	if ref.Interval == 0 {
-		ref.Interval = c.interval
-	}
+	ref = c.withInterval(ref)
 	if i, seen := c.scriptIndices[ref.URL]; seen {
 		c.refs.Scripts[i].Interval = min(c.refs.Scripts[i].Interval, ref.Interval)
 		return
 	}
 	c.scriptIndices[ref.URL] = len(c.refs.Scripts)
 	c.refs.Scripts = append(c.refs.Scripts, ref)
+}
+
+// ruleSet records the remote list named by a module rule line, if any.
+func (c *referenceCollector) ruleSet(line string) {
+	ref, ok := remoteRuleSet(line)
+	if !ok {
+		return
+	}
+	ref.ResourceReference = c.withInterval(ref.ResourceReference)
+	key := RuleSetReference{Kind: ref.Kind, ResourceReference: ResourceReference{URL: ref.URL}}
+	if i, seen := c.ruleSetIndices[key]; seen {
+		c.refs.RuleSets[i].Interval = min(c.refs.RuleSets[i].Interval, ref.Interval)
+		return
+	}
+	c.ruleSetIndices[key] = len(c.refs.RuleSets)
+	c.refs.RuleSets = append(c.refs.RuleSets, ref)
+}
+
+func (c *referenceCollector) withInterval(ref ResourceReference) ResourceReference {
+	if ref.Interval == 0 {
+		ref.Interval = c.interval
+	}
+	return ref
 }
 
 func scan(text []byte, supplied map[string]string, visit func(int, string, string, string, outcome)) (Metadata, model.Diagnostics) {

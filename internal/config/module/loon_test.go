@@ -104,7 +104,7 @@ proxy = direct
 		t.Fatalf("quoted argument should remain a string: %+v", got.Scripts[1])
 	}
 	metadata, refs := InspectWithOptions([]byte(input), options)
-	if !reflect.DeepEqual(metadata, report.Metadata) || !slices.Equal(refs.MapLocal, []string{"https://example.test/content"}) ||
+	if !reflect.DeepEqual(metadata, report.Metadata) || !slices.Equal(refURLs(refs.MapLocal), []string{"https://example.test/content"}) ||
 		!slices.Equal(refs.Scripts, []ScriptReference{{"https://example.test/script.js", 600}}) {
 		t.Fatalf("incorrect inspection %+v, %+v", metadata, refs)
 	}

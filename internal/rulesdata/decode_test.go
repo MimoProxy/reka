@@ -146,3 +146,21 @@ func FuzzDecodeMRS(f *testing.F) {
 		_, _ = Decode("ipcidr", "mrs", "", b)
 	})
 }
+
+func TestSurgeLists(t *testing.T) {
+	specs, err := Decode("domain", "surge", "", []byte("; comment\n.example.test\nexact.test\n*.wild.test\nbad..name\n"))
+	if err != nil || len(specs) != 2 || specs[0].Kind != router.KindDomain || specs[0].Values[0] != "exact.test" ||
+		specs[1].Kind != router.KindDomainSuffix || specs[1].Values[0] != "example.test" {
+		t.Fatalf("domain list = %+v, %v", specs, err)
+	}
+	specs, err = Decode("classical", "surge", "", []byte("DOMAIN-SUFFIX,a.test,extended-matching\nDEST-PORT,443\nSRC-IP,192.0.2.1\nSCRIPT,x\nRULE-SET,other\nIP-CIDR,192.0.2.0/24,no-resolve\n"))
+	if err != nil || len(specs) != 4 || specs[1].Kind != router.KindDstPort || specs[2].Kind != router.KindSrcIPCIDR || !specs[3].NoResolve {
+		t.Fatalf("classical list = %+v, %v", specs, err)
+	}
+	if _, err := Decode("classical", "surge", "", []byte("SCRIPT,x\n")); err == nil {
+		t.Error("a list with no usable lines was accepted")
+	}
+	if _, err := Decode("ipcidr", "surge", "", []byte("192.0.2.0/24\n")); err == nil {
+		t.Error("an ipcidr Surge list was accepted")
+	}
+}

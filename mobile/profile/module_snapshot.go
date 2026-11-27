@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/config/model"
+	"github.com/MimoProxy/reka/internal/config/module"
 	"github.com/MimoProxy/reka/internal/config/moduleacquire"
 	"github.com/MimoProxy/reka/internal/httprewrite"
 	"github.com/MimoProxy/reka/internal/resource"
@@ -52,7 +53,7 @@ func (s *ModuleSnapshot) valid() bool {
 	source := s.Source
 	if s.Version != moduleSnapshotVersion || source.ID == "" ||
 		!model.ValidModuleFormat(source.Module.Format) || !resource.ValidHash(source.Module.Request) ||
-		len(source.Lock.Resources) > model.MaxModuleResources+model.MaxModuleScripts ||
+		len(source.Lock.Resources) > model.MaxModuleLocks ||
 		len(s.ScriptErrors) > model.MaxModuleScripts {
 		return false
 	}
@@ -74,6 +75,8 @@ func (s *ModuleSnapshot) valid() bool {
 			limit = httprewrite.MaxMapLocalSize
 		case "script":
 			limit = model.MaxScriptSize
+		case module.RuleSetKind, module.DomainSetKind:
+			limit = model.MaxModuleRuleSetSize
 		default:
 			return false
 		}
@@ -84,6 +87,7 @@ func (s *ModuleSnapshot) valid() bool {
 		total += len(s.Resources[lock.Hash])
 	}
 	if counts["map-local"] > model.MaxModuleResources || counts["script"] > model.MaxModuleScripts ||
+		counts[module.RuleSetKind]+counts[module.DomainSetKind] > model.MaxModuleRuleSets ||
 		len(s.Resources) != len(limits) || total > moduleacquire.MaxBundleSize {
 		return false
 	}

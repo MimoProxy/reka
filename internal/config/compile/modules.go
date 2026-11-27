@@ -14,6 +14,7 @@ import (
 
 type moduleLayer struct {
 	result   *module.Result
+	ruleSets []*yaml.Node
 	rules    []*yaml.Node
 	rewrites map[string][]*yaml.Node
 }
@@ -31,7 +32,7 @@ func validateModuleSnapshot(src model.Source, node *yaml.Node) error {
 	if !model.ValidModuleFormat(src.Module.Format) || !resource.ValidHash(src.Module.Request) {
 		return errors.New("invalid module format or request identity")
 	}
-	if src.Lock == nil || !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > model.MaxModuleResources+model.MaxModuleScripts {
+	if src.Lock == nil || !resource.ValidHash(src.Lock.Root) || len(src.Lock.Resources) > model.MaxModuleLocks {
 		return errors.New("invalid module resource lock")
 	}
 	requests := map[moduleResourceKey]bool{}
@@ -40,7 +41,7 @@ func validateModuleSnapshot(src model.Source, node *yaml.Node) error {
 	for _, locked := range src.Lock.Resources {
 		request := moduleResourceKey{locked.Kind, locked.Request}
 		id := moduleResourceKey{locked.Kind, locked.ID}
-		if (locked.Kind != "map-local" && locked.Kind != "script") || !idRE.MatchString(locked.ID) || !strings.HasPrefix(locked.Request, locked.ID) ||
+		if !moduleResourceKinds[locked.Kind] || !idRE.MatchString(locked.ID) || !strings.HasPrefix(locked.Request, locked.ID) ||
 			!resource.ValidHash(locked.Request) || !resource.ValidHash(locked.Hash) || requests[request] || ids[id] {
 			return errors.New("invalid or duplicate module resource lock")
 		}
@@ -48,11 +49,14 @@ func validateModuleSnapshot(src model.Source, node *yaml.Node) error {
 		ids[id] = true
 		counts[locked.Kind]++
 	}
-	if counts["map-local"] > model.MaxModuleResources || counts["script"] > model.MaxModuleScripts {
+	if counts["map-local"] > model.MaxModuleResources || counts["script"] > model.MaxModuleScripts ||
+		counts[module.RuleSetKind]+counts[module.DomainSetKind] > model.MaxModuleRuleSets {
 		return errors.New("invalid module resource lock")
 	}
 	return nil
 }
+
+var moduleResourceKinds = map[string]bool{"map-local": true, "script": true, module.RuleSetKind: true, module.DomainSetKind: true}
 
 type modulePolicies struct {
 	ids       map[string]bool
@@ -206,6 +210,17 @@ func (c *compiler) moduleNodes(id string, result *module.Result) moduleLayer {
 		put(n, "id", scalar(scoped))
 		c.scopedIDs[scoped] = true
 		c.origins[model.JoinPath("", kind, scoped)] = moduleOrigin(id, result.ItemLines[itemID])
+	}
+	for _, set := range result.RuleSets {
+		n := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		record("rule-sets", set.ID, n)
+		if set.Name != "" {
+			put(n, "name", scalar(set.Name))
+		}
+		put(n, "behavior", scalar(set.Behavior))
+		put(n, "format", scalar(set.Format))
+		put(n, "hash", scalar(set.Hash))
+		layer.ruleSets = append(layer.ruleSets, n)
 	}
 	for _, rule := range result.Rules {
 		n := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}

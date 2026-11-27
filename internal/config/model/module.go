@@ -18,8 +18,16 @@ const (
 	ModuleFormatStash = "stash"
 
 	MaxModuleResources = 32
-	ModuleMinInterval  = 300
-	ModuleMaxInterval  = 604800
+	// MaxModuleRuleSets and MaxModuleRuleSetSize bound the RULE-SET and
+	// DOMAIN-SET lists one module downloads. Neither sing-box nor mihomo
+	// limits rule providers; these keep a module's lists within the module
+	// bundle, which the iOS app holds in memory while refreshing.
+	MaxModuleRuleSets    = 32
+	MaxModuleRuleSetSize = 8 << 20
+	// MaxModuleLocks bounds every resource a module snapshot pins.
+	MaxModuleLocks    = MaxModuleResources + MaxModuleRuleSets + MaxModuleScripts
+	ModuleMinInterval = 300
+	ModuleMaxInterval = 604800
 )
 
 // Module declares an external module and its profile-specific settings.

@@ -29,7 +29,7 @@ type loonLine struct {
 	headerRewrite *model.HeaderRewrite
 	bodyRewrite   *model.BodyRewrite
 	mapLocal      *model.MapLocal
-	mapURL        string
+	mapRef        ResourceReference
 }
 
 func (c *converter) convertLoon(text []byte) (Metadata, model.Diagnostics) {
@@ -50,7 +50,7 @@ func (c *converter) convertLoon(text []byte) (Metadata, model.Diagnostics) {
 				case row.bodyRewrite != nil:
 					c.addBodyRewrite(row.number, *row.bodyRewrite)
 				case row.mapLocal != nil:
-					issue = c.addMapLocal(row.number, *row.mapLocal, row.mapURL)
+					issue = c.addMapLocal(row.number, *row.mapLocal, row.mapRef.URL)
 				}
 			}
 			c.report.Rewrites.record(issue.status == "")
@@ -102,7 +102,10 @@ func inspectLoon(text []byte, supplied map[string]string, interval int) (Metadat
 		if row.script {
 			collector.script(row.scriptRef)
 		}
-		collector.mapLocal(row.mapURL)
+		collector.mapLocal(row.mapRef)
+		if row.section == "rule" {
+			collector.ruleSet(row.text)
+		}
 	})
 	return metadata, collector.refs
 }
@@ -189,8 +192,8 @@ func scanLoon(text []byte, supplied map[string]string, visit func(loonLine, loon
 				case row.script:
 					row.scriptSpec, row.scriptRef, row.issue = parseLoonScript(expanded, args, remaining)
 				case section == "map local":
-					result, url, issue := parseMapLocal(expanded)
-					row.mapLocal, row.mapURL, row.issue = &result, url, issue
+					result, ref, issue := parseMapLocal(expanded)
+					row.mapLocal, row.mapRef, row.issue = &result, ref, issue
 				case row.rewrite:
 					row.parseRewrite()
 				}

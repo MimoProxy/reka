@@ -111,7 +111,7 @@ func walk(behavior, format, code string, data []byte, visit func(router.RuleSpec
 	switch format {
 	case "mrs":
 		entries, err = decodeMRS(behavior, data)
-	case "text":
+	case "text", "surge":
 		if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
 			return errors.New("invalid rule text")
 		}
@@ -119,7 +119,8 @@ func walk(behavior, format, code string, data []byte, visit func(router.RuleSpec
 		scanner.Buffer(make([]byte, 4096), 1<<20)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
-			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") ||
+				format == "surge" && strings.HasPrefix(line, ";") {
 				continue
 			}
 			entries = append(entries, line)
@@ -147,6 +148,11 @@ func walk(behavior, format, code string, data []byte, visit func(router.RuleSpec
 	}
 	if err != nil {
 		return err
+	}
+	if format == "surge" {
+		if entries, err = surgeEntries(behavior, entries); err != nil {
+			return err
+		}
 	}
 	if len(entries) == 0 {
 		return errors.New("empty rule resource")

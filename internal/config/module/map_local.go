@@ -11,23 +11,25 @@ import (
 	"github.com/MimoProxy/reka/internal/httprewrite"
 )
 
-func parseMapLocal(text string) (model.MapLocal, string, outcome) {
+// parseMapLocal returns the rule and, for a remote file, its download.
+func parseMapLocal(text string) (model.MapLocal, ResourceReference, outcome) {
 	var r model.MapLocal
 	fields, ok := words(text, true)
 	if !ok || len(fields) < 2 {
-		return r, "", badRewrite("invalid Map Local syntax")
+		return r, ResourceReference{}, badRewrite("invalid Map Local syntax")
 	}
 	r.Match = fields[0]
 	if issue := validateMatch(r.Match); issue.skips() {
-		return r, "", issue
+		return r, ResourceReference{}, issue
 	}
 	r.DataType = ptr("file")
+	var interval int
 	seen := make(map[string]bool)
 	for _, field := range fields[1:] {
 		key, value, ok := strings.Cut(field, "=")
 		key = strings.ToLower(key)
 		if !ok || seen[key] {
-			return r, "", badRewrite("expected unique Map Local key=value fields")
+			return r, ResourceReference{}, badRewrite("expected unique Map Local key=value fields")
 		}
 		seen[key] = true
 		switch key {
@@ -37,24 +39,29 @@ func parseMapLocal(text string) (model.MapLocal, string, outcome) {
 			case "file", "text", "json", "tiny-gif", "base64":
 				r.DataType = ptr(kind)
 			default:
-				return r, "", unsupported("module.map-local-type", "unknown Map Local data type")
+				return r, ResourceReference{}, unsupported("module.map-local-type", "unknown Map Local data type")
 			}
 		case "data":
 			r.Data = ptr(value)
 		case "header":
 			headers, ok := parseMapHeaders(value)
 			if !ok {
-				return r, "", unsupported("module.map-local-header", "expected a header list or its standard base64 encoding")
+				return r, ResourceReference{}, unsupported("module.map-local-header", "expected a header list or its standard base64 encoding")
 			}
 			r.Headers = headers
+		case "update-interval":
+			// Surge applies it only to a remote file and ignores it otherwise.
+			if interval, ok = updateInterval(value); !ok {
+				return r, ResourceReference{}, unsupported("module.map-local-interval", "update-interval must be an integer")
+			}
 		case "status-code":
 			code, err := strconv.Atoi(value)
 			if err != nil || code < 100 || code > 999 {
-				return r, "", unsupported("module.map-local-status", "Map Local status code must be between 100 and 999")
+				return r, ResourceReference{}, unsupported("module.map-local-status", "Map Local status code must be between 100 and 999")
 			}
 			r.StatusCode = ptr(code)
 		default:
-			return r, "", unsupported("module.map-local-setting", "unknown Map Local setting")
+			return r, ResourceReference{}, unsupported("module.map-local-setting", "unknown Map Local setting")
 		}
 	}
 	var remote string
@@ -64,7 +71,7 @@ func parseMapLocal(text string) (model.MapLocal, string, outcome) {
 		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
 			parsed, err := url.Parse(value)
 			if err != nil || parsed.Hostname() == "" || parsed.Fragment != "" {
-				return r, "", unsupported("module.map-local-url", "invalid Map Local URL")
+				return r, ResourceReference{}, unsupported("module.map-local-url", "invalid Map Local URL")
 			}
 			remote = value
 		}
@@ -73,14 +80,17 @@ func parseMapLocal(text string) (model.MapLocal, string, outcome) {
 	if remote != "" {
 		validation = lockMapLocal(r, strings.Repeat("0", 64))
 	} else if *r.DataType == "file" {
-		return r, "", unsupported("module.map-local-file", "modules cannot read local Map Local files")
+		return r, ResourceReference{}, unsupported("module.map-local-file", "modules cannot read local Map Local files")
 	} else if *r.DataType == "tiny-gif" && r.Data != nil && *r.Data == "" {
 		r.Data, validation.Data = nil, nil
 	}
 	if !validMapLocal(validation) {
-		return r, "", unsupported("module.map-local-value", "invalid or unsupported Map Local data or headers")
+		return r, ResourceReference{}, unsupported("module.map-local-value", "invalid or unsupported Map Local data or headers")
 	}
-	return r, remote, outcome{}
+	if remote == "" {
+		return r, ResourceReference{}, outcome{}
+	}
+	return r, ResourceReference{URL: remote, Interval: interval}, outcome{}
 }
 
 func parseMapHeaders(value string) ([]model.MapLocalHeader, bool) {

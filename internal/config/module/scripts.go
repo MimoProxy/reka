@@ -11,10 +11,7 @@ import (
 )
 
 // ScriptReference identifies a remote script and its refresh interval in seconds.
-type ScriptReference struct {
-	URL      string
-	Interval int
-}
+type ScriptReference = ResourceReference
 
 // ScriptItem describes a convertible script in a module report or preview.
 type ScriptItem struct {
@@ -178,13 +175,11 @@ func parseScriptFields(name, format string, fields []scriptSetting) (model.Scrip
 		case "script-path":
 			ref.URL = value
 		case "script-update-interval":
-			seconds, err := strconv.ParseInt(value, 10, 64)
-			if err != nil || seconds < -1 {
+			interval, ok := updateInterval(value)
+			if !ok || strings.HasPrefix(value, "-") && value != "-1" {
 				return script, ref, unsupported("module.script-update-interval", "script-update-interval must be an integer greater than or equal to -1")
 			}
-			if seconds > 0 {
-				ref.Interval = int(min(max(seconds, model.ModuleMinInterval), model.ModuleMaxInterval))
-			}
+			ref.Interval = interval
 		default:
 			return script, ref, unsupported("module.script-setting", "unsupported script setting")
 		}
@@ -294,4 +289,18 @@ func quotedSetting(s string, separatorPattern *regexp.Regexp) (value, rest strin
 		}
 	}
 	return "", "", false
+}
+
+// updateInterval parses a resource update interval in seconds. Zero and
+// negative values, which turn off updates in Surge, use the module's interval:
+// modules are refreshed as a whole, so a resource cannot opt out on its own.
+func updateInterval(value string) (int, bool) {
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	if seconds <= 0 {
+		return 0, true
+	}
+	return int(min(max(seconds, model.ModuleMinInterval), model.ModuleMaxInterval)), true
 }

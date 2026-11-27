@@ -23,6 +23,13 @@ func inspectStash(text []byte, interval int) (Metadata, ResourceReferences) {
 			}
 		}
 	}
+	if seq := stashSequence(fields["rules"]); seq != nil {
+		for _, item := range seq.Content {
+			if text, ok := stashString(item); ok {
+				refs.ruleSet(text)
+			}
+		}
+	}
 	return stashMetadata(fields), refs.refs
 }
 

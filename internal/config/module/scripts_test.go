@@ -228,7 +228,7 @@ Skip = type=cron, script-path=https://example.test/skip.js
 		{1200, 900, 1200},
 	} {
 		metadata, refs := Inspect([]byte(input), arguments, tc.moduleInterval)
-		if metadata.Name != "Script filters" || !slices.Equal(refs.MapLocal, []string{url}) {
+		if metadata.Name != "Script filters" || !slices.Equal(refURLs(refs.MapLocal), []string{url}) {
 			t.Fatalf("unexpected metadata %+v or Map Local references %+v", metadata, refs.MapLocal)
 		}
 		want := []ScriptReference{

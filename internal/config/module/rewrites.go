@@ -30,11 +30,11 @@ func (c *converter) rewrite(line int, section, text string) outcome {
 		}
 		return issue
 	case "map local":
-		r, url, issue := parseMapLocal(text)
+		r, ref, issue := parseMapLocal(text)
 		if issue.skips() {
 			return issue
 		}
-		return c.addMapLocal(line, r, url)
+		return c.addMapLocal(line, r, ref.URL)
 	}
 	return unsupported("module.section", "unknown rewrite section")
 }

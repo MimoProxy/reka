@@ -60,8 +60,9 @@ type ScriptError struct {
 // EntryKey keeps script validators independent of Map Local validators when
 // both sections refer to the same URL. Existing Map Local keys stay stable.
 func EntryKey(lock model.ResourceLock) string {
-	if lock.Kind == "script" {
-		return "script/" + lock.ID
+	switch lock.Kind {
+	case "script", module.RuleSetKind, module.DomainSetKind:
+		return lock.Kind + "/" + lock.ID
 	}
 	return lock.ID
 }
@@ -146,15 +147,30 @@ func Acquire(ctx context.Context, def model.Module, opts Options) (Result, error
 	if len(refs.Scripts) > model.MaxModuleScripts {
 		return Result{}, &subscription.Error{Code: "too_many_module_scripts"}
 	}
+	if len(refs.RuleSets) > model.MaxModuleRuleSets {
+		return Result{}, &subscription.Error{Code: "too_many_module_rule_sets"}
+	}
 	fetcher.MaxBytes = httprewrite.MaxMapLocalSize
-	locks := make([]model.ResourceLock, 0, len(refs.MapLocal)+len(refs.Scripts))
-	for _, url := range refs.MapLocal {
-		request := resource.Hash([]byte(url))
+	locks := make([]model.ResourceLock, 0, len(refs.MapLocal)+len(refs.RuleSets)+len(refs.Scripts))
+	for _, ref := range refs.MapLocal {
+		request := resource.Hash([]byte(ref.URL))
 		id := request[:24]
-		if _, err := batch.Fetch(ctx, id, "map-local", "", url, nil, interval); err != nil {
+		if _, err := batch.Fetch(ctx, id, "map-local", "", ref.URL, nil, ref.Interval); err != nil {
 			return Result{}, err
 		}
 		locks = append(locks, model.ResourceLock{ID: id, Kind: "map-local", Request: request, Hash: batch.Entries[id].Hash})
+	}
+	fetcher.MaxBytes = model.MaxModuleRuleSetSize
+	for _, ref := range refs.RuleSets {
+		request := resource.Hash([]byte(ref.URL))
+		lock := model.ResourceLock{ID: request[:24], Kind: ref.Kind, Request: request}
+		key := EntryKey(lock)
+		fetcher.ValidateBody = func(data []byte) error { return ValidateRuleSetBody(ref.Kind, data) }
+		if _, err := batch.Fetch(ctx, key, lock.Kind, "", ref.URL, nil, ref.Interval); err != nil {
+			return Result{}, err
+		}
+		lock.Hash = batch.Entries[key].Hash
+		locks = append(locks, lock)
 	}
 	var scriptErrors []ScriptError
 	var scriptRetry time.Time

@@ -265,3 +265,37 @@ func TestAcquireScriptCancellationAndBundleLimit(t *testing.T) {
 		}
 	})
 }
+
+func TestAcquireRuleSetLocks(t *testing.T) {
+	list := "DOMAIN,ads.example.com\n"
+	opts := acquireTestOptions(t, func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/module":
+			fmt.Fprint(w, "[Rule]\nRULE-SET,https://example.com/ads.list,REJECT,update-interval=3600\nDOMAIN-SET,https://example.com/ads.txt,REJECT\n")
+		case "/ads.list":
+			fmt.Fprint(w, list)
+		case "/ads.txt":
+			fmt.Fprint(w, ".ads.example.com\n")
+		default:
+			http.NotFound(w, req)
+		}
+	})
+	def := model.Module{ID: "ads", URL: "https://example.com/module", Interval: 86400}
+	result, err := Acquire(t.Context(), def, opts)
+	if err != nil || len(result.Snapshot.Lock.Resources) != 2 {
+		t.Fatalf("rule set locks: %+v, error %v", result, err)
+	}
+	rules, domains := result.Snapshot.Lock.Resources[0], result.Snapshot.Lock.Resources[1]
+	if rules.Kind != "rule-set" || domains.Kind != "domain-set" || rules.Hash != resource.Hash([]byte(list)) || domains.Hash != resource.Hash([]byte(".ads.example.com\n")) {
+		t.Fatalf("rule set locks: %+v", result.Snapshot.Lock.Resources)
+	}
+	entry := result.Entries[EntryKey(rules)]
+	if entry.Next.Sub(entry.Checked) != time.Hour || !result.Next.Equal(entry.Next) {
+		t.Fatalf("next %v should use the rule set's interval, entry %+v", result.Next, entry)
+	}
+	// A list with no usable lines fails the refresh rather than the profile.
+	list = "SCRIPT,unknown\n"
+	if _, err := Acquire(t.Context(), def, Options{Blobs: opts.Blobs, Client: opts.Client, Force: true}); subscription.Code(err) != "resource_invalid" {
+		t.Fatalf("unusable list error = %v", err)
+	}
+}

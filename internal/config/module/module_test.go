@@ -408,7 +408,7 @@ func TestMapLocalAndInspect(t *testing.T) {
 	args := map[string]string{"Location": "https://example.net/overridden"}
 	metadata, refs := Inspect([]byte(input), args)
 	wantURLs := []string{"https://example.net/overridden", "https://example.net/other", "https://example.net/text", "https://example.net/base64", "https://example.net/gif"}
-	if metadata.Name != "Example" || !slices.Equal(refs.MapLocal, wantURLs) {
+	if metadata.Name != "Example" || !slices.Equal(refURLs(refs.MapLocal), wantURLs) {
 		t.Fatalf("wrong URLs or metadata %+v, %+v", metadata, refs.MapLocal)
 	}
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -489,4 +489,56 @@ func FuzzConvert(f *testing.F) {
 		Inspect(text, args)
 		Convert(text, Options{Arguments: args})
 	})
+}
+
+func refURLs(refs []ResourceReference) []string {
+	urls := make([]string, len(refs))
+	for i, ref := range refs {
+		urls[i] = ref.URL
+	}
+	return urls
+}
+
+func TestRemoteRuleSetReferences(t *testing.T) {
+	const list = "https://example.test/ads.list"
+	text := "[Rule]\n" +
+		"RULE-SET," + list + ",REJECT,update-interval=43200\n" +
+		"RULE-SET," + list + ",DIRECT,update-interval=7200\n" +
+		"DOMAIN-SET," + list + ",REJECT,update-interval=-1\n" +
+		"RULE-SET,named,DIRECT\n" +
+		"[Map Local]\n" +
+		"^https://example\\.test/a data=https://example.test/a.json update-interval=3600\n" +
+		"^https://example\\.test/b data=https://example.test/a.json update-interval=600\n" +
+		"^https://example\\.test/c data=https://example.test/c.json\n"
+	_, refs := Inspect([]byte(text), nil, 86400)
+	want := []RuleSetReference{
+		{Kind: RuleSetKind, ResourceReference: ResourceReference{URL: list, Interval: 7200}},
+		{Kind: DomainSetKind, ResourceReference: ResourceReference{URL: list, Interval: 86400}},
+	}
+	if !slices.Equal(refs.RuleSets, want) {
+		t.Errorf("rule sets = %+v", refs.RuleSets)
+	}
+	maps := []ResourceReference{{URL: "https://example.test/a.json", Interval: 3600}, {URL: "https://example.test/c.json", Interval: 86400}}
+	if !slices.Equal(refs.MapLocal, maps) {
+		t.Errorf("Map Local = %+v", refs.MapLocal)
+	}
+
+	hash := strings.Repeat("a", 64)
+	result, report := Convert([]byte(text), Options{ID: "ads", ResourceForKind: func(kind, url string) (string, bool) {
+		return hash, true
+	}, Resolve: func(string) (string, bool) { return "", false }})
+	if len(result.RuleSets) != 2 || result.RuleSets[0].Name != "ads.list" || result.RuleSets[0].Format != "surge" ||
+		result.RuleSets[0].Behavior != "classical" || result.RuleSets[1].Behavior != "domain" || result.RuleSets[0].Hash != hash {
+		t.Fatalf("rule sets = %+v", result.RuleSets)
+	}
+	if len(result.Rules) != 4 || result.Rules[0].Match.Values[0] != "ads/"+result.RuleSets[0].ID ||
+		result.Rules[1].Match.Values[0] != result.Rules[0].Match.Values[0] || result.Rules[2].Match.Values[0] != "ads/"+result.RuleSets[1].ID ||
+		result.Rules[3].Match.Values[0] != "named" {
+		t.Fatalf("rules = %+v", result.Rules)
+	}
+	for _, line := range report.Lines {
+		if line.Status != Supported {
+			t.Errorf("line %+v", line)
+		}
+	}
 }

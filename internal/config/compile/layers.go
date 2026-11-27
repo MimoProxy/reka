@@ -518,6 +518,16 @@ func (c *compiler) layers(doc *model.Doc) {
 		}
 	}
 	modules := c.convertModules(moduleSources, merged)
+	for _, def := range c.profile.Modules {
+		if sets := modules[def.ID].ruleSets; len(sets) != 0 {
+			dest := field(doc.Mapping(), "rule-sets")
+			if dest == nil {
+				dest = sequence()
+				put(doc.Mapping(), "rule-sets", dest)
+			}
+			dest.Content = append(dest.Content, sets...)
+		}
+	}
 	originalRules := field(doc.Mapping(), "rules")
 	marked := map[string]bool{}
 	markers := map[string]bool{}

@@ -298,8 +298,13 @@ func (s *Service) moduleResourcesLocked(def model.Module, src model.Source) bool
 	_, refs := module.InspectWithOptions(text, module.Options{
 		Format: src.Module.Format, Arguments: def.Arguments, ModuleInterval: def.Interval,
 	})
-	for _, url := range refs.MapLocal {
-		if !locked[resourceKey{"map-local", resource.Hash([]byte(url))}] {
+	for _, ref := range refs.MapLocal {
+		if !locked[resourceKey{"map-local", resource.Hash([]byte(ref.URL))}] {
+			return false
+		}
+	}
+	for _, ref := range refs.RuleSets {
+		if !locked[resourceKey{ref.Kind, resource.Hash([]byte(ref.URL))}] {
 			return false
 		}
 	}
