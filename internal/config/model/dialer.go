@@ -9,4 +9,11 @@ type Dialer struct {
 	IPVersion   string `yaml:"ip-version" json:"ip-version,omitempty"`
 	TFO         bool   `yaml:"tfo" json:"tfo,omitempty"`
 	MPTCP       bool   `yaml:"mptcp" json:"mptcp,omitempty"`
+	// NetworkStrategy chooses among the networks the platform reports:
+	// "fallback" also tries the other networks when the preferred one has
+	// not connected within NetworkFallbackDelay milliseconds, "hybrid"
+	// races every network at once. Empty or "default" uses the system's
+	// choice only.
+	NetworkStrategy      string `yaml:"network-strategy" json:"network-strategy,omitempty"`
+	NetworkFallbackDelay int    `yaml:"network-fallback-delay" json:"network-fallback-delay,omitempty"`
 }

@@ -27,6 +27,7 @@ type ConnInfo struct {
 
 	OriginalDestination string
 	api.MITMConnectionInfo
+	api.ConnectionNetwork
 }
 
 type tracked struct {
@@ -42,13 +43,14 @@ type tracked struct {
 }
 
 func (c *tracked) snapshot() ConnInfo {
-	state, mitm := c.attempt.activeInfo()
+	state, mitm, network := c.attempt.activeInfo()
 	return ConnInfo{
 		ID: c.id, Metadata: c.md, Outbound: c.out.Tag(), OutboundType: c.out.Type(), Info: c.info,
 		Start: c.start, Upload: c.attempt.up.Load(), Download: c.attempt.down.Load(),
 		State:               state,
 		OriginalDestination: c.originalDestination,
 		MITMConnectionInfo:  mitm,
+		ConnectionNetwork:   network,
 	}
 }
 
@@ -131,7 +133,7 @@ func (b *Backend) CloseIdleConnections(now time.Time, idle time.Duration, share 
 	b.conns.mu.Lock()
 	candidates := make([]candidate, 0, len(b.conns.conns))
 	for _, c := range b.conns.conns {
-		state, _ := c.attempt.activeInfo()
+		state, _, _ := c.attempt.activeInfo()
 		last := c.attempt.up.lastActive()
 		if down := c.attempt.down.lastActive(); down.After(last) {
 			last = down

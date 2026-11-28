@@ -23,6 +23,7 @@ type connectionAttempt struct {
 	store             *history.Store
 	releasePacketFlow func() bool // Reports whether the flow was evicted.
 	onTCPDial         func(error)
+	networks          *hostNetworks
 	mu                sync.Mutex
 	api.ConnectionTrace
 	events   []connectionEvent
@@ -59,7 +60,7 @@ func (b *Backend) beginConnectionAt(ctx context.Context, md Metadata, start time
 	}
 	release, _ := ctx.Value(packetFlowReleaseKey{}).(func() bool)
 	attempt := &connectionAttempt{
-		store: b.history, releasePacketFlow: release, onTCPDial: b.onTCPDial, ConnectionTrace: api.ConnectionTrace{Connection: c},
+		store: b.history, releasePacketFlow: release, onTCPDial: b.onTCPDial, networks: &b.networks, ConnectionTrace: api.ConnectionTrace{Connection: c},
 		up: rateCounter{start: c.Start}, down: rateCounter{start: c.Start},
 	}
 	if b.historyScope != nil {
@@ -247,6 +248,7 @@ func (a *connectionAttempt) socketEventsLocked(observed socketDialResult, direct
 	if observed.local.IsValid() {
 		a.LocalAddr = observed.local.String()
 		a.Interface = observed.interfaceName
+		a.ConnectionNetwork = a.networks.describe(a.Interface)
 	}
 	if observed.server.IsValid() {
 		a.ServerAddr = observed.server.String()
@@ -292,17 +294,17 @@ func (a *connectionAttempt) mitmInfoLocked() api.MITMConnectionInfo {
 	return info
 }
 
-func (a *connectionAttempt) activeInfo() (string, api.MITMConnectionInfo) {
+func (a *connectionAttempt) activeInfo() (string, api.MITMConnectionInfo, api.ConnectionNetwork) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	info := a.mitmInfoLocked()
 	if a.EndedAt.IsZero() {
 		if a.ReadyAt == nil {
-			return "connecting", info
+			return "connecting", info, a.ConnectionNetwork
 		}
-		return "active", info
+		return "active", info, a.ConnectionNetwork
 	}
-	return "", info
+	return "", info, a.ConnectionNetwork
 }
 
 func (a *connectionAttempt) complete(reason, stage string) {

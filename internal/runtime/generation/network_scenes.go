@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/MimoProxy/reka/internal/api"
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/config/compile"
 )
 
@@ -79,6 +80,12 @@ func (e *Engine) SetPacketFlowInterface(name string) {
 	e.packetInterface.Store(&name)
 	_, g := e.current()
 	e.refreshSceneObservation(g)
+}
+
+// SetNetworkInterfaces passes the host's networks, most preferred first, to
+// outbounds with a network strategy.
+func (e *Engine) SetNetworkInterfaces(interfaces []sagernet.NetworkInterface) {
+	e.backend.SetNetworkInterfaces(interfaces)
 }
 
 func matchNetworkScene(scenes []compile.NetworkScene, obs *sceneObservation) string {

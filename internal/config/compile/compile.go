@@ -199,6 +199,9 @@ type Effective struct {
 
 	// IPVersionOverride is empty when the profile's IP settings are in use.
 	IPVersionOverride string `json:"-"`
+	// NetworkStrategyOverride is empty when the profile's dialer network
+	// strategies are in use.
+	NetworkStrategyOverride string `json:"-"`
 
 	Provenance map[string]Origin `json:"provenance"`
 
@@ -611,6 +614,16 @@ func (c *compiler) outbounds(eff *Effective) {
 			}
 			if !slices.Contains([]string{"", "dual", "ipv4", "ipv6", "ipv4-prefer", "ipv6-prefer"}, value.IPVersion) {
 				c.errorf(doc, base+"/dialer/ip-version", "outbound.dialer", "invalid IP version policy")
+			}
+			if !slices.Contains([]string{"", "default", "fallback", "hybrid"}, value.NetworkStrategy) {
+				c.errorf(doc, base+"/dialer/network-strategy", "outbound.dialer", "network-strategy must be default, fallback or hybrid")
+			}
+			// Same conflict upstream reports for network_strategy.
+			if value.NetworkStrategy != "" && (value.Interface != "" || value.TFO || value.Proxy != "") {
+				c.errorf(doc, base+"/dialer/network-strategy", "outbound.dialer", "network-strategy cannot be combined with interface-name, tfo or a dialer proxy")
+			}
+			if value.NetworkFallbackDelay < 0 || value.NetworkFallbackDelay > maxNetworkFallbackDelay {
+				c.errorf(doc, base+"/dialer/network-fallback-delay", "outbound.dialer", "network-fallback-delay must be 0 to 10000 milliseconds")
 			}
 			out.Dialer = &value
 		}

@@ -29,6 +29,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/mobile/appbridge"
 	"github.com/MimoProxy/reka/mobile/packettunnel"
@@ -115,6 +116,21 @@ func RekaGoAppOperation(input C.RekaAppOperationInput, length C.size_t, output u
 func RekaGoSetNetworkInterface(id C.uint64_t, name *C.char) {
 	if session := lookup(id); session != nil && name != nil {
 		session.SetNetworkInterface(C.GoString(name))
+	}
+}
+
+// RekaGoSetNetworkInterfaces reports the usable networks, most preferred
+// first, as a JSON array of {name, index, type, expensive, constrained}.
+//
+//export RekaGoSetNetworkInterfaces
+func RekaGoSetNetworkInterfaces(id C.uint64_t, data unsafe.Pointer, length C.size_t) {
+	session := lookup(id)
+	if session == nil || data == nil || length > 8192 {
+		return
+	}
+	var interfaces []sagernet.NetworkInterface
+	if json.Unmarshal(unsafe.Slice((*byte)(data), int(length)), &interfaces) == nil {
+		session.SetNetworkInterfaces(interfaces)
 	}
 }
 

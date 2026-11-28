@@ -909,6 +909,10 @@ func usesUpstreamOutbound(o compile.Outbound) bool {
 
 func specFor(o compile.Outbound) any {
 	if o.Builtin && o.Type == model.OutboundDirect {
+		if o.Dialer != nil && o.Dialer.NetworkStrategy != "" && o.Dialer.NetworkStrategy != "default" {
+			// The generic pipeline carries the dialer's network options.
+			return sagernet.ProxySpec{Type: o.Type, Options: protocolOptions(o)}
+		}
 		return sagernet.DirectSpec{DomainStrategy: domainStrategy(o.Dialer)}
 	}
 	tls := func() *sagernet.TLSSpec {
@@ -1568,7 +1572,7 @@ func (e *Engine) Connections() []Connection {
 			Source: c.Metadata.Source.String(), Destination: c.Metadata.Destination.String(),
 			Outbound: c.Outbound, Start: c.Start, Upload: c.Upload, Download: c.Download,
 			OriginalDestination: c.OriginalDestination, State: c.State,
-			MITMConnectionInfo: c.MITMConnectionInfo,
+			MITMConnectionInfo: c.MITMConnectionInfo, ConnectionNetwork: c.ConnectionNetwork,
 		}
 		if fi, ok := c.Info.(*FlowInfo); ok {
 			conn.FlowInfo = *fi
@@ -1707,6 +1711,12 @@ func protocolOptions(o compile.Outbound) json.RawMessage {
 		values["bind_interface"], values["routing_mark"], values["tcp_fast_open"], values["tcp_multi_path"] = d.Interface, d.RoutingMark, d.TFO, d.MPTCP
 		if strategy := domainStrategy(d); strategy != "" {
 			values["domain_strategy"] = strategy
+		}
+		if d.NetworkStrategy != "" && d.NetworkStrategy != "default" {
+			values["network_strategy"] = d.NetworkStrategy
+			if d.NetworkFallbackDelay > 0 {
+				values["fallback_delay"] = fmt.Sprintf("%dms", d.NetworkFallbackDelay)
+			}
 		}
 	}
 	if o.UDPOverTCP {

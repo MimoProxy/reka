@@ -212,9 +212,13 @@ func (b *Backend) newProtocol(tag string, s ProxySpec) (result adapter.Outbound,
 			returnErr = fmt.Errorf("required TLS verification overlay is unavailable")
 		}
 	}()
-	if bind, _ := values["bind_interface"].(string); bind != "" && b.protect != nil {
+	bind, _ := values["bind_interface"].(string)
+	if bind != "" && b.protect != nil {
 		ctx = service.ExtendContext(ctx)
 		service.MustRegister[adapter.NetworkManager](ctx, &networkManager{protect: b.protect, explicitProtect: true})
+	} else if strategy, _ := values["network_strategy"].(string); strategy != "" && bind == "" {
+		// Upstream rejects a strategy together with an explicit interface.
+		ctx = b.networkStrategyContext(ctx)
 	}
 	if values["reka_xhttp"] != nil {
 		if s.Type != "vless" {

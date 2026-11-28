@@ -31,7 +31,7 @@ func TestConnectionMITMProtocolSnapshots(t *testing.T) {
 		attempt.recordMITMUpstreamProtocol(protocol)
 	}
 
-	_, live := attempt.activeInfo()
+	_, live, _ := attempt.activeInfo()
 	trace := attempt.trace()
 	want := []string{"http/1.1", "h2"}
 	for _, info := range []api.MITMConnectionInfo{live, trace.MITMConnectionInfo} {
@@ -62,11 +62,11 @@ func TestPlainHTTPConnectionDiagnostics(t *testing.T) {
 			t.Fatalf("unexpected HTTP connection fields: %s", data)
 		}
 	}
-	_, live := attempt.activeInfo()
+	_, live, _ := attempt.activeInfo()
 	assertFields(live, "", "")
 	attempt.MITM, attempt.MITMPlainHTTP = true, true
 	attempt.setMITMPassthrough("upgrade")
-	_, live = attempt.activeInfo()
+	_, live, _ = attempt.activeInfo()
 	assertFields(live, "true", `"upgrade"`)
 	attempt.complete("eof", "")
 	assertFields(attempt.trace().MITMConnectionInfo, "true", `"upgrade"`)

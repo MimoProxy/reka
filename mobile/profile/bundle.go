@@ -92,6 +92,12 @@ type Controls struct {
 	BlockQUIC string `json:"blockQuic,omitempty"`
 	// IPVersion overrides the dialer IP policy and DNS IPv6 setting when set.
 	IPVersion string `json:"ipVersion,omitempty"`
+	// WiFiAssist sets the network strategy of every outbound that does not
+	// pin its own interface: "fallback" also tries the other networks the
+	// host reports (such as cellular) when the preferred one has not
+	// connected in time, "hybrid" races them all. Empty keeps the profile's
+	// settings.
+	WiFiAssist string `json:"wifiAssist,omitempty"`
 	// ProcessMode overrides the profile's process.mode when set: off, rule
 	// (only when a rule needs the process) or always.
 	ProcessMode string `json:"processMode,omitempty"`
@@ -337,6 +343,9 @@ func controlledMember(values, names map[string]string, groupID string, members [
 func ApplyControls(base *compile.Effective, summary Summary, controls Controls) (*compile.Effective, error) {
 	eff, err := base.WithIPVersion(controls.IPVersion)
 	if err != nil {
+		return nil, err
+	}
+	if eff, err = eff.WithNetworkStrategy(controls.WiFiAssist); err != nil {
 		return nil, err
 	}
 	eff.Groups = slices.Clone(base.Groups)

@@ -297,11 +297,21 @@ type Connection struct {
 	Download    int64     `json:"download"`
 	FlowInfo
 	MITMConnectionInfo
+	ConnectionNetwork
 
 	// OriginalDestination is set when the active destination was rewritten.
 	OriginalDestination string `json:"original_destination,omitempty"`
 	// State is used by the Packet Tunnel connection list.
 	State string `json:"-"`
+}
+
+// ConnectionNetwork is the host network a connection's socket uses, when the
+// host reports its networks.
+type ConnectionNetwork struct {
+	// NetworkType is wifi, cellular, ethernet or other.
+	NetworkType string `json:"network_type,omitempty"`
+	// NetworkName is the host's name for the network, such as a Wi-Fi SSID.
+	NetworkName string `json:"network_name,omitempty"`
 }
 
 type MITMConnectionInfo struct {

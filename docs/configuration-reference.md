@@ -294,6 +294,8 @@ Reka supports one peer per outbound. The first TCP dial, UDP flow or connectivit
 | `routing-mark` | 0–4294967295 整数 | 平台 socket 路由标记 |
 | `ip-version` | 空、`dual`、`ipv4`、`ipv6`、`ipv4-prefer`、`ipv6-prefer` | 服务器地址解析/连接策略 |
 | `tfo`、`mptcp` | 布尔，默认 false | TCP Fast Open / MPTCP；宿主不支持时返回错误 |
+| `network-strategy` | 空、`default`、`fallback`、`hybrid` | 在宿主报告的多个网络（Wi-Fi、蜂窝、有线）间选择。`fallback` 先用系统首选网络，未及时连上时再试其他网络；`hybrid` 同时尝试所有网络。仅对 TCP 新连接生效，已建立的连接不迁移。需要宿主报告网络列表（目前为 iOS），否则按系统默认网络连接。不能与 `interface-name`、`tfo`、`proxy` 同用 |
+| `network-fallback-delay` | 0–10000 毫秒，默认 300 | `fallback` 等待首选网络的时间，与 sing-box 默认值一致 |
 
 `dialer: {proxy: parent}` 不会在 parent 不可用时改为直连。包括所有未选中分组成员在内的整个节点/分组图都必须无环。配置 proxy 后，它优先于子节点的物理 socket 参数；接口、mark 等应放在 parent。UDP 也要求父节点和经过的分组允许 UDP。替换父节点会重建依赖它的子节点，已有连接按旧实例排空。
 

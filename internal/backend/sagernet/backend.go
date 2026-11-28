@@ -88,6 +88,7 @@ type Backend struct {
 	trafficDownload   atomic.Uint64
 	processInfoLookup func(context.Context, Metadata) (ProcessInfo, bool)
 	protect           control.Func
+	networks          hostNetworks
 	endpointSockets   endpointSocketRegistry
 	endpointListeners endpointListeners
 	processLookup     func(context.Context, Metadata) (string, bool)
@@ -412,6 +413,11 @@ func (b *Backend) NewOutbound(tag string, spec any) (*Outbound, error) {
 		}
 		if s.Detour != nil {
 			values["detour"] = "reka-detour"
+		}
+		if strategy, _ := values["network_strategy"].(string); strategy != "" {
+			if bind, _ := values["bind_interface"].(string); bind == "" {
+				ctx = b.networkStrategyContext(ctx)
+			}
 		}
 		s.Options, _ = json.Marshal(values)
 		// Reka's own REALITY client; see vless.go.

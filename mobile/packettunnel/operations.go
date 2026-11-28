@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/MimoProxy/reka/internal/api"
+	"github.com/MimoProxy/reka/internal/backend/sagernet"
 	"github.com/MimoProxy/reka/internal/history"
 	"github.com/MimoProxy/reka/internal/runtime/generation"
 )
@@ -69,6 +70,10 @@ type ConnectionRow struct {
 	MITMClientProtocol    string                `json:"mitmClientProtocol,omitempty"`
 	MITMUpstreamProtocols []string              `json:"mitmUpstreamProtocols,omitempty"`
 	MITMSkipped           string                `json:"mitmSkipped,omitempty"`
+	// NetworkType and NetworkName say which host network carries the
+	// connection, for example cellular, or wifi and the SSID.
+	NetworkType string `json:"networkType,omitempty"`
+	NetworkName string `json:"networkName,omitempty"`
 }
 
 type Latency struct {
@@ -198,7 +203,7 @@ func (s *Session) connections() []ConnectionRow {
 				MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
 				MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
 				MITMClientProtocol: conn.MITMClientProtocol, MITMUpstreamProtocols: conn.MITMUpstreamProtocols,
-				MITMSkipped: conn.MITMSkipped,
+				MITMSkipped: conn.MITMSkipped, NetworkType: conn.NetworkType, NetworkName: conn.NetworkName,
 			})
 		}
 		sortConnectionRows(rows)
@@ -249,7 +254,7 @@ func (s *Session) connections() []ConnectionRow {
 			MITM: conn.MITM, MITMRequests: conn.MITMRequests, MITMMatchedIDs: conn.MITMMatchedIDs,
 			MITMBodyPassthroughs: conn.MITMBodyPassthroughs, MITMScripts: conn.MITMScripts,
 			MITMClientProtocol: conn.MITMClientProtocol, MITMUpstreamProtocols: conn.MITMUpstreamProtocols,
-			MITMSkipped: conn.MITMSkipped,
+			MITMSkipped: conn.MITMSkipped, NetworkType: conn.NetworkType, NetworkName: conn.NetworkName,
 		})
 	}
 	sortConnectionRows(rows)
@@ -335,6 +340,19 @@ func (s *Session) NetworkChanged(available, changed bool) {
 		s.logger.Info("Network available")
 	} else {
 		s.logger.Warn("Network unavailable")
+	}
+}
+
+// SetNetworkInterfaces reports the host's usable networks, most preferred
+// first, for outbounds using Wi-Fi assist.
+func (s *Session) SetNetworkInterfaces(interfaces []sagernet.NetworkInterface) {
+	if s.ctx.Err() != nil {
+		return
+	}
+	if s.profile != nil {
+		s.profile.engine.SetNetworkInterfaces(interfaces)
+	} else if s.backend != nil {
+		s.backend.SetNetworkInterfaces(interfaces)
 	}
 }
 
